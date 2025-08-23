@@ -28,6 +28,7 @@ ignore = [
 
     'UP038', # Deprecated rule
 
+    # TODO: reduce this
     'FBT001',
     'FBT002',
     'A002',
@@ -36,9 +37,10 @@ ignore = [
     'LOG015',
     'G004',
     'DTZ006',
+    'PLR0',
 ]
 
 
 [lint.per-file-ignores]
 # Relaxed lints for test files
-"test_*.py" = ["T201", "SLF001"]
+"test_*.py" = ["T201", "SLF001", "ANN", "T201"]

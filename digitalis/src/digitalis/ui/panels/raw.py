@@ -24,7 +24,7 @@ highlighter = ReprHighlighter()
 iso_highlighter = ISO8601Highlighter()
 
 
-def add_node(  # noqa: PLR0912
+def add_node(
     name: str, node: TreeNode, obj: Any, expand_depth: int, auto_expand: bool = True
 ) -> None:
     """Adds a node to the tree.
@@ -220,7 +220,7 @@ class TreeView(Tree):
             )
             header_node.set_label(dummy_label)
 
-    def _update_node_incrementally(  # noqa: PLR0912
+    def _update_node_incrementally(
         self, node: TreeNode, new_obj: Any, path: str, expand_depth: int
     ) -> None:
         """Update a single node incrementally based on data comparison."""
@@ -335,7 +335,7 @@ class TreeView(Tree):
             if child_label not in new_slots:
                 child_node.remove()
 
-    def _update_array_node(  # noqa: PLR0912
+    def _update_array_node(
         self, array_node: TreeNode, new_array: list | tuple, slot: str, path: str, expand_depth: int
     ) -> None:
         """Update an array node incrementally, comparing min(old_len, new_len) items."""
