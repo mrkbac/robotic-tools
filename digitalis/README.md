@@ -1,5 +1,7 @@
 # Digitalis 🪻
 
+![Digitalis](./screenshot.svg)
+
 ## Usage
 
 ```sh

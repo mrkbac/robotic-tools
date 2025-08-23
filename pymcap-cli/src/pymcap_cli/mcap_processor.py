@@ -363,30 +363,6 @@ class McapProcessor:
 
         return self.stats
 
-    def _can_copy_chunk_fast(self, chunk: Chunk, indexes: list[MessageIndex]) -> bool:
-        """Check if entire chunk can be copied without decoding."""
-        # Fast copy is possible if:
-        # 1. We have chunk copying enabled
-        # 2. We're in recovery mode (handle any errors)
-        # 3. No topic filtering (would need to decode to check topics)
-        # 4. Time filtering allows the entire chunk time range
-
-        if self.options.include_topics or self.options.exclude_topics:
-            for idx in indexes:
-                channel = self.channels.get(idx.channel_id)
-                if channel is None:
-                    # contains unknown channel need decoding
-                    return False
-                if self.should_include_topic(channel.topic):
-                    return False
-
-        # Check if chunk time range intersects with our filter range
-        chunk_start = chunk.message_start_time
-        chunk_end = chunk.message_end_time
-
-        # If chunk is entirely within our time range, we can copy it
-        return chunk_start >= self.options.start_time and chunk_end < self.options.end_time
-
     def _process_chunk_smart(
         self, chunk: Chunk, indexes: list[MessageIndex], writer: McapWriter
     ) -> None:

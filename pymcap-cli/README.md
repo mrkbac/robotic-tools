@@ -10,6 +10,7 @@
 - **🎯 Precise Filtering**: Regex topic filtering, time range filtering, and content type filtering with deferred schema/channel writing
 - **📊 Rich Progress Display**: Beautiful progress bars with transfer speeds and time estimates using Rich console output
 - **🛡️ Robust Error Handling**: Graceful degradation with detailed error reporting and recovery statistics
+
 ## ⚡ Quick Start
 
 ```bash

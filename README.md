@@ -2,7 +2,9 @@
 
 ## Digitalis
 
-Digitalis is visualization tool for robotics development in your terminal.
+Digitalis is a visualization tool for robotics development in your terminal.
+
+![Digitalis](./digitalis/screenshot.svg)
 
 ## mcap-ros2-support-fast
 
