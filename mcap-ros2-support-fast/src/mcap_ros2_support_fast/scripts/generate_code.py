@@ -31,7 +31,9 @@ def main() -> None:
 
     with Path(args.mcap_file).open("rb") as f:
         reader = make_reader(f)
-        schemas = reader.get_summary().schemas
+        summary = reader.get_summary()
+        assert summary
+        schemas = summary.schemas
         for schema in schemas.values():
             if schema.name in seen_schemas:
                 continue

@@ -3,7 +3,7 @@ name = "pymcap-cli"
 version = "0.1.0"
 description = "A CLI tool for slicing and dicing MCAP files."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = ["mcap>=1.3.0", "rich>=14.1.0"]
 
 [build-system]
