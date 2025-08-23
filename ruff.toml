@@ -1,0 +1,44 @@
+required-version = ">=0.8.0"
+line-length = 100
+
+src = ['src']
+
+target-version = 'py310'
+
+
+[lint]
+exclude = ['msgs']
+select = ['ALL']
+
+ignore = [
+    'ANN401',  # dynamically-typed-expression
+    'C901',    # complex-structure
+    'D',       # pydocstyle
+    'EM101',   # raw-string-in-exception
+    'EM102',   # f-string-in-exception
+    'FIX002',  # TODO
+    'PLR2004', # MagicValueComparisons
+    'S101',    # AssertUsed
+    'TD',      # TODO
+    'TRY003',  # raise-vanilla-args
+
+    # formatter
+    'COM812', # missing-trailing-comma
+    'ISC001', # single-line-implicit-string-concatenation
+
+    'UP038', # Deprecated rule
+
+    'FBT001',
+    'FBT002',
+    'A002',
+    'FBT003',
+    'ERA001',
+    'LOG015',
+    'G004',
+    'DTZ006',
+]
+
+
+[lint.per-file-ignores]
+# Relaxed lints for test files
+"test_*.py" = ["T201", "SLF001"]

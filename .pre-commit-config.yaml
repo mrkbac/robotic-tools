@@ -1,0 +1,53 @@
+# ignore all vendored files
+exclude: ^.*vendor/.*$
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-json
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-vcs-permalinks
+      - id: check-xml
+      - id: check-yaml
+      - id: destroyed-symlinks
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.12.9"
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.35.4
+    hooks:
+      - id: typos
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.8.9
+    hooks:
+      - id: uv-lock
+        entry: "tools/run_uv_lock_on_all_packages.sh"
+        pass_filenames: false
+        files: (uv\.lock|pyproject\.toml|uv\.toml)$
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: Run ty on all packages
+        entry: "tools/run_ty_on_all_packages.sh"
+        language: system
+        pass_filenames: false
