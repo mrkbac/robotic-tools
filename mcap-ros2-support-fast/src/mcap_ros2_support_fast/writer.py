@@ -11,7 +11,7 @@ from mcap.writer import CompressionType
 from mcap.writer import Writer as McapWriter
 
 from . import __version__
-from ._planner import serialize_dynamic  # TODO
+from ._planner import serialize_dynamic
 
 if TYPE_CHECKING:
     from ._plans import EncoderFunction
@@ -81,11 +81,7 @@ class Writer:
         if encoder is None:
             if schema.encoding != SchemaEncoding.ROS2:
                 raise McapROS2WriteError(f'can\'t parse schema with encoding "{schema.encoding}"')
-            type_dict = serialize_dynamic(schema.name, schema.data.decode())
-            # Check if schema.name is in type_dict
-            if schema.name not in type_dict:
-                raise McapROS2WriteError(f'schema parsing failed for "{schema.name}"')
-            encoder = type_dict[schema.name]
+            encoder = serialize_dynamic(schema.name, schema.data.decode())
             self._encoders[schema.id] = encoder
 
         if topic not in self._channel_ids:

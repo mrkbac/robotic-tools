@@ -9,8 +9,12 @@ from pathlib import Path
 
 from mcap.reader import make_reader
 
-from mcap_ros2_support_fast._dynamic_codegen import UTF8_FUNC_NAME, CodeGeneratorFactory, EncoderGeneratorFactory
+from mcap_ros2_support_fast._dynamic_decoder import (
+    DecoderGeneratorFactory,
+)
+from mcap_ros2_support_fast._dynamic_encoder import EncoderGeneratorFactory
 from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
+from mcap_ros2_support_fast._plans import UTF8_FUNC_NAME
 
 
 def main() -> None:
@@ -44,7 +48,7 @@ def main() -> None:
             optimized_plan = optimize_plan(plan)
 
             # Create decoder factory for this schema
-            decoder_factory = CodeGeneratorFactory(optimized_plan)
+            decoder_factory = DecoderGeneratorFactory(optimized_plan)
             decoder_func_name = f"decode_{schema.name.replace('/', '_')}"
             decoder_code = decoder_factory.generate_decoder_code(decoder_func_name)
 

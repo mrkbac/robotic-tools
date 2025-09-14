@@ -128,3 +128,22 @@ STRING_TO_TYPE_ID = {
     "string": TypeId.STRING,
     "wstring": TypeId.WSTRING,
 }
+
+# Type metadata for code generation
+TYPE_INFO: dict[TypeId, str] = {
+    TypeId.BOOL: "?",
+    TypeId.BYTE: "B",
+    TypeId.CHAR: "B",
+    TypeId.FLOAT32: "f",
+    TypeId.FLOAT64: "d",
+    TypeId.INT8: "b",
+    TypeId.UINT8: "B",
+    TypeId.INT16: "h",
+    TypeId.UINT16: "H",
+    TypeId.INT32: "i",
+    TypeId.UINT32: "I",
+    TypeId.INT64: "q",
+    TypeId.UINT64: "Q",
+    TypeId.PADDING: "x",  # Padding bytes, no size
+}
+UTF8_FUNC_NAME = "_decode_utf8"

@@ -7,7 +7,7 @@ from mcap.exceptions import McapError
 from mcap.records import Schema
 from mcap.well_known import MessageEncoding, SchemaEncoding
 
-from mcap_ros2_support_fast._dynamic_codegen import create_decoder
+from mcap_ros2_support_fast._dynamic_decoder import create_decoder
 
 from ._planner import generate_dynamic
 from ._plans import DecodedMessage, DecoderFunction

@@ -4,15 +4,10 @@ import struct
 from collections.abc import Iterable
 
 import pytest
-from mcap_ros2_support_fast._dynamic_codegen import (
+from mcap_ros2_support_fast._dynamic_decoder import (
     create_decoder as create_codegen_decoder,
 )
 from mcap_ros2_support_fast._planner import generate_dynamic
-
-
-def get_decoder_parser():
-    """Helper function to get the correct parser based on decoder type."""
-    return create_dynamic_decoder if decoder_type == "dynamic" else create_codegen_decoder
 
 
 def serialize_string(s: str) -> bytes:

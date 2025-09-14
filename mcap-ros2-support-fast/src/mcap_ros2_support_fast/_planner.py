@@ -362,9 +362,7 @@ def optimize_plan(plan: PlanList) -> PlanList:
     return target_type, final_steps
 
 
-def serialize_dynamic(
-    schema_name: str, schema_text: str
-) -> dict[str, EncoderFunction]:
+def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
     """Convert a ROS2 concatenated message definition into message encoders.
 
     This function generates encoder functions that can serialize message objects
@@ -374,7 +372,7 @@ def serialize_dynamic(
     :param schema_text: The schema text to use for serializing the message payload.
     :return: A dictionary mapping schema names to encoder functions.
     """
-    from ._dynamic_codegen import create_encoder
+    from ._dynamic_encoder import create_encoder
 
     # First collect all message definitions
     msgdefs: dict[str, MessageSpecification] = {
@@ -388,20 +386,6 @@ def serialize_dynamic(
 
     _for_each_msgdef(schema_name, schema_text, collect_msgdef)
 
-    # Now generate encoders for each collected message definition
-    result: dict[str, EncoderFunction] = {}
-
-    for name, msgdef in msgdefs.items():
-        # Skip built-in types as they're not schemas themselves
-        if name in _builtin_types:
-            continue
-
-        # Generate plan for this message type
-        plan = _generate_plan(msgdef, msgdefs)
-        optimized_plan = optimize_plan(plan)
-
-        # Create encoder using code generation
-        encoder = create_encoder(optimized_plan)
-        result[name] = encoder
-
-    return result
+    plan = _generate_plan(msgdefs[schema_name], msgdefs)
+    optimized_plan = optimize_plan(plan)
+    return create_encoder(optimized_plan)
