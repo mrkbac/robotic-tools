@@ -11,7 +11,7 @@ from mcap.writer import CompressionType
 from mcap.writer import Writer as McapWriter
 
 from . import __version__
-from ._planner import serialize_dynamic
+from ._planner import serialize_dynamic  # TODO
 
 if TYPE_CHECKING:
     from ._plans import EncoderFunction

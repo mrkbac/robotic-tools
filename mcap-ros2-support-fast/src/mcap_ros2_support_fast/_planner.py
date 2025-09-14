@@ -8,11 +8,8 @@ backends (interpreted, compiled, code-generated, etc.).
 import re
 from collections.abc import Callable
 from dataclasses import make_dataclass
-from io import BytesIO
 from typing import Any
 
-from ._cdr import CdrWriter
-from ._dynamic import _write_complex_type
 from ._plans import (
     STRING_TO_TYPE_ID,
     ActionType,
@@ -173,32 +170,6 @@ def generate_dynamic(
     return parser(optimized_plan)
 
 
-def serialize_dynamic(schema_name: str, schema_text: str) -> dict[str, EncoderFunction]:
-    """Convert a ROS2 concatenated message definition into a dictionary of message encoders.
-
-    :param schema_name: The name of the schema defined in `schema_text`.
-    :param schema_text: The schema text to use for serializing message payloads.
-    :return: A dictionary mapping schema names to message encoders.
-    """
-    msgdefs: dict[str, MessageSpecification] = {
-        **_builtin_types,  # Include built-in types
-    }
-    encoders: dict[str, EncoderFunction] = {}
-
-    def handle_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageSpecification) -> None:
-        # Add the message definition to the dictionary
-        msgdefs[cur_schema_name] = msgdef
-        msgdefs[short_name] = msgdef
-
-        # Add the message encoder to the dictionary
-        encoder: EncoderFunction = _make_encode_message(cur_schema_name, msgdefs)
-        encoders[cur_schema_name] = encoder
-        encoders[short_name] = encoder
-
-    _for_each_msgdef(schema_name, schema_text, handle_msgdef)
-    return encoders
-
-
 def _for_each_msgdef(
     schema_name: str,
     schema_text: str,
@@ -229,34 +200,6 @@ def _for_each_msgdef(
         msgdef = parse_message_string(pkg_name, msg_name, cur_schema_text)
 
         fn(cur_schema_name, short_name, msgdef)
-
-
-def _make_encode_message(
-    schema_name: str, msgdefs: dict[str, MessageSpecification]
-) -> EncoderFunction:
-    return lambda msg: _encode_message(schema_name, msgdefs, msg)
-
-
-def _encode_message(
-    schema_name: str, msgdefs: dict[str, MessageSpecification], ros2_msg: Any
-) -> bytes:
-    """Serialize a ROS2 message to bytes.
-
-    :param schema_name: The name of the schema to use for deserializing the message payload. This
-        key must exist in the `msgdefs` dictionary
-    :param msgdefs: A dictionary containing the message definitions for the top-level message and
-        any nested messages.
-    :param ros2_msg: The message to serialize.
-    :return: The serialized message.
-    """
-    msgdef = msgdefs.get(schema_name)
-    if msgdef is None:
-        raise ValueError(f'Message definition not found for "{schema_name}"')
-    output = BytesIO()
-    writer = CdrWriter(output)
-
-    _write_complex_type(msgdef.fields, msgdefs, ros2_msg, writer)
-    return output.getvalue()
 
 
 def _find_groupable_primitives(steps: PlanActions) -> list[tuple[int, int]]:
@@ -417,3 +360,48 @@ def optimize_plan(plan: PlanList) -> PlanList:
             )
 
     return target_type, final_steps
+
+
+def serialize_dynamic(
+    schema_name: str, schema_text: str
+) -> dict[str, EncoderFunction]:
+    """Convert a ROS2 concatenated message definition into message encoders.
+
+    This function generates encoder functions that can serialize message objects
+    to CDR-encoded bytes.
+
+    :param schema_name: The name of the schema defined in `schema_text`.
+    :param schema_text: The schema text to use for serializing the message payload.
+    :return: A dictionary mapping schema names to encoder functions.
+    """
+    from ._dynamic_codegen import create_encoder
+
+    # First collect all message definitions
+    msgdefs: dict[str, MessageSpecification] = {
+        **_builtin_types,  # Include built-in types
+    }
+
+    def collect_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageSpecification) -> None:
+        # Add the message definition to the dictionary
+        msgdefs[cur_schema_name] = msgdef
+        msgdefs[short_name] = msgdef
+
+    _for_each_msgdef(schema_name, schema_text, collect_msgdef)
+
+    # Now generate encoders for each collected message definition
+    result: dict[str, EncoderFunction] = {}
+
+    for name, msgdef in msgdefs.items():
+        # Skip built-in types as they're not schemas themselves
+        if name in _builtin_types:
+            continue
+
+        # Generate plan for this message type
+        plan = _generate_plan(msgdef, msgdefs)
+        optimized_plan = optimize_plan(plan)
+
+        # Create encoder using code generation
+        encoder = create_encoder(optimized_plan)
+        result[name] = encoder
+
+    return result

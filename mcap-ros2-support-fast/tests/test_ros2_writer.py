@@ -2,13 +2,12 @@ from array import array
 from io import BytesIO
 
 from mcap.reader import make_reader
-from mcap_ros2_support_fast._dynamic import create_decoder
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import Writer as Ros2Writer
 
 
 def read_ros2_messages(stream: BytesIO):
-    reader = make_reader(stream, decoder_factories=[DecoderFactory(create_decoder)])
+    reader = make_reader(stream, decoder_factories=[DecoderFactory()])
     return reader.iter_decoded_messages()
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mcap.reader import make_reader
 
-from mcap_ros2_support_fast._dynamic_codegen import UTF8_FUNC_NAME, CodeGeneratorFactory
+from mcap_ros2_support_fast._dynamic_codegen import UTF8_FUNC_NAME, CodeGeneratorFactory, EncoderGeneratorFactory
 from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
 
 
@@ -25,9 +25,11 @@ def main() -> None:
     output_path.parent.mkdir(exist_ok=True, parents=True)
 
     # Generate code for each schema
-    factories = []
+    decoder_factories = []
+    encoder_factories = []
     seen_schemas: set[str] = set()
     decoder_functions = []
+    encoder_functions = []
 
     with Path(args.mcap_file).open("rb") as f:
         reader = make_reader(f)
@@ -41,20 +43,33 @@ def main() -> None:
             plan = generate_plans(schema.name, schema.data.decode())
             optimized_plan = optimize_plan(plan)
 
-            # Create factory for this schema
-            factory = CodeGeneratorFactory(optimized_plan)
-            func_name = f"decode_{schema.name.replace('/', '_')}"
-            code = factory.generate_decoder_code(func_name)
+            # Create decoder factory for this schema
+            decoder_factory = CodeGeneratorFactory(optimized_plan)
+            decoder_func_name = f"decode_{schema.name.replace('/', '_')}"
+            decoder_code = decoder_factory.generate_decoder_code(decoder_func_name)
 
-            factories.append(factory)
-            decoder_functions.append(code)
+            decoder_factories.append(decoder_factory)
+            decoder_functions.append(decoder_code)
+
+            # Create encoder factory for this schema
+            encoder_factory = EncoderGeneratorFactory(optimized_plan)
+            encoder_func_name = f"encode_{schema.name.replace('/', '_')}"
+            encoder_code = encoder_factory.generate_encoder_code(encoder_func_name)
+
+            encoder_factories.append(encoder_factory)
+            encoder_functions.append(encoder_code)
 
     # Extract information needed for code generation
-    all_struct_patterns = {}
+    all_decoder_struct_patterns = {}
+    all_encoder_struct_patterns = {}
     all_message_classes = set()
 
-    for factory in factories:
-        all_struct_patterns.update(factory.struct_patterns)
+    for factory in decoder_factories:
+        all_decoder_struct_patterns.update(factory.struct_patterns)
+        all_message_classes.update(factory.message_classes)
+
+    for factory in encoder_factories:
+        all_encoder_struct_patterns.update(factory.struct_patterns)
         all_message_classes.update(factory.message_classes)
 
     # Start building the complete output file
@@ -75,14 +90,23 @@ def main() -> None:
         [
             "# Utility functions",
             f"{UTF8_FUNC_NAME} = codecs.utf_8_decode",
+            "_encode_utf8 = codecs.utf_8_encode",
+            "_get_field = lambda obj, *field_path: (__import__('functools').reduce(lambda o, f: o[f] if isinstance(o, dict) else getattr(o, f), field_path, obj))",
             "",
         ]
     )
 
     # Add global struct patterns
     generated_lines.append("# Global struct patterns")
-    for pattern, var_name in all_struct_patterns.items():
+
+    # Decoder struct patterns (unpack_from)
+    for pattern, var_name in all_decoder_struct_patterns.items():
         generated_lines.append(f"{var_name}g = struct.Struct('{pattern}').unpack_from")
+
+    # Encoder struct patterns (pack)
+    for pattern, var_name in all_encoder_struct_patterns.items():
+        generated_lines.append(f"{var_name}g = struct.Struct('{pattern}').pack")
+
     generated_lines.append("")
 
     # Add message class definitions (avoid duplicates)
@@ -101,6 +125,12 @@ def main() -> None:
         generated_lines.append(code)
         generated_lines.append("")
 
+    # Add encoder functions
+    generated_lines.append("# Encoder functions")
+    for code in encoder_functions:
+        generated_lines.append(code)
+        generated_lines.append("")
+
     # Add decoder registry
     generated_lines.append("# Decoder registry")
     generated_lines.append("DECODERS = {")
@@ -110,11 +140,23 @@ def main() -> None:
     generated_lines.append("}")
     generated_lines.append("")
 
-    # Add factory function
+    # Add encoder registry
+    generated_lines.append("# Encoder registry")
+    generated_lines.append("ENCODERS = {")
+    for schema_name in sorted(seen_schemas):
+        func_name = f"encode_{schema_name.replace('/', '_')}"
+        generated_lines.append(f'    "{schema_name}": {func_name},')
+    generated_lines.append("}")
+    generated_lines.append("")
+
+    # Add factory functions
     generated_lines.extend(
         [
             "def get_decoder(schema_name: str):",
             "    return DECODERS.get(schema_name)",
+            "",
+            "def get_encoder(schema_name: str):",
+            "    return ENCODERS.get(schema_name)",
             "",
         ]
     )

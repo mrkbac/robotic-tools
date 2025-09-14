@@ -4,14 +4,13 @@ import struct
 from collections.abc import Iterable
 
 import pytest
-from mcap_ros2_support_fast._dynamic import create_decoder as create_dynamic_decoder
 from mcap_ros2_support_fast._dynamic_codegen import (
     create_decoder as create_codegen_decoder,
 )
 from mcap_ros2_support_fast._planner import generate_dynamic
 
 
-def get_decoder_parser(decoder_type: str):
+def get_decoder_parser():
     """Helper function to get the correct parser based on decoder type."""
     return create_dynamic_decoder if decoder_type == "dynamic" else create_codegen_decoder
 
@@ -246,16 +245,12 @@ def float32_buffer(floats: list[float]) -> bytes:
         ),
     ],
 )
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_basic_types(
-    msg_def: str, data: Iterable[int], expected: dict, decoder_type: str
-) -> None:
+def test_deserialize_basic_types(msg_def: str, data: Iterable[int], expected: dict) -> None:
     """Test deserialization of basic types."""
     buffer = bytes([0, 1, 0, 0, *list(data)])
 
     # Choose decoder based on parameter
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
 
     # Convert SimpleNamespace to dict for comparison
@@ -308,25 +303,18 @@ def test_deserialize_basic_types(
         ),
     ],
 )
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_time_types(
-    msg_def: str, data: Iterable[int], expected: dict, decoder_type: str
-) -> None:
+def test_deserialize_time_types(msg_def: str, data: Iterable[int], expected: dict) -> None:
     """Test deserialization of ROS2 time and duration types (nanosec format)."""
     buffer = bytes([0, 1, 0, 0, *list(data)])
 
-    # Choose decoder based on parameter
-    parser = create_dynamic_decoder if decoder_type == "dynamic" else create_codegen_decoder
-
     # Test ROS2 format (nanosec)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
     assert result_dict == expected
 
 
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_ros2_log_message(decoder_type: str) -> None:
+def test_deserialize_ros2_log_message() -> None:
     """Test deserialization of a ROS 2 log message."""
     buffer = bytes.fromhex(
         "00010000fb65865e80faae0614000000120000006d696e696d616c5f7075626c69736865720000001e0000005075626c697368696e673a202748656c6c6f2c20776f726c64212030270000004c0000002f6f70742f726f73325f77732f656c6f7175656e742f7372632f726f73322f6578616d706c65732f72636c6370702f6d696e696d616c5f7075626c69736865722f6c616d6264612e637070000b0000006f70657261746f722829007326000000"
@@ -348,8 +336,7 @@ string file # file the message came from
 string function # function the message came from
 uint32 line # line the message came from
 """
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -365,8 +352,7 @@ uint32 line # line the message came from
     assert result_dict == expected
 
 
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_ros2_tf_message(decoder_type: str) -> None:
+def test_deserialize_ros2_tf_message() -> None:
     """Test deserialization of a ROS 2 tf2_msgs/TFMessage."""
     buffer = bytes.fromhex(
         "0001000001000000286fae6169ddd73108000000747572746c6531000e000000747572746c65315f616865616400000000000000000000000000f03f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f03f"
@@ -398,8 +384,7 @@ float64 y
 float64 z
 float64 w
 """
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -421,21 +406,18 @@ float64 w
     assert result_dict == expected
 
 
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_empty_ros2_message(decoder_type: str) -> None:
+def test_deserialize_empty_ros2_message() -> None:
     """Test deserialization of an empty ROS 2 message (e.g. std_msgs/msg/Empty)."""
     buffer = bytes.fromhex("0001000000")
     msg_def = ""
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
     assert result_dict == {}
 
 
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_empty_field_followed_by_uint8(decoder_type: str) -> None:
+def test_deserialize_empty_field_followed_by_uint8() -> None:
     """Test deserialization of a custom msg with a std_msgs/msg/Empty field followed by uint8."""
     # Note: ROS/FastDDS seems to add 2 extra padding bytes at the end
     buffer = bytes.fromhex("00010000007b0000")
@@ -446,16 +428,14 @@ uint8 uint_8_field
 MSG: std_msgs/Empty
 # This message has no fields
 """
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
     assert result_dict == {"empty": {}, "uint_8_field": 123}
 
 
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_empty_field_followed_by_int32(decoder_type: str) -> None:
+def test_deserialize_empty_field_followed_by_int32() -> None:
     """Test deserialization of a custom msg with a std_msgs/msg/Empty field followed by int32."""
     buffer = bytes.fromhex("00010000000000007b000001")
     msg_def = """
@@ -465,16 +445,14 @@ int32 int_32_field
 MSG: std_msgs/Empty
 # This message has no fields
 """
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
     assert result_dict == {"empty": {}, "int_32_field": 16777339}
 
 
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_deserialize_empty_message_with_constants(decoder_type: str) -> None:
+def test_deserialize_empty_message_with_constants() -> None:
     """Deserialization of a custom msg with an empty message (with constants) followed by int32."""
     buffer = bytes.fromhex("00010000000000007b000001")
     msg_def = """
@@ -484,8 +462,7 @@ int32 int_32_field
 MSG: custom_msgs/Nothing
 int32 EXAMPLE=123
 """
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -499,12 +476,10 @@ int32 EXAMPLE=123
         "wstring[] field",
     ],
 )
-@pytest.mark.parametrize("decoder_type", ["dynamic", "codegen"])
-def test_wstring_throws_exception(msg_def: str, decoder_type: str) -> None:
+def test_wstring_throws_exception(msg_def: str) -> None:
     """Test that wstring fields throw an exception."""
     buffer = bytes.fromhex("00010000000000007b000000")
-    parser = get_decoder_parser(decoder_type)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=parser)
+    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
 
     with pytest.raises(NotImplementedError, match="wstring.*not.*implemented"):
         decoder(buffer)

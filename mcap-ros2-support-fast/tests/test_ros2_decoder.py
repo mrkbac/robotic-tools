@@ -1,5 +1,4 @@
 from mcap.reader import make_reader
-from mcap_ros2_support_fast._dynamic import create_decoder
 from mcap_ros2_support_fast.decoder import DecoderFactory
 
 from .generate import generate_sample_data
@@ -7,7 +6,7 @@ from .generate import generate_sample_data
 
 def test_ros2_decoder() -> None:
     with generate_sample_data() as m:
-        reader = make_reader(m, decoder_factories=[DecoderFactory(create_decoder)])
+        reader = make_reader(m, decoder_factories=[DecoderFactory()])
         count = 0
         for index, (_, _, _, ros_msg) in enumerate(reader.iter_decoded_messages("/chatter")):
             assert ros_msg.data == f"string message {index}"
@@ -26,7 +25,7 @@ def test_ros2_decoder() -> None:
 
 def test_ros2_decoder_msg_eq() -> None:
     with generate_sample_data() as m:
-        reader = make_reader(m, decoder_factories=[DecoderFactory(create_decoder)])
+        reader = make_reader(m, decoder_factories=[DecoderFactory()])
 
         decoded_messages = reader.iter_decoded_messages("/chatter")
         _, _, _, msg0 = next(decoded_messages)
