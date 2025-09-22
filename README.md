@@ -24,7 +24,7 @@ uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=pymcap-
 
 ## License
 
-All tools in this repo are licensed under [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html).
+All tools in this repo are licensed under MIT.
 
 These tools draw inspiration from the following projects (mostly MIT licensed):
 
