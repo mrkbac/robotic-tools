@@ -31,7 +31,6 @@ build-backend = "uv_build"
 dev = [
     "pytest>=8.4.1",
     "textual-dev>=1.7.0",
-    "mcap-ros2-support>=0.5.5",
     "ty>=0.0.1a19",
 ]
 

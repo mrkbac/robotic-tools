@@ -252,7 +252,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "mcap-ros2-support" },
     { name = "pytest" },
     { name = "textual-dev" },
     { name = "ty" },
@@ -275,7 +274,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "mcap-ros2-support", specifier = ">=0.5.5" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "textual-dev", specifier = ">=1.7.0" },
     { name = "ty", specifier = ">=0.0.1a19" },
