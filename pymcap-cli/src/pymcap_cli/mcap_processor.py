@@ -6,8 +6,9 @@ from datetime import datetime
 from re import Pattern
 from typing import BinaryIO
 
-from mcap.exceptions import McapError
-from mcap.records import (
+from rich.console import Console
+
+from pymcap_cli.mcap_data import (
     Attachment,
     Channel,
     Chunk,
@@ -19,13 +20,9 @@ from mcap.records import (
     Metadata,
     Schema,
 )
-from mcap.stream_reader import breakup_chunk
-from rich.console import Console
-
-from pymcap_cli.mcap.reader import read_message
+from pymcap_cli.reader import McapError, breakup_chunk, stream_reader
 from pymcap_cli.utils import file_progress
-
-from .mcap.writer import CompressionType, McapWriter
+from pymcap_cli.writer import CompressionType, McapWriter
 
 console = Console()
 
@@ -148,6 +145,9 @@ class McapProcessor:
         # Channel topic cache for filtering
         self.channel_topics: dict[int, str] = {}
 
+        # Cache filtering decisions per channel ID to avoid repeated regex matching
+        self.channel_filter_cache: dict[int, bool] = {}
+
     def should_include_topic(self, topic: str) -> bool:
         """Check if topic should be included based on filter criteria."""
         if self.options.include_topics:
@@ -171,6 +171,8 @@ class McapProcessor:
             return
         self.channels[channel.id] = channel
         self.channel_topics[channel.id] = channel.topic
+        # Pre-compute filtering decision for this channel
+        self.channel_filter_cache[channel.id] = self.should_include_topic(channel.topic)
 
     def ensure_schema_written(self, schema_id: int, writer: McapWriter) -> bool:
         """Ensure schema is written to output. Returns True if written."""
@@ -221,9 +223,16 @@ class McapProcessor:
         if not self.should_include_time(message.log_time):
             return
 
-        # 4. Topic filtering (for messages)
-        topic = self.channel_topics.get(message.channel_id)
-        if topic and not self.should_include_topic(topic):
+        # Topic filtering using cached decision (avoid repeated regex matching)
+        should_include = self.channel_filter_cache.get(message.channel_id)
+        if should_include is None:
+            # Channel not yet seen - this shouldn't happen in well-formed MCAP
+            # but handle it gracefully
+            topic = self.channel_topics.get(message.channel_id, "")
+            should_include = self.should_include_topic(topic)
+            self.channel_filter_cache[message.channel_id] = should_include
+
+        if not should_include:
             self.stats.filter_rejections += 1
             return
 
@@ -286,73 +295,84 @@ class McapProcessor:
         try:
             with file_progress("[bold blue]Processing MCAP...", console) as progress:
                 task = progress.add_task("Processing", total=file_size)
-                # Choose processing mode based on options
-                emit_chunks = not self.options.always_decode_chunk
-                stream_reader = read_message(
+                # Always emit chunks so we can track statistics and handle them properly
+                records = stream_reader(
                     input_stream,
-                    should_include=lambda c: self.should_include_topic(c.topic),
-                    start_time=self.options.start_time,
-                    end_time=self.options.end_time,
-                    emit_chunks=emit_chunks,
+                    emit_chunks=True,
                 )
 
                 last_chunk: Chunk | None = None
                 last_chunk_message_indexes: list[MessageIndex] = []
 
-                for record in stream_reader:
-                    try:
-                        # Update progress
-                        progress.update(task, completed=input_stream.tell())
+                try:
+                    for record in records:
+                        try:
+                            # Update progress
+                            progress.update(task, completed=input_stream.tell())
 
-                        # Ensure writer is started before processing any records
-                        if not writer_started:
+                            # Ensure writer is started before processing any records
+                            if not writer_started:
+                                if isinstance(record, Header):
+                                    writer.start(profile=record.profile, library=record.library)
+                                else:
+                                    # Start with default values if no header found
+                                    writer.start()
+                                writer_started = True
+
+                            if not isinstance(record, MessageIndex) and last_chunk:
+                                self._process_chunk_smart(
+                                    last_chunk, last_chunk_message_indexes, writer
+                                )
+                                last_chunk = None
+                                last_chunk_message_indexes = []
+
                             if isinstance(record, Header):
-                                writer.start(profile=record.profile, library=record.library)
-                            else:
-                                # Start with default values if no header found
-                                writer.start()
-                            writer_started = True
+                                # Header already processed above for writer start
+                                pass
 
-                        if not isinstance(record, MessageIndex) and last_chunk:
-                            self._process_chunk_smart(
-                                last_chunk, last_chunk_message_indexes, writer
-                            )
+                            elif isinstance(record, Chunk):
+                                self.stats.chunks_processed += 1
+                                last_chunk = record
+                                last_chunk_message_indexes = []
+                            elif isinstance(record, MessageIndex):
+                                last_chunk_message_indexes.append(record)
+                            elif isinstance(record, Schema):
+                                self.process_schema(record)
+                            elif isinstance(record, Channel):
+                                self.process_channel(record)
+                            elif isinstance(record, Message):
+                                self.process_message(record, writer)
+                            elif isinstance(record, Attachment):
+                                self.process_attachment(record, writer)
+                            elif isinstance(record, Metadata):
+                                self.process_metadata(record, writer)
+                            elif isinstance(record, (DataEnd, Footer)):
+                                break
+
+                        except McapError as e:
+                            if self.options.recovery_mode:
+                                console.print(
+                                    f"[yellow]Warning: Skipping invalid record: {e}[/yellow]"
+                                )
+                                self.stats.errors_encountered += 1
+                                continue
+                            raise
+                except McapError as e:
+                    # Catch errors from iteration itself (e.g., truncated file)
+                    if self.options.recovery_mode:
+                        console.print(f"[yellow]Warning: {e}[/yellow]")
+                        self.stats.errors_encountered += 1
+                        # If we encountered an error and have a pending chunk,
+                        # decode it to recover what we can (indexes may be incomplete)
+                        if last_chunk:
+                            self._process_chunk_fallback(last_chunk, writer)
                             last_chunk = None
-                            last_chunk_message_indexes = []
-
-                        if isinstance(record, Header):
-                            # Header already processed above for writer start
-                            pass
-
-                        elif isinstance(record, Chunk):
-                            self.stats.chunks_processed += 1
-                            last_chunk = record
-                            last_chunk_message_indexes = []
-                        elif isinstance(record, MessageIndex):
-                            last_chunk_message_indexes.append(record)
-                        elif isinstance(record, Schema):
-                            self.process_schema(record)
-                        elif isinstance(record, Channel):
-                            self.process_channel(record)
-                        elif isinstance(record, Message):
-                            self.process_message(record, writer)
-                        elif isinstance(record, Attachment):
-                            self.process_attachment(record, writer)
-                        elif isinstance(record, Metadata):
-                            self.process_metadata(record, writer)
-                        elif isinstance(record, (DataEnd, Footer)):
-                            break
-
-                    except McapError as e:
-                        if self.options.recovery_mode:
-                            console.print(f"[yellow]Warning: Skipping invalid record: {e}[/yellow]")
-                            self.stats.errors_encountered += 1
-                            continue
+                    else:
                         raise
 
                 if last_chunk:
-                    # always decompress the last chunk
-                    self._process_chunk_fallback(last_chunk, writer)
+                    # Process the last chunk (smart processing will decode if needed)
+                    self._process_chunk_smart(last_chunk, last_chunk_message_indexes, writer)
 
                 # Complete progress
                 if task and file_size:
@@ -369,33 +389,77 @@ class McapProcessor:
         """Smart chunk processing with fast copying when possible."""
         decode = False
 
-        # chunk time outside of limits
+        # chunk time outside of limits - skip entirely
         if (
             chunk.message_end_time < self.options.start_time
             or chunk.message_start_time >= self.options.end_time
         ):
             return
 
-        if self.options.include_topics:
+        # Check if time filtering is active and chunk is not fully contained
+        # If so, must decode to filter individual messages
+        if (self.options.start_time > 0 or self.options.end_time < 2**63 - 1) and not (
+            chunk.message_start_time >= self.options.start_time
+            and chunk.message_end_time < self.options.end_time
+        ):
+            decode = True
+
+        # Check if chunk compression matches desired output compression
+        # If not, must decode and re-encode
+        if chunk.compression != self.options.compression_type.value:
+            decode = True
+
+        if self.options.include_topics or self.options.exclude_topics:
+            # Check if chunk has uniform filtering decision (all include or all exclude)
+            has_include = False
+            has_exclude = False
+            has_unknown = False
+
             for idx in indexes:
-                channel = self.channels.get(idx.channel_id)
-                if channel is None:
-                    # contains unknown channel need decoding
-                    decode = True
+                should_include = self.channel_filter_cache.get(idx.channel_id)
+                if should_include is None:
+                    has_unknown = True
                     break
-                if not self.should_include_topic(channel.topic):
-                    # Topic should be included
-                    decode = True
+                if should_include:
+                    has_include = True
+                else:
+                    has_exclude = True
+
+            # If chunk has unknown channels, must decode
+            if has_unknown or (has_include and has_exclude):
+                decode = True
+            # If chunk has ONLY excluded channels, skip it entirely
+            elif has_exclude and not has_include:
+                return
 
         if decode or self.options.always_decode_chunk:
             self._process_chunk_fallback(chunk, writer)
         else:
+            # Fast-copy path: extract schemas and channels first
+            self._extract_chunk_metadata(chunk)
+
             for idx in indexes:
                 self.ensure_channel_written(idx.channel_id, writer)
             writer.add_chunk_with_indexes(chunk, indexes)
             self.stats.messages_written += sum(len(idx.records) for idx in indexes)
             self.stats.chunks_copied += 1
-            return
+
+    def _extract_chunk_metadata(self, chunk: Chunk) -> None:
+        """Extract schemas and channels from chunk without fully decoding."""
+        try:
+            chunk_records = breakup_chunk(chunk, validate_crc=False)
+            for chunk_record in chunk_records:
+                if isinstance(chunk_record, Schema):
+                    self.process_schema(chunk_record)
+                elif isinstance(chunk_record, Channel):
+                    self.process_channel(chunk_record)
+        except McapError as e:
+            # If we can't extract metadata, that's okay - we'll still copy the chunk
+            if self.options.recovery_mode:
+                console.print(f"[yellow]Warning: Failed to extract chunk metadata: {e}[/yellow]")
+                self.stats.errors_encountered += 1
+            else:
+                raise
 
     def _process_chunk_fallback(self, chunk: Chunk, writer: McapWriter) -> None:
         """Fallback to decode chunk into individual records."""

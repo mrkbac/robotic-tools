@@ -1,10 +1,12 @@
 import itertools
+from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
+from typing import BinaryIO
 
-from mcap.exceptions import McapError
-from mcap.reader import make_reader
-from mcap.records import (
+from rich.console import Console
+
+from pymcap_cli.mcap_data import (
+    Attachment,
     Channel,
     Chunk,
     ChunkIndex,
@@ -14,12 +16,16 @@ from mcap.records import (
     MessageIndex,
     Schema,
     Statistics,
+    Summary,
 )
-from mcap.stream_reader import breakup_chunk
-from mcap.summary import Summary
-from rich.console import Console
-
-from pymcap_cli.mcap.reader import stream_reader
+from pymcap_cli.reader import (
+    LazyChunk,
+    McapError,
+    breakup_chunk,
+    get_header,
+    get_summary,
+    stream_reader,
+)
 from pymcap_cli.utils import file_progress
 
 
@@ -34,27 +40,26 @@ console = Console()  # TODO improve
 
 
 def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) -> dict[int, int]:
-    # channel, offset
-    idx_list = []
-    for idx in indexes:
-        for _time, offset in idx.records:
-            idx_list.append((idx.channel_id, offset))
-    sorted_idx_by_off = sorted(idx_list, key=lambda x: x[1])
-    sorted_idx_by_off.append((None, chunk_size))
+    idx_list: list[tuple[int | None, int]] = [
+        (idx.channel_id, offset) for idx in indexes for _, offset in idx.records
+    ]
 
-    sizes: dict[int, int] = {}
-    for cur, (_, end_offset) in itertools.pairwise(sorted_idx_by_off):
+    # Sort by offset (second element)
+    idx_list.sort(key=lambda x: x[1])
+    idx_list.append((None, chunk_size))
+
+    sizes_dd: dict[int, int] = defaultdict(int)
+
+    for cur, (_, end_offset) in itertools.pairwise(idx_list):
         channel, start_offset = cur
         size = (end_offset - start_offset) - (2 + 4 + 8 + 8)
         assert size > 0, f"Invalid size for channel {channel}: {size}"
-        sizes[channel] = sizes.get(channel, 0) + size
+        sizes_dd[channel] += size
 
-    return sizes
+    return dict(sizes_dd)
 
 
-def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
-    file_size = file.stat().st_size
-
+def rebuild_info(f: BinaryIO, file_size: int, *, exact_sizes: bool = False) -> Info:
     header: Header | None = None
     statistics: Statistics = Statistics(
         attachment_count=0,
@@ -96,18 +101,15 @@ def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
             else:
                 raise McapError(f"Unexpected record type: {type(record)}")
 
-    last_chunk = None
+    last_chunk: Chunk | LazyChunk | None = None
     last_chunk_message_indexes: list[MessageIndex] = []
 
-    with (
-        file_progress("[bold blue]Rebuilding MCAP info...", console) as progress,
-        file.open("rb") as f,
-    ):
+    with file_progress("[bold blue]Rebuilding MCAP info...", console) as progress:
         task = progress.add_task("Processing", total=file_size)
 
-        reader = stream_reader(f, skip_magic=False, emit_chunks=not exact_sizes)
-
-        for record in reader:
+        for record in stream_reader(
+            f, skip_magic=False, emit_chunks=not exact_sizes, lazy_chunks=not exact_sizes
+        ):
             progress.update(task, completed=f.tell())
 
             if not isinstance(record, MessageIndex) and last_chunk:
@@ -118,6 +120,9 @@ def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
                         break
 
                 if decode:
+                    if isinstance(last_chunk, LazyChunk):
+                        # Convert LazyChunk to full Chunk
+                        last_chunk = last_chunk.to_chunk(f)
                     update_from_chunk(last_chunk)
                 else:
                     new_sizes = _estimate_size_from_indexes(
@@ -139,7 +144,7 @@ def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
                 summary.schemas[record.id] = record
             elif isinstance(record, Message):
                 handle_message(record)
-            elif isinstance(record, Chunk):
+            elif isinstance(record, (Chunk, LazyChunk)):
                 last_chunk = record
 
                 summary.chunk_indexes.append(
@@ -147,7 +152,9 @@ def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
                         chunk_length=0,  # TODO
                         chunk_start_offset=0,  # TODO
                         compression=record.compression,
-                        compressed_size=len(record.data),
+                        compressed_size=len(record.data)
+                        if isinstance(record, Chunk)
+                        else record.data_len,
                         message_end_time=record.message_end_time,
                         message_index_length=0,  # TODO
                         message_index_offsets={},
@@ -175,7 +182,7 @@ def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
 
             elif isinstance(record, Statistics):
                 pass  # We calculate statistics ourselves
-            elif isinstance(record, DataEnd):
+            elif isinstance(record, (DataEnd, Attachment)):
                 break
             else:
                 raise McapError(f"Unexpected record type: {type(record)}")
@@ -188,10 +195,8 @@ def rebuild_info(file: Path, *, exact_sizes: bool = False) -> Info:
     return Info(header=header, summary=summary, channel_sizes=channel_sizes)
 
 
-def read_info(file: Path) -> Info:
-    with file.open("rb") as f:
-        reader = make_reader(f)
-        header = reader.get_header()
-        summary = reader.get_summary()
-        assert summary is not None, "Summary should not be None"
-        return Info(header=header, summary=summary)
+def read_info(f: BinaryIO) -> Info:
+    header = get_header(f)
+    summary = get_summary(f)
+    assert summary is not None, "Summary should not be None"
+    return Info(header=header, summary=summary)

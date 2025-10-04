@@ -1,10 +1,12 @@
 import argparse
+import io
 from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
+from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.rebuild import read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human
 
@@ -32,6 +34,12 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
         help="Rebuild the MCAP file from scratch",
     )
 
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode",
+    )
+
     return parser
 
 
@@ -39,7 +47,21 @@ def handle_command(args: argparse.Namespace) -> None:
     """Handle the info command execution."""
 
     file = Path(args.file)
-    info = rebuild_info(file) if args.rebuild else read_info(file)
+    file_size = file.stat().st_size
+
+    debug_wrapper: DebugStreamWrapper | None = None
+    with file.open("rb", buffering=0) as f_raw:
+        if args.debug:
+            debug_wrapper = DebugStreamWrapper(f_raw)
+            f_buffered = io.BufferedReader(debug_wrapper, buffer_size=1024)
+        else:
+            f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
+
+        info = rebuild_info(f_buffered, file_size) if args.rebuild else read_info(f_buffered)
+
+    if debug_wrapper:
+        debug_wrapper.print_stats(file_size)
+
     header = info.header
     summary = info.summary
     assert header is not None, "Header should not be None"
@@ -50,7 +72,7 @@ def handle_command(args: argparse.Namespace) -> None:
     info_table = Table.grid(padding=(0, 1))
     info_table.add_column(style="bold blue")
     info_table.add_column()
-    info_table.add_row("File:", f"[green]{file.name}[/green]")
+    info_table.add_row("File:", f"[green]{file}[/green]")
     info_table.add_row("Library:", f"[yellow]{header.library}[/yellow]")
     info_table.add_row("Profile:", f"[yellow]{header.profile}[/yellow]")
 
