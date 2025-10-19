@@ -1,0 +1,22 @@
+[project]
+name = "fox-bridge"
+version = "0.1.0"
+description = "Foxglove WebSocket proxy with message transformations"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.3.4",
+    "pointcloud2>=0.2.3",
+    "mcap-ros2-support>=0.5.5",
+    "websockets>=15.0.1",
+    "typing-extensions>=4.12.2",
+    "portable-ffmpeg>=0.1.0",
+    "pillow>=12.0.0",
+]
+
+[project.scripts]
+bridge = "fox_bridge.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.8.9,<0.9.0"]
+build-backend = "uv_build"
