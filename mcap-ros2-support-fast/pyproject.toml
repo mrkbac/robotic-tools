@@ -8,9 +8,6 @@ dependencies = [
     "mcap>=1.3.0",
 ]
 
-[project.scripts]
-gen_code = "mcap_ros2_support_fast.scripts.generate_code:main"
-
 [build-system]
 requires = ["uv_build>=0.8.1,<0.9.0"]
 build-backend = "uv_build"
