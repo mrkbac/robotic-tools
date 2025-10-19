@@ -9,6 +9,7 @@ import sys
 from fox_bridge.proxy import ProxyBridge
 from fox_bridge.transformers import TransformerRegistry
 from fox_bridge.transformers.image_to_video import ImageToVideoTransformer
+from fox_bridge.transformers.pointcloud_voxel import PointCloudVoxelTransformer
 
 # Configure logging
 logging.basicConfig(
@@ -71,6 +72,9 @@ async def main_async(args: argparse.Namespace) -> None:
         use_hardware=True,
     )
     registry.register(image_transformer)
+
+    pointcloud_transformer = PointCloudVoxelTransformer(voxel_size=0.1)
+    registry.register(pointcloud_transformer)
 
     logger.info("Registered transformers:")
     for transformer in registry.get_all_transformers():
