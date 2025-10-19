@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable verbose debug logging",
     )
+    parser.add_argument(
+        "--throttle-hz",
+        type=float,
+        default=1.0,
+        help="Topic throttle rate in Hz (default: 1.0; set to 0 to disable)",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +82,7 @@ async def main_async(args: argparse.Namespace) -> None:
         listen_host=args.host,
         listen_port=args.port,
         transformer_registry=registry,
+        default_throttle_hz=args.throttle_hz,
     )
 
     # Setup signal handlers for graceful shutdown

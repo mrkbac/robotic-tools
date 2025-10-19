@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Any
 
 from PIL import Image
+from portable_ffmpeg import get_ffmpeg
 
 from . import Transformer, TransformError
 
@@ -100,9 +101,10 @@ class ImageToVideoTransformer(Transformer):
         Returns:
             True if the encoder is available
         """
+        ffmpeg, _ = get_ffmpeg()
         try:
             result = subprocess.run(
-                ["static_ffmpeg", "-hide_banner", "-encoders"],
+                [ffmpeg, "-hide_banner", "-encoders"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -146,7 +148,7 @@ class ImageToVideoTransformer(Transformer):
 
         return new_width, new_height
 
-    def transform(self, message: dict[str, Any]) -> dict[str, Any]:
+    def transform(self, message: Any) -> dict[str, Any]:
         """Transform CompressedImage to CompressedVideo.
 
         Args:
@@ -160,20 +162,20 @@ class ImageToVideoTransformer(Transformer):
         """
         try:
             # Extract fields from input message
-            header = message.get("header", {})
-            jpeg_data = bytes(message.get("data", []))
-            input_format = message.get("format", "")
+            # header = message.get("header", {})
+            # jpeg_data = bytes(message.get("data", []))
+            # input_format = message.get("format", "")
 
-            if not jpeg_data:
-                raise TransformError("Empty image data")
+            if not message.data:
+                raise TransformError(f"Empty image data, {message}")
 
             # Verify it's JPEG (for now we only support JPEG)
-            if input_format and "jpeg" not in input_format.lower():
-                raise TransformError(f"Unsupported format: {input_format}")
+            if message.format and "jpeg" not in message.format.lower():
+                raise TransformError(f"Unsupported format: {message.format}")
 
             # Get image dimensions using PIL (faster than ffprobe)
             try:
-                img = Image.open(BytesIO(jpeg_data))
+                img = Image.open(BytesIO(message.data))
                 width, height = img.size
             except Exception as e:
                 raise TransformError(f"Failed to read image: {e}") from e
@@ -185,12 +187,17 @@ class ImageToVideoTransformer(Transformer):
                 logger.debug(f"Downscaling from {width}x{height} to {target_width}x{target_height}")
 
             # Encode JPEG to H.264
-            h264_data = self._encode_to_h264(jpeg_data, width, height, target_width, target_height)
+            h264_data = self._encode_to_h264(
+                message.data, width, height, target_width, target_height
+            )
 
             # Build output message
             output_message = {
-                "timestamp": header.get("stamp", {"sec": 0, "nanosec": 0}),
-                "frame_id": header.get("frame_id", ""),
+                "timestamp": {
+                    "sec": message.header.stamp.sec,
+                    "nanosec": message.header.stamp.nanosec,
+                },
+                "frame_id": message.header.frame_id,
                 "data": list(h264_data),  # Convert bytes to list of uint8
                 "format": self.codec,
             }

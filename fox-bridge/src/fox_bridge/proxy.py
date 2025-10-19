@@ -20,6 +20,7 @@ from .types import (
     JsonOpCodes,
     ServerInfoMessage,
     SubscribeMessage,
+    UnadvertiseMessage,
     UnsubscribeMessage,
 )
 
@@ -35,6 +36,8 @@ class ProxyBridge:
         listen_host: str = "0.0.0.0",
         listen_port: int = 8766,
         transformer_registry: TransformerRegistry | None = None,
+        default_throttle_hz: float | None = 1.0,
+        topic_throttle_overrides: dict[str, float | None] | None = None,
     ):
         """Initialize the proxy bridge.
 
@@ -43,11 +46,15 @@ class ProxyBridge:
             listen_host: Host to listen on for downstream clients
             listen_port: Port to listen on for downstream clients
             transformer_registry: Optional transformer registry for message transformations
+            default_throttle_hz: Default throttle rate in Hz for all topics (None disables throttling)
+            topic_throttle_overrides: Optional per-topic throttle overrides in Hz
         """
         self.upstream_url = upstream_url
         self.listen_host = listen_host
         self.listen_port = listen_port
         self.transformer_registry = transformer_registry or TransformerRegistry()
+        self.default_throttle_hz = default_throttle_hz
+        self.topic_throttle_overrides = dict(topic_throttle_overrides or {})
 
         # Upstream connection
         self.upstream_ws: websockets.ClientConnection | None = None
@@ -69,6 +76,10 @@ class ProxyBridge:
         # Maps transformed channel ID -> upstream channel ID
         self.transformed_to_upstream: dict[int, int] = {}
         self.next_channel_id = 10000  # Start transformed channels at high ID to avoid conflicts
+
+        # Topic throttling (per upstream channel)
+        self.channel_throttle_hz: dict[int, float | None] = {}
+        self.channel_last_sent_time: dict[int, float] = {}
 
         # Downstream client tracking
         self.downstream_clients: set[ServerConnection] = set()
@@ -185,12 +196,42 @@ class ProxyBridge:
                 await self._handle_advertise_upstream(msg)
 
             elif op == JsonOpCodes.UNADVERTISE.value:
-                # Remove unadvertised channels and forward
-                for channel_id in msg.get("channelIds", []):
-                    channel = self.advertised_channels.pop(channel_id, None)
-                    if channel:
-                        logger.info(f"Channel unadvertised: {channel['topic']} (id={channel_id})")
-                await self._broadcast_to_clients(message)
+                downstream_ids: list[int] = []
+
+                for upstream_channel_id in msg.get("channelIds", []):
+                    transformed_id = self.transformed_channels.pop(upstream_channel_id, None)
+
+                    if transformed_id is not None:
+                        channel = self.advertised_channels.pop(transformed_id, None)
+                        self.transformed_to_upstream.pop(transformed_id, None)
+                        if channel:
+                            downstream_ids.append(transformed_id)
+                            logger.info(
+                                "Transformed channel unadvertised: %s (upstream_id=%s, downstream_id=%s)",
+                                channel.get("topic", "?"),
+                                upstream_channel_id,
+                                transformed_id,
+                            )
+                    else:
+                        channel = self.advertised_channels.pop(upstream_channel_id, None)
+                        if channel:
+                            downstream_ids.append(upstream_channel_id)
+                            logger.info(
+                                "Channel unadvertised: %s (id=%s)",
+                                channel.get("topic", "?"),
+                                upstream_channel_id,
+                            )
+
+                    self.upstream_channels.pop(upstream_channel_id, None)
+                    self.channel_throttle_hz.pop(upstream_channel_id, None)
+                    self.channel_last_sent_time.pop(upstream_channel_id, None)
+
+                if downstream_ids:
+                    unadvertise_msg: UnadvertiseMessage = {
+                        "op": JsonOpCodes.UNADVERTISE.value,
+                        "channelIds": downstream_ids,
+                    }
+                    await self._broadcast_to_clients(json.dumps(unadvertise_msg))
 
             elif op in (
                 JsonOpCodes.STATUS.value,
@@ -245,6 +286,23 @@ class ProxyBridge:
 
         # Determine which downstream channel ID to use
         downstream_channel_id = transformed_channel_id if transformed_channel_id else channel_id
+
+        # Apply throttling before performing any transformations or forwarding
+        throttle_hz = self.channel_throttle_hz.get(channel_id, self.default_throttle_hz)
+        if throttle_hz is not None and throttle_hz > 0:
+            now = asyncio.get_running_loop().time()
+            min_interval = 1.0 / throttle_hz if throttle_hz > 0 else 0.0
+            last_sent = self.channel_last_sent_time.get(channel_id)
+
+            if last_sent is not None and (now - last_sent) < min_interval:
+                logger.debug(
+                    "Dropping message due to throttle: channel_id=%s, interval=%.3fs",
+                    channel_id,
+                    min_interval,
+                )
+                return
+
+            self.channel_last_sent_time[channel_id] = now
 
         # Forward to all clients subscribed to the downstream channel
         for client, subs in self.client_subscriptions.items():
@@ -519,6 +577,13 @@ class ProxyBridge:
                 f"Upstream channel advertised: {channel['topic']} (id={channel_id}, schema={schema_name})"
             )
 
+            # Initialize throttling for this channel
+            throttle_hz = self.topic_throttle_overrides.get(
+                channel["topic"], self.default_throttle_hz
+            )
+            self.channel_throttle_hz[channel_id] = throttle_hz
+            self.channel_last_sent_time.pop(channel_id, None)
+
             # Check if we have a transformer for this schema
             transformer = self.transformer_registry.get_transformer(schema_name)
             logger.debug(f"Transformer lookup for schema {schema_name}: {transformer}")
@@ -601,7 +666,7 @@ class ProxyBridge:
             payload = data[13:]
 
             # Decode the input message
-            input_msg = self._decode_message(schema_name, payload)
+            input_msg = self._decode_message(channel, payload)
 
             # Transform the message
             output_msg = transformer.transform(input_msg)
@@ -621,11 +686,11 @@ class ProxyBridge:
 
             return bytes(result)
 
-        except Exception as e:
-            logger.warning(f"Message transformation failed: {e}")
+        except Exception:
+            logger.exception("Message transformation failed")
             return None
 
-    def _decode_message(self, channel: ChannelInfo, payload: bytes) -> dict[str, Any]:
+    def _decode_message(self, channel: ChannelInfo, payload: bytes) -> Any:
         """Decode a CDR-encoded message.
 
         Args:
@@ -635,9 +700,10 @@ class ProxyBridge:
         Returns:
             Decoded message as a dictionary
         """
+        schema_name = channel["schemaName"]
+
         # Get or create decoder for this schema
-        if channel["schemaName"] not in self.message_decoders:
-            schema_name = channel["schemaName"]
+        if schema_name not in self.message_decoders:
             schema_def = channel["schema"]
             # Generate decoder functions for this schema
             decoders = generate_dynamic(schema_name, schema_def)
@@ -649,10 +715,7 @@ class ProxyBridge:
         decoder = self.message_decoders[schema_name]
 
         # Decode the message
-        decoded = decoder(payload)
-
-        # Convert to dictionary
-        return self._msg_to_dict(decoded)
+        return decoder(payload)
 
     def _encode_message(self, schema_name: str, message: dict[str, Any]) -> bytes:
         """Encode a message to CDR format.
@@ -678,27 +741,3 @@ class ProxyBridge:
 
         # Encode the message
         return encoder(message)
-
-    def _msg_to_dict(self, obj: Any) -> dict[str, Any] | list | Any:
-        """Convert a message object to a dictionary recursively.
-
-        Args:
-            obj: The message object (SimpleNamespace, list, or primitive)
-
-        Returns:
-            Dictionary representation of the message
-        """
-        if hasattr(obj, "__dict__"):
-            # Object with attributes - convert to dict
-            result = {}
-            for key, value in obj.__dict__.items():
-                result[key] = self._msg_to_dict(value)
-            return result
-        if isinstance(obj, list):
-            # List - convert each element
-            return [self._msg_to_dict(item) for item in obj]
-        if isinstance(obj, bytes):
-            # Bytes - convert to list of integers
-            return list(obj)
-        # Primitive value
-        return obj
