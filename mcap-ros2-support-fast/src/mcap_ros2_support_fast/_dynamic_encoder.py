@@ -85,7 +85,7 @@ class EncoderGeneratorFactory:
             self.code.append(f"_pad = ((_offset + {mask}) & ~{mask}) - _offset")
             self.code.append("if _pad:")
             with self.code.indent(None):
-                self.code.append(f"_buffer.extend(b'\\x00' * _pad)")
+                self.code.append("_buffer.extend(b'\\x00' * _pad)")
                 self.code.append("_offset += _pad")
 
     def reset_alignment(self, initial: int = 0) -> None:
