@@ -7,6 +7,7 @@ from rich.console import Console
 
 from pymcap_cli.mcap_data import (
     Attachment,
+    AttachmentIndex,
     Channel,
     Chunk,
     ChunkIndex,
@@ -14,6 +15,8 @@ from pymcap_cli.mcap_data import (
     Header,
     Message,
     MessageIndex,
+    Metadata,
+    MetadataIndex,
     Schema,
     Statistics,
     Summary,
@@ -182,8 +185,16 @@ def rebuild_info(f: BinaryIO, file_size: int, *, exact_sizes: bool = False) -> I
 
             elif isinstance(record, Statistics):
                 pass  # We calculate statistics ourselves
-            elif isinstance(record, (DataEnd, Attachment)):
+            elif isinstance(record, DataEnd):
                 break
+            elif isinstance(record, Attachment):
+                statistics.attachment_count += 1
+            elif isinstance(record, AttachmentIndex):
+                summary.attachment_indexes.append(record)
+            elif isinstance(record, Metadata):
+                statistics.metadata_count += 1
+            elif isinstance(record, MetadataIndex):
+                summary.metadata_indexes.append(record)
             else:
                 raise McapError(f"Unexpected record type: {type(record)}")
 

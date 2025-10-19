@@ -1,3 +1,4 @@
+import io
 import struct
 import zlib
 from abc import ABC, abstractmethod
@@ -55,7 +56,14 @@ def _write_string(value: str) -> bytes:
 
 def _write_map(value: dict[str, str]) -> bytes:
     """Write a length-prefixed map to bytes."""
-    entries = b"".join(_write_string(k) + _write_string(v) for k, v in value.items())
+    if not value:
+        return struct.pack("<I", 0)
+
+    parts: list[bytes] = []
+    for k, v in value.items():
+        parts.append(_write_string(k))
+        parts.append(_write_string(v))
+    entries = b"".join(parts)
     return struct.pack("<I", len(entries)) + entries
 
 
@@ -82,7 +90,7 @@ class McapRecord(ABC):
         ...
 
     @classmethod
-    def read_record(cls: type[T], data: IO[bytes]) -> T:  # noqa: PYI019
+    def read_record(cls: type[T], data: IO[bytes] | io.BufferedIOBase) -> T:  # noqa: PYI019
         """Read a complete record with opcode and length prefix."""
         header = data.read(9)
         if len(header) < 9:
@@ -353,7 +361,8 @@ class Message(McapRecord):
 
     @classmethod
     def read(cls, data: bytes) -> "Message":
-        return cls(*struct.unpack("<HIQQ", data[:22]), data[22:])
+        channel_id, sequence, log_time, publish_time = struct.unpack_from("<HIQQ", data, 0)
+        return cls(channel_id, sequence, log_time, publish_time, data[22:])
 
 
 @dataclass(slots=True)
@@ -364,12 +373,18 @@ class MessageIndex(McapRecord):
     records: list[tuple[int, int]]
 
     def write(self) -> bytes:
-        records_data = b"".join(
-            struct.pack("<QQ", timestamp, offset) for timestamp, offset in self.records
-        )
-        return (
-            struct.pack("<H", self.channel_id) + struct.pack("<I", len(records_data)) + records_data
-        )
+        # Pre-allocate buffer for better performance
+        num_records = len(self.records)
+        records_size = num_records * 16  # 2 * 8 bytes per record
+        buffer = bytearray(2 + 4 + records_size)  # channel_id + length + records
+
+        struct.pack_into("<HI", buffer, 0, self.channel_id, records_size)
+        offset = 6
+        for timestamp, msg_offset in self.records:
+            struct.pack_into("<QQ", buffer, offset, timestamp, msg_offset)
+            offset += 16
+
+        return bytes(buffer)
 
     @classmethod
     def read(cls, data: bytes) -> "MessageIndex":

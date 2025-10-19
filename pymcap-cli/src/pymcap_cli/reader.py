@@ -92,7 +92,9 @@ class LazyChunk:
     data_len: int
 
     @classmethod
-    def read_from_stream(cls, stream: IO[bytes], record_start: int) -> "LazyChunk":
+    def read_from_stream(
+        cls, stream: IO[bytes] | io.BufferedIOBase, record_start: int
+    ) -> "LazyChunk":
         """Read chunk metadata from stream without loading the compressed data."""
         data = stream.read(8 + 8 + 8 + 4)
         message_start_time, message_end_time, uncompressed_size, uncompressed_crc = (
@@ -166,26 +168,28 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
 def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> list[McapRecord]:
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
     records: list[McapRecord] = []
-    stream = io.BytesIO(data)
-    while stream.tell() < len(data):
-        opcode, length = struct.unpack("<BQ", stream.read(_RECORD_HEADER_SIZE))
-        record_data = stream.read(length)
+    pos = 0
+
+    while pos < len(data):
+        opcode, length = struct.unpack_from("<BQ", data, pos)
+        pos += _RECORD_HEADER_SIZE
+        record_data_end = pos + length
+
         if opcode == Opcode.CHANNEL:
-            channel = Channel.read(record_data)
-            records.append(channel)
+            records.append(Channel.read(data[pos:record_data_end]))
         elif opcode == Opcode.MESSAGE:
-            message = Message.read(record_data)
-            records.append(message)
+            records.append(Message.read(data[pos:record_data_end]))
         elif opcode == Opcode.SCHEMA:
-            schema = Schema.read(record_data)
-            records.append(schema)
+            records.append(Schema.read(data[pos:record_data_end]))
+
+        pos = record_data_end
 
     return records
 
 
 @overload
 def stream_reader(
-    stream: IO[bytes],
+    stream: IO[bytes] | io.BufferedIOBase,
     *,
     skip_magic: bool = False,
     emit_chunks: bool = False,
@@ -196,7 +200,7 @@ def stream_reader(
 
 @overload
 def stream_reader(
-    stream: IO[bytes],
+    stream: IO[bytes] | io.BufferedIOBase,
     *,
     skip_magic: bool = False,
     emit_chunks: bool = False,
@@ -206,7 +210,7 @@ def stream_reader(
 
 
 def stream_reader(
-    stream: IO[bytes],
+    stream: IO[bytes] | io.BufferedIOBase,
     *,
     skip_magic: bool = False,
     emit_chunks: bool = False,
@@ -312,7 +316,7 @@ def _read_summary_from_iterator(stream_reader: Iterator[McapRecord]) -> Summary 
     return summary
 
 
-def get_summary(stream: IO[bytes]) -> Summary | None:
+def get_summary(stream: IO[bytes] | io.BufferedIOBase) -> Summary | None:
     """Get the start and end indexes of each chunk in the stream."""
     if not stream.seekable():
         return None
@@ -408,7 +412,7 @@ def _read_inner(
 
 
 def _read_message_seeking(
-    stream: IO[bytes],
+    stream: IO[bytes] | io.BufferedIOBase,
     should_include: Callable[[Channel, Schema | None], bool] | None,
     start_time: float | None,
     end_time: float | None,
@@ -437,7 +441,7 @@ def _read_message_seeking(
 
 
 def _read_message_non_seeking(
-    stream: IO[bytes],
+    stream: IO[bytes] | io.BufferedIOBase,
     should_include: Callable[[Channel, Schema | None], bool] | None,
     start_time: float | None,
     end_time: float | None,
@@ -549,12 +553,22 @@ def read_message(
 
     # if not buffer io bufferedreader
     if not isinstance(stream, io.BufferedIOBase):
-        stream = io.BufferedReader(stream)  # pyright: ignore[reportArgumentType]
+        stream = io.BufferedReader(stream)  # type: ignore[arg-type]
 
     if stream.seekable():
         return _read_message_seeking(
-            stream, should_include, start_time, end_time, emit_chunks, validate_crc
+            stream,
+            should_include,
+            start_time,
+            end_time,
+            emit_chunks,
+            validate_crc,
         )
     return _read_message_non_seeking(
-        stream, should_include, start_time, end_time, emit_chunks, validate_crc
+        stream,
+        should_include,
+        start_time,
+        end_time,
+        emit_chunks,
+        validate_crc,
     )

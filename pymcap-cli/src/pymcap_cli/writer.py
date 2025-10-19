@@ -99,11 +99,14 @@ class _ChunkBuilder:
         self.compression = compression
         self.enable_crcs = enable_crcs
         self.chunk_size = chunk_size
+        # Pre-allocate buffer to avoid reallocations
+        self.buffer_data = bytearray(2 * chunk_size)
+        self.buffer_pos = 0
         self.reset()
 
     def reset(self) -> None:
         """Reset builder state for a new chunk."""
-        self.buffer = io.BytesIO()
+        self.buffer_pos = 0
         self.message_start_time = 0
         self.message_end_time = 0
         self.message_indices: dict[int, MessageIndex] = {}
@@ -117,7 +120,7 @@ class _ChunkBuilder:
         Returns (chunk, message_indices) if chunk is full and ready to write, None otherwise.
         """
         # Check if we need to finalize current chunk before adding this record
-        if self.buffer.tell() >= self.chunk_size and self.num_messages > 0:
+        if self.buffer_pos >= self.chunk_size and self.num_messages > 0:
             result = self.finalize()
             self.reset()
             # After reset, fall through to add the record to the new chunk
@@ -125,8 +128,16 @@ class _ChunkBuilder:
             result = None
 
         # Add record to current chunk
+        record_data = record.write_record()
+        record_len = len(record_data)
+
+        # Ensure buffer has space (grow if needed)
+        if self.buffer_pos + record_len > len(self.buffer_data):
+            self.buffer_data.extend(bytearray(max(record_len, self.chunk_size)))
+
         if isinstance(record, (Schema, Channel)):
-            self.buffer.write(record.write_record())
+            self.buffer_data[self.buffer_pos : self.buffer_pos + record_len] = record_data
+            self.buffer_pos += record_len
         elif isinstance(record, Message):
             if self.num_messages == 0:
                 self.message_start_time = record.log_time
@@ -139,11 +150,12 @@ class _ChunkBuilder:
                     channel_id=record.channel_id, records=[]
                 )
             self.message_indices[record.channel_id].records.append(
-                (record.log_time, self.buffer.tell())
+                (record.log_time, self.buffer_pos)
             )
 
             self.num_messages += 1
-            self.buffer.write(record.write_record())
+            self.buffer_data[self.buffer_pos : self.buffer_pos + record_len] = record_data
+            self.buffer_pos += record_len
 
         return result
 
@@ -152,7 +164,7 @@ class _ChunkBuilder:
         if self.num_messages == 0:
             return None
 
-        chunk_data = self.buffer.getvalue()
+        chunk_data = bytes(self.buffer_data[: self.buffer_pos])
 
         if self.compression == CompressionType.ZSTD:
             cctx = zstandard.ZstdCompressor()

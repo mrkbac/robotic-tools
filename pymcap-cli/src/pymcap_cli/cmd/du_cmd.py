@@ -40,37 +40,39 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
 def run_du(file_path: Path, *, exact_sizes: bool) -> None:
     """Run disk usage analysis on MCAP file."""
 
-    info = rebuild_info(file_path, exact_sizes=exact_sizes)
-    assert info.channel_sizes
-    assert info.summary.statistics
-    total_message_size = sum(info.channel_sizes.values())
-    start_time = info.summary.statistics.message_start_time
-    end_time = info.summary.statistics.message_end_time
-    topic_message_size = info.channel_sizes
+    file_size = file_path.stat().st_size
+    with file_path.open("rb") as f:
+        info = rebuild_info(f, file_size, exact_sizes=exact_sizes)
+        assert info.channel_sizes
+        assert info.summary.statistics
+        total_message_size = sum(info.channel_sizes.values())
+        start_time = info.summary.statistics.message_start_time
+        end_time = info.summary.statistics.message_end_time
+        topic_message_size = info.channel_sizes
 
-    """Display the usage analysis results."""
-    # Message size stats table
-    message_table = Table()
-    message_table.add_column("Topic", style="bold white")
-    message_table.add_column("Size", justify="right", style="green")
-    message_table.add_column("Total %", justify="right", style="yellow")
-    message_table.add_column("per sec", justify="right", style="cyan")
+        """Display the usage analysis results."""
+        # Message size stats table
+        message_table = Table()
+        message_table.add_column("Topic", style="bold white")
+        message_table.add_column("Size", justify="right", style="green")
+        message_table.add_column("Total %", justify="right", style="yellow")
+        message_table.add_column("per sec", justify="right", style="cyan")
 
-    # Sort topics by size (largest first)
-    sorted_topics = sorted(topic_message_size.items(), key=lambda x: x[1], reverse=True)
+        # Sort topics by size (largest first)
+        sorted_topics = sorted(topic_message_size.items(), key=lambda x: x[1], reverse=True)
 
-    duration_ns = end_time - start_time
+        duration_ns = end_time - start_time
 
-    for channel_id, size in sorted_topics:
-        percentage = (size / total_message_size * 100) if total_message_size > 0 else 0
-        per_seconds_bytes = int(size / duration_ns * 1_000_000_000)
-        topic = info.summary.channels.get(channel_id)
-        name = topic.topic if topic else f"Unknown Topic ({channel_id})"
-        message_table.add_row(
-            name, bytes_to_human(size), f"{percentage:.2f}%", bytes_to_human(per_seconds_bytes)
-        )
+        for channel_id, size in sorted_topics:
+            percentage = (size / total_message_size * 100) if total_message_size > 0 else 0
+            per_seconds_bytes = int(size / duration_ns * 1_000_000_000)
+            topic = info.summary.channels.get(channel_id)
+            name = topic.topic if topic else f"Unknown Topic ({channel_id})"
+            message_table.add_row(
+                name, bytes_to_human(size), f"{percentage:.2f}%", bytes_to_human(per_seconds_bytes)
+            )
 
-    console.print(message_table)
+        console.print(message_table)
 
 
 def handle_command(args: argparse.Namespace) -> None:
