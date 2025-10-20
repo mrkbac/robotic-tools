@@ -69,9 +69,6 @@ class ImageToVideoTransformer(Transformer):
             if self._test_encoder("h264_videotoolbox"):
                 return "h264_videotoolbox"
         elif system == "Linux":
-            # Linux - try V4L2 M2M for Jetson devices (must be first, as Jetson may also have NVENC)
-            if self._test_encoder("h264_v4l2m2m"):
-                return "h264_v4l2m2m"
             # Try NVENC for NVIDIA GPUs
             if self._test_encoder("h264_nvenc"):
                 return "h264_nvenc"
