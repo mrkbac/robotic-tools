@@ -125,9 +125,17 @@ class ImageToVideoTransformer(Transformer):
             Tuple of (target_width, target_height). Returns original dimensions
             if no downscaling is needed.
         """
-        # If both dimensions are within max_dimension, no scaling needed
+
+        def ensure_even(value: int) -> int:
+            if value % 2 == 0:
+                return value
+            # Prefer shrinking by one pixel; if that would hit zero, bump to 2 instead
+            adjusted = value - 1
+            return adjusted if adjusted >= 2 else 2
+
+        # If both dimensions are within max_dimension, no scaling needed besides ensuring even size
         if width <= self.max_dimension and height <= self.max_dimension:
-            return width, height
+            return ensure_even(width), ensure_even(height)
 
         # Calculate aspect ratio
         aspect_ratio = width / height
@@ -143,8 +151,8 @@ class ImageToVideoTransformer(Transformer):
             new_width = int(new_height * aspect_ratio)
 
         # Ensure dimensions are even (required for most video codecs)
-        new_width = new_width - (new_width % 2)
-        new_height = new_height - (new_height % 2)
+        new_width = ensure_even(new_width)
+        new_height = ensure_even(new_height)
 
         return new_width, new_height
 
@@ -161,11 +169,6 @@ class ImageToVideoTransformer(Transformer):
             TransformError: If transformation fails
         """
         try:
-            # Extract fields from input message
-            # header = message.get("header", {})
-            # jpeg_data = bytes(message.get("data", []))
-            # input_format = message.get("format", "")
-
             if not message.data:
                 raise TransformError(f"Empty image data, {message}")
 
@@ -235,8 +238,9 @@ class ImageToVideoTransformer(Transformer):
         # Build ffmpeg command
         # Input: JPEG from stdin
         # Output: H.264 Annex B format to stdout
+        ffmpeg_path, _ = get_ffmpeg()
         cmd = [
-            "static_ffmpeg",
+            ffmpeg_path,
             "-hide_banner",
             "-loglevel",
             "error",
@@ -346,7 +350,10 @@ class ImageToVideoTransformer(Transformer):
                 raise TransformError("FFmpeg produced empty output")
 
             # Verify it starts with H.264 Annex B start code
-            if not (len(h264_data) >= 4 and h264_data[:3] == b"\x00\x00\x01"):
+            if not (
+                len(h264_data) >= 4
+                and (h264_data[:4] == b"\x00\x00\x00\x01" or h264_data[:3] == b"\x00\x00\x01")
+            ):
                 logger.warning("H.264 data may not be in Annex B format")
 
             return h264_data
