@@ -53,6 +53,50 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Topic throttle rate in Hz (default: 1.0; set to 0 to disable)",
     )
+
+    parser.add_argument(
+        "--image-codec",
+        default="h264",
+        help="Video codec to use for image compression (default: h264)",
+    )
+    parser.add_argument(
+        "--image-quality",
+        type=int,
+        default=23,
+        help="CRF/quality value for image compression (lower is higher quality, default: 23)",
+    )
+    parser.add_argument(
+        "--image-preset",
+        default="fast",
+        help="Encoder preset for image compression (default: fast)",
+    )
+    parser.add_argument(
+        "--image-max-dimension",
+        type=int,
+        default=480,
+        help="Maximum width/height used when downscaling images before encoding (default: 480)",
+    )
+    parser.add_argument(
+        "--image-disable-hw",
+        dest="image_use_hardware",
+        action="store_false",
+        help="Disable hardware acceleration for image compression",
+    )
+
+    parser.add_argument(
+        "--pointcloud-voxel-size",
+        type=float,
+        default=0.1,
+        help="Voxel size (in meters) for point cloud downsampling (default: 0.1)",
+    )
+    parser.add_argument(
+        "--pointcloud-keep-nans",
+        dest="pointcloud_skip_nans",
+        action="store_false",
+        help="Keep NaN points when voxelizing point clouds (default: drop NaNs)",
+    )
+
+    parser.set_defaults(image_use_hardware=True, pointcloud_skip_nans=True)
     return parser.parse_args()
 
 
@@ -67,13 +111,18 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # Register image to video transformer
     image_transformer = ImageToVideoTransformer(
-        codec="h264",
-        quality=23,  # Good quality for H.264
-        use_hardware=True,
+        codec=args.image_codec,
+        quality=args.image_quality,
+        preset=args.image_preset,
+        use_hardware=args.image_use_hardware,
+        max_dimension=args.image_max_dimension,
     )
     registry.register(image_transformer)
 
-    pointcloud_transformer = PointCloudVoxelTransformer(voxel_size=0.1)
+    pointcloud_transformer = PointCloudVoxelTransformer(
+        voxel_size=args.pointcloud_voxel_size,
+        skip_nans=args.pointcloud_skip_nans,
+    )
     registry.register(pointcloud_transformer)
 
     logger.info("Registered transformers:")
