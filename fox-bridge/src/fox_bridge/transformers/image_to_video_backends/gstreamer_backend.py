@@ -1,4 +1,4 @@
-"""GStreamer CLI backend that avoids PyGObject dependencies."""
+"""Minimal GStreamer backend executed via gst-launch-1.0."""
 
 from __future__ import annotations
 
@@ -11,55 +11,38 @@ from .base import EncodingConfig, ImageToVideoBackend, ImageToVideoBackendError
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_FRAMERATE: Final[str] = "30/1"
+
 
 def is_gstreamer_available() -> bool:
-    """Detect whether gst-launch-1.0 is present on PATH."""
+    """Return True if gst-launch-1.0 is on PATH."""
     return shutil.which("gst-launch-1.0") is not None
 
 
 class GStreamerBackend(ImageToVideoBackend):
-    """Encode frames by invoking gst-launch-1.0 pipelines."""
-
-    _DEFAULT_FRAMERATE: Final[str] = "30/1"
+    """Very small wrapper that pipes JPEG into gst-launch-1.0 + x264enc."""
 
     def __init__(self, config: EncodingConfig) -> None:
         if config.codec != "h264":
             raise ImageToVideoBackendError(
-                "GStreamer backend currently supports only H.264 encoding"
+                "Minimal GStreamer backend only supports H.264 output"
             )
         super().__init__(config)
 
         self._gst_launch = shutil.which("gst-launch-1.0")
         if not self._gst_launch:
-            raise ImageToVideoBackendError("gst-launch-1.0 executable not found in PATH")
+            raise ImageToVideoBackendError("gst-launch-1.0 executable not found on PATH")
 
         self._gst_inspect = shutil.which("gst-inspect-1.0")
-        if not self._gst_inspect:
-            raise ImageToVideoBackendError("gst-inspect-1.0 executable not found in PATH")
-
-        self._supports_nvjpeg = self._element_exists("nvjpegdec")
-        self._supports_nvconv = self._element_exists("nvvidconv")
-        self._supports_nvh264 = self._element_exists("nvv4l2h264enc")
-        self._supports_x264 = self._element_exists("x264enc")
-        self._supports_jpegdec = self._element_exists("jpegdec")
-        self._supports_videoscale = self._element_exists("videoscale")
-        self._nvv4l2h264enc_has_qp = self._element_has_property("nvv4l2h264enc", "qp")
-
-        self._use_nvidia = (
-            self.config.use_hardware
-            and self._supports_nvjpeg
-            and self._supports_nvconv
-            and self._supports_nvh264
-        )
-
-        if self._use_nvidia:
-            logger.info("Using NVIDIA accelerated GStreamer pipeline")
-        elif not (self._supports_x264 and self._supports_jpegdec and self._supports_videoscale):
-            raise ImageToVideoBackendError(
-                "Required software GStreamer plugins (x264enc/jpegdec/videoscale) are unavailable"
-            )
+        if self._gst_inspect:
+            if not self._element_exists("x264enc"):
+                raise ImageToVideoBackendError(
+                    "GStreamer x264enc plugin is not available (gst-inspect-x264enc failed)"
+                )
         else:
-            logger.info("Using software GStreamer pipeline with x264enc")
+            logger.debug(
+                "gst-inspect-1.0 not found; skipping plugin preflight. Pipeline may fail at runtime."
+            )
 
     def encode(
         self,
@@ -69,13 +52,13 @@ class GStreamerBackend(ImageToVideoBackend):
         target_width: int,
         target_height: int,
     ) -> bytes:
-        pipeline_args = self._build_pipeline(
+        pipeline = self._build_pipeline(
             len(jpeg_data), input_width, input_height, target_width, target_height
         )
 
         try:
             result = subprocess.run(
-                pipeline_args,
+                pipeline,
                 input=jpeg_data,
                 capture_output=True,
                 timeout=self.config.timeout_s,
@@ -110,85 +93,31 @@ class GStreamerBackend(ImageToVideoBackend):
         target_width: int,
         target_height: int,
     ) -> list[str]:
-        base = [
+        # Keep the pipeline intentionally minimal: jpegdec -> videoconvert -> videoscale -> x264enc.
+        return [
             self._gst_launch or "gst-launch-1.0",
             "-q",
             "-e",
             "fdsrc",
-            f"fd=0",
+            "fd=0",
             f"blocksize={buffer_size}",
             "!",
-            f"image/jpeg,width={input_width},height={input_height},framerate={self._DEFAULT_FRAMERATE}",
+            f"image/jpeg,width={input_width},height={input_height},framerate={_DEFAULT_FRAMERATE}",
             "!",
-            "jpegparse",
-            "!",
-        ]
-
-        if self._use_nvidia:
-            pipeline_tail = self._build_nvidia_pipeline(target_width, target_height)
-        else:
-            pipeline_tail = self._build_software_pipeline(target_width, target_height)
-
-        return base + pipeline_tail
-
-    def _build_nvidia_pipeline(self, width: int, height: int) -> list[str]:
-        preset_level = self._map_nvidia_preset(self.config.preset)
-        qp = max(0, min(self.config.quality, 51))
-        bitrate = self._quality_to_bitrate(self.config.quality)
-
-        pipeline: list[str] = [
-            "nvjpegdec",
-            "!",
-            "nvvidconv",
-            "!",
-            f"video/x-raw(memory:NVMM),format=NV12,width={width},height={height},framerate={self._DEFAULT_FRAMERATE}",
-            "!",
-            "nvv4l2h264enc",
-            "iframeinterval=1",
-            "idrinterval=1",
-            "insert-sps-pps=1",
-            f"preset-level={preset_level}",
-        ]
-        if self._nvv4l2h264enc_has_qp:
-            pipeline.extend(["control-rate=0", f"qp={qp}"])
-        else:
-            logger.info(
-                "nvv4l2h264enc missing 'qp' property; falling back to bitrate control"
-            )
-            pipeline.extend(["control-rate=1", f"bitrate={bitrate}"])
-        pipeline.extend(
-            [
-                "!",
-                "h264parse",
-                "config-interval=-1",
-                "!",
-                "video/x-h264,stream-format=byte-stream,alignment=au",
-                "!",
-                "filesink",
-                "location=/dev/stdout",
-            ]
-        )
-        return pipeline
-
-    def _build_software_pipeline(self, width: int, height: int) -> list[str]:
-        quantizer = max(0, min(self.config.quality, 51))
-        speed_preset = self._validate_x264_preset(self.config.preset)
-        return [
             "jpegdec",
             "!",
             "videoconvert",
             "!",
             "videoscale",
             "!",
-            f"video/x-raw,format=I420,width={width},height={height},framerate={self._DEFAULT_FRAMERATE}",
+            f"video/x-raw,format=I420,width={target_width},height={target_height},framerate={_DEFAULT_FRAMERATE}",
             "!",
             "x264enc",
             "tune=zerolatency",
             "byte-stream=true",
             "key-int-max=1",
             "bframes=0",
-            f"speed-preset={speed_preset}",
-            f"quantizer={quantizer}",
+            "speed-preset=fast",
             "rc-lookahead=0",
             "!",
             "h264parse",
@@ -209,68 +138,8 @@ class GStreamerBackend(ImageToVideoBackend):
                 check=False,
                 capture_output=True,
                 timeout=5,
-                text=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         return result.returncode == 0
 
-    def _element_has_property(self, element: str, prop: str) -> bool:
-        if not self._gst_inspect:
-            return False
-        try:
-            result = subprocess.run(
-                [self._gst_inspect, element],
-                check=False,
-                capture_output=True,
-                timeout=5,
-                text=True,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-        if result.returncode != 0:
-            return False
-        lower_output = result.stdout.lower()
-        needle = prop.lower()
-        return f" {needle} " in lower_output or f"{needle}:" in lower_output
-
-    def _map_nvidia_preset(self, preset: str) -> int:
-        mapping = {
-            "ultrafast": 0,
-            "superfast": 1,
-            "veryfast": 2,
-            "faster": 3,
-            "fast": 4,
-            "medium": 5,
-            "slow": 6,
-            "slower": 7,
-            "veryslow": 7,
-        }
-        return mapping.get(preset.lower(), 4)
-
-    def _validate_x264_preset(self, preset: str) -> str:
-        valid = {
-            "ultrafast",
-            "superfast",
-            "veryfast",
-            "faster",
-            "fast",
-            "medium",
-            "slow",
-            "slower",
-            "veryslow",
-            "placebo",
-        }
-        lower = preset.lower()
-        if lower in valid:
-            return lower
-        logger.warning("Unsupported x264 preset '%s', defaulting to 'fast'", preset)
-        return "fast"
-
-    def _quality_to_bitrate(self, quality: int) -> int:
-        """Convert CRF-like quality (0 best - 51 worst) to an approximate bitrate in bps."""
-        clamped = max(0, min(51, quality))
-        max_bitrate = 20_000_000
-        min_bitrate = 1_000_000
-        scale = (51 - clamped) / 51
-        return int(min_bitrate + (max_bitrate - min_bitrate) * scale)
