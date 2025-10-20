@@ -112,7 +112,9 @@ class GStreamerBackend(ImageToVideoBackend):
             "fd=0",
             f"blocksize={buffer_size}",
             "!",
-            f"image/jpeg,width={input_width},height={input_height},framerate={_DEFAULT_FRAMERATE}",
+            "capsfilter",
+            f"caps=image/jpeg,width={input_width},height={input_height},framerate={_DEFAULT_FRAMERATE}",
+            "!",
         ]
         if self._use_nvidia:
             return base + self._nvidia_pipeline_tail(target_width, target_height)
