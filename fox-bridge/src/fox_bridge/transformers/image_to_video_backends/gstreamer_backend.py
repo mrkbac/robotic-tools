@@ -43,6 +43,7 @@ class GStreamerBackend(ImageToVideoBackend):
         self._supports_x264 = self._element_exists("x264enc")
         self._supports_jpegdec = self._element_exists("jpegdec")
         self._supports_videoscale = self._element_exists("videoscale")
+        self._nvv4l2h264enc_has_qp = self._element_has_property("nvv4l2h264enc", "qp")
 
         self._use_nvidia = (
             self.config.use_hardware
@@ -133,7 +134,9 @@ class GStreamerBackend(ImageToVideoBackend):
     def _build_nvidia_pipeline(self, width: int, height: int) -> list[str]:
         preset_level = self._map_nvidia_preset(self.config.preset)
         qp = max(0, min(self.config.quality, 51))
-        return [
+        bitrate = self._quality_to_bitrate(self.config.quality)
+
+        pipeline: list[str] = [
             "nvjpegdec",
             "!",
             "nvvidconv",
@@ -144,18 +147,28 @@ class GStreamerBackend(ImageToVideoBackend):
             "iframeinterval=1",
             "idrinterval=1",
             "insert-sps-pps=1",
-            "control-rate=0",
             f"preset-level={preset_level}",
-            f"qp={qp}",
-            "!",
-            "h264parse",
-            "config-interval=-1",
-            "!",
-            "video/x-h264,stream-format=byte-stream,alignment=au",
-            "!",
-            "filesink",
-            "location=/dev/stdout",
         ]
+        if self._nvv4l2h264enc_has_qp:
+            pipeline.extend(["control-rate=0", f"qp={qp}"])
+        else:
+            logger.info(
+                "nvv4l2h264enc missing 'qp' property; falling back to bitrate control"
+            )
+            pipeline.extend(["control-rate=1", f"bitrate={bitrate}"])
+        pipeline.extend(
+            [
+                "!",
+                "h264parse",
+                "config-interval=-1",
+                "!",
+                "video/x-h264,stream-format=byte-stream,alignment=au",
+                "!",
+                "filesink",
+                "location=/dev/stdout",
+            ]
+        )
+        return pipeline
 
     def _build_software_pipeline(self, width: int, height: int) -> list[str]:
         quantizer = max(0, min(self.config.quality, 51))
@@ -196,10 +209,30 @@ class GStreamerBackend(ImageToVideoBackend):
                 check=False,
                 capture_output=True,
                 timeout=5,
+                text=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         return result.returncode == 0
+
+    def _element_has_property(self, element: str, prop: str) -> bool:
+        if not self._gst_inspect:
+            return False
+        try:
+            result = subprocess.run(
+                [self._gst_inspect, element],
+                check=False,
+                capture_output=True,
+                timeout=5,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode != 0:
+            return False
+        lower_output = result.stdout.lower()
+        needle = prop.lower()
+        return f" {needle} " in lower_output or f"{needle}:" in lower_output
 
     def _map_nvidia_preset(self, preset: str) -> int:
         mapping = {
@@ -234,3 +267,10 @@ class GStreamerBackend(ImageToVideoBackend):
         logger.warning("Unsupported x264 preset '%s', defaulting to 'fast'", preset)
         return "fast"
 
+    def _quality_to_bitrate(self, quality: int) -> int:
+        """Convert CRF-like quality (0 best - 51 worst) to an approximate bitrate in bps."""
+        clamped = max(0, min(51, quality))
+        max_bitrate = 20_000_000
+        min_bitrate = 1_000_000
+        scale = (51 - clamped) / 51
+        return int(min_bitrate + (max_bitrate - min_bitrate) * scale)
