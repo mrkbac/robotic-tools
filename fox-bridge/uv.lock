@@ -12,6 +12,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pointcloud2" },
     { name = "portable-ffmpeg" },
+    { name = "pygobject", marker = "sys_platform == 'linux'" },
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
@@ -23,6 +24,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.0.0" },
     { name = "pointcloud2", specifier = ">=0.2.3" },
     { name = "portable-ffmpeg", specifier = ">=0.1.0" },
+    { name = "pygobject", marker = "sys_platform == 'linux'", specifier = ">=3.54.5" },
     { name = "typing-extensions", specifier = ">=4.12.2" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
@@ -198,6 +200,21 @@ sdist = { url = "https://files.pythonhosted.org/packages/44/f4/21a509690b57bafc0
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b6/e7/cd530c42d8bd2c11adfd22f6a61ce74e73bde74f2ae20fd6c97b07393616/portable_ffmpeg-0.1.0-py3-none-any.whl", hash = "sha256:06aef1a28c3c0a3e737104659478005e7959013b0987eda8b9ca2b1784e2d8c6", size = 8392, upload-time = "2025-06-15T11:28:16.934Z" },
 ]
+
+[[package]]
+name = "pycairo"
+version = "1.28.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/d9/412da520de9052b7e80bfc810ec10f5cb3dbfa4aa3e23c2820dc61cdb3d0/pycairo-1.28.0.tar.gz", hash = "sha256:26ec5c6126781eb167089a123919f87baa2740da2cca9098be8b3a6b91cc5fbc", size = 662477, upload-time = "2025-04-14T20:11:08.218Z" }
+
+[[package]]
+name = "pygobject"
+version = "3.54.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pycairo" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d3/a5/68f883df1d8442e3b267cb92105a4b2f0de819bd64ac9981c2d680d3f49f/pygobject-3.54.5.tar.gz", hash = "sha256:b6656f6348f5245606cf15ea48c384c7f05156c75ead206c1b246c80a22fb585", size = 1274658, upload-time = "2025-10-18T13:45:03.121Z" }
 
 [[package]]
 name = "typing-extensions"
