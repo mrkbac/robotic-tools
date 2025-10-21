@@ -1,6 +1,6 @@
 import argparse
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.console import Console
@@ -78,11 +78,15 @@ def handle_command(args: argparse.Namespace) -> None:
 
     # Timing and messages panel
     duration_ns = statistics.message_end_time - statistics.message_start_time
+    duration_human = timedelta(milliseconds=duration_ns / 1_000_000)
     date_start = datetime.fromtimestamp(statistics.message_start_time / 1_000_000_000)
     date_end = datetime.fromtimestamp(statistics.message_end_time / 1_000_000_000)
 
     info_table.add_row("Messages:", f"[green]{statistics.message_count:,}[/green]")
-    info_table.add_row("Duration:", f"[yellow]{duration_ns / 1_000_000:.2f} ms[/yellow]")
+    info_table.add_row(
+        "Duration:",
+        f"[yellow]{duration_ns / 1_000_000:.2f} ms[/yellow] [cyan]({duration_human})[/cyan]",
+    )
     info_table.add_row("Start:", f"[cyan]{date_start}[/cyan]")
     info_table.add_row("End:", f"[cyan]{date_end}[/cyan]")
 

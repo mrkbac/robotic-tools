@@ -369,16 +369,30 @@ def _chunks_matching_topics(
     ]
 
 
+_ReaderReturnType = Iterator[tuple[Schema | None, Channel, Message]]
+
+
 def _read_inner(
     reader: Iterator[McapRecord],
     should_include: Callable[[Channel, Schema | None], bool] | None,
     start_time: float | None,
     end_time: float | None,
-) -> Iterator[tuple[Schema | None, Channel, Message]]:
-    _schemas: dict[int, Schema] = {}
-    _channels: dict[int, Channel] = {}
+    schemas: dict[int, Schema] | None = None,
+    channels: dict[int, Channel] | None = None,
+) -> _ReaderReturnType:
+    _schemas: dict[int, Schema] = schemas or {}
+    _channels: dict[int, Channel] = channels or {}
     _include: set[int] | None = None
-    if should_include is not None:
+    if should_include:
+        _include = {
+            channel.id
+            for channel in _channels.values()
+            if should_include(
+                channel,
+                _schemas.get(channel.schema_id),
+            )
+        }
+    else:
         _include = set()
 
     for record in reader:
@@ -391,23 +405,20 @@ def _read_inner(
             if (
                 _include is not None
                 and should_include
-                and should_include(
-                    _channels[record.id],
-                    None if record.schema_id == 0 else _schemas[record.schema_id],
-                )
+                and should_include(_channels[record.id], _schemas.get(record.schema_id))
             ):
                 _include.add(record.id)
         if isinstance(record, Message):
             if record.channel_id not in _channels:
                 raise McapError(f"no channel record found with id {record.channel_id}")
-            channel = _channels[record.channel_id]
             if (
-                (_include is not None and channel.id not in _include)
+                (_include is not None and record.channel_id not in _include)
                 or (start_time is not None and record.log_time < start_time)
                 or (end_time is not None and record.log_time >= end_time)
             ):
                 continue
-            schema = None if channel.schema_id == 0 else _schemas[channel.schema_id]
+            channel = _channels[record.channel_id]
+            schema = _schemas.get(channel.schema_id)
             yield (schema, channel, record)
 
 
@@ -418,7 +429,7 @@ def _read_message_seeking(
     end_time: float | None,
     emit_chunks: bool,
     validate_crc: bool,
-) -> Iterator[tuple[Schema | None, Channel, Message]]:
+) -> _ReaderReturnType:
     summary = get_summary(stream)
     # No summary or chunk indexes exists
     if summary is None or not summary.chunk_indexes:
@@ -437,7 +448,9 @@ def _read_message_seeking(
             chunk = Chunk.read_record(stream)
             yield from breakup_chunk(chunk, validate_crc)
 
-    yield from _read_inner(reader(), should_include, start_time, end_time)
+    yield from _read_inner(
+        reader(), should_include, start_time, end_time, summary.schemas, summary.channels
+    )
 
 
 def _read_message_non_seeking(
@@ -447,7 +460,7 @@ def _read_message_non_seeking(
     end_time: float | None,
     emit_chunks: bool,
     validate_crc: bool,
-) -> Iterator[tuple[Schema | None, Channel, Message]]:
+) -> _ReaderReturnType:
     yield from _read_inner(
         stream_reader(stream, emit_chunks=emit_chunks, validate_crc=validate_crc),
         should_include,
@@ -515,19 +528,19 @@ class _Remapper:
 
 
 def read_message(
-    stream: IO[bytes] | list[IO[bytes]],
+    stream: IO[bytes] | list[IO[bytes] | _ReaderReturnType],
     should_include: Callable[[Channel, Schema | None], bool] | None = None,
     start_time: float | None = None,
     end_time: float | None = None,
     emit_chunks: bool = False,
     validate_crc: bool = False,
-) -> Iterator[tuple[Schema | None, Channel, Message]]:
+) -> _ReaderReturnType:
     remapper = _Remapper()
 
     def remap_schema_channel(
-        generator: Iterator[tuple[Schema | None, Channel, Message]],
+        generator: _ReaderReturnType,
         stream_id: int,
-    ) -> Iterator[tuple[Schema | None, Channel, Message]]:
+    ) -> _ReaderReturnType:
         for schema, channel, message in generator:
             mapped_schema = remapper.remap_schema(stream_id, schema)
             mapped_channel = remapper.remap_channel(stream_id, channel)
@@ -541,9 +554,9 @@ def read_message(
         return heapq.merge(
             *[
                 remap_schema_channel(
-                    read_message(
-                        s, should_include, start_time, end_time, emit_chunks, validate_crc
-                    ),
+                    read_message(s, should_include, start_time, end_time, emit_chunks, validate_crc)
+                    if isinstance(s, IO)
+                    else s,
                     stream_id=i,
                 )
                 for i, s in enumerate(stream)
@@ -572,3 +585,35 @@ def read_message(
         emit_chunks,
         validate_crc,
     )
+
+
+# def read_message_decoded(
+#     stream: IO[bytes] | list[IO[bytes] | _ReaderReturnType],
+#     topics: Iterator[str] | None = None,
+#     start_time: float | None = None,
+#     end_time: float | None = None,
+#     decoder_factories: Iterator[DecoderFactory] = (),
+# ) -> Iterator[DecodedMessageTuple]:
+#     decoders: dict[int, Callable[[bytes], Any]] = {}
+
+#     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
+#         if schema is None:
+#             return message.data
+#         decoder = decoders.get(hash(schema.data))
+#         if decoder is not None:
+#             return decoder(message.data)
+#         for factory in decoder_factories:
+#             decoder = factory.decoder_for(channel.message_encoding, schema)
+#             if decoder is not None:
+#                 decoders[message.channel_id] = decoder
+#                 return decoder(message.data)
+
+#         raise ValueError(
+#             f"no decoder factory supplied for message encoding {channel.message_encoding}, "
+#             f"schema {schema}"
+#         )
+
+#     for schema, channel, message in read_message(stream, topics, start_time, end_time):
+#         yield DecodedMessageTuple(
+#             schema, channel, message, decoded_message(schema, channel, message)
+#         )
