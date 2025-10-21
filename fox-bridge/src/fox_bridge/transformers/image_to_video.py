@@ -128,7 +128,7 @@ class ImageToVideoTransformer(Transformer):
                 return value
             # Prefer shrinking by one pixel; if that would hit zero, bump to 2 instead
             adjusted = value - 1
-            return adjusted if adjusted >= 2 else 2
+            return max(adjusted, 2)
 
         # If both dimensions are within max_dimension, no scaling needed besides ensuring even size
         if width <= self.max_dimension and height <= self.max_dimension:

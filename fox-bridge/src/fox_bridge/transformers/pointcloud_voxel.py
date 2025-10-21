@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 from pointcloud2 import PointCloud2, PointField, dtype_from_fields, read_points
 
-from . import TransformError, Transformer
+from . import Transformer, TransformError
 
 logger = logging.getLogger(__name__)
 

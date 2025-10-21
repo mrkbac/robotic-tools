@@ -3,18 +3,21 @@ import heapq
 import io
 import struct
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
-from typing import IO, Literal, overload
+from typing import IO, Any, Literal, NamedTuple, Protocol, overload
 
-import zstandard
+try:
+    from zstandard import decompress as zstd_decompress
+except ImportError:
+    zstd_decompress = None  # type: ignore[assignment]
 
 try:
     from lz4.frame import decompress as lz4_decompress
 except ImportError:
-    lz4_decompress = None
+    lz4_decompress = None  # type: ignore[assignment]
 
-from .mcap_data import (
+from small_mcap.data import (
     OPCODE_TO_RECORD,
     AttachmentIndex,
     Channel,
@@ -38,6 +41,10 @@ _RECORD_HEADER_SIZE = _OPCODE_SIZE + _RECORD_LENGTH_SIZE
 _MAGIC = b"\x89MCAP0\r\n"
 _MAGIC_SIZE = len(_MAGIC)
 _FOOTER_SIZE = _RECORD_HEADER_SIZE + 8 + 8 + 4
+
+# Limits and defaults
+_RECORD_SIZE_LIMIT = 4 * 2**30  # 4 GiB - maximum size for a single record
+_REMAP_ID_START = 10_000  # Starting ID for remapped schemas and channels
 
 
 class McapError(Exception):
@@ -142,16 +149,33 @@ class LazyChunk:
 
 
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
+    # Validate compression string
+    if not isinstance(chunk.compression, str):
+        raise UnsupportedCompressionError(
+            f"compression must be a string, got {type(chunk.compression).__name__}"
+        )
+
     if chunk.compression == "zstd":
-        data = zstandard.decompress(chunk.data, chunk.uncompressed_size)
+        if zstd_decompress is None:
+            raise UnsupportedCompressionError(
+                "zstd compression used but zstandard module is not installed. "
+                "Install it with: pip install zstandard"
+            )
+        data = zstd_decompress(chunk.data, chunk.uncompressed_size)
     elif chunk.compression == "lz4":
         if lz4_decompress is None:
-            raise UnsupportedCompressionError("lz4 (module not installed)")
+            raise UnsupportedCompressionError(
+                "lz4 compression used but lz4 module is not installed. "
+                "Install it with: pip install lz4"
+            )
         data = lz4_decompress(chunk.data)
     elif chunk.compression == "":
         data = chunk.data
     else:
-        raise UnsupportedCompressionError(chunk.compression)
+        raise UnsupportedCompressionError(
+            f"Unknown compression type '{chunk.compression}'. "
+            f"Supported types: 'zstd', 'lz4', '' (uncompressed)"
+        )
 
     if validate_crc and chunk.uncompressed_crc != 0:
         calculated_crc = zlib.crc32(data)
@@ -217,7 +241,7 @@ def stream_reader(
     validate_crc: bool = False,
     lazy_chunks: bool = False,
 ) -> Iterator[McapRecord] | Iterator[McapRecord | LazyChunk]:
-    record_size_limit = 4 * 2**30  # 4 Gib
+    record_size_limit = _RECORD_SIZE_LIMIT
     checksum = 0
 
     def read(n: int) -> bytes:
@@ -471,8 +495,8 @@ def _read_message_non_seeking(
 
 class _Remapper:
     def __init__(self) -> None:
-        self._last_schema_id = 10_000
-        self._last_channel_id = 10_000
+        self._last_schema_id = _REMAP_ID_START
+        self._last_channel_id = _REMAP_ID_START
         self._schema_lookup_fast: dict[tuple[int, int], Schema | None] = {}
         self._channel_lookup_fast: dict[tuple[int, int], Channel] = {}
         self._schema_lookup_slow: dict[tuple[str, bytes], Schema | None] = {}
@@ -587,33 +611,51 @@ def read_message(
     )
 
 
-# def read_message_decoded(
-#     stream: IO[bytes] | list[IO[bytes] | _ReaderReturnType],
-#     topics: Iterator[str] | None = None,
-#     start_time: float | None = None,
-#     end_time: float | None = None,
-#     decoder_factories: Iterator[DecoderFactory] = (),
-# ) -> Iterator[DecodedMessageTuple]:
-#     decoders: dict[int, Callable[[bytes], Any]] = {}
+class DecoderFactory(Protocol):
+    def decoder_for(
+        self, message_encoding: str, schema: Schema | None
+    ) -> Callable[[bytes], Any]: ...
 
-#     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
-#         if schema is None:
-#             return message.data
-#         decoder = decoders.get(hash(schema.data))
-#         if decoder is not None:
-#             return decoder(message.data)
-#         for factory in decoder_factories:
-#             decoder = factory.decoder_for(channel.message_encoding, schema)
-#             if decoder is not None:
-#                 decoders[message.channel_id] = decoder
-#                 return decoder(message.data)
 
-#         raise ValueError(
-#             f"no decoder factory supplied for message encoding {channel.message_encoding}, "
-#             f"schema {schema}"
-#         )
+class DecodedMessageTuple(NamedTuple):
+    schema: Schema | None
+    channel: Channel
+    message: Message
+    decoded_message: Any
 
-#     for schema, channel, message in read_message(stream, topics, start_time, end_time):
-#         yield DecodedMessageTuple(
-#             schema, channel, message, decoded_message(schema, channel, message)
-#         )
+
+def read_message_decoded(
+    stream: IO[bytes] | list[IO[bytes] | _ReaderReturnType],
+    topics: Iterator[str] | None = None,
+    start_time: float | None = None,
+    end_time: float | None = None,
+    decoder_factories: Iterable[DecoderFactory] = (),
+) -> Iterator[DecodedMessageTuple]:
+    decoders: dict[int, Callable[[bytes], Any]] = {}
+
+    def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
+        if schema is None:
+            return message.data
+        decoder = decoders.get(hash(schema.data))
+        if decoder is not None:
+            return decoder(message.data)
+        for factory in decoder_factories:
+            decoder = factory.decoder_for(channel.message_encoding, schema)
+            if decoder is not None:
+                decoders[message.channel_id] = decoder
+                return decoder(message.data)
+
+        raise ValueError(
+            f"no decoder factory supplied for message encoding {channel.message_encoding}, "
+            f"schema {schema}"
+        )
+
+    def _should_include(channel: Channel, _schema: Schema | None) -> bool:
+        if topics is None:
+            return True
+        return channel.topic in topics
+
+    for schema, channel, message in read_message(stream, _should_include, start_time, end_time):
+        yield DecodedMessageTuple(
+            schema, channel, message, decoded_message(schema, channel, message)
+        )

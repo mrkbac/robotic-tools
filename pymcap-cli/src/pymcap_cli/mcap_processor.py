@@ -7,8 +7,7 @@ from re import Pattern
 from typing import BinaryIO
 
 from rich.console import Console
-
-from pymcap_cli.mcap_data import (
+from small_mcap.data import (
     Attachment,
     Channel,
     Chunk,
@@ -20,9 +19,10 @@ from pymcap_cli.mcap_data import (
     Metadata,
     Schema,
 )
-from pymcap_cli.reader import McapError, breakup_chunk, stream_reader
+from small_mcap.reader import McapError, breakup_chunk, stream_reader
+from small_mcap.writer import CompressionType, McapWriter
+
 from pymcap_cli.utils import file_progress
-from pymcap_cli.writer import CompressionType, McapWriter
 
 console = Console()
 
@@ -273,7 +273,7 @@ class McapProcessor:
         if not self.options.include_metadata:
             return False
 
-        writer.add_metadata(name=metadata.name, data=metadata.metadata)
+        writer.add_metadata(name=metadata.name, metadata=metadata.metadata)
         self.stats.metadata_written += 1
         return True
 

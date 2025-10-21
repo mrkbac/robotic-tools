@@ -3,7 +3,7 @@
 import io
 from pathlib import Path
 
-from pymcap_cli.writer import CompressionType, McapWriter
+from small_mcap.writer import CompressionType, McapWriter
 
 
 def create_simple_mcap(

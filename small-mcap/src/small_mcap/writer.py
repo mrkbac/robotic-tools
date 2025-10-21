@@ -6,15 +6,20 @@ from dataclasses import dataclass
 from enum import Enum, Flag, auto
 from typing import BinaryIO
 
-import zstandard
+try:
+    import zstandard
+except ImportError:
+    zstandard = None  # type: ignore[assignment]
 
 try:
     from lz4.frame import compress as lz4_compress
 except ImportError:
-    lz4_compress = None
+    lz4_compress = None  # type: ignore[assignment]
 
 
-from .mcap_data import (
+from small_mcap.data import (
+    Attachment,
+    AttachmentIndex,
     Channel,
     Chunk,
     ChunkIndex,
@@ -23,6 +28,8 @@ from .mcap_data import (
     Header,
     Message,
     MessageIndex,
+    Metadata,
+    MetadataIndex,
     Opcode,
     Schema,
     Statistics,
@@ -30,6 +37,9 @@ from .mcap_data import (
 )
 
 MCAP0_MAGIC = struct.pack("<8B", 137, 77, 67, 65, 80, 48, 13, 10)
+
+# Buffer allocation multiplier for chunk builder
+BUFFER_SIZE_MULTIPLIER = 2  # Pre-allocate 2x chunk_size to avoid reallocations
 
 
 @dataclass
@@ -100,7 +110,7 @@ class _ChunkBuilder:
         self.enable_crcs = enable_crcs
         self.chunk_size = chunk_size
         # Pre-allocate buffer to avoid reallocations
-        self.buffer_data = bytearray(2 * chunk_size)
+        self.buffer_data = bytearray(BUFFER_SIZE_MULTIPLIER * chunk_size)
         self.buffer_pos = 0
         self.reset()
 
@@ -167,6 +177,8 @@ class _ChunkBuilder:
         chunk_data = bytes(self.buffer_data[: self.buffer_pos])
 
         if self.compression == CompressionType.ZSTD:
+            if zstandard is None:
+                raise ImportError("zstandard module not available")
             cctx = zstandard.ZstdCompressor()
             compressed_data = cctx.compress(chunk_data)
         elif self.compression == CompressionType.LZ4:
@@ -208,6 +220,26 @@ class McapWriter:
         enable_crcs: bool = True,
         enable_data_crcs: bool = False,
     ) -> None:
+        # Validate compression type
+        if not isinstance(compression, CompressionType):
+            raise TypeError(
+                f"compression must be a CompressionType enum, got {type(compression).__name__}. "
+                f"Valid values: CompressionType.NONE, CompressionType.LZ4, CompressionType.ZSTD"
+            )
+
+        # Check if required compression libraries are available
+        if compression == CompressionType.LZ4 and lz4_compress is None:
+            raise ValueError(
+                "LZ4 compression requested but lz4 module is not installed. "
+                "Install it with: pip install lz4"
+            )
+
+        if compression == CompressionType.ZSTD and zstandard is None:
+            raise ValueError(
+                "ZSTD compression requested but zstandard module is not installed. "
+                "Install it with: pip install zstandard"
+            )
+
         self.output = output
         self.chunk_size = chunk_size
         self.compression = compression
@@ -227,6 +259,8 @@ class McapWriter:
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
         self.chunk_indices: list[ChunkIndex] = []
+        self.attachment_indexes: list[AttachmentIndex] = []
+        self.metadata_indexes: list[MetadataIndex] = []
         self.statistics = Statistics(
             attachment_count=0,
             channel_count=0,
@@ -286,6 +320,13 @@ class McapWriter:
         if self._finished:
             raise RuntimeError("Writer already finished")
 
+        # Validate schema_id exists if non-zero
+        if schema_id != 0 and schema_id not in self.schemas:
+            raise ValueError(
+                f"Schema ID {schema_id} does not exist. "
+                f"Add the schema using add_schema() before adding this channel."
+            )
+
         channel = Channel(
             id=channel_id,
             schema_id=schema_id,
@@ -312,6 +353,13 @@ class McapWriter:
         if self._finished:
             raise RuntimeError("Writer already finished")
 
+        # Validate channel_id exists
+        if channel_id not in self.channels:
+            raise ValueError(
+                f"Channel ID {channel_id} does not exist. "
+                f"Add the channel using add_channel() before adding messages to it."
+            )
+
         message = Message(
             channel_id=channel_id,
             sequence=sequence,
@@ -337,18 +385,59 @@ class McapWriter:
 
     def add_attachment(
         self,
-        create_time: int,
         log_time: int,
+        create_time: int,
         name: str,
         media_type: str,
         data: bytes,
     ) -> None:
-        """Add an attachment to the file. (Not implemented yet)"""
-        # Not implemented in simplified version
+        """Add an attachment to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
 
-    def add_metadata(self, name: str, data: dict[str, str]) -> None:
-        """Add metadata to the file. (Not implemented yet)"""
-        # Not implemented in simplified version
+        attachment = Attachment(
+            log_time=log_time,
+            create_time=create_time,
+            name=name,
+            media_type=media_type,
+            data=data,
+        )
+        offset = self.crc_writer.tell()
+        data = attachment.write_record()
+        self.crc_writer.write(data)
+
+        self.attachment_indexes.append(
+            AttachmentIndex(
+                offset=offset,
+                length=len(data),
+                log_time=log_time,
+                create_time=create_time,
+                data_size=len(attachment.data),
+                name=name,
+                media_type=media_type,
+            )
+        )
+
+        self.statistics.attachment_count += 1
+
+    def add_metadata(self, name: str, metadata: dict[str, str]) -> None:
+        """Add a metadata record to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        record = Metadata(name=name, metadata=metadata)
+
+        offset = self.crc_writer.tell()
+        data = record.write_record()
+        self.crc_writer.write(data)
+
+        self.metadata_indexes.append(MetadataIndex(offset=offset, length=len(data), name=name))
+
+        self.statistics.metadata_count += 1
 
     def add_chunk_with_indexes(self, chunk: Chunk, indexes: list[MessageIndex]) -> None:
         """
@@ -555,6 +644,32 @@ class McapWriter:
             summary_offsets.append(
                 SummaryOffset(
                     group_opcode=Opcode.CHUNK_INDEX,
+                    group_start=summary_start + group_start,
+                    group_length=summary_buffer.tell() - group_start,
+                )
+            )
+
+        # Write attachment indexes
+        if (self.index_types & IndexType.ATTACHMENT) and self.attachment_indexes:
+            group_start = summary_buffer.tell()
+            for attachment_index in self.attachment_indexes:
+                summary_buffer.write(attachment_index.write_record())
+            summary_offsets.append(
+                SummaryOffset(
+                    group_opcode=Opcode.ATTACHMENT_INDEX,
+                    group_start=summary_start + group_start,
+                    group_length=summary_buffer.tell() - group_start,
+                )
+            )
+
+        # Write metadata indexes
+        if (self.index_types & IndexType.METADATA) and self.metadata_indexes:
+            group_start = summary_buffer.tell()
+            for metadata_index in self.metadata_indexes:
+                summary_buffer.write(metadata_index.write_record())
+            summary_offsets.append(
+                SummaryOffset(
+                    group_opcode=Opcode.METADATA_INDEX,
                     group_start=summary_start + group_start,
                     group_length=summary_buffer.tell() - group_start,
                 )

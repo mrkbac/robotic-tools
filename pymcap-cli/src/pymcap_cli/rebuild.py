@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from typing import BinaryIO
 
 from rich.console import Console
-
-from pymcap_cli.mcap_data import (
+from small_mcap.data import (
     Attachment,
     AttachmentIndex,
     Channel,
@@ -21,7 +20,7 @@ from pymcap_cli.mcap_data import (
     Statistics,
     Summary,
 )
-from pymcap_cli.reader import (
+from small_mcap.reader import (
     LazyChunk,
     McapError,
     breakup_chunk,
@@ -29,6 +28,7 @@ from pymcap_cli.reader import (
     get_summary,
     stream_reader,
 )
+
 from pymcap_cli.utils import file_progress
 
 
@@ -55,6 +55,7 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
 
     for cur, (_, end_offset) in itertools.pairwise(idx_list):
         channel, start_offset = cur
+        assert channel is not None, "Channel ID should not be None"
         size = (end_offset - start_offset) - (2 + 4 + 8 + 8)
         assert size > 0, f"Invalid size for channel {channel}: {size}"
         sizes_dd[channel] += size

@@ -10,4 +10,5 @@ members = [
     "digitalis",
     "mcap-ros2-support-fast",
     "pymcap-cli",
+    "small-mcap",
 ]

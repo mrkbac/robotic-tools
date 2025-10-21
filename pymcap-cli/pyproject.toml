@@ -5,9 +5,8 @@ description = "A CLI tool for slicing and dicing MCAP files."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "lz4>=4.3.3",
     "rich>=14.1.0",
-    "zstandard>=0.23.0",
+    "small-mcap",
 ]
 
 [build-system]
@@ -26,3 +25,6 @@ dev = [
     "pytest-benchmark>=5.1.0",
     "ty>=0.0.1a19",
 ]
+
+[tool.uv.sources]
+small-mcap = { workspace = true }

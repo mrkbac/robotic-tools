@@ -41,8 +41,6 @@ repos:
     hooks:
       - id: uv-lock
         entry: "tools/run_uv_lock_on_all_packages.sh"
-        pass_filenames: false
-        files: (uv\.lock|pyproject\.toml|uv\.toml)$
 
   - repo: local
     hooks:
