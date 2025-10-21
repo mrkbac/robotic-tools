@@ -155,7 +155,6 @@ class EncoderGeneratorFactory:
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
 
-            pattern = f"<{len(value_expr) if array_size else ''}{''.join([struct_name] * (array_size or 1))}"
             if array_size is not None:
                 pattern = f"<{array_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)

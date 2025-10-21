@@ -476,7 +476,7 @@ def test_wstring_throws_exception(msg_def: str) -> None:
     buffer = bytes.fromhex("00010000000000007b000000")
     decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
 
-    with pytest.raises(NotImplementedError, match="wstring.*not.*implemented"):
+    with pytest.raises(NotImplementedError, match=r"wstring.*not.*implemented"):
         decoder(buffer)
 
 

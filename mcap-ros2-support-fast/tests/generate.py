@@ -35,13 +35,13 @@ class Empty:
 
 @contextlib.contextmanager
 def generate_sample_data():
-    file = TemporaryFile("w+b")
+    file = TemporaryFile("w+b")  # noqa: SIM115 TODO: Improve
     writer = Writer(file)
     writer.start(profile="ros2", library="test")
     string_schema_id = writer.register_schema(
         name=String._type,
         encoding="ros2msg",
-        data=String._full_text.encode(),  # type: ignore
+        data=String._full_text.encode(),
     )
     string_channel_id = writer.register_channel(
         topic="/chatter", message_encoding="cdr", schema_id=string_schema_id
@@ -50,7 +50,7 @@ def generate_sample_data():
     for i in range(10):
         msg = String(data=f"string message {i}")
         buff = BytesIO()
-        msg.serialize(buff)  # type: ignore
+        msg.serialize(buff)
         writer.add_message(
             channel_id=string_channel_id,
             log_time=i * 1000,
@@ -61,7 +61,7 @@ def generate_sample_data():
     empty_schema_id = writer.register_schema(
         name=Empty._type,
         encoding="ros2msg",
-        data=Empty._full_text.encode(),  # type: ignore
+        data=Empty._full_text.encode(),
     )
     empty_channel_id = writer.register_channel(
         topic="/empty", message_encoding="cdr", schema_id=empty_schema_id
@@ -70,7 +70,7 @@ def generate_sample_data():
     for i in range(10):
         msg = Empty()
         buff = BytesIO()
-        msg.serialize(buff)  # type: ignore
+        msg.serialize(buff)
         writer.add_message(
             channel_id=empty_channel_id,
             log_time=i * 1000,

@@ -166,7 +166,7 @@ if __name__ == "__main__":
     # Generate all fixtures when run directly
     fixtures_dir = Path(__file__).parent
     fixtures = ensure_fixtures(fixtures_dir)
-    print("Generated test fixtures:")  # noqa: T201
+    print("Generated test fixtures:")
     for name, path in fixtures.items():
         size_kb = path.stat().st_size / 1024
-        print(f"  {name:20s} -> {path.name:30s} ({size_kb:.1f} KB)")  # noqa: T201
+        print(f"  {name:20s} -> {path.name:30s} ({size_kb:.1f} KB)")

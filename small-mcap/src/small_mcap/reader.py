@@ -47,6 +47,10 @@ _RECORD_SIZE_LIMIT = 4 * 2**30  # 4 GiB - maximum size for a single record
 _REMAP_ID_START = 10_000  # Starting ID for remapped schemas and channels
 
 
+_ReaderReturnType = Iterator[tuple[Schema | None, Channel, Message]]
+_ShouldIncludeType = Callable[[Channel, Schema | None], bool]
+
+
 class McapError(Exception):
     pass
 
@@ -369,7 +373,7 @@ def get_header(stream: IO[bytes]) -> Header:
 
 def _chunks_matching_topics(
     summary: Summary,
-    should_include: Callable[[Channel, Schema | None], bool] | None,
+    should_include: _ShouldIncludeType | None,
     start_time: float | None,
     end_time: float | None,
 ) -> list[ChunkIndex]:
@@ -393,12 +397,9 @@ def _chunks_matching_topics(
     ]
 
 
-_ReaderReturnType = Iterator[tuple[Schema | None, Channel, Message]]
-
-
 def _read_inner(
     reader: Iterator[McapRecord],
-    should_include: Callable[[Channel, Schema | None], bool] | None,
+    should_include: _ShouldIncludeType | None,
     start_time: float | None,
     end_time: float | None,
     schemas: dict[int, Schema] | None = None,
@@ -448,7 +449,7 @@ def _read_inner(
 
 def _read_message_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
-    should_include: Callable[[Channel, Schema | None], bool] | None,
+    should_include: _ShouldIncludeType | None,
     start_time: float | None,
     end_time: float | None,
     emit_chunks: bool,
@@ -479,7 +480,7 @@ def _read_message_seeking(
 
 def _read_message_non_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
-    should_include: Callable[[Channel, Schema | None], bool] | None,
+    should_include: _ShouldIncludeType | None,
     start_time: float | None,
     end_time: float | None,
     emit_chunks: bool,
@@ -552,8 +553,8 @@ class _Remapper:
 
 
 def read_message(
-    stream: IO[bytes] | list[IO[bytes] | _ReaderReturnType],
-    should_include: Callable[[Channel, Schema | None], bool] | None = None,
+    stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
+    should_include: _ShouldIncludeType | None = None,
     start_time: float | None = None,
     end_time: float | None = None,
     emit_chunks: bool = False,
@@ -611,10 +612,10 @@ def read_message(
     )
 
 
-class DecoderFactory(Protocol):
+class DecoderFactoryProtocol(Protocol):
     def decoder_for(
         self, message_encoding: str, schema: Schema | None
-    ) -> Callable[[bytes], Any]: ...
+    ) -> Callable[[bytes], Any] | None: ...
 
 
 class DecodedMessageTuple(NamedTuple):
@@ -625,11 +626,11 @@ class DecodedMessageTuple(NamedTuple):
 
 
 def read_message_decoded(
-    stream: IO[bytes] | list[IO[bytes] | _ReaderReturnType],
-    topics: Iterator[str] | None = None,
+    stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
+    should_include: _ShouldIncludeType | None = None,
     start_time: float | None = None,
     end_time: float | None = None,
-    decoder_factories: Iterable[DecoderFactory] = (),
+    decoder_factories: Iterable[DecoderFactoryProtocol] = (),
 ) -> Iterator[DecodedMessageTuple]:
     decoders: dict[int, Callable[[bytes], Any]] = {}
 
@@ -640,8 +641,7 @@ def read_message_decoded(
         if decoder is not None:
             return decoder(message.data)
         for factory in decoder_factories:
-            decoder = factory.decoder_for(channel.message_encoding, schema)
-            if decoder is not None:
+            if decoder := factory.decoder_for(channel.message_encoding, schema):
                 decoders[message.channel_id] = decoder
                 return decoder(message.data)
 
@@ -650,12 +650,7 @@ def read_message_decoded(
             f"schema {schema}"
         )
 
-    def _should_include(channel: Channel, _schema: Schema | None) -> bool:
-        if topics is None:
-            return True
-        return channel.topic in topics
-
-    for schema, channel, message in read_message(stream, _should_include, start_time, end_time):
+    for schema, channel, message in read_message(stream, should_include, start_time, end_time):
         yield DecodedMessageTuple(
             schema, channel, message, decoded_message(schema, channel, message)
         )

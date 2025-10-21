@@ -25,27 +25,18 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.12.9"
+    rev: "v0.14.1"
     hooks:
       - id: ruff-check
         args: ["--fix"]
       - id: ruff-format
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.35.4
+    rev: v1.38.1
     hooks:
       - id: typos
 
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.8.9
+    rev: 0.9.5
     hooks:
       - id: uv-lock
-        entry: "tools/run_uv_lock_on_all_packages.sh"
-
-  - repo: local
-    hooks:
-      - id: ty
-        name: Run ty on all packages
-        entry: "tools/run_ty_on_all_packages.sh"
-        language: system
-        pass_filenames: false

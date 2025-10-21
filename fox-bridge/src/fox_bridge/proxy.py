@@ -1,6 +1,7 @@
 """Foxglove WebSocket proxy bridge implementation."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import struct
@@ -33,12 +34,12 @@ class ProxyBridge:
     def __init__(
         self,
         upstream_url: str,
-        listen_host: str = "0.0.0.0",
+        listen_host: str = "0.0.0.0",  # noqa: S104
         listen_port: int = 8766,
         transformer_registry: TransformerRegistry | None = None,
         default_throttle_hz: float | None = 1.0,
         topic_throttle_overrides: dict[str, float | None] | None = None,
-    ):
+    ) -> None:
         """Initialize the proxy bridge.
 
         Args:
@@ -46,7 +47,8 @@ class ProxyBridge:
             listen_host: Host to listen on for downstream clients
             listen_port: Port to listen on for downstream clients
             transformer_registry: Optional transformer registry for message transformations
-            default_throttle_hz: Default throttle rate in Hz for all topics (None disables throttling)
+            default_throttle_hz: Default throttle rate in Hz for all topics
+                (None disables throttling)
             topic_throttle_overrides: Optional per-topic throttle overrides in Hz
         """
         self.upstream_url = upstream_url
@@ -135,10 +137,8 @@ class ProxyBridge:
         # Cancel server task
         if self.server_task:
             self.server_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self.server_task
-            except asyncio.CancelledError:
-                pass
 
     async def _connect_upstream(self) -> None:
         """Connect to upstream Foxglove bridge with reconnection logic."""
@@ -207,7 +207,8 @@ class ProxyBridge:
                         if channel:
                             downstream_ids.append(transformed_id)
                             logger.info(
-                                "Transformed channel unadvertised: %s (upstream_id=%s, downstream_id=%s)",
+                                "Transformed channel unadvertised: "
+                                "%s (upstream_id=%s, downstream_id=%s)",
                                 channel.get("topic", "?"),
                                 upstream_channel_id,
                                 transformed_id,
@@ -436,7 +437,7 @@ class ProxyBridge:
         except Exception:
             logger.exception("Error handling client JSON message")
 
-    async def _handle_client_binary(self, client: ServerConnection, data: bytes) -> None:
+    async def _handle_client_binary(self, _client: ServerConnection, _data: bytes) -> None:
         """Handle binary messages from downstream client."""
         # For initial pass-through, we don't handle client publishing
         logger.debug("Ignoring client binary message (client publish not supported)")
@@ -466,7 +467,7 @@ class ProxyBridge:
             is_transformed = channel_id in self.transformed_to_upstream
             logger.info(
                 f"Client subscribed to {channel_info.get('topic', '?')} "
-                f"(channel={channel_id}, upstream={upstream_channel_id}, transformed={is_transformed})"
+                f"(channel={channel_id}, upstream={upstream_channel_id}, transformed={is_transformed})"  # noqa: E501
             )
 
     async def _handle_client_unsubscribe(
@@ -492,7 +493,7 @@ class ProxyBridge:
 
                 channel_info = self.upstream_channels.get(upstream_channel_id, {})
                 logger.info(
-                    f"Client unsubscribed from {channel_info.get('topic', '?')} (channel={channel_id})"
+                    f"Client unsubscribed from {channel_info.get('topic', '?')} (channel={channel_id})"  # noqa: E501
                 )
 
     async def _subscribe_upstream(self, channel_id: int) -> None:
@@ -514,7 +515,7 @@ class ProxyBridge:
 
         channel = self.upstream_channels.get(channel_id, {})
         logger.info(
-            f"Subscribed to upstream {channel.get('topic', '?')} (channel={channel_id}, upstream_sub={upstream_sub_id})"
+            f"Subscribed to upstream {channel.get('topic', '?')} (channel={channel_id}, upstream_sub={upstream_sub_id})"  # noqa: E501
         )
 
     async def _unsubscribe_upstream(self, channel_id: int) -> None:
@@ -545,7 +546,7 @@ class ProxyBridge:
 
         # Unsubscribe from all channels this client was subscribed to
         client_subs = self.client_subscriptions.pop(client, {})
-        for client_sub_id, channel_id in client_subs.items():
+        for channel_id in client_subs.values():
             # Check if this is a transformed channel
             upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
 
@@ -574,7 +575,7 @@ class ProxyBridge:
             # Track the upstream channel for transformation lookup
             self.upstream_channels[channel_id] = channel
             logger.info(
-                f"Upstream channel advertised: {channel['topic']} (id={channel_id}, schema={schema_name})"
+                f"Upstream channel advertised: {channel['topic']} (id={channel_id}, schema={schema_name})"  # noqa: E501
             )
 
             # Initialize throttling for this channel

@@ -40,8 +40,9 @@ def _read_and_write(writer_class, msgs: int):
     messages_data = []
     with mcap_file.open("rb") as f:
         reader = make_reader(f, decoder_factories=[decoder_factory])
-        for decoded_msg in itertools.islice(reader.iter_decoded_messages(), msgs):
-            messages_data.append(
+
+        messages_data.extend(
+            [
                 {
                     "topic": decoded_msg.channel.topic,
                     "schema": decoded_msg.schema,
@@ -50,7 +51,9 @@ def _read_and_write(writer_class, msgs: int):
                     "publish_time": decoded_msg.message.publish_time,
                     "sequence": decoded_msg.message.sequence,
                 }
-            )
+                for decoded_msg in itertools.islice(reader.iter_decoded_messages(), msgs)
+            ]
+        )
 
     # Second pass: write messages using specified writer
     with TemporaryFile() as temp_file:

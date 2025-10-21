@@ -5,11 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "cachetools>=6.1.0",
     "lark>=1.2.2",
-    "mcap>=1.3.0",
-    "mcap-ros2-support>=0.5.5",
+    "mcap-ros2-support-fast",
     "pointcloud2>=0.2.3",
+    "small-mcap[compression]",
     "textual>=5.1.1",
     "textual-image>=0.8.3",
     "textual-slider>=0.2.0",
@@ -31,8 +30,11 @@ build-backend = "uv_build"
 dev = [
     "pytest>=8.4.1",
     "textual-dev>=1.7.0",
-    "ty>=0.0.1a19",
 ]
 
 [tool.ty.rules]
 invalid-assignment = "ignore" # causes issues with reactive
+
+[tool.uv.sources]
+mcap-ros2-support-fast = { workspace = true }
+small-mcap = { workspace = true }

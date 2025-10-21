@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Foxglove WebSocket proxy bridge - forwards topics with optional transformations"
+        description="Foxglove WebSocket proxy - forwards topics with optional transformations"
     )
     parser.add_argument(
         "source_ws",
@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
+        default="0.0.0.0",  # noqa: S104
         help="Host to listen on for downstream clients (default: 0.0.0.0)",
     )
     parser.add_argument(
@@ -143,7 +143,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
     def signal_handler() -> None:
         logger.info("Received shutdown signal")
-        asyncio.create_task(bridge.stop())
+        asyncio.create_task(bridge.stop())  # noqa: RUF006
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)

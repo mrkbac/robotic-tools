@@ -12,7 +12,7 @@ from typing import Any
 
 import websockets
 from mcap.well_known import SchemaEncoding
-from mcap_ros2._dynamic import DecoderFunction, generate_dynamic
+from mcap_ros2_support_fast.decoder import DecoderFunction, generate_dynamic
 
 from digitalis.reader.source import Source, SourceStatus
 from digitalis.reader.types import MessageEvent, SourceInfo, Topic
@@ -67,10 +67,7 @@ def get_decoder(schema: AdvertisedChannel, cache: dict[int, DecoderFunction]) ->
 
     decoder = cache.get(schema.id)
     if decoder is None:
-        type_dict = generate_dynamic(schema.schema_name, schema.schema)
-        if schema.schema_name not in type_dict:
-            raise ROS2DecodeError(f'Schema parsing failed for "{schema.schema_name}"')
-        decoder = type_dict[schema.schema_name]
+        decoder = generate_dynamic(schema.schema_name, schema.schema)
         cache[schema.id] = decoder
     return decoder
 

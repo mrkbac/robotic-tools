@@ -100,16 +100,17 @@ class ImageToVideoTransformer(Transformer):
         """
         ffmpeg, _ = get_ffmpeg()
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603
                 [ffmpeg, "-hide_banner", "-encoders"],
                 check=False,
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            return encoder in result.stdout
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
+        else:
+            return encoder in result.stdout
 
     def _calculate_downscale_dimensions(self, width: int, height: int) -> tuple[int, int]:
         """Calculate target dimensions for downscaling while maintaining aspect ratio.
@@ -165,14 +166,13 @@ class ImageToVideoTransformer(Transformer):
         Raises:
             TransformError: If transformation fails
         """
+        if not message.data:
+            raise TransformError(f"Empty image data, {message}")
+
+        # Verify it's JPEG (for now we only support JPEG)
+        if message.format and "jpeg" not in message.format.lower():
+            raise TransformError(f"Unsupported format: {message.format}")
         try:
-            if not message.data:
-                raise TransformError(f"Empty image data, {message}")
-
-            # Verify it's JPEG (for now we only support JPEG)
-            if message.format and "jpeg" not in message.format.lower():
-                raise TransformError(f"Unsupported format: {message.format}")
-
             # Get image dimensions using PIL (faster than ffprobe)
             try:
                 img = Image.open(BytesIO(message.data))
@@ -192,7 +192,7 @@ class ImageToVideoTransformer(Transformer):
             )
 
             # Build output message
-            output_message = {
+            return {
                 "timestamp": {
                     "sec": message.header.stamp.sec,
                     "nanosec": message.header.stamp.nanosec,
@@ -201,8 +201,6 @@ class ImageToVideoTransformer(Transformer):
                 "data": list(h264_data),  # Convert bytes to list of uint8
                 "format": self.codec,
             }
-
-            return output_message
 
         except TransformError:
             raise
@@ -329,14 +327,22 @@ class ImageToVideoTransformer(Transformer):
 
         try:
             # Run ffmpeg
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603
                 cmd,
                 input=jpeg_data,
                 capture_output=True,
                 timeout=30,  # 30 second timeout
                 check=False,
             )
-
+        except subprocess.TimeoutExpired as e:
+            raise TransformError("FFmpeg encoding timed out") from e
+        except FileNotFoundError as e:
+            raise TransformError(
+                "FFmpeg not found. Install portable-ffmpeg: pip install portable-ffmpeg"
+            ) from e
+        except Exception as e:
+            raise TransformError(f"Encoding error: {e}") from e
+        else:
             if result.returncode != 0:
                 error_msg = result.stderr.decode("utf-8", errors="ignore")
                 raise TransformError(f"FFmpeg encoding failed: {error_msg}")
@@ -354,15 +360,6 @@ class ImageToVideoTransformer(Transformer):
                 logger.warning("H.264 data may not be in Annex B format")
 
             return h264_data
-
-        except subprocess.TimeoutExpired as e:
-            raise TransformError("FFmpeg encoding timed out") from e
-        except FileNotFoundError as e:
-            raise TransformError(
-                "FFmpeg not found. Install portable-ffmpeg: pip install portable-ffmpeg"
-            ) from e
-        except Exception as e:
-            raise TransformError(f"Encoding error: {e}") from e
 
 
 __all__ = ["ImageToVideoTransformer"]

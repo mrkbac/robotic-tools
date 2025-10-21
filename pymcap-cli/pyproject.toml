@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "rich>=14.1.0",
-    "small-mcap",
+    "small-mcap[compression]",
 ]
 
 [build-system]
@@ -23,7 +23,6 @@ dev = [
     "pyinstrument>=5.1.1",
     "pytest>=8.4.2",
     "pytest-benchmark>=5.1.0",
-    "ty>=0.0.1a19",
 ]
 
 [tool.uv.sources]

@@ -10,7 +10,9 @@ from collections.abc import Callable
 from dataclasses import make_dataclass
 from typing import Any
 
-from ._plans import (
+from mcap_ros2_support_fast._dynamic_decoder import create_decoder
+from mcap_ros2_support_fast._dynamic_encoder import create_encoder
+from mcap_ros2_support_fast._plans import (
     STRING_TO_TYPE_ID,
     ActionType,
     ComplexAction,
@@ -24,6 +26,7 @@ from ._plans import (
     PrimitiveGroupAction,
     TypeId,
 )
+
 from ._vendor.rosidl_adapter.parser import (
     Field,
     MessageSpecification,
@@ -152,7 +155,9 @@ def generate_plans(schema_name: str, schema_text: str) -> PlanList:
 
 
 def generate_dynamic(
-    schema_name: str, schema_text: str, parser: Callable[[PlanList], DecoderFunction]
+    schema_name: str,
+    schema_text: str,
+    parser: Callable[[PlanList], DecoderFunction] = create_decoder,
 ) -> DecoderFunction:
     """Convert a ROS2 concatenated message definition into a message parser.
 
@@ -372,7 +377,6 @@ def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
     :param schema_text: The schema text to use for serializing the message payload.
     :return: A dictionary mapping schema names to encoder functions.
     """
-    from ._dynamic_encoder import create_encoder
 
     # First collect all message definitions
     msgdefs: dict[str, MessageSpecification] = {

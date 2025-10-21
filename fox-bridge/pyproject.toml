@@ -5,7 +5,7 @@ description = "Foxglove WebSocket proxy with message transformations"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=2.3.4",
+    "numpy>=2.0.0",
     "pointcloud2>=0.2.3",
     "mcap-ros2-support>=0.5.5",
     "websockets>=15.0.1",

@@ -50,7 +50,7 @@ def get_default_panel(schema: str) -> type["BasePanel"] | None:
     return panels[0]
 
 
-class BasePanel(Generic[T], Widget, can_focus=True):
+class BasePanel(Widget, Generic[T], can_focus=True):
     def __init_subclass__(
         cls,
         can_focus: bool | None = None,
