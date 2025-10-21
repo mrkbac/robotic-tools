@@ -3,7 +3,7 @@ name = "fox-bridge"
 version = "0.1.0"
 description = "Foxglove WebSocket proxy with message transformations"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.3.4",
     "pointcloud2>=0.2.3",
