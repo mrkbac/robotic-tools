@@ -11,4 +11,6 @@ members = [
     "mcap-ros2-support-fast",
     "pymcap-cli",
     "small-mcap",
+    "websocket-proxy",
+    "websocket-bridge",
 ]

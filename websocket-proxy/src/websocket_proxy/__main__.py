@@ -1,15 +1,13 @@
-"""CLI entry point for fox-bridge proxy."""
-
 import argparse
 import asyncio
 import logging
 import signal
 import sys
 
-from fox_bridge.proxy import ProxyBridge
-from fox_bridge.transformers import TransformerRegistry
-from fox_bridge.transformers.image_to_video import ImageToVideoTransformer
-from fox_bridge.transformers.pointcloud_voxel import PointCloudVoxelTransformer
+from websocket_proxy.proxy import ProxyBridge
+from websocket_proxy.transformers import TransformerRegistry
+from websocket_proxy.transformers.image_to_video import ImageToVideoTransformer
+from websocket_proxy.transformers.pointcloud_voxel import PointCloudVoxelTransformer
 
 # Configure logging
 logging.basicConfig(

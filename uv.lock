@@ -13,6 +13,8 @@ members = [
     "pymcap-cli",
     "robotic-tools",
     "small-mcap",
+    "websocket-bridge",
+    "websocket-proxy",
 ]
 
 [[package]]
@@ -714,6 +716,9 @@ wheels = [
 name = "mcap-ros2-support-fast"
 version = "0.1.0"
 source = { editable = "mcap-ros2-support-fast" }
+dependencies = [
+    { name = "small-mcap" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -725,6 +730,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "small-mcap", editable = "small-mcap" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1243,6 +1249,15 @@ wheels = [
 ]
 
 [[package]]
+name = "portable-ffmpeg"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/f4/21a509690b57bafc00012392c085c428140d59bf790809c74c580b711756/portable_ffmpeg-0.1.0.tar.gz", hash = "sha256:85094cc7acbcf9dd07b9dd4408847220e0d6fe0ea20a8623b6e02dd63f316b60", size = 32932, upload-time = "2025-06-15T11:28:18.261Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/e7/cd530c42d8bd2c11adfd22f6a61ce74e73bde74f2ae20fd6c97b07393616/portable_ffmpeg-0.1.0-py3-none-any.whl", hash = "sha256:06aef1a28c3c0a3e737104659478005e7959013b0987eda8b9ca2b1784e2d8c6", size = 8392, upload-time = "2025-06-15T11:28:16.934Z" },
+]
+
+[[package]]
 name = "propcache"
 version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1698,6 +1713,47 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/91/7a/146a99696aee0609e3712f2b44c6274566bc368dfe8375191278045186b8/uc-micro-py-1.0.3.tar.gz", hash = "sha256:d321b92cff673ec58027c04015fcaa8bb1e005478643ff4a500882eaab88c48a", size = 6043, upload-time = "2024-02-09T16:52:01.654Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/37/87/1f677586e8ac487e29672e4b17455758fce261de06a0d086167bb760361a/uc_micro_py-1.0.3-py3-none-any.whl", hash = "sha256:db1dffff340817673d7b466ec86114a9dc0e9d4d9b5ba229d9d60e5c12600cd5", size = 6229, upload-time = "2024-02-09T16:52:00.371Z" },
+]
+
+[[package]]
+name = "websocket-bridge"
+version = "0.1.0"
+source = { editable = "websocket-bridge" }
+dependencies = [
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "typing-extensions", specifier = ">=4.15.0" },
+    { name = "websockets", specifier = ">=15.0.1" },
+]
+
+[[package]]
+name = "websocket-proxy"
+version = "0.1.0"
+source = { editable = "websocket-proxy" }
+dependencies = [
+    { name = "mcap-ros2-support" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pillow" },
+    { name = "pointcloud2" },
+    { name = "portable-ffmpeg" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mcap-ros2-support", specifier = ">=0.5.5" },
+    { name = "numpy", specifier = ">=2.0.0" },
+    { name = "pillow", specifier = ">=12.0.0" },
+    { name = "pointcloud2", specifier = ">=0.2.3" },
+    { name = "portable-ffmpeg", specifier = ">=0.1.0" },
+    { name = "typing-extensions", specifier = ">=4.12.2" },
+    { name = "websockets", specifier = ">=15.0.1" },
 ]
 
 [[package]]

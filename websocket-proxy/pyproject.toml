@@ -1,5 +1,5 @@
 [project]
-name = "fox-bridge"
+name = "websocket-proxy"
 version = "0.1.0"
 description = "Foxglove WebSocket proxy with message transformations"
 readme = "README.md"
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-bridge = "fox_bridge.__main__:main"
+bridge = "websocket_proxy.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

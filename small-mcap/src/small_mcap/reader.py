@@ -18,6 +18,8 @@ except ImportError:
     lz4_decompress = None  # type: ignore[assignment]
 
 from small_mcap.data import (
+    MAGIC,
+    MAGIC_SIZE,
     OPCODE_TO_RECORD,
     AttachmentIndex,
     Channel,
@@ -38,8 +40,6 @@ from small_mcap.data import (
 _OPCODE_SIZE = 1
 _RECORD_LENGTH_SIZE = 8
 _RECORD_HEADER_SIZE = _OPCODE_SIZE + _RECORD_LENGTH_SIZE
-_MAGIC = b"\x89MCAP0\r\n"
-_MAGIC_SIZE = len(_MAGIC)
 _FOOTER_SIZE = _RECORD_HEADER_SIZE + 8 + 8 + 4
 
 # Limits and defaults
@@ -260,10 +260,10 @@ def stream_reader(
     cached_pos = stream.tell()
 
     if not skip_magic:
-        magic = read(_MAGIC_SIZE)
-        if magic != _MAGIC:
+        magic = read(MAGIC_SIZE)
+        if magic != MAGIC:
             raise InvalidMagicError(magic)
-        cached_pos += _MAGIC_SIZE
+        cached_pos += MAGIC_SIZE
 
     while True:
         checksum_before_read = checksum
@@ -314,8 +314,8 @@ def stream_reader(
 
         if isinstance(record, Footer):
             if not skip_magic:
-                magic = read(_MAGIC_SIZE)
-                if magic != _MAGIC:
+                magic = read(MAGIC_SIZE)
+                if magic != MAGIC:
                     raise InvalidMagicError(magic)
             break
 
@@ -349,7 +349,7 @@ def get_summary(stream: IO[bytes] | io.BufferedIOBase) -> Summary | None:
     if not stream.seekable():
         return None
     try:
-        stream.seek(-(_FOOTER_SIZE + _MAGIC_SIZE), io.SEEK_END)
+        stream.seek(-(_FOOTER_SIZE + MAGIC_SIZE), io.SEEK_END)
         footer = next(stream_reader(stream, skip_magic=True))
         if not isinstance(footer, Footer):
             return None

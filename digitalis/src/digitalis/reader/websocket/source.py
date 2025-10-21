@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import websockets
-from mcap.well_known import SchemaEncoding
-from mcap_ros2_support_fast.decoder import DecoderFunction, generate_dynamic
+from mcap_ros2_support_fast.decoder import DecoderFactory
+from small_mcap.data import Schema
 
 from digitalis.reader.source import Source, SourceStatus
 from digitalis.reader.types import MessageEvent, SourceInfo, Topic
@@ -59,19 +59,6 @@ class ROS2DecodeError(Exception):
     """Raised if a message cannot be decoded as a ROS2 message."""
 
 
-def get_decoder(schema: AdvertisedChannel, cache: dict[int, DecoderFunction]) -> DecoderFunction:
-    """Get or create a decoder for a schema."""
-    if schema is None or schema.schema_encoding != SchemaEncoding.ROS2:
-        msg = f"Invalid schema for ROS2 decoding: {schema.schema_encoding}"
-        raise ROS2DecodeError(msg)
-
-    decoder = cache.get(schema.id)
-    if decoder is None:
-        decoder = generate_dynamic(schema.schema_name, schema.schema)
-        cache[schema.id] = decoder
-    return decoder
-
-
 class WebSocketSource(Source):
     """WebSocket source for real-time data streaming with dynamic topic discovery."""
 
@@ -98,7 +85,7 @@ class WebSocketSource(Source):
         self._active_subscriptions: set[int] = set()
         self._subscription_to_channel: dict[int, int] = {}
         self._channel_to_subscription: dict[int, int] = {}
-        self._decoder_cache: dict[int, DecoderFunction] = {}
+        self._decoder_factory = DecoderFactory()
         # Subscription state tracking
         self._subscribed_topics: set[str] = set()  # User's intended subscriptions
         self._intended_subscriptions: set[str] = set()  # Persist across disconnections
@@ -568,7 +555,15 @@ class WebSocketSource(Source):
         # Decode message
         message_obj: Any = payload
         try:
-            decoder = get_decoder(channel, self._decoder_cache)
+            decoder = self._decoder_factory.decoder_for(
+                channel.encoding,
+                Schema(
+                    id=channel.id,
+                    name=channel.schema_name,
+                    encoding=channel.schema_encoding,
+                    data=channel.schema.encode(),
+                ),
+            )
             message_obj = decoder(payload)
         except (ROS2DecodeError, ValueError):
             logger.debug(f"Failed to decode message for topic {channel.topic}")

@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from enum import IntEnum, unique
 from typing import IO, ClassVar, Final, TypeVar, cast
 
+MAGIC = b"\x89MCAP0\r\n"
+MAGIC_SIZE = len(MAGIC)
+
 
 @unique
 class Opcode(IntEnum):
