@@ -36,6 +36,7 @@ class PointCloud(InteractiveRenderPanel):
 
     def watch_data(self, data: MessageEvent | None) -> None:
         """Update the point cloud data."""
+        super().watch_data(data)  # Reset first_data flag on topic change
         if not data:
             return
 

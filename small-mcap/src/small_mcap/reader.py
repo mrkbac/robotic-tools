@@ -374,8 +374,8 @@ def get_header(stream: IO[bytes]) -> Header:
 def _chunks_matching_topics(
     summary: Summary,
     should_include: _ShouldIncludeType | None,
-    start_time: float | None,
-    end_time: float | None,
+    start_time_ns: int | None,
+    end_time_ns: int | None,
 ) -> list[ChunkIndex]:
     channel_set: set[int] | None = None
     if should_include:
@@ -388,8 +388,8 @@ def _chunks_matching_topics(
     return [
         chunk_index
         for chunk_index in summary.chunk_indexes
-        if not (start_time is not None and chunk_index.message_end_time < start_time)
-        and not (end_time is not None and chunk_index.message_start_time >= end_time)
+        if not (start_time_ns is not None and chunk_index.message_end_time < start_time_ns)
+        and not (end_time_ns is not None and chunk_index.message_start_time >= end_time_ns)
         and any(
             channel_set is None or channel_id in channel_set
             for channel_id in chunk_index.message_index_offsets
@@ -400,8 +400,8 @@ def _chunks_matching_topics(
 def _read_inner(
     reader: Iterator[McapRecord],
     should_include: _ShouldIncludeType | None,
-    start_time: float | None,
-    end_time: float | None,
+    start_time_ns: int | None,
+    end_time_ns: int | None,
     schemas: dict[int, Schema] | None = None,
     channels: dict[int, Channel] | None = None,
 ) -> _ReaderReturnType:
@@ -438,8 +438,8 @@ def _read_inner(
                 raise McapError(f"no channel record found with id {record.channel_id}")
             if (
                 (_include is not None and record.channel_id not in _include)
-                or (start_time is not None and record.log_time < start_time)
-                or (end_time is not None and record.log_time >= end_time)
+                or (start_time_ns is not None and record.log_time < start_time_ns)
+                or (end_time_ns is not None and record.log_time >= end_time_ns)
             ):
                 continue
             channel = _channels[record.channel_id]
@@ -450,8 +450,8 @@ def _read_inner(
 def _read_message_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
     should_include: _ShouldIncludeType | None,
-    start_time: float | None,
-    end_time: float | None,
+    start_time_ns: int | None,
+    end_time_ns: int | None,
     emit_chunks: bool,
     validate_crc: bool,
 ) -> _ReaderReturnType:
@@ -461,11 +461,11 @@ def _read_message_seeking(
         # seek to start
         stream.seek(0, io.SEEK_SET)
         yield from _read_message_non_seeking(
-            stream, should_include, start_time, end_time, emit_chunks, validate_crc
+            stream, should_include, start_time_ns, end_time_ns, emit_chunks, validate_crc
         )
         return
 
-    chunk_indexes = _chunks_matching_topics(summary, should_include, start_time, end_time)
+    chunk_indexes = _chunks_matching_topics(summary, should_include, start_time_ns, end_time_ns)
 
     def reader() -> Iterator[McapRecord]:
         for cidx in chunk_indexes:
@@ -474,23 +474,23 @@ def _read_message_seeking(
             yield from breakup_chunk(chunk, validate_crc)
 
     yield from _read_inner(
-        reader(), should_include, start_time, end_time, summary.schemas, summary.channels
+        reader(), should_include, start_time_ns, end_time_ns, summary.schemas, summary.channels
     )
 
 
 def _read_message_non_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
     should_include: _ShouldIncludeType | None,
-    start_time: float | None,
-    end_time: float | None,
+    start_time_ns: int | None,
+    end_time_ns: int | None,
     emit_chunks: bool,
     validate_crc: bool,
 ) -> _ReaderReturnType:
     yield from _read_inner(
         stream_reader(stream, emit_chunks=emit_chunks, validate_crc=validate_crc),
         should_include,
-        start_time,
-        end_time,
+        start_time_ns,
+        end_time_ns,
     )
 
 
@@ -555,8 +555,8 @@ class _Remapper:
 def read_message(
     stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType | None = None,
-    start_time: float | None = None,
-    end_time: float | None = None,
+    start_time_ns: int | None = None,
+    end_time_ns: int | None = None,
     emit_chunks: bool = False,
     validate_crc: bool = False,
 ) -> _ReaderReturnType:
@@ -579,7 +579,9 @@ def read_message(
         return heapq.merge(
             *[
                 remap_schema_channel(
-                    read_message(s, should_include, start_time, end_time, emit_chunks, validate_crc)
+                    read_message(
+                        s, should_include, start_time_ns, end_time_ns, emit_chunks, validate_crc
+                    )
                     if isinstance(s, IO)
                     else s,
                     stream_id=i,
@@ -597,16 +599,16 @@ def read_message(
         return _read_message_seeking(
             stream,
             should_include,
-            start_time,
-            end_time,
+            start_time_ns,
+            end_time_ns,
             emit_chunks,
             validate_crc,
         )
     return _read_message_non_seeking(
         stream,
         should_include,
-        start_time,
-        end_time,
+        start_time_ns,
+        end_time_ns,
         emit_chunks,
         validate_crc,
     )
@@ -628,8 +630,8 @@ class DecodedMessageTuple(NamedTuple):
 def read_message_decoded(
     stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType | None = None,
-    start_time: float | None = None,
-    end_time: float | None = None,
+    start_time_ns: int | None = None,
+    end_time_ns: int | None = None,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
 ) -> Iterator[DecodedMessageTuple]:
     decoders: dict[int, Callable[[bytes], Any]] = {}
@@ -650,7 +652,9 @@ def read_message_decoded(
             f"schema {schema}"
         )
 
-    for schema, channel, message in read_message(stream, should_include, start_time, end_time):
+    for schema, channel, message in read_message(
+        stream, should_include, start_time_ns, end_time_ns
+    ):
         yield DecodedMessageTuple(
             schema, channel, message, decoded_message(schema, channel, message)
         )

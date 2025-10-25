@@ -142,10 +142,13 @@ class Diagnostic(BasePanel[DiagnosticArray]):
     filter_text: reactive[str] = reactive("")
     _last_channel_id: str | None = None
     _newest_timestamp: int
+    _pending_update: bool = False
 
     def __init__(self) -> None:
         super().__init__()
         self._newest_timestamp = 0
+        self.set_interval(1.0, self._validate_stale)  # Check staleness every second
+        self.set_interval(0.05, self._flush_updates)  # Update UI at 20Hz
 
     DEFAULT_CSS = """
     Diagnostic {
@@ -175,14 +178,20 @@ class Diagnostic(BasePanel[DiagnosticArray]):
         yield DiagTree()
 
     def _validate_stale(self) -> None:
+        """Periodically check for stale diagnostics (runs every second)."""
         if self._newest_timestamp == 0:
             return
 
         stale_threshold = self._newest_timestamp - STALE_TIME_NANOSECONDS
+        updated = False
 
         for key, wrap in self.diag_data.items():
-            if wrap.timestamp_ns < stale_threshold and wrap.status.level != DiagnosticLevel.STALE:
+            if wrap.timestamp_ns < stale_threshold and not wrap.is_stale:
                 self.diag_data[key].is_stale = True
+                updated = True
+
+        if updated:
+            self._pending_update = True
 
     def _update_child(self) -> None:
         diag = self.query_one(DiagTree)
@@ -205,6 +214,12 @@ class Diagnostic(BasePanel[DiagnosticArray]):
             diag.data = self.diag_data
         diag.mutate_reactive(DiagTree.data)
 
+    def _flush_updates(self) -> None:
+        """Periodically flush pending updates to the UI (throttled at 20Hz)."""
+        if self._pending_update:
+            self._update_child()
+            self._pending_update = False
+
     def watch_data(self, data: MessageEvent | None) -> None:
         if data is None:
             return
@@ -225,8 +240,8 @@ class Diagnostic(BasePanel[DiagnosticArray]):
                 timestamp_ns=data.timestamp_ns,
             )
 
-        self._validate_stale()
-        self._update_child()
+        # Mark that we need to update UI (will happen in next flush)
+        self._pending_update = True
 
     @on(Select.Changed)
     def log_level_change(self, event: Select.Changed) -> None:

@@ -109,6 +109,7 @@ class DataScreen(Screen):
     source_status: reactive[SourceStatus] = reactive(SourceStatus.INITIALIZING)
 
     topics: reactive[list[Topic]] = reactive([])
+    _previous_topic: Topic | None = None
 
     def __init__(self, file_or_url: str) -> None:
         super().__init__()
@@ -175,11 +176,16 @@ class DataScreen(Screen):
         time_control.current_time = current_time
 
     def watch_selected_topic(self, topic: Topic | None) -> None:
+        # Unsubscribe from previous topic if any
+        if self._previous_topic and self._previous_topic != topic:
+            self.run_worker(self.source.unsubscribe(self._previous_topic.name))
+
         # Subscribe to the selected topic
         if topic:
             data_panel = self.query_one(DataView)
             data_panel.data = None
             self.run_worker(self.source.subscribe(topic.name))
+            self._previous_topic = topic
 
     def on_mount(self) -> None:
         """Initialize the app when mounted."""

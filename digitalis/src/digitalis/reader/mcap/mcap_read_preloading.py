@@ -32,20 +32,14 @@ class McapReaderPreloading:
         self._message_iterator: Iterator[MessageEvent] | None = None
 
         self._file: IO[bytes] = self._file_path.open("rb")
-        self._message_iterator = iter(self._get_message(self._file))
+        self._message_iterator = iter(self._get_messages(self._file, 0))
         self._file.seek(8)  # Skip magic bytes
 
     def set_subscription(self, topics: list[str]) -> None:
         """Set the topics to subscribe to."""
-        new_subscribed_topics_id = {
+        self._subscribed_topics_id = {
             channel.id for channel in self.summary.channels.values() if channel.topic in topics
         }
-
-        # Only recreate iterator if subscription actually changed
-        if self._subscribed_topics_id != new_subscribed_topics_id:
-            self._subscribed_topics_id = new_subscribed_topics_id
-            # Create new iterator at current file position
-            self._message_iterator = iter(self._get_message(self._file))
 
     def close(self) -> None:
         """Clean up resources."""
@@ -66,7 +60,7 @@ class McapReaderPreloading:
         except (StopIteration, EndOfFileError):
             return None
 
-    def _get_message(self, io: IO[bytes]) -> Iterable[MessageEvent]:
+    def _get_messages(self, io: IO[bytes], timestamp_ns: int) -> Iterable[MessageEvent]:
         """Generator to yield messages from the stream."""
 
         if not self._subscribed_topics_id:
@@ -76,6 +70,7 @@ class McapReaderPreloading:
             io,
             lambda channel, _schema: channel.id in self._subscribed_topics_id,
             decoder_factories=[self._decoder_factory],
+            start_time_ns=timestamp_ns,
         ):
             msg_event = MessageEvent(
                 topic=msg.channel.topic,
@@ -107,4 +102,4 @@ class McapReaderPreloading:
         )
 
         self._file.seek(chunk[0].chunk_start_offset)
-        self._message_iterator = iter(self._get_message(self._file))
+        self._message_iterator = iter(self._get_messages(self._file, timestamp_ns))

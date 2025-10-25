@@ -296,6 +296,11 @@ class Tf(BasePanel[TFMessage]):
 
     tf_data: reactive[dict[str, TransformData]] = reactive({})
     _last_channel_id: str | None = None
+    _pending_update: bool = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_interval(0.05, self._flush_updates)  # Update UI at 20Hz
 
     def compose(self) -> ComposeResult:
         yield TfTree()
@@ -304,6 +309,12 @@ class Tf(BasePanel[TFMessage]):
         tree = self.query_one(TfTree)
         tree.data = self.tf_data
         tree.mutate_reactive(TfTree.data)
+
+    def _flush_updates(self) -> None:
+        """Periodically flush pending updates to the UI (throttled at 20Hz)."""
+        if self._pending_update:
+            self._update_tree()
+            self._pending_update = False
 
     def watch_data(self, data: MessageEvent | None) -> None:
         if data is None:
@@ -314,7 +325,7 @@ class Tf(BasePanel[TFMessage]):
             self.tf_data.clear()
             self._last_channel_id = data.topic
 
-        # TODO: Subscribe to booth topics and show correctly
+        # TODO: Subscribe to both topics and show correctly
         is_static = False
 
         # Process each transform in the message
@@ -333,4 +344,5 @@ class Tf(BasePanel[TFMessage]):
                 timestamp_ns=data.timestamp_ns,
             )
 
-        self._update_tree()
+        # Mark that we need to update UI (will happen in next flush)
+        self._pending_update = True

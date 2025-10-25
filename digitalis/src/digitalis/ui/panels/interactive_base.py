@@ -8,6 +8,7 @@ from textual.binding import Binding, BindingType
 from textual.reactive import reactive
 from textual.widgets import Static
 
+from digitalis.reader.types import MessageEvent
 from digitalis.ui.panels.base import BasePanel
 from digitalis.utilities import RichRender, nanoseconds_to_iso
 
@@ -97,6 +98,12 @@ class InteractiveRenderPanel(BasePanel):
         """
 
     # Shared interactive behavior
+    def watch_data(self, data: MessageEvent | None) -> None:
+        """Watch for data changes to reset first_data flag when topic changes."""
+        if data is None:
+            # Topic changed or cleared - reset auto-fit flag
+            self._first_data = True
+
     def _trigger_background_render(self) -> None:
         """Trigger background rendering if conditions are met."""
         if self.data is not None:

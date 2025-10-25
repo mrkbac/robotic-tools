@@ -219,6 +219,8 @@ class McapSource(PlaybackSource):
             self._playback_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._playback_task
+        if self._mcap_reader:
+            self._mcap_reader.close()
         logger.info("MCAP source closed")
 
     async def _playback_loop(self) -> None:

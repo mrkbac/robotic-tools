@@ -1,5 +1,6 @@
 import logging
 import math
+from collections import deque
 from typing import Any, ClassVar, Protocol
 
 import numpy as np
@@ -102,12 +103,15 @@ class NavSatFix(InteractiveRenderPanel):
 
     def __init__(self) -> None:
         super().__init__(default_resolution=10.0)
-        self.gps_points: list[tuple[float, float, float]] = []  # (lat, lon, timestamp)
+        self.gps_points: deque[tuple[float, float, float]] = deque(
+            maxlen=self.MAX_POINTS
+        )  # (lat, lon, timestamp) with automatic size limiting
         self.origin_lat: float | None = None
         self.origin_lon: float | None = None
 
     def watch_data(self, data: MessageEvent | None) -> None:
         """Update the GPS data and add to trajectory."""
+        super().watch_data(data)  # Reset first_data flag on topic change
         if not data:
             return
 
@@ -134,13 +138,9 @@ class NavSatFix(InteractiveRenderPanel):
             self.origin_lat = lat
             self.origin_lon = lon
 
-        # Add point to trajectory
+        # Add point to trajectory (deque automatically limits size)
         timestamp = data.timestamp_ns / 1e9  # Convert to seconds
         self.gps_points.append((lat, lon, timestamp))
-
-        # Limit buffer size
-        if len(self.gps_points) > self.MAX_POINTS:
-            self.gps_points = self.gps_points[-self.MAX_POINTS :]
 
         # Use centralized auto-fit logic
         self._handle_first_data_auto_fit()
