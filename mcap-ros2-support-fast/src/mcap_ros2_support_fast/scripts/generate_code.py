@@ -7,7 +7,7 @@ uv run python -m mcap_ros2_support_fast.scripts.generate_code <mcap_file> -o out
 import argparse
 from pathlib import Path
 
-from mcap.reader import make_reader
+from small_mcap.reader import get_summary
 
 from mcap_ros2_support_fast._dynamic_decoder import (
     DecoderGeneratorFactory,
@@ -36,8 +36,7 @@ def main() -> None:
     encoder_functions = []
 
     with Path(args.mcap_file).open("rb") as f:
-        reader = make_reader(f)
-        summary = reader.get_summary()
+        summary = get_summary(f)
         assert summary
         schemas = summary.schemas
         for schema in schemas.values():

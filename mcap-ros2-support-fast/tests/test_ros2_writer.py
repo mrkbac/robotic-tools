@@ -1,25 +1,28 @@
 from array import array
 from io import BytesIO
 
-from mcap.reader import make_reader
+from mcap_ros2_support_fast import ROS2EncoderFactory
 from mcap_ros2_support_fast.decoder import DecoderFactory
-from mcap_ros2_support_fast.writer import Writer as Ros2Writer
+from small_mcap.reader import read_message_decoded
+from small_mcap.writer import McapWriter
 
 
 def read_ros2_messages(stream: BytesIO):
-    reader = make_reader(stream, decoder_factories=[DecoderFactory()])
-    return reader.iter_decoded_messages()
+    return read_message_decoded(stream, decoder_factories=[DecoderFactory()])
 
 
 def test_write_messages() -> None:
     output = BytesIO()
-    ros_writer = Ros2Writer(output=output)
-    schema = ros_writer.register_msgdef("test_msgs/TestData", "string a\nint32 b")
+    ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
+    ros_writer.start()
+    schema_name = "test_msgs/TestData"
+    schema_data = b"string a\nint32 b"
     for i in range(10):
-        ros_writer.write_message(
+        ros_writer.add_message_object(
             topic="/test",
-            schema=schema,
-            message={"a": f"string message {i}", "b": i},
+            schema_name=schema_name,
+            schema_data=schema_data,
+            message_obj={"a": f"string message {i}", "b": i},
             log_time=i,
             publish_time=i,
             sequence=i,
@@ -39,13 +42,16 @@ def test_write_messages() -> None:
 
 def test_write_std_msgs_empty_messages() -> None:
     output = BytesIO()
-    ros_writer = Ros2Writer(output=output)
-    schema = ros_writer.register_msgdef("std_msgs/msg/Empty", "")
+    ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
+    ros_writer.start()
+    schema_name = "std_msgs/msg/Empty"
+    schema_data = b""
     for i in range(10):
-        ros_writer.write_message(
+        ros_writer.add_message_object(
             topic="/test",
-            schema=schema,
-            message={},
+            schema_name=schema_name,
+            schema_data=schema_data,
+            message_obj={},
             log_time=i,
             publish_time=i,
             sequence=i,
@@ -63,15 +69,18 @@ def test_write_std_msgs_empty_messages() -> None:
 
 def test_write_uint8_array_with_py_array() -> None:
     output = BytesIO()
-    ros_writer = Ros2Writer(output=output)
-    schema = ros_writer.register_msgdef("test_msgs/ByteArray", "uint8[] data")
+    ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
+    ros_writer.start()
+    schema_name = "test_msgs/ByteArray"
+    schema_data = b"uint8[] data"
 
     for i in range(10):
         byte_array = array("B", [i] * 5)
-        ros_writer.write_message(
+        ros_writer.add_message_object(
             topic="/image",
-            schema=schema,
-            message={"data": byte_array},
+            schema_name=schema_name,
+            schema_data=schema_data,
+            message_obj={"data": byte_array},
             log_time=i,
             publish_time=i,
             sequence=i,

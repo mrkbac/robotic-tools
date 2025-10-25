@@ -2,22 +2,13 @@ import io
 import struct
 import zlib
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, Flag, auto
-from typing import BinaryIO
-
-try:
-    import zstandard
-except ImportError:
-    zstandard = None  # type: ignore[assignment]
-
-try:
-    from lz4.frame import compress as lz4_compress
-except ImportError:
-    lz4_compress = None  # type: ignore[assignment]
-
+from typing import Any, BinaryIO, Protocol
 
 from small_mcap.data import (
+    MAGIC,
     Attachment,
     AttachmentIndex,
     Channel,
@@ -36,7 +27,16 @@ from small_mcap.data import (
     SummaryOffset,
 )
 
-MCAP0_MAGIC = struct.pack("<8B", 137, 77, 67, 65, 80, 48, 13, 10)
+try:
+    import zstandard
+except ImportError:
+    zstandard = None  # type: ignore[assignment]
+
+try:
+    from lz4.frame import compress as lz4_compress
+except ImportError:
+    lz4_compress = None  # type: ignore[assignment]
+
 
 # Buffer allocation multiplier for chunk builder
 BUFFER_SIZE_MULTIPLIER = 2  # Pre-allocate 2x chunk_size to avoid reallocations
@@ -200,6 +200,15 @@ class _ChunkBuilder:
         ), self.message_indices.copy()
 
 
+class EncoderFactoryProtocol(Protocol):
+    profile: str
+    library: str
+    encoding: str  # Schema encoding format
+    message_encoding: str  # Message data encoding format
+
+    def encoder_for(self, schema: Schema | None) -> Callable[[Any], bytes] | None: ...
+
+
 class McapWriter:
     """
     MCAP file writer with simple imperative API.
@@ -219,6 +228,7 @@ class McapWriter:
         use_summary_offsets: bool = True,
         enable_crcs: bool = True,
         enable_data_crcs: bool = False,
+        encoder_factory: EncoderFactoryProtocol | None = None,
     ) -> None:
         # Validate compression type
         if not isinstance(compression, CompressionType):
@@ -251,6 +261,7 @@ class McapWriter:
         self.use_summary_offsets = use_summary_offsets
         self.enable_crcs = enable_crcs
         self.enable_data_crcs = enable_data_crcs
+        self.encoder_factory = encoder_factory
 
         self._started = False
         self._finished = False
@@ -261,6 +272,12 @@ class McapWriter:
         self.chunk_indices: list[ChunkIndex] = []
         self.attachment_indexes: list[AttachmentIndex] = []
         self.metadata_indexes: list[MetadataIndex] = []
+
+        # Caching for encoder factory usage
+        self._schema_ids_by_name: dict[str, int] = {}
+        self._channel_ids_by_topic: dict[str, int] = {}
+        self._next_schema_id = 1
+        self._next_channel_id = 1
         self.statistics = Statistics(
             attachment_count=0,
             channel_count=0,
@@ -286,8 +303,13 @@ class McapWriter:
         if self._started:
             raise RuntimeError("Writer already started")
 
+        # Use factory profile/library if available
+        if self.encoder_factory is not None:
+            profile = self.encoder_factory.profile
+            library = self.encoder_factory.library
+
         # Write header
-        self.crc_writer.write(MCAP0_MAGIC)
+        self.crc_writer.write(MAGIC)
         header_data = Header(profile=profile, library=library).write_record()
         self.crc_writer.write(header_data)
 
@@ -439,6 +461,94 @@ class McapWriter:
 
         self.statistics.metadata_count += 1
 
+    def register_schema(self, name: str, data: bytes) -> int:
+        """
+        Register a schema by name and return its ID. If already registered, returns existing ID.
+        Uses encoder_factory.encoding if available, otherwise defaults to empty string.
+
+        :param name: Schema name (e.g., message type)
+        :param data: Schema definition data
+        :return: Schema ID
+        """
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Check cache
+        if name in self._schema_ids_by_name:
+            return self._schema_ids_by_name[name]
+
+        # Create new schema
+        schema_id = self._next_schema_id
+        self._next_schema_id += 1
+
+        encoding = self.encoder_factory.encoding if self.encoder_factory else ""
+        self.add_schema(schema_id, name, encoding, data)
+        self._schema_ids_by_name[name] = schema_id
+
+        return schema_id
+
+    def add_message_object(
+        self,
+        topic: str,
+        schema_name: str,
+        schema_data: bytes,
+        message_obj: Any,
+        log_time: int,
+        publish_time: int,
+        sequence: int = 0,
+    ) -> None:
+        """
+        Add a message object, automatically registering schema and channel as needed.
+        Requires encoder_factory to be set.
+
+        :param topic: The topic of the message
+        :param schema_name: The schema name (e.g., message type)
+        :param schema_data: The schema definition data
+        :param message_obj: The message object to encode
+        :param log_time: The time at which the message was logged (nanosecond UNIX timestamp)
+        :param publish_time: The time at which the message was published (nanosecond UNIX timestamp)
+        :param sequence: Optional sequence number
+        """
+        if self.encoder_factory is None:
+            raise RuntimeError("encoder_factory must be set to use add_message_object()")
+
+        # Register schema if needed
+        schema_id = self.register_schema(schema_name, schema_data)
+
+        # Register channel if needed
+        if topic not in self._channel_ids_by_topic:
+            channel_id = self._next_channel_id
+            self._next_channel_id += 1
+            self.add_channel(
+                channel_id=channel_id,
+                topic=topic,
+                message_encoding=self.encoder_factory.message_encoding,
+                schema_id=schema_id,
+            )
+            self._channel_ids_by_topic[topic] = channel_id
+
+        channel_id = self._channel_ids_by_topic[topic]
+
+        # Get schema and encoder
+        schema = self.schemas[schema_id]
+        encoder = self.encoder_factory.encoder_for(schema)
+        if encoder is None:
+            raise RuntimeError(f"encoder_factory returned None for schema {schema_name}")
+
+        # Encode message
+        data = encoder(message_obj)
+
+        # Add encoded message
+        self.add_message(
+            channel_id=channel_id,
+            log_time=log_time,
+            publish_time=publish_time,
+            data=data,
+            sequence=sequence,
+        )
+
     def add_chunk_with_indexes(self, chunk: Chunk, indexes: list[MessageIndex]) -> None:
         """
         Add a pre-built chunk with its indexes directly to the file.
@@ -520,7 +630,7 @@ class McapWriter:
         self.crc_writer.write(footer.write_record())
 
         # Write closing magic
-        self.crc_writer.write(MCAP0_MAGIC)
+        self.crc_writer.write(MAGIC)
 
         self._finished = True
 

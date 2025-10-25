@@ -6,6 +6,15 @@ from typing import Literal, TypedDict
 from typing_extensions import NotRequired
 
 
+class ConnectionStatus(Enum):
+    """Connection status states."""
+
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+
+
 class JsonOpCodes(Enum):
     """JSON WebSocket operation codes."""
 

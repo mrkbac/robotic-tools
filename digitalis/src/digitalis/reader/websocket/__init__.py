@@ -1,7 +1,6 @@
 """WebSocket source implementation."""
 
-from .source import WebSocketSource
-from .types import (
+from websocket_bridge.ws_types import (
     AdvertiseMessage,
     BinaryOpCodes,
     JsonOpCodes,
@@ -11,6 +10,8 @@ from .types import (
     StatusLevel,
     StatusMessage,
 )
+
+from .source import WebSocketSource
 
 __all__ = [
     "AdvertiseMessage",

@@ -15,6 +15,7 @@ dependencies = [
     # only available on mac arm
     "textual-speedups>=0.2.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "typing-extensions>=4.14.1",
+    "websocket-bridge",
     "websockets>=15.0.1",
 ]
 
@@ -38,3 +39,4 @@ invalid-assignment = "ignore" # causes issues with reactive
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
 small-mcap = { workspace = true }
+websocket-bridge = { workspace = true }

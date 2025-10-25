@@ -3,7 +3,7 @@ import heapq
 import io
 import struct
 import zlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from typing import IO, Any, Literal, NamedTuple, Protocol, overload
 
@@ -654,3 +654,7 @@ def read_message_decoded(
         yield DecodedMessageTuple(
             schema, channel, message, decoded_message(schema, channel, message)
         )
+
+
+def include_topics(topics: Sequence[str]) -> Callable[[Channel, Schema | None], bool]:
+    return lambda channel, _schema: channel.topic in topics
