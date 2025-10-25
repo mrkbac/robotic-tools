@@ -7,12 +7,24 @@ import struct
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import overload
+from typing import cast, overload
 
+from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
-from websockets.server import Serve, WebSocketServerProtocol, serve
+from websockets.typing import Subprotocol
 
-from .ws_types import AdvertiseMessage, BinaryOpCodes, ChannelInfo, JsonMessage, JsonOpCodes
+from .ws_types import (
+    AdvertiseMessage,
+    BinaryOpCodes,
+    ChannelInfo,
+    JsonMessage,
+    JsonOpCodes,
+    ServerInfoMessage,
+    StatusMessage,
+    SubscribeMessage,
+    UnadvertiseMessage,
+    UnsubscribeMessage,
+)
 
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 JsonDict = dict[str, JsonValue]
@@ -48,7 +60,7 @@ class Channel:
 class ConnectionState:
     """Mutable state for a connected client."""
 
-    websocket: WebSocketServerProtocol
+    websocket: ServerConnection
     subscriptions: dict[int, int] = field(default_factory=dict)
 
 
@@ -87,7 +99,7 @@ class WebSocketBridgeServer:
         self._supported_encodings = list(supported_encodings or [])
 
         self._channels: dict[int, Channel] = {}
-        self._connections: dict[WebSocketServerProtocol, ConnectionState] = {}
+        self._connections: dict[ServerConnection, ConnectionState] = {}
         self._json_handlers: dict[str, list[JsonHandler]] = {}
         self._binary_handlers: dict[int, list[BinaryHandler]] = {}
 
@@ -96,7 +108,7 @@ class WebSocketBridgeServer:
         self._on_subscribe: list[SubscriptionHandler] = []
         self._on_unsubscribe: list[SubscriptionHandler] = []
 
-        self._server: Serve | None = None
+        self._server: Server | None = None
         self._state_lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -109,7 +121,7 @@ class WebSocketBridgeServer:
             self._handle_connection,
             self._host,
             self._port,
-            subprotocols=[self._subprotocol],
+            subprotocols=[Subprotocol(self._subprotocol)],
         )
 
     async def stop(self) -> None:
@@ -209,11 +221,11 @@ class WebSocketBridgeServer:
 
     async def unadvertise(self, channel_ids: Iterable[int]) -> None:
         """Broadcast unadvertise message to clients for the given channel ids."""
-        payload = {
+        message: UnadvertiseMessage = {
             "op": JsonOpCodes.UNADVERTISE.value,
             "channelIds": list(channel_ids),
         }
-        await self._broadcast_json(payload)
+        await self._broadcast_json(message)
 
     async def publish_message(
         self,
@@ -251,7 +263,7 @@ class WebSocketBridgeServer:
         status_id: str | None = None,
     ) -> None:
         """Broadcast a status JSON message to every client."""
-        payload: JsonMessage = {
+        payload: StatusMessage = {
             "op": JsonOpCodes.STATUS.value,
             "level": level,
             "message": message,
@@ -260,7 +272,7 @@ class WebSocketBridgeServer:
             payload["id"] = status_id
         await self._broadcast_json(payload)
 
-    async def _broadcast_json(self, message: JsonDict) -> None:
+    async def _broadcast_json(self, message: JsonMessage) -> None:
         """Send a JSON message to all connections."""
         frame = json.dumps(message)
         for state in list(self._connections.values()):
@@ -269,7 +281,7 @@ class WebSocketBridgeServer:
             except ConnectionClosed:
                 Logger.debug("Failed broadcast to closed connection")
 
-    async def _handle_connection(self, websocket: WebSocketServerProtocol) -> None:
+    async def _handle_connection(self, websocket: ServerConnection) -> None:
         """Handle the lifetime of a single client connection."""
         state = ConnectionState(websocket=websocket)
         async with self._state_lock:
@@ -293,7 +305,7 @@ class WebSocketBridgeServer:
                 await _ensure_awaitable(handler(state))
 
     async def _send_server_info(self, state: ConnectionState) -> None:
-        message: JsonMessage = {
+        message: ServerInfoMessage = {
             "op": JsonOpCodes.SERVER_INFO.value,
             "name": self._name,
             "capabilities": list(self._capabilities),
@@ -318,9 +330,9 @@ class WebSocketBridgeServer:
         op_value = str(message["op"])
 
         if op_value == JsonOpCodes.SUBSCRIBE.value:
-            await self._apply_subscriptions(state, message)
+            await self._apply_subscriptions(state, cast("SubscribeMessage", message))
         elif op_value == JsonOpCodes.UNSUBSCRIBE.value:
-            await self._remove_subscriptions(state, message)
+            await self._remove_subscriptions(state, cast("UnsubscribeMessage", message))
 
         handlers = self._json_handlers.get(op_value, [])
         for handler in handlers:
@@ -334,43 +346,35 @@ class WebSocketBridgeServer:
         for handler in handlers:
             await _ensure_awaitable(handler(state, payload))
 
-    async def _apply_subscriptions(self, state: ConnectionState, message: JsonDict) -> None:
-        subscriptions = message.get("subscriptions")
-        if not isinstance(subscriptions, list):
-            return
+    async def _apply_subscriptions(self, state: ConnectionState, message: SubscribeMessage) -> None:
+        subscriptions = message["subscriptions"]
         for entry in subscriptions:
-            if (
-                isinstance(entry, dict)
-                and isinstance(entry.get("id"), int)
-                and isinstance(entry.get("channelId"), int)
-            ):
-                sub_id = entry["id"]
-                channel_id = entry["channelId"]
-                state.subscriptions[sub_id] = channel_id
-                for handler in self._on_subscribe:
-                    await _ensure_awaitable(handler(state, sub_id, channel_id))
+            sub_id = entry["id"]
+            channel_id = entry["channelId"]
+            state.subscriptions[sub_id] = channel_id
+            for handler in self._on_subscribe:
+                await _ensure_awaitable(handler(state, sub_id, channel_id))
 
-    async def _remove_subscriptions(self, state: ConnectionState, message: JsonDict) -> None:
-        subscription_ids = message.get("subscriptionIds")
-        if not isinstance(subscription_ids, list):
-            return
+    async def _remove_subscriptions(
+        self, state: ConnectionState, message: UnsubscribeMessage
+    ) -> None:
+        subscription_ids = message["subscriptionIds"]
         for sub_id in subscription_ids:
-            if isinstance(sub_id, int):
-                channel_id = state.subscriptions.pop(sub_id, None)
-                if channel_id is None:
-                    continue
-                for handler in self._on_unsubscribe:
-                    await _ensure_awaitable(handler(state, sub_id, channel_id))
+            channel_id = state.subscriptions.pop(sub_id, None)
+            if channel_id is None:
+                continue
+            for handler in self._on_unsubscribe:
+                await _ensure_awaitable(handler(state, sub_id, channel_id))
 
     @overload
-    def get_connection(self, websocket: WebSocketServerProtocol) -> ConnectionState | None: ...
+    def get_connection(self, websocket: ServerConnection) -> ConnectionState | None: ...
 
     @overload
     def get_connection(self, websocket: None = ...) -> list[ConnectionState]: ...
 
     def get_connection(
         self,
-        websocket: WebSocketServerProtocol | None = None,
+        websocket: ServerConnection | None = None,
     ) -> ConnectionState | None | list[ConnectionState]:
         """Retrieve connection state for a specific websocket or all connections."""
         if websocket is None:

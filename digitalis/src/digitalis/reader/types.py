@@ -9,7 +9,7 @@ class Topic:
     """Represents a topic with its schema information."""
 
     name: str
-    schema_name: str
+    schema_name: str | None
     topic_id: int
     message_count: int | None = None
 

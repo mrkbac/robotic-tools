@@ -43,6 +43,7 @@ class ImageViewer(BasePanel):
             img = PIL.Image.open(BytesIO(self.data.message.data))
 
         content = self.query_one(ContentSwitcher)
+        img_container: HalfcellImage | AutoImage
         if content.current == "cell":
             img_container = self.query_one(HalfcellImage)
         else:

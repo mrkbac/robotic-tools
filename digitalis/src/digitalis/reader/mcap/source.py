@@ -4,13 +4,22 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from typing import IO, TYPE_CHECKING
+
+from mcap_ros2_support_fast.decoder import DecoderFactory
+from small_mcap.reader import (
+    EndOfFileError,
+    get_summary,
+    read_message_decoded,
+)
 
 from digitalis.exceptions import InvalidFileFormatError
 from digitalis.reader.source import PlaybackSource, SourceStatus
 from digitalis.reader.types import MessageEvent, SourceInfo, Topic
 
-from .mcap_read_preloading import McapReaderPreloading
+if TYPE_CHECKING:
+    from small_mcap.data import Statistics, Summary
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +27,29 @@ logger = logging.getLogger(__name__)
 class McapSource(PlaybackSource):
     """MCAP file source with playback control and seeking capabilities."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(
+        self,
+        path: str,
+        on_message: Callable[[MessageEvent], None],
+        on_source_info: Callable[[SourceInfo], None],
+        on_time: Callable[[int], None],
+        on_status: Callable[[SourceStatus], None],
+    ) -> None:
+        super().__init__(
+            on_message=on_message,
+            on_source_info=on_source_info,
+            on_time=on_time,
+            on_status=on_status,
+        )
         self.path = path
-        self._mcap_reader: McapReaderPreloading | None = None
-        self._stats = None
+        self._file = open(path, "rb")  # noqa: PTH123, SIM115
+        self._decoder_factory = DecoderFactory()
+        self._summary: Summary | None = None
+        self._message_iterator: Iterator[MessageEvent] | None = None
+        self._stats: Statistics | None = None
         self._channels: dict[int, Topic] = {}
         self._subscribed_topics: set[str] = set()
+        self._subscribed_topics_id: set[int] = set()
         self._current_time: int | None = None
         self._playback_speed = 1.0
         self._playback_task: asyncio.Task | None = None
@@ -32,64 +58,52 @@ class McapSource(PlaybackSource):
 
         # Status tracking
         self._current_status = SourceStatus.READY
-        self._status_handler: Callable[[SourceStatus], None] | None = None
-
-        # Callback handlers
-        self._message_handler: Callable[[MessageEvent], None] | None = None
-        self._source_info_handler: Callable[[SourceInfo], None] | None = None
-        self._time_handler: Callable[[int], None] | None = None
 
     async def initialize(self) -> SourceInfo:
         """Initialize the MCAP reader and extract metadata."""
         logger.info(f"Initializing MCAP source: {self.path}")
 
-        try:
-            self._mcap_reader = McapReaderPreloading(self.path)
+        self._summary = get_summary(self._file)
 
-            summary = self._mcap_reader.summary
-            stats = summary.statistics
-            if stats is None:
-                raise InvalidFileFormatError("Statistics not found in MCAP file")  # noqa: TRY301, TODO: improve
-            self._stats = stats
+        if self._summary is None:
+            raise InvalidFileFormatError("No summary found in MCAP file.")
 
-            topics = []
+        stats = self._summary.statistics
+        if stats is None:
+            raise InvalidFileFormatError("Statistics not found in MCAP file")
+        self._stats = stats
 
-            for channel in summary.channels.values():
-                schema = summary.schemas.get(channel.schema_id)
-                topic = Topic(
-                    name=channel.topic,
-                    schema_name=schema.name if schema else "unknown",  # TODO: make None
-                    message_count=stats.channel_message_counts.get(
-                        channel.id, 0
-                    ),  # TODO: make None
-                    topic_id=channel.id,
-                )
-                topics.append(topic)
-                self._channels[channel.id] = topic
+        topics = []
 
-            self._current_time = stats.message_start_time
-
-            self._playback_task = asyncio.create_task(self._playback_loop())
-
-            source_info = SourceInfo(
-                topics=topics,
-                start_time_ns=stats.message_start_time,
-                end_time_ns=stats.message_end_time,
+        for channel in self._summary.channels.values():
+            schema = self._summary.schemas.get(channel.schema_id)
+            topic = Topic(
+                name=channel.topic,
+                schema_name=schema.name if schema else None,
+                message_count=stats.channel_message_counts.get(channel.id),
+                topic_id=channel.id,
             )
+            topics.append(topic)
+            self._channels[channel.id] = topic
 
-            # Notify source info handler
-            if self._source_info_handler:
-                self._source_info_handler(source_info)
+        self._current_time = stats.message_start_time
+        self._message_iterator = iter(self._get_messages(self._file, stats.message_start_time))
 
-            # File loaded successfully, ensure status is READY
-            self._set_status(SourceStatus.READY)
+        self._playback_task = asyncio.create_task(self._playback_loop())
 
-            return source_info  # noqa: TRY300
+        source_info = SourceInfo(
+            topics=topics,
+            start_time_ns=stats.message_start_time,
+            end_time_ns=stats.message_end_time,
+        )
 
-        except Exception:
-            logger.exception("Failed to initialize MCAP source")
-            self._set_status(SourceStatus.ERROR)
-            raise
+        # Notify source info handler
+        self._notify_source_info(source_info)
+
+        # File loaded successfully, ensure status is READY
+        self._set_status(SourceStatus.READY)
+
+        return source_info
 
     async def subscribe(self, topic: str) -> None:
         """Subscribe to messages from a topic."""
@@ -104,10 +118,13 @@ class McapSource(PlaybackSource):
         self._subscribed_topics.add(topic)
         logger.info(f"Subscribed to topic {topic}")
 
-        # # Send current message if available
-        # self._send_current_messages()
-        assert self._mcap_reader is not None, "McapReader not initialized"
-        self._mcap_reader.set_subscription(list(self._subscribed_topics))
+        assert self._summary is not None, "McapReader not initialized"
+
+        self._subscribed_topics_id = {
+            channel.id
+            for channel in self._summary.channels.values()
+            if channel.topic in self._subscribed_topics
+        }
 
     async def unsubscribe(self, topic: str) -> None:
         """Unsubscribe from messages from a topic."""
@@ -117,27 +134,12 @@ class McapSource(PlaybackSource):
 
         self._subscribed_topics.remove(topic)
         logger.info(f"Unsubscribed from topic {topic}")
-        assert self._mcap_reader is not None, "McapReader not initialized"
-        self._mcap_reader.set_subscription(list(self._subscribed_topics))
-
-    def set_message_handler(self, handler: Callable[[MessageEvent], None]) -> None:
-        """Set the callback for handling incoming messages."""
-        self._message_handler = handler
-
-    def set_source_info_handler(self, handler: Callable[[SourceInfo], None]) -> None:
-        """Set the callback for handling source info updates."""
-        self._source_info_handler = handler
-
-    def set_time_handler(self, handler: Callable[[int], None]) -> None:
-        """Set the callback for handling time updates."""
-        self._time_handler = handler
-
-    def set_status_handler(self, handler: Callable[[SourceStatus], None]) -> None:
-        """Set the callback for handling source status updates."""
-        self._status_handler = handler
-        # Immediately notify with current status
-        if self._status_handler:
-            self._status_handler(self._current_status)
+        assert self._summary is not None, "McapReader not initialized"
+        self._subscribed_topics_id = {
+            channel.id
+            for channel in self._summary.channels.values()
+            if channel.topic in self._subscribed_topics
+        }
 
     def get_status(self) -> SourceStatus:
         """Get the current source status."""
@@ -148,8 +150,7 @@ class McapSource(PlaybackSource):
         if self._current_status != status:
             self._current_status = status
             logger.debug(f"MCAP source status changed to: {status.value}")
-            if self._status_handler:
-                self._status_handler(status)
+            self._notify_status(status)
 
     def start_playback(self) -> None:
         """Start or resume playback."""
@@ -175,25 +176,34 @@ class McapSource(PlaybackSource):
         )
 
         self._current_time = timestamp_ns
-        assert self._mcap_reader is not None, "McapReader not initialized"
-        self._mcap_reader.seek_to_ns(timestamp_ns)
+        assert self._summary is not None, "McapReader not initialized"
+        chunk = sorted(
+            (
+                c
+                for c in self._summary.chunk_indexes
+                if timestamp_ns <= c.message_end_time
+                # it can happen that we seek between chunk so we select next chunk
+            ),
+            key=lambda c: c.chunk_start_offset,
+        )
+
+        self._file.seek(chunk[0].chunk_start_offset)
+        self._message_iterator = iter(self._get_messages(self._file, timestamp_ns))
 
         # Signal that a seek operation occurred
         self._seek_flag = True
 
         # Immediately fetch and display the next message at/after this timestamp
         # This provides visual feedback even when playback is paused
-        msg = self._mcap_reader.get_next_message()
-        # TODO: fetch for each subscribed topic
+        msg = self.get_next_message()
         if msg is not None:
             # Send message if we're subscribed to its topic
-            if self._message_handler and msg.topic in self._subscribed_topics:
-                self._message_handler(msg)
+            if msg.topic in self._subscribed_topics:
+                self._notify_message(msg)
 
             # Update current time to the actual message timestamp
             self._current_time = msg.timestamp_ns
-            if self._time_handler:
-                self._time_handler(msg.timestamp_ns)
+            self._notify_time(msg.timestamp_ns)
 
     @property
     def is_playing(self) -> bool:
@@ -219,16 +229,13 @@ class McapSource(PlaybackSource):
             self._playback_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._playback_task
-        if self._mcap_reader:
-            self._mcap_reader.close()
+        self._file.close()
         logger.info("MCAP source closed")
 
     async def _playback_loop(self) -> None:
         """Main playback loop."""
         if not self._stats:
             return
-
-        assert self._mcap_reader is not None, "McapReader not initialized"
 
         last_msg_time = None
         start_time = time.perf_counter_ns()
@@ -243,14 +250,14 @@ class McapSource(PlaybackSource):
                 last_msg_time = None
                 start_time = time.perf_counter_ns()
 
-            msg = self._mcap_reader.get_next_message()
+            msg = self.get_next_message()
             if msg is None:
                 await asyncio.sleep(0.01)
                 continue
 
             # Send message if subscribed
-            if self._message_handler and msg.topic in self._subscribed_topics:
-                self._message_handler(msg)
+            if msg.topic in self._subscribed_topics:
+                self._notify_message(msg)
 
             # Calculate and perform sleep for realistic playback timing
             if last_msg_time is not None:
@@ -264,10 +271,42 @@ class McapSource(PlaybackSource):
             # Update state for next iteration
             last_msg_time = msg.timestamp_ns
             self._current_time = msg.timestamp_ns
-            if self._time_handler:
-                self._time_handler(msg.timestamp_ns)
+            self._notify_time(msg.timestamp_ns)
             start_time = time.perf_counter_ns()
 
     async def _smooth_sleep(self, sleep_seconds: float) -> None:
         """Sleep with interruption checking."""
         await asyncio.sleep(sleep_seconds)
+
+    def get_next_message(self) -> MessageEvent | None:
+        """Get the next message from the stream.
+
+        Returns:
+            MessageEvent: The next message in the stream, or None if stream is exhausted.
+        """
+        assert self._message_iterator is not None
+
+        try:
+            return next(self._message_iterator)
+        except (StopIteration, EndOfFileError):
+            return None
+
+    def _get_messages(self, io: IO[bytes], timestamp_ns: int) -> Iterable[MessageEvent]:
+        """Generator to yield messages from the stream."""
+
+        if not self._subscribed_topics_id:
+            return
+
+        for msg in read_message_decoded(
+            io,
+            lambda channel, _schema: channel.id in self._subscribed_topics_id,
+            decoder_factories=[self._decoder_factory],
+            start_time_ns=timestamp_ns,
+        ):
+            msg_event = MessageEvent(
+                topic=msg.channel.topic,
+                message=msg.decoded_message,
+                timestamp_ns=msg.message.log_time,
+                schema_name=msg.schema.name if msg.schema else None,
+            )
+            yield msg_event

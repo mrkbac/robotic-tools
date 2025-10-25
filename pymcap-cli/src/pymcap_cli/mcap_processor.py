@@ -116,7 +116,7 @@ def compile_topic_patterns(patterns: list[str]) -> list[Pattern[str]]:
     for pattern in patterns:
         try:
             compiled.append(re.compile(pattern, re.IGNORECASE))
-        except re.error as e:  # noqa: PERF203
+        except re.error as e:
             raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
 
     return compiled

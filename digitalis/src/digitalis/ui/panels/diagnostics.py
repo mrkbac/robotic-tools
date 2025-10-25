@@ -83,7 +83,9 @@ class DiagTree(Tree):
         self.show_root = False
 
     def watch_data(self, data: dict[str, StaleStatusWrapper]) -> None:
-        _node_map: dict[str, TreeNode] = {kv.data: kv for kv in self.root.children}  # pyright: ignore[reportAssignmentType]
+        _node_map: dict[str, TreeNode] = {
+            kv.data: kv for kv in self.root.children if isinstance(kv.data, str)
+        }  # pyright: ignore[reportAssignmentType]
 
         stale_keys = set(_node_map.keys()) - set(data.keys())
         for stale_key in stale_keys:
@@ -245,7 +247,7 @@ class Diagnostic(BasePanel[DiagnosticArray]):
 
     @on(Select.Changed)
     def log_level_change(self, event: Select.Changed) -> None:
-        self.filter_level = event.value  # pyright: ignore[reportAttributeAccessIssue]
+        self.filter_level = DiagnosticLevel(event.value) if isinstance(event.value, int) else None  # pyright: ignore[reportAttributeAccessIssue]
         self._update_child()
 
     @on(Input.Changed)

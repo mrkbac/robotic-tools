@@ -5,10 +5,9 @@ import contextlib
 import json
 import logging
 import struct
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
-from websockets.client import WebSocketClientProtocol
 
 from .ws_types import (
     BinaryOpCodes,
@@ -21,6 +20,9 @@ from .ws_types import (
     SubscribeMessage,
     UnsubscribeMessage,
 )
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ class WebSocketBridgeClient:
         self._max_retry_delay = max_retry_delay
         self._backoff_factor = backoff_factor
 
-        self._websocket: WebSocketClientProtocol | None = None
+        self._websocket: ClientConnection | None = None
         self._receiver_task: asyncio.Task[None] | None = None
         self._connection_task: asyncio.Task[None] | None = None
         self._connection_event = asyncio.Event()
@@ -102,7 +104,7 @@ class WebSocketBridgeClient:
             # Stop persistent connection attempts
             self._should_connect = False
             self._running = False
-            self._set_connection_status(ConnectionStatus.DISCONNECTED)
+            await self._set_connection_status(ConnectionStatus.DISCONNECTED)
 
             # Cancel connection task
             if self._connection_task:
@@ -143,19 +145,19 @@ class WebSocketBridgeClient:
         """Return the cached serverInfo message."""
         return self._server_info
 
-    def get_status(self) -> ConnectionStatus:
+    def get_connection_status(self) -> ConnectionStatus:
         """Get the current connection status."""
         return self._connection_status
 
-    def _set_connection_status(self, status: ConnectionStatus) -> None:
+    async def _set_connection_status(self, status: ConnectionStatus) -> None:
         """Update connection status and notify via callback."""
         if self._connection_status != status:
             self._connection_status = status
             logger.debug(f"Connection status changed to: {status.value}")
             # Call the callback method for subclasses to override
-            asyncio.create_task(self._on_connection_status_changed(status))
+            await self.on_connection_status_changed(status)
 
-    async def _on_connection_status_changed(self, status: ConnectionStatus) -> None:
+    async def on_connection_status_changed(self, status: ConnectionStatus) -> None:
         """Callback for connection status changes. Override in subclasses."""
         logger.debug(f"Connection status: {status.value}")
 
@@ -181,12 +183,12 @@ class WebSocketBridgeClient:
         while self._should_connect:
             if not self._websocket:
                 self._connection_event.clear()  # Clear event until connected
-                self._set_connection_status(ConnectionStatus.CONNECTING)
+                await self._set_connection_status(ConnectionStatus.CONNECTING)
 
                 try:
                     await self._attempt_connection()
                     self._consecutive_failures = 0
-                    self._set_connection_status(ConnectionStatus.CONNECTED)
+                    await self._set_connection_status(ConnectionStatus.CONNECTED)
                     self._connection_event.set()  # Signal connection established
                     logger.info("✅ WebSocket connected successfully")
 
@@ -341,14 +343,14 @@ class WebSocketBridgeClient:
                 logger.warning("WebSocket connection closed, will reconnect...")
                 self._websocket = None
                 self._connection_event.clear()  # Clear event when disconnected
-                self._set_connection_status(ConnectionStatus.RECONNECTING)
+                await self._set_connection_status(ConnectionStatus.RECONNECTING)
                 # Connection will be re-established by the connection task
 
             except Exception:
                 logger.exception("Error in message loop")
                 self._websocket = None
                 self._connection_event.clear()  # Clear event on error
-                self._set_connection_status(ConnectionStatus.RECONNECTING)
+                await self._set_connection_status(ConnectionStatus.RECONNECTING)
                 # Brief pause before continuing loop
                 await asyncio.sleep(1.0)
 

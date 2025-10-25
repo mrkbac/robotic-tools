@@ -57,7 +57,9 @@ class McapError(Exception):
 
 class InvalidMagicError(McapError):
     def __init__(self, bad_magic: bytes) -> None:
-        super().__init__(f"not a valid MCAP file, invalid magic: {bad_magic}")
+        super().__init__(
+            f"not a valid MCAP file, invalid magic: {bad_magic.decode('utf-8', 'replace')}"
+        )
 
 
 class EndOfFileError(McapError):

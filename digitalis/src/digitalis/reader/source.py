@@ -22,6 +22,26 @@ class SourceStatus(Enum):
 class Source(ABC):
     """Base interface for data sources that provide topic subscription and message delivery."""
 
+    def __init__(
+        self,
+        on_message: Callable[[MessageEvent], None],
+        on_source_info: Callable[[SourceInfo], None],
+        on_time: Callable[[int], None],
+        on_status: Callable[[SourceStatus], None],
+    ) -> None:
+        """Initialize the source with callback handlers.
+
+        Args:
+            on_message: Callback for incoming messages
+            on_source_info: Callback for source info updates
+            on_time: Callback for time updates
+            on_status: Callback for status updates
+        """
+        self._notify_message = on_message
+        self._notify_source_info = on_source_info
+        self._notify_time = on_time
+        self._notify_status = on_status
+
     @abstractmethod
     async def initialize(self) -> SourceInfo:
         """Initialize the source and return available topics and metadata."""
@@ -45,26 +65,6 @@ class Source(ABC):
     @abstractmethod
     async def unsubscribe(self, topic: str) -> None:
         """Unsubscribe from messages from a topic."""
-        ...
-
-    @abstractmethod
-    def set_message_handler(self, handler: Callable[[MessageEvent], None]) -> None:
-        """Set callback to handle incoming messages."""
-        ...
-
-    @abstractmethod
-    def set_source_info_handler(self, handler: Callable[[SourceInfo], None]) -> None:
-        """Set callback to handle source info updates (time range, metadata changes)."""
-        ...
-
-    @abstractmethod
-    def set_time_handler(self, handler: Callable[[int], None]) -> None:
-        """Set callback to handle time updates."""
-        ...
-
-    @abstractmethod
-    def set_status_handler(self, handler: Callable[[SourceStatus], None]) -> None:
-        """Set callback to handle source status updates."""
         ...
 
     def get_status(self) -> SourceStatus:

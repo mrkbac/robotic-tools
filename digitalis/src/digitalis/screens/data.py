@@ -115,11 +115,13 @@ class DataScreen(Screen):
         super().__init__()
         self.title = f"Digitalis 🪻 - {file_or_url} - FPS: {MAX_FPS}"
 
-        self.source = create_source(file_or_url)
-        self.source.set_message_handler(self.on_message)
-        self.source.set_source_info_handler(self.on_source_info)
-        self.source.set_time_handler(self.on_time_update)
-        self.source.set_status_handler(self.on_status_update)
+        self.source = create_source(
+            file_or_url,
+            on_message=self.on_message,
+            on_source_info=self.on_source_info,
+            on_time=self.on_time_update,
+            on_status=self.on_status_update,
+        )
 
     def on_source_info(self, source_info: SourceInfo) -> None:
         """Handle source info updates from the source."""

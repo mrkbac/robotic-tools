@@ -2,7 +2,7 @@ import logging
 from typing import ClassVar
 
 import numpy as np
-import pointcloud2
+import pointcloud2  # type: ignore[import-untyped]
 from textual import work
 from textual.binding import Binding, BindingType
 from textual.widgets import Static
