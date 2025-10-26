@@ -13,4 +13,5 @@ members = [
     "small-mcap",
     "websocket-proxy",
     "websocket-bridge",
+    "ros-parser",
 ]

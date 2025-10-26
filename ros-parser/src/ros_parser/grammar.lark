@@ -1,0 +1,134 @@
+// ROS2 Message Definition Grammar
+// Based on: https://github.com/ros2/rosidl/blob/master/rosidl_adapter/rosidl_adapter/parser.py
+// Parser: LALR with contextual lexer for performance and clarity
+
+// Import common terminals from Lark standard library
+%import common.INT
+%import common.SIGNED_INT
+%import common.SIGNED_FLOAT
+%import common.WS_INLINE
+%import common.NEWLINE
+%import common.SH_COMMENT -> COMMENT
+
+// Globally ignore inline whitespace and comments
+%ignore WS_INLINE
+%ignore COMMENT
+
+// Require at least one newline between field/constant definitions
+// Empty files are allowed
+start: _empty
+     | _lines
+
+_empty: NEWLINE*
+_lines: NEWLINE* line (NEWLINE+ line)* NEWLINE*
+
+line: content
+
+content: field_or_constant
+
+// Field or constant definition - disambiguated by presence of '='
+// Note: Constants should only use primitive types (validated in transformer)
+field_or_constant: type_spec identifier field_or_const_tail?
+
+identifier: IDENTIFIER
+
+field_or_const_tail: constant_tail
+                   | default_tail
+
+// Constant definition with '=' separator
+constant_tail: "=" constant_value
+
+// Field with default value (no '=')
+default_tail: default_value
+
+// Type specification
+type_spec: string_type string_bound? array_spec?
+         | numeric_type array_spec?
+         | complex_type array_spec?
+         | local_type array_spec?
+
+// String types can have bounds
+string_type: STRING_TYPE
+
+// Numeric and other primitive types (no bounds allowed)
+numeric_type: NUMERIC_TYPE
+
+complex_type: PACKAGE_NAME "/" TYPE_IDENTIFIER
+local_type: TYPE_IDENTIFIER
+
+// String bounds: <=N (only for string/wstring)
+string_bound: "<=" INTEGER
+
+// Array specifications
+array_spec: unbounded_array
+          | fixed_array
+          | bounded_array
+
+unbounded_array: "[" "]"
+fixed_array: "[" INTEGER "]"
+bounded_array: "[" "<=" INTEGER "]"
+
+// Values
+default_value: array_literal
+             | primitive_literal
+
+constant_value: primitive_literal
+
+array_literal: "[" [primitive_literal ("," primitive_literal)* [","]] "]"
+
+primitive_literal: quoted_string
+                 | boolean_literal
+                 | numeric_literal
+                 | unquoted_string
+
+quoted_string: ESCAPED_STRING
+boolean_literal: BOOLEAN
+numeric_literal: HEX_NUMBER | BINARY_NUMBER | OCTAL_NUMBER | SIGNED_NUMBER | FLOAT_NUMBER
+unquoted_string: UNQUOTED_STRING
+
+// String types (can have bounds) - higher priority than regex patterns
+STRING_TYPE.2: "string" | "wstring"
+
+// Numeric and other primitive types (no bounds) - higher priority than regex patterns
+NUMERIC_TYPE.2: "bool" | "byte" | "char"
+              | "float32" | "float64"
+              | "int8" | "uint8"
+              | "int16" | "uint16"
+              | "int32" | "uint32"
+              | "int64" | "uint64"
+              | "time" | "duration"
+
+// Package names: start with lowercase, no trailing underscore
+// Pattern: [a-z]([a-z0-9_]*[a-z0-9])? - ensures no trailing underscore
+PACKAGE_NAME: /[a-z]([a-z0-9_]*[a-z0-9])?/
+
+// Type identifiers start with uppercase letter
+TYPE_IDENTIFIER: /[A-Z][A-Za-z0-9]*/
+
+// General identifier for field/constant names
+// Pattern: letter optionally followed by alphanumeric/underscores (no trailing underscore)
+IDENTIFIER: /[A-Za-z]([A-Za-z0-9_]*[A-Za-z0-9])?/
+
+// Special base numeric literals - highest priority to match before plain integers
+HEX_NUMBER.2: /[+-]?0[xX][0-9a-fA-F]+/
+BINARY_NUMBER.2: /[+-]?0[bB][01]+/
+OCTAL_NUMBER.2: /[+-]?0[oO][0-7]+/
+
+// Use imported common number terminals - higher priority than UNQUOTED_STRING
+INTEGER.1: INT
+SIGNED_NUMBER.1: SIGNED_INT
+FLOAT_NUMBER.1: SIGNED_FLOAT
+
+// Boolean literals - higher priority than UNQUOTED_STRING
+// Only true/false (1/0 treated as numeric and coerced in semantic pass)
+// Use word boundaries to avoid matching "false" in "falsehood"
+BOOLEAN.1: /\b(true|True|false|False)\b/
+
+// Strings can be quoted or unquoted for compatibility with reference parser
+ESCAPED_STRING: /'(?:[^'\\]|\\.)*'/
+              | /"(?:[^"\\]|\\.)*"/
+
+// Unquoted strings (for default values and constants) - match until comment or end of line
+// Excludes =, whitespace, #, comma, brackets, quotes, and newline
+// LOWEST priority - fallback for anything not matched by other terminals
+UNQUOTED_STRING.0: /[^\s#\[\],=\n"'][^#\[\],=\n"']*/

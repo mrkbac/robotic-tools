@@ -12,6 +12,7 @@ members = [
     "mcap-ros2-support-fast",
     "pymcap-cli",
     "robotic-tools",
+    "ros-parser",
     "small-mcap",
     "websocket-bridge",
     "websocket-proxy",
@@ -1601,6 +1602,29 @@ wheels = [
 name = "robotic-tools"
 version = "0.1.0"
 source = { virtual = "." }
+
+[[package]]
+name = "ros-parser"
+version = "0.1.0"
+source = { editable = "ros-parser" }
+dependencies = [
+    { name = "pytest" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "lark" },
+    { name = "pyinstrument" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", specifier = ">=8.4.2" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "lark", specifier = ">=1.3.0" },
+    { name = "pyinstrument", specifier = ">=5.1.1" },
+]
 
 [[package]]
 name = "small-mcap"
