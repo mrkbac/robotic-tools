@@ -34,6 +34,7 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
     current_active: dict[int, ChunkIndex] = {}
     # Chunks active at first point of max concurrency
     max_concurrent_chunks: dict[int, ChunkIndex] = {}
+    max_concurrent_bytes = 0
 
     for _, event_type, chunk_id in events:
         if event_type == 0:  # Start event
@@ -41,13 +42,15 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
             if len(current_active) > len(max_concurrent_chunks):
                 # Save the chunks that are active at this point of maximum concurrency
                 max_concurrent_chunks = current_active.copy()
+                # Sum the uncompressed size of chunks at the point of maximum concurrency
+                max_concurrent_bytes = max(
+                    max_concurrent_bytes,
+                    sum(chunk.uncompressed_size for chunk in max_concurrent_chunks.values()),
+                )
         else:  # End event
             current_active.pop(chunk_id, None)
 
-    # Sum the uncompressed size of chunks at the point of maximum concurrency
-    total_size_at_max = sum(chunk.uncompressed_size for chunk in max_concurrent_chunks.values())
-
-    return len(max_concurrent_chunks), total_size_at_max
+    return len(max_concurrent_chunks), max_concurrent_bytes
 
 
 def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -192,7 +195,7 @@ def handle_command(args: argparse.Namespace) -> None:
         chunk_stats.add_row(
             "Overlaps:",
             f"[green]{max_concurrent}[/green] max concurrent, "
-            f"[yellow]{bytes_to_human(overlap_size)}[/yellow] decompressed",
+            f"[yellow]{bytes_to_human(overlap_size)}[/yellow] max total size at once",
         )
         console.print(chunk_stats)
 

@@ -141,6 +141,7 @@ def handle_chunks(args: argparse.Namespace) -> None:
     table.add_column("Compressed Size", style="yellow", justify="right")
     table.add_column("Uncompressed Size", style="yellow", justify="right")
     table.add_column("Ratio", style="magenta", justify="right")
+    table.add_column("Channel IDs", style="green")
 
     for chunk in summary.chunk_indexes:
         # Convert timestamps to human readable format (time only, not date)
@@ -158,6 +159,10 @@ def handle_chunks(args: argparse.Namespace) -> None:
             else 0.0
         )
 
+        # Extract and format channel IDs from message_index_offsets
+        channel_ids = sorted(chunk.message_index_offsets.keys())
+        channel_ids_str = ", ".join(str(cid) for cid in channel_ids)
+
         table.add_row(
             str(chunk.chunk_start_offset),
             str(chunk.chunk_length),
@@ -167,6 +172,7 @@ def handle_chunks(args: argparse.Namespace) -> None:
             bytes_to_human(chunk.compressed_size),
             bytes_to_human(chunk.uncompressed_size),
             f"{ratio:.1f}%",
+            channel_ids_str,
         )
 
     console.print(table)
