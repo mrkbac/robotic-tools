@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from pymcap_cli.cmd import du_cmd, filter_cmd, info_cmd, process_cmd, recover_cmd
+from pymcap_cli.cmd import du_cmd, filter_cmd, info_cmd, list_cmd, process_cmd, recover_cmd
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -20,6 +20,9 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Add info command
     info_cmd.add_parser(subparsers)
+
+    # Add list command
+    list_cmd.add_parser(subparsers)
 
     # Add recover command
     recover_cmd.add_parser(subparsers)
@@ -48,6 +51,8 @@ def main() -> None:
     # Route to appropriate command handler
     if args.command == "info":
         info_cmd.handle_command(args)
+    elif args.command == "list":
+        list_cmd.handle_command(args)
     elif args.command == "recover":
         recover_cmd.handle_command(args)
     elif args.command == "du":

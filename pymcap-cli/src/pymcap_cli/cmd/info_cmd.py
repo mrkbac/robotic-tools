@@ -5,6 +5,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+from small_mcap.data import ChunkIndex
 from small_mcap.reader import InvalidMagicError
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
@@ -12,6 +13,41 @@ from pymcap_cli.rebuild import read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human
 
 console = Console()
+
+
+def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int]:
+    if len(chunk_indexes) <= 1:
+        return 0, 0
+
+    # Create events for start and end of each chunk
+    # Each event is (time, event_type, chunk_id)
+    # event_type: 0 = start, 1 = end (so starts come before ends at same time)
+    events: list[tuple[int, int, int]] = []
+    for idx, chunk in enumerate(chunk_indexes):
+        events.append((chunk.message_start_time, 0, idx))
+        events.append((chunk.message_end_time, 1, idx))
+
+    # Sort by time, then by event type (starts before ends)
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    # Map of chunk ID to ChunkIndex for currently active chunks
+    current_active: dict[int, ChunkIndex] = {}
+    # Chunks active at first point of max concurrency
+    max_concurrent_chunks: dict[int, ChunkIndex] = {}
+
+    for _, event_type, chunk_id in events:
+        if event_type == 0:  # Start event
+            current_active[chunk_id] = chunk_indexes[chunk_id]
+            if len(current_active) > len(max_concurrent_chunks):
+                # Save the chunks that are active at this point of maximum concurrency
+                max_concurrent_chunks = current_active.copy()
+        else:  # End event
+            current_active.pop(chunk_id, None)
+
+    # Sum the uncompressed size of chunks at the point of maximum concurrency
+    total_size_at_max = sum(chunk.uncompressed_size for chunk in max_concurrent_chunks.values())
+
+    return len(max_concurrent_chunks), total_size_at_max
 
 
 def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -145,6 +181,20 @@ def handle_command(args: argparse.Namespace) -> None:
         )
 
     console.print(compression_table)
+
+    # Calculate chunk overlaps
+    max_concurrent, overlap_size = _calculate_chunk_overlaps(summary.chunk_indexes)
+    # Display overlap information if there are overlapping chunks
+    if max_concurrent > 1:
+        chunk_stats = Table.grid(padding=(0, 1))
+        chunk_stats.add_column(style="bold blue")
+        chunk_stats.add_column()
+        chunk_stats.add_row(
+            "Overlaps:",
+            f"[green]{max_concurrent}[/green] max concurrent, "
+            f"[yellow]{bytes_to_human(overlap_size)}[/yellow] decompressed",
+        )
+        console.print(chunk_stats)
 
     # Channels table (improved)
     channels_table = Table()
