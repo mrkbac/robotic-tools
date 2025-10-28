@@ -97,6 +97,114 @@ class _CRCWriter:
         self._f.close()
 
 
+def _compress_chunk_data(
+    data: bytes, compression: CompressionType, min_ratio: float = 0.05
+) -> tuple[bytes, str]:
+    """
+    Compress chunk data and return (compressed_data, compression_type_used).
+
+    Falls back to uncompressed if compression doesn't save at least min_ratio (default 5%).
+
+    :param data: Uncompressed chunk data
+    :param compression: Desired compression type
+    :param min_ratio: Minimum compression ratio to use compression (default 0.05 = 5%)
+    :return: Tuple of (compressed_data, compression_type_string)
+    """
+    if compression == CompressionType.NONE:
+        return data, ""
+
+    # Try compression
+    if compression == CompressionType.ZSTD:
+        if zstandard is None:
+            raise ImportError("zstandard module not available")
+        cctx = zstandard.ZstdCompressor()
+        compressed = cctx.compress(data)
+    elif compression == CompressionType.LZ4:
+        if lz4_compress is None:
+            raise ImportError("lz4 module not available")
+        compressed = lz4_compress(data)
+    else:
+        raise ValueError(f"Unsupported compression type: {compression}")
+
+    # Check if compression is beneficial
+    original_size = len(data)
+    compressed_size = len(compressed)
+    savings_ratio = (original_size - compressed_size) / original_size
+
+    if savings_ratio < min_ratio:
+        # Compression not beneficial, use uncompressed
+        return data, ""
+
+    return compressed, compression.value
+
+
+def _write_summary_section(
+    buffer: io.BytesIO,
+    offsets: list[SummaryOffset],
+    opcode: Opcode,
+    items: list[Any],
+    summary_start: int,
+) -> None:
+    """Write a group of records to summary and add corresponding offset."""
+    if not items:
+        return
+
+    group_start = buffer.tell()
+    buffer.writelines(item.write_record() for item in items)
+
+    offsets.append(
+        SummaryOffset(
+            group_opcode=opcode,
+            group_start=summary_start + group_start,
+            group_length=buffer.tell() - group_start,
+        )
+    )
+
+
+def _calculate_summary_offset_start(
+    summary_start: int,
+    summary_data: bytes,
+    summary_offsets: list[SummaryOffset],
+    use_summary_offsets: bool,
+) -> int:
+    """Calculate the summary offset start position."""
+    if not use_summary_offsets or not summary_offsets:
+        return 0
+    return (
+        summary_start
+        + len(summary_data)
+        - sum(len(offset.write_record()) for offset in summary_offsets)
+    )
+
+
+def _calculate_summary_crc(
+    summary_data: bytes,
+    summary_start: int,
+    summary_offsets: list[SummaryOffset],
+    use_summary_offsets: bool,
+    enable_crcs: bool,
+) -> int:
+    """Calculate CRC for summary section including footer fields."""
+    if not enable_crcs:
+        return 0
+
+    # CRC of summary data
+    summary_crc = zlib.crc32(summary_data)
+
+    # Include footer fields in CRC
+    summary_offset_start = _calculate_summary_offset_start(
+        summary_start, summary_data, summary_offsets, use_summary_offsets
+    )
+    footer_fields = struct.pack(
+        "<BQQQ",
+        Opcode.FOOTER,
+        8 + 8 + 4,  # Footer record length
+        0 if len(summary_data) == 0 else summary_start,
+        summary_offset_start,
+    )
+    return zlib.crc32(footer_fields, summary_crc)
+
+
 class _ChunkBuilder:
     """Builds chunks by accumulating messages until chunk size limit is reached."""
 
@@ -176,22 +284,11 @@ class _ChunkBuilder:
 
         chunk_data = bytes(self.buffer_data[: self.buffer_pos])
 
-        if self.compression == CompressionType.ZSTD:
-            if zstandard is None:
-                raise ImportError("zstandard module not available")
-            cctx = zstandard.ZstdCompressor()
-            compressed_data = cctx.compress(chunk_data)
-        elif self.compression == CompressionType.LZ4:
-            if lz4_compress is None:
-                raise ImportError("lz4 module not available")
-            compressed_data = lz4_compress(chunk_data)
-        elif self.compression == CompressionType.NONE:
-            compressed_data = chunk_data
-        else:
-            raise ValueError(f"Unsupported compression type: {self.compression}")
+        # Compress data (will fall back to uncompressed if < 5% savings)
+        compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
 
         return Chunk(
-            compression=self.compression.value,
+            compression=compression_used,
             data=compressed_data,
             message_start_time=self.message_start_time,
             message_end_time=self.message_end_time,
@@ -250,6 +347,7 @@ class McapWriter:
                 "Install it with: pip install zstandard"
             )
 
+        # Configuration
         self.output = output
         self.chunk_size = chunk_size
         self.compression = compression
@@ -263,21 +361,26 @@ class McapWriter:
         self.enable_data_crcs = enable_data_crcs
         self.encoder_factory = encoder_factory
 
+        # Writer state
         self._started = False
         self._finished = False
 
-        # State tracking
+        # Schemas and channels
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
+
+        # Indexes
         self.chunk_indices: list[ChunkIndex] = []
         self.attachment_indexes: list[AttachmentIndex] = []
         self.metadata_indexes: list[MetadataIndex] = []
 
-        # Caching for encoder factory usage
+        # Encoder factory caching (for automatic schema/channel registration)
         self._schema_ids_by_name: dict[str, int] = {}
         self._channel_ids_by_topic: dict[str, int] = {}
         self._next_schema_id = 1
         self._next_channel_id = 1
+
+        # Statistics tracking
         self.statistics = Statistics(
             attachment_count=0,
             channel_count=0,
@@ -290,10 +393,8 @@ class McapWriter:
             schema_count=0,
         )
 
-        # CRC writer wraps output
+        # I/O components
         self.crc_writer = _CRCWriter(output, enable_crcs)
-
-        # Chunk builder for accumulating messages
         self.chunk_builder: _ChunkBuilder | None = None
         if use_chunking:
             self.chunk_builder = _ChunkBuilder(compression, enable_crcs, chunk_size)
@@ -568,6 +669,12 @@ class McapWriter:
         # Write the pre-built chunk
         self._write_chunk(chunk, {idx.channel_id: idx for idx in indexes})
 
+    def _finalize_current_chunk(self) -> None:
+        """Finalize and write any remaining chunk."""
+        if self.chunk_builder is not None and (result := self.chunk_builder.finalize()):
+            chunk, message_indices = result
+            self._write_chunk(chunk, message_indices)
+
     def finish(self) -> None:
         """Finish writing the MCAP file."""
         if not self._started:
@@ -576,11 +683,9 @@ class McapWriter:
             return
 
         # Finalize any remaining chunk
-        if self.chunk_builder is not None and (result := self.chunk_builder.finalize()):
-            chunk, message_indices = result
-            self._write_chunk(chunk, message_indices)
+        self._finalize_current_chunk()
 
-        # Write DataEnd
+        # Write DataEnd record
         data_end = DataEnd(data_section_crc=self.crc_writer.crc).write_record()
         self.crc_writer.enable_crc = False  # No need to include DataEnd in CRC
         self.crc_writer.write(data_end)
@@ -588,39 +693,14 @@ class McapWriter:
         # Build and write summary section
         summary_start = self.crc_writer.tell()
         summary_data, summary_offsets = self._build_summary(summary_start)
-
-        # Calculate summary CRC
-        summary_crc = 0
-        if self.enable_crcs:
-            summary_crc = zlib.crc32(summary_data)
-            # Include footer fields in CRC
-            summary_offset_start = (
-                summary_start
-                + len(summary_data)
-                - sum(len(offset.write_record()) for offset in summary_offsets)
-                if self.use_summary_offsets and summary_offsets
-                else 0
-            )
-            summary_crc = zlib.crc32(
-                struct.pack(
-                    "<BQQQ",
-                    Opcode.FOOTER,
-                    8 + 8 + 4,  # Footer record length
-                    0 if len(summary_data) == 0 else summary_start,
-                    summary_offset_start,
-                ),
-                summary_crc,
-            )
-
+        summary_crc = _calculate_summary_crc(
+            summary_data, summary_start, summary_offsets, self.use_summary_offsets, self.enable_crcs
+        )
         self.crc_writer.write(summary_data)
 
         # Write footer
-        summary_offset_start = (
-            summary_start
-            + len(summary_data)
-            - sum(len(offset.write_record()) for offset in summary_offsets)
-            if self.use_summary_offsets and summary_offsets
-            else 0
+        summary_offset_start = _calculate_summary_offset_start(
+            summary_start, summary_data, summary_offsets, self.use_summary_offsets
         )
         footer = Footer(
             summary_start=0 if len(summary_data) == 0 else summary_start,
@@ -708,84 +788,32 @@ class McapWriter:
         summary_buffer = io.BytesIO()
         summary_offsets: list[SummaryOffset] = []
 
-        # Write schemas
-        if self.repeat_schemas and self.schemas:
-            group_start = summary_buffer.tell()
-            for schema in self.schemas.values():
-                summary_buffer.write(schema.write_record())
-            summary_offsets.append(
-                SummaryOffset(
-                    group_opcode=Opcode.SCHEMA,
-                    group_start=summary_start + group_start,
-                    group_length=summary_buffer.tell() - group_start,
-                )
-            )
+        # Define sections to write (opcode, items, should_write)
+        sections = [
+            (Opcode.SCHEMA, list(self.schemas.values()), self.repeat_schemas),
+            (Opcode.CHANNEL, list(self.channels.values()), self.repeat_channels),
+            (Opcode.STATISTICS, [self.statistics], self.use_statistics),
+            (Opcode.CHUNK_INDEX, self.chunk_indices, bool(self.index_types & IndexType.CHUNK)),
+            (
+                Opcode.ATTACHMENT_INDEX,
+                self.attachment_indexes,
+                bool(self.index_types & IndexType.ATTACHMENT),
+            ),
+            (
+                Opcode.METADATA_INDEX,
+                self.metadata_indexes,
+                bool(self.index_types & IndexType.METADATA),
+            ),
+        ]
 
-        # Write channels
-        if self.repeat_channels and self.channels:
-            group_start = summary_buffer.tell()
-            for channel in self.channels.values():
-                summary_buffer.write(channel.write_record())
-            summary_offsets.append(
-                SummaryOffset(
-                    group_opcode=Opcode.CHANNEL,
-                    group_start=summary_start + group_start,
-                    group_length=summary_buffer.tell() - group_start,
+        # Write all sections using data-driven approach
+        for opcode, items, should_write in sections:
+            if should_write and items:
+                _write_summary_section(
+                    summary_buffer, summary_offsets, opcode, items, summary_start
                 )
-            )
 
-        # Write statistics
-        if self.use_statistics:
-            group_start = summary_buffer.tell()
-            summary_buffer.write(self.statistics.write_record())
-            summary_offsets.append(
-                SummaryOffset(
-                    group_opcode=Opcode.STATISTICS,
-                    group_start=summary_start + group_start,
-                    group_length=summary_buffer.tell() - group_start,
-                )
-            )
-
-        # Write chunk indexes
-        if (self.index_types & IndexType.CHUNK) and self.chunk_indices:
-            group_start = summary_buffer.tell()
-            for chunk_index in self.chunk_indices:
-                summary_buffer.write(chunk_index.write_record())
-            summary_offsets.append(
-                SummaryOffset(
-                    group_opcode=Opcode.CHUNK_INDEX,
-                    group_start=summary_start + group_start,
-                    group_length=summary_buffer.tell() - group_start,
-                )
-            )
-
-        # Write attachment indexes
-        if (self.index_types & IndexType.ATTACHMENT) and self.attachment_indexes:
-            group_start = summary_buffer.tell()
-            for attachment_index in self.attachment_indexes:
-                summary_buffer.write(attachment_index.write_record())
-            summary_offsets.append(
-                SummaryOffset(
-                    group_opcode=Opcode.ATTACHMENT_INDEX,
-                    group_start=summary_start + group_start,
-                    group_length=summary_buffer.tell() - group_start,
-                )
-            )
-
-        # Write metadata indexes
-        if (self.index_types & IndexType.METADATA) and self.metadata_indexes:
-            group_start = summary_buffer.tell()
-            for metadata_index in self.metadata_indexes:
-                summary_buffer.write(metadata_index.write_record())
-            summary_offsets.append(
-                SummaryOffset(
-                    group_opcode=Opcode.METADATA_INDEX,
-                    group_start=summary_start + group_start,
-                    group_length=summary_buffer.tell() - group_start,
-                )
-            )
-
-        # Write summary offsets
+        # Write summary offsets at the end
         if self.use_summary_offsets:
             for offset in summary_offsets:
                 summary_buffer.write(offset.write_record())
