@@ -10,6 +10,13 @@ from collections.abc import Callable
 from dataclasses import make_dataclass
 from typing import Any
 
+from ros_parser import (
+    Field,
+    MessageDefinition,
+    Type,
+    parse_message_string,
+)
+
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
 from mcap_ros2_support_fast._dynamic_encoder import create_encoder
 from mcap_ros2_support_fast._plans import (
@@ -25,13 +32,6 @@ from mcap_ros2_support_fast._plans import (
     PrimitiveArrayAction,
     PrimitiveGroupAction,
     TypeId,
-)
-
-from ._vendor.rosidl_adapter.parser import (
-    Field,
-    MessageSpecification,
-    Type,
-    parse_message_string,
 )
 
 # Type size information for alignment-aware grouping
@@ -55,25 +55,23 @@ _TYPE_SIZES = {
 
 _builtin_types = {
     # https://github.com/ros2/rcl_interfaces/blob/rolling/builtin_interfaces/msg/Time.msg
-    "builtin_interfaces/Time": MessageSpecification(
-        "builtin_interfaces",
-        "Time",
-        [Field(Type("int32"), "sec"), Field(Type("uint32"), "nanosec")],
-        [],
+    "builtin_interfaces/Time": MessageDefinition(
+        name="builtin_interfaces/Time",
+        fields=[Field(Type(type_name="int32"), "sec"), Field(Type(type_name="uint32"), "nanosec")],
+        constants=[],
     ),
     # https://github.com/ros2/rcl_interfaces/blob/rolling/builtin_interfaces/msg/Duration.msg
-    "builtin_interfaces/Duration": MessageSpecification(
-        "builtin_interfaces",
-        "Duration",
-        [Field(Type("int32"), "sec"), Field(Type("uint32"), "nanosec")],
-        [],
+    "builtin_interfaces/Duration": MessageDefinition(
+        name="builtin_interfaces/Duration",
+        fields=[Field(Type(type_name="int32"), "sec"), Field(Type(type_name="uint32"), "nanosec")],
+        constants=[],
     ),
 }
 
 
 def _generate_plan(
-    msgdef: MessageSpecification,
-    msgdefs: dict[str, MessageSpecification],
+    msgdef: MessageDefinition,
+    msgdefs: dict[str, MessageDefinition],
 ) -> PlanList:
     """Generate a pre-computed parsing plan for a message definition."""
     plan: PlanActions = []
@@ -81,11 +79,15 @@ def _generate_plan(
     # Create dataclass fields - using Any type for simplicity as requested
     fields = [(field.name, Any) for field in msgdef.fields]
 
+    # Create a valid Python identifier from the message name
+    # e.g., "std_msgs/msg/String" -> "std_msgs_msg_String"
+    class_name = msgdef.name.replace("/", "_") if msgdef.name else "Message"
+
     msg_class = make_dataclass(
-        f"{msgdef.base_type.pkg_name}_{msgdef.msg_name}",
+        class_name,
         fields,
         namespace={
-            "_type": str(msgdef.base_type),
+            "_type": msgdef.name,
             "_full_text": str(msgdef),
         },
         slots=True,  # Use slots for better performance
@@ -96,9 +98,9 @@ def _generate_plan(
         field_type = field.type
         field_name = field.name
 
-        if field_type.pkg_name is not None:
+        if field_type.package_name is not None:
             # Complex type - generate nested plan
-            type_path = f"{field_type.pkg_name}/{field_type.type}"
+            type_path = f"{field_type.package_name}/{field_type.type_name}"
             nested_msgdef = msgdefs.get(type_path)
             if nested_msgdef is None:
                 raise ValueError(f"Message definition not found for {type_path}")
@@ -112,7 +114,7 @@ def _generate_plan(
                 plan.append(ComplexAction(field_name, _generate_plan(nested_msgdef, msgdefs)))
         else:
             # Primitive type
-            type_name = field_type.type
+            type_name = field_type.type_name
             type_id = STRING_TO_TYPE_ID.get(type_name)
             if type_id is None:
                 raise ValueError(f"Unknown primitive type: {type_name}")
@@ -135,11 +137,11 @@ def generate_plans(schema_name: str, schema_text: str) -> PlanList:
     :param schema_text: The schema text to use for generating plans.
     :return: The execution plan for the primary schema type.
     """
-    msgdefs: dict[str, MessageSpecification] = {
+    msgdefs: dict[str, MessageDefinition] = {
         **_builtin_types,  # Include built-in types
     }
 
-    def handle_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageSpecification) -> None:
+    def handle_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageDefinition) -> None:
         # Add the message definition to the dictionary
         msgdefs[cur_schema_name] = msgdef
         msgdefs[short_name] = msgdef
@@ -178,7 +180,7 @@ def generate_dynamic(
 def _for_each_msgdef(
     schema_name: str,
     schema_text: str,
-    fn: Callable[[str, str, MessageSpecification], None],
+    fn: Callable[[str, str, MessageDefinition], None],
 ) -> None:
     cur_schema_name = schema_name
 
@@ -202,7 +204,17 @@ def _for_each_msgdef(
         pkg_name = cur_schema_name.split("/")[0]
         msg_name = cur_schema_name.split("/")[-1]
         short_name = pkg_name + "/" + msg_name
-        msgdef = parse_message_string(pkg_name, msg_name, cur_schema_text)
+
+        # Parse the message with the package context
+        msgdef = parse_message_string(cur_schema_text, context_package_name=pkg_name)
+
+        # Set the short name on the message definition (pkg_name/msg_name format)
+        # This is the standard ROS2 message type format used in _type field
+        msgdef = MessageDefinition(
+            name=short_name,
+            fields=msgdef.fields,
+            constants=msgdef.constants,
+        )
 
         fn(cur_schema_name, short_name, msgdef)
 
@@ -379,11 +391,11 @@ def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
     """
 
     # First collect all message definitions
-    msgdefs: dict[str, MessageSpecification] = {
+    msgdefs: dict[str, MessageDefinition] = {
         **_builtin_types,  # Include built-in types
     }
 
-    def collect_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageSpecification) -> None:
+    def collect_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageDefinition) -> None:
         # Add the message definition to the dictionary
         msgdefs[cur_schema_name] = msgdef
         msgdefs[short_name] = msgdef
