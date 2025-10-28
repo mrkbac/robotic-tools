@@ -108,11 +108,10 @@ class LazyChunk:
         cls, stream: IO[bytes] | io.BufferedIOBase, record_start: int
     ) -> "LazyChunk":
         """Read chunk metadata from stream without loading the compressed data."""
-        data = stream.read(8 + 8 + 8 + 4)
-        message_start_time, message_end_time, uncompressed_size, uncompressed_crc = (
-            struct.unpack_from("<QQQI", data, 0)
+        data = stream.read(8 + 8 + 8 + 4 + 4)
+        message_start_time, message_end_time, uncompressed_size, uncompressed_crc, str_len = (
+            struct.unpack("<QQQII", data)
         )
-        str_len = struct.unpack("<I", stream.read(4))[0]
         compression = stream.read(str_len).decode("utf-8")
         data_len = struct.unpack("<Q", stream.read(8))[0]
         stream.seek(data_len, 1)  # Skip the data for now
@@ -123,18 +122,6 @@ class LazyChunk:
             uncompressed_crc,
             compression,
             record_start,
-        )
-
-    @classmethod
-    def from_chunk_index(cls, chunk_index: ChunkIndex) -> "LazyChunk":
-        """Create a LazyChunk from a ChunkIndex."""
-        return cls(
-            message_start_time=chunk_index.message_start_time,
-            message_end_time=chunk_index.message_end_time,
-            uncompressed_size=chunk_index.uncompressed_size,
-            uncompressed_crc=0,  # CRC not stored in ChunkIndex
-            compression=chunk_index.compression,
-            record_start=chunk_index.chunk_start_offset,
         )
 
     def to_chunk(self, stream: IO[bytes]) -> Chunk:
