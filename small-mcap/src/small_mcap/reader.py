@@ -351,6 +351,10 @@ def get_summary(stream: IO[bytes] | io.BufferedIOBase) -> Summary | None:
     if not stream.seekable():
         return None
     try:
+        stream.seek(-MAGIC_SIZE, io.SEEK_END)
+        magic = stream.read(MAGIC_SIZE)
+        if magic != MAGIC:
+            raise InvalidMagicError(magic)
         stream.seek(-(_FOOTER_SIZE + MAGIC_SIZE), io.SEEK_END)
         footer = next(stream_reader(stream, skip_magic=True))
         if not isinstance(footer, Footer):

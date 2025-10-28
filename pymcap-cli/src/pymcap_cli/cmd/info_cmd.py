@@ -5,6 +5,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+from small_mcap.reader import InvalidMagicError
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.rebuild import read_info, rebuild_info
@@ -57,7 +58,14 @@ def handle_command(args: argparse.Namespace) -> None:
         else:
             f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
 
-        info = rebuild_info(f_buffered, file_size) if args.rebuild else read_info(f_buffered)
+        if args.rebuild:
+            info = rebuild_info(f_buffered, file_size)
+        else:
+            try:
+                info = read_info(f_buffered)
+            except InvalidMagicError:
+                console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
+                info = rebuild_info(f_buffered, file_size)
 
     if debug_wrapper:
         debug_wrapper.print_stats(file_size)
@@ -146,6 +154,8 @@ def handle_command(args: argparse.Namespace) -> None:
     channels_table.add_column("Hz", justify="right", style="yellow")
     if info.channel_sizes:
         channels_table.add_column("Size", justify="right", style="yellow")
+        channels_table.add_column("B/s", justify="right", style="magenta")
+        channels_table.add_column("B/msg", justify="right", style="magenta")
 
     for channel in sorted(summary.channels.values(), key=lambda c: c.topic):
         channel_id = channel.id
@@ -160,6 +170,14 @@ def handle_command(args: argparse.Namespace) -> None:
         ]
         if info.channel_sizes:
             row.append(bytes_to_human(info.channel_sizes.get(channel_id, 0)))
+            bps = (
+                info.channel_sizes.get(channel_id, 0) / (duration_ns / 1_000_000_000)
+                if duration_ns > 0
+                else 0
+            )
+            row.append(bytes_to_human(int(bps)) + "/s")
+            b_per_msg = info.channel_sizes.get(channel_id, 0) / count if count > 0 else 0
+            row.append(bytes_to_human(int(b_per_msg)) + "/msg")
         channels_table.add_row(*row)
 
     console.print(channels_table)
