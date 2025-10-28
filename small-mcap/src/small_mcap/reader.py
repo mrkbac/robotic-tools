@@ -101,8 +101,7 @@ class LazyChunk:
     uncompressed_size: int
     uncompressed_crc: int
     compression: str
-    data_offset: int
-    data_len: int
+    record_start: int  # Offset where the Chunk record begins
 
     @classmethod
     def read_from_stream(
@@ -116,8 +115,6 @@ class LazyChunk:
         str_len = struct.unpack("<I", stream.read(4))[0]
         compression = stream.read(str_len).decode("utf-8")
         data_len = struct.unpack("<Q", stream.read(8))[0]
-        # Calculate absolute offset: record_start + all header fields we've read
-        data_offset = record_start + 8 + 8 + 8 + 4 + 4 + str_len + 8
         stream.seek(data_len, 1)  # Skip the data for now
         return cls(
             message_start_time,
@@ -125,33 +122,25 @@ class LazyChunk:
             uncompressed_size,
             uncompressed_crc,
             compression,
-            data_offset,
-            data_len,
+            record_start,
         )
 
-    def load_data(self, stream: IO[bytes]) -> bytes:
-        """Load the compressed chunk data from stream."""
-        current_pos = stream.tell()
-        stream.seek(self.data_offset)
-        data = stream.read(self.data_len)
-        stream.seek(current_pos)  # Restore position
-        if len(data) != self.data_len:
-            raise McapError(
-                f"Failed to read chunk data: expected {self.data_len} bytes, got {len(data)}"
-            )
-        return data
+    @classmethod
+    def from_chunk_index(cls, chunk_index: ChunkIndex) -> "LazyChunk":
+        """Create a LazyChunk from a ChunkIndex."""
+        return cls(
+            message_start_time=chunk_index.message_start_time,
+            message_end_time=chunk_index.message_end_time,
+            uncompressed_size=chunk_index.uncompressed_size,
+            uncompressed_crc=0,  # CRC not stored in ChunkIndex
+            compression=chunk_index.compression,
+            record_start=chunk_index.chunk_start_offset,
+        )
 
     def to_chunk(self, stream: IO[bytes]) -> Chunk:
-        """Convert to a full Chunk by loading the data."""
-        data = self.load_data(stream)
-        return Chunk(
-            message_start_time=self.message_start_time,
-            message_end_time=self.message_end_time,
-            uncompressed_size=self.uncompressed_size,
-            uncompressed_crc=self.uncompressed_crc,
-            compression=self.compression,
-            data=data,
-        )
+        """Convert to a full Chunk by reading from the stream."""
+        stream.seek(self.record_start)
+        return Chunk.read_record(stream)
 
 
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
@@ -461,14 +450,31 @@ def _read_message_seeking(
 
     chunk_indexes = _chunks_matching_topics(summary, should_include, start_time_ns, end_time_ns)
 
-    def reader() -> Iterator[McapRecord]:
-        for cidx in chunk_indexes:
-            stream.seek(cidx.chunk_start_offset, io.SEEK_SET)
-            chunk = Chunk.read_record(stream)
-            yield from breakup_chunk(chunk, validate_crc)
+    def _lazy_yield(stream: IO[bytes], index: ChunkIndex) -> Iterator[McapRecord | ChunkIndex]:
+        # Emit the chunk index to prevent early loading and decompression of chunk
+        yield index
+
+        stream.seek(index.chunk_start_offset)
+        chunk = Chunk.read_record(stream)
+
+        yield from breakup_chunk(chunk)
+
+    def _lazy_sort(item: McapRecord | ChunkIndex) -> int:
+        if isinstance(item, ChunkIndex):
+            return item.message_start_time
+        if isinstance(item, Message):
+            return item.log_time
+        return 0  # Other records are not yielded
+
+    lazy_iterators = [_lazy_yield(stream, cidx) for cidx in chunk_indexes]
+    reader = (
+        item
+        for item in heapq.merge(*lazy_iterators, key=_lazy_sort)
+        if not isinstance(item, ChunkIndex)  # Filter out sentinels
+    )
 
     yield from _read_inner(
-        reader(), should_include, start_time_ns, end_time_ns, summary.schemas, summary.channels
+        reader, should_include, start_time_ns, end_time_ns, summary.schemas, summary.channels
     )
 
 
