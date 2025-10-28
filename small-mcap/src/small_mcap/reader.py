@@ -379,33 +379,31 @@ def get_header(stream: IO[bytes]) -> Header:
 
 def _chunks_matching_topics(
     summary: Summary,
-    should_include: _ShouldIncludeType | None,
+    should_include: _ShouldIncludeType,
     start_time_ns: int | None,
     end_time_ns: int | None,
 ) -> list[ChunkIndex]:
-    channel_set: set[int] | None = None
-    if should_include:
-        channel_set = {
-            channel.id
-            for channel in summary.channels.values()
-            if should_include(channel, summary.schemas.get(channel.schema_id))
-        }
+    channel_set = {
+        channel.id
+        for channel in summary.channels.values()
+        if should_include(channel, summary.schemas.get(channel.schema_id))
+    }
 
-    return [
-        chunk_index
-        for chunk_index in summary.chunk_indexes
-        if not (start_time_ns is not None and chunk_index.message_end_time < start_time_ns)
-        and not (end_time_ns is not None and chunk_index.message_start_time >= end_time_ns)
-        and any(
-            channel_set is None or channel_id in channel_set
-            for channel_id in chunk_index.message_index_offsets
-        )
-    ]
+    return sorted(
+        [
+            chunk_index
+            for chunk_index in summary.chunk_indexes
+            if not (start_time_ns is not None and chunk_index.message_end_time < start_time_ns)
+            and not (end_time_ns is not None and chunk_index.message_start_time >= end_time_ns)
+            and any(channel_id in channel_set for channel_id in chunk_index.message_index_offsets)
+        ],
+        key=lambda c: c.message_start_time,
+    )
 
 
 def _read_inner(
     reader: Iterator[McapRecord],
-    should_include: _ShouldIncludeType | None,
+    should_include: _ShouldIncludeType,
     start_time_ns: int | None,
     end_time_ns: int | None,
     schemas: dict[int, Schema] | None = None,
@@ -414,17 +412,11 @@ def _read_inner(
     _schemas: dict[int, Schema] = schemas or {}
     _channels: dict[int, Channel] = channels or {}
     _include: set[int] | None = None
-    if should_include:
-        _include = {
-            channel.id
-            for channel in _channels.values()
-            if should_include(
-                channel,
-                _schemas.get(channel.schema_id),
-            )
-        }
-    else:
-        _include = set()
+    _include = {
+        channel.id
+        for channel in _channels.values()
+        if should_include(channel, _schemas.get(channel.schema_id))
+    }
 
     for record in reader:
         if isinstance(record, Schema):
@@ -433,17 +425,13 @@ def _read_inner(
             if record.schema_id != 0 and record.schema_id not in _schemas:
                 raise McapError(f"no schema record found with id {record.schema_id}")
             _channels[record.id] = record
-            if (
-                _include is not None
-                and should_include
-                and should_include(_channels[record.id], _schemas.get(record.schema_id))
-            ):
+            if should_include(_channels[record.id], _schemas.get(record.schema_id)):
                 _include.add(record.id)
         if isinstance(record, Message):
             if record.channel_id not in _channels:
                 raise McapError(f"no channel record found with id {record.channel_id}")
             if (
-                (_include is not None and record.channel_id not in _include)
+                (record.channel_id not in _include)
                 or (start_time_ns is not None and record.log_time < start_time_ns)
                 or (end_time_ns is not None and record.log_time >= end_time_ns)
             ):
@@ -455,7 +443,7 @@ def _read_inner(
 
 def _read_message_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
-    should_include: _ShouldIncludeType | None,
+    should_include: _ShouldIncludeType,
     start_time_ns: int | None,
     end_time_ns: int | None,
     emit_chunks: bool,
@@ -486,7 +474,7 @@ def _read_message_seeking(
 
 def _read_message_non_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
-    should_include: _ShouldIncludeType | None,
+    should_include: _ShouldIncludeType,
     start_time_ns: int | None,
     end_time_ns: int | None,
     emit_chunks: bool,
@@ -558,9 +546,17 @@ class _Remapper:
         return mapped_channel
 
 
+def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
+    return True
+
+
+def include_topics(topics: Sequence[str]) -> Callable[[Channel, Schema | None], bool]:
+    return lambda channel, _schema: channel.topic in topics
+
+
 def read_message(
     stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
-    should_include: _ShouldIncludeType | None = None,
+    should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int | None = None,
     end_time_ns: int | None = None,
     emit_chunks: bool = False,
@@ -635,7 +631,7 @@ class DecodedMessageTuple(NamedTuple):
 
 def read_message_decoded(
     stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
-    should_include: _ShouldIncludeType | None = None,
+    should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int | None = None,
     end_time_ns: int | None = None,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
@@ -664,7 +660,3 @@ def read_message_decoded(
         yield DecodedMessageTuple(
             schema, channel, message, decoded_message(schema, channel, message)
         )
-
-
-def include_topics(topics: Sequence[str]) -> Callable[[Channel, Schema | None], bool]:
-    return lambda channel, _schema: channel.topic in topics
