@@ -9,7 +9,7 @@ from collections import defaultdict
 from typing import Any
 
 import websockets
-from mcap_ros2._dynamic import generate_dynamic, serialize_dynamic
+from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
 from websockets.asyncio.server import ServerConnection, serve
 
 from .schemas import get_schema
@@ -706,12 +706,9 @@ class ProxyBridge:
         # Get or create decoder for this schema
         if schema_name not in self.message_decoders:
             schema_def = channel["schema"]
-            # Generate decoder functions for this schema
-            decoders = generate_dynamic(schema_name, schema_def)
-            # Get the decoder for the main message type
-            if schema_name not in decoders:
-                raise ValueError(f"Decoder not generated for {schema_name}")
-            self.message_decoders[schema_name] = decoders[schema_name]
+            # Generate decoder function for this schema
+            decoder = generate_dynamic(schema_name, schema_def)
+            self.message_decoders[schema_name] = decoder
 
         decoder = self.message_decoders[schema_name]
 
@@ -731,12 +728,9 @@ class ProxyBridge:
         # Get or create encoder for this schema
         if schema_name not in self.message_encoders:
             schema_def = get_schema(schema_name)
-            # Generate encoder functions for this schema
-            encoders = serialize_dynamic(schema_name, schema_def)
-            # Get the encoder for the main message type
-            if schema_name not in encoders:
-                raise ValueError(f"Encoder not generated for {schema_name}")
-            self.message_encoders[schema_name] = encoders[schema_name]
+            # Generate encoder function for this schema
+            encoder = serialize_dynamic(schema_name, schema_def)
+            self.message_encoders[schema_name] = encoder
 
         encoder = self.message_encoders[schema_name]
 

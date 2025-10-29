@@ -1611,23 +1611,21 @@ source = { virtual = "." }
 name = "ros-parser"
 version = "0.1.0"
 source = { editable = "ros-parser" }
-dependencies = [
-    { name = "pytest" },
-]
 
 [package.dev-dependencies]
 dev = [
     { name = "lark" },
     { name = "pyinstrument" },
+    { name = "pytest" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytest", specifier = ">=8.4.2" }]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "lark", specifier = ">=1.3.0" },
     { name = "pyinstrument", specifier = ">=5.1.1" },
+    { name = "pytest", specifier = ">=8.4.2" },
 ]
 
 [[package]]
@@ -1826,7 +1824,7 @@ name = "websocket-proxy"
 version = "0.1.0"
 source = { editable = "websocket-proxy" }
 dependencies = [
-    { name = "mcap-ros2-support" },
+    { name = "mcap-ros2-support-fast" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pillow" },
@@ -1838,7 +1836,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcap-ros2-support", specifier = ">=0.5.5" },
+    { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pillow", specifier = ">=12.0.0" },
     { name = "pointcloud2", specifier = ">=0.2.3" },
