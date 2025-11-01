@@ -24,6 +24,7 @@ from small_mcap.reader import (
     read_message_decoded,
     stream_reader,
 )
+from small_mcap.rebuild import RebuildInfo, rebuild_summary
 from small_mcap.records import (
     MAGIC,
     MAGIC_SIZE,
@@ -98,6 +99,7 @@ __all__ = [
     "PrebuiltChunk",
     # Well-known constants
     "Profile",
+    "RebuildInfo",
     "RecordLengthLimitExceededError",
     "Schema",
     "SchemaEncoding",
@@ -111,5 +113,6 @@ __all__ = [
     "include_topics",
     "read_message",
     "read_message_decoded",
+    "rebuild_summary",
     "stream_reader",
 ]

@@ -261,7 +261,12 @@ class AttachmentIndex(McapRecord):
     def write(self) -> bytes:
         return (
             struct.pack(
-                "<QQQQQ", self.offset, self.length, self.log_time, self.create_time, self.data_size
+                "<QQQQQ",
+                self.offset,
+                self.length,
+                self.log_time,
+                self.create_time,
+                self.data_size,
             )
             + _write_string(self.name)
             + _write_string(self.media_type)
@@ -571,7 +576,13 @@ class Message(McapRecord):
 
     def write(self) -> bytes:
         return (
-            struct.pack("<HIQQ", self.channel_id, self.sequence, self.log_time, self.publish_time)
+            struct.pack(
+                "<HIQQ",
+                self.channel_id,
+                self.sequence,
+                self.log_time,
+                self.publish_time,
+            )
             + self.data
         )
 
@@ -618,15 +629,9 @@ class MessageIndex(McapRecord):
     def read(cls, data: bytes) -> "MessageIndex":
         channel_id = struct.unpack_from("<H", data, 0)[0]
         records_len = struct.unpack_from("<I", data, 2)[0]
-        num_records = records_len // 16
-        # Optimization: Use single struct.unpack call instead of list comprehension
-        if num_records == 0:
+        if records_len == 0:
             return cls(channel_id, [])
-        # Unpack all records at once: each record is 2 Q values (8 bytes each = 16 bytes)
-        format_str = f"<{num_records * 2}Q"
-        unpacked = struct.unpack_from(format_str, data, 6)
-        # Convert flat list to list of tuples
-        records = [(unpacked[i * 2], unpacked[i * 2 + 1]) for i in range(num_records)]
+        records = list(struct.iter_unpack("<QQ", data[6 : 6 + records_len]))
         return cls(channel_id, records)
 
 

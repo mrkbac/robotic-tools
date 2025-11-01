@@ -1,10 +1,11 @@
-from typing import BinaryIO
+import io
+from typing import cast
 
 
 class DebugStreamWrapper:
     """Wrapper for file streams that tracks I/O statistics."""
 
-    def __init__(self, stream: BinaryIO) -> None:
+    def __init__(self, stream: io.BufferedIOBase | io.RawIOBase) -> None:
         self.stream = stream
         self.read_calls = 0
         self.read_into_calls = 0
@@ -39,7 +40,7 @@ class DebugStreamWrapper:
 
     def readinto(self, b: memoryview) -> int | None:
         self.read_into_calls += 1
-        n = self.stream.readinto(b)
+        n = cast("int | None", self.stream.readinto(b))
         if n is not None:
             self.read_bytes += n
         return n

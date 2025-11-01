@@ -25,7 +25,9 @@ def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> 
     return seconds * 1_000_000_000
 
 
-def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+def add_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> argparse.ArgumentParser:
     """Add the process command parser to the subparsers."""
     parser = subparsers.add_parser(
         "process",

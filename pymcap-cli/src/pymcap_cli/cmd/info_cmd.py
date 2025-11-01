@@ -52,7 +52,9 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
     return len(max_concurrent_chunks), max_concurrent_bytes
 
 
-def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+def add_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> argparse.ArgumentParser:
     """Add the info command parser to the subparsers."""
     parser = subparsers.add_parser(
         "info",
@@ -90,6 +92,7 @@ def handle_command(args: argparse.Namespace) -> None:
 
     debug_wrapper: DebugStreamWrapper | None = None
     with file.open("rb", buffering=0) as f_raw:
+        f_buffered: io.BufferedReader
         if args.debug:
             debug_wrapper = DebugStreamWrapper(f_raw)
             f_buffered = io.BufferedReader(debug_wrapper, buffer_size=1024)

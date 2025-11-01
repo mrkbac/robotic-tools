@@ -9,7 +9,9 @@ from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
 console = Console()
 
 
-def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+def add_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> argparse.ArgumentParser:
     """Add the recover command parser to the subparsers."""
     parser = subparsers.add_parser(
         "recover",

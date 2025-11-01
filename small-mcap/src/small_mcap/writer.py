@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, Flag, auto
-from typing import Any, BinaryIO, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 
 from small_mcap.records import (
     MAGIC,
@@ -27,22 +27,26 @@ from small_mcap.records import (
     SummaryOffset,
 )
 
-try:
+if TYPE_CHECKING:
     import zstandard
-except ImportError:
-    zstandard = None  # type: ignore[assignment]
+    from lz4.frame import compress as lz4_compress  # type: ignore[import-untyped]
+else:
+    try:
+        import zstandard
+    except ImportError:
+        zstandard = None  # type: ignore[assignment]
 
-try:
-    from lz4.frame import compress as lz4_compress
-except ImportError:
-    lz4_compress = None  # type: ignore[assignment]
+    try:
+        from lz4.frame import compress as lz4_compress
+    except ImportError:
+        lz4_compress = None  # type: ignore[assignment]
 
 
 # Buffer allocation multiplier for chunk builder
 BUFFER_SIZE_MULTIPLIER = 2  # Pre-allocate 2x chunk_size to avoid reallocations
 
 
-@dataclass
+@dataclass(slots=True)
 class PrebuiltChunk:
     """
     Special marker for pre-built chunks that should be written directly
@@ -789,7 +793,7 @@ class McapWriter:
         summary_offsets: list[SummaryOffset] = []
 
         # Define sections to write (opcode, items, should_write)
-        sections = [
+        sections: list[tuple[Opcode, list[Any], bool]] = [
             (Opcode.SCHEMA, list(self.schemas.values()), self.repeat_schemas),
             (Opcode.CHANNEL, list(self.channels.values()), self.repeat_channels),
             (Opcode.STATISTICS, [self.statistics], self.use_statistics),

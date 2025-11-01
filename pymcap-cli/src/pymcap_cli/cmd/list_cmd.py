@@ -13,7 +13,9 @@ from pymcap_cli.utils import bytes_to_human
 console = Console()
 
 
-def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+def add_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> argparse.ArgumentParser:
     """Add the list command and its subcommands to the subparsers."""
     parser = subparsers.add_parser(
         "list",
