@@ -7,20 +7,23 @@ from re import Pattern
 from typing import BinaryIO
 
 from rich.console import Console
-from small_mcap.data import (
+from small_mcap import (
     Attachment,
     Channel,
     Chunk,
+    CompressionType,
     DataEnd,
     Footer,
     Header,
+    McapError,
+    McapWriter,
     Message,
     MessageIndex,
     Metadata,
     Schema,
+    breakup_chunk,
+    stream_reader,
 )
-from small_mcap.reader import McapError, breakup_chunk, stream_reader
-from small_mcap.writer import CompressionType, McapWriter
 
 from pymcap_cli.utils import file_progress
 

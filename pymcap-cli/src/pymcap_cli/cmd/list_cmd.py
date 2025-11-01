@@ -5,7 +5,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
-from small_mcap.reader import InvalidMagicError
+from small_mcap import InvalidMagicError
 
 from pymcap_cli.rebuild import Info, read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human

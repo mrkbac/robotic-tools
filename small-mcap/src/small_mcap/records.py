@@ -151,6 +151,8 @@ class McapRecord(ABC):
     def read(cls, data: bytes) -> "McapRecord":
         """Deserialize the record content without opcode and length prefix.
 
+        Note: Always use `unpack_from` to also handle padding correctly.
+
         Args:
             data: The raw record content bytes
 
@@ -479,7 +481,7 @@ class DataEnd(McapRecord):
 
     @classmethod
     def read(cls, data: bytes) -> "DataEnd":
-        return cls(struct.unpack("<I", data)[0])
+        return cls(struct.unpack_from("<I", data, 0)[0])
 
 
 @dataclass(slots=True)
@@ -510,7 +512,7 @@ class Footer(McapRecord):
 
     @classmethod
     def read(cls, data: bytes) -> "Footer":
-        return cls(*struct.unpack("<QQI", data))
+        return cls(*struct.unpack_from("<QQI", data, 0))
 
 
 @dataclass(slots=True)
@@ -828,7 +830,7 @@ class SummaryOffset(McapRecord):
 
     @classmethod
     def read(cls, data: bytes) -> "SummaryOffset":
-        return cls(*struct.unpack("<BQQ", data))
+        return cls(*struct.unpack_from("<BQQ", data, 0))
 
 
 @dataclass(slots=True)

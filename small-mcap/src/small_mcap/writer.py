@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum, Flag, auto
 from typing import Any, BinaryIO, Protocol
 
-from small_mcap.data import (
+from small_mcap.records import (
     MAGIC,
     Attachment,
     AttachmentIndex,

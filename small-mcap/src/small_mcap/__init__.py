@@ -1,0 +1,115 @@
+"""Small-mcap: A lightweight Python library for reading and writing MCAP files.
+
+This package provides a simple and efficient interface for working with MCAP files,
+a container format designed for storing timestamped multimodal data.
+"""
+
+# Record types and core data structures
+# Reader classes and functions
+from small_mcap.reader import (
+    CRCValidationError,
+    DecodedMessageTuple,
+    DecoderFactoryProtocol,
+    EndOfFileError,
+    InvalidMagicError,
+    LazyChunk,
+    McapError,
+    RecordLengthLimitExceededError,
+    UnsupportedCompressionError,
+    breakup_chunk,
+    get_header,
+    get_summary,
+    include_topics,
+    read_message,
+    read_message_decoded,
+    stream_reader,
+)
+from small_mcap.records import (
+    MAGIC,
+    MAGIC_SIZE,
+    OPCODE_TO_RECORD,
+    Attachment,
+    AttachmentIndex,
+    Channel,
+    Chunk,
+    ChunkIndex,
+    DataEnd,
+    Footer,
+    Header,
+    McapRecord,
+    Message,
+    MessageIndex,
+    Metadata,
+    MetadataIndex,
+    Opcode,
+    Schema,
+    Statistics,
+    Summary,
+    SummaryOffset,
+)
+
+# Well-known constants
+from small_mcap.well_known import MessageEncoding, Profile, SchemaEncoding
+
+# Writer classes and functions
+from small_mcap.writer import (
+    CompressionType,
+    EncoderFactoryProtocol,
+    IndexType,
+    McapWriter,
+    PrebuiltChunk,
+)
+
+__all__ = [
+    # Constants
+    "MAGIC",
+    "MAGIC_SIZE",
+    "OPCODE_TO_RECORD",
+    "Attachment",
+    "AttachmentIndex",
+    "CRCValidationError",
+    "Channel",
+    "Chunk",
+    "ChunkIndex",
+    "CompressionType",
+    "DataEnd",
+    "DecodedMessageTuple",
+    "DecoderFactoryProtocol",
+    "EncoderFactoryProtocol",
+    "EndOfFileError",
+    "Footer",
+    "Header",
+    "IndexType",
+    "InvalidMagicError",
+    "LazyChunk",
+    # Reader
+    "McapError",
+    # Record types
+    "McapRecord",
+    # Writer
+    "McapWriter",
+    "Message",
+    "MessageEncoding",
+    "MessageIndex",
+    "Metadata",
+    "MetadataIndex",
+    # Enums
+    "Opcode",
+    "PrebuiltChunk",
+    # Well-known constants
+    "Profile",
+    "RecordLengthLimitExceededError",
+    "Schema",
+    "SchemaEncoding",
+    "Statistics",
+    "Summary",
+    "SummaryOffset",
+    "UnsupportedCompressionError",
+    "breakup_chunk",
+    "get_header",
+    "get_summary",
+    "include_topics",
+    "read_message",
+    "read_message_decoded",
+    "stream_reader",
+]

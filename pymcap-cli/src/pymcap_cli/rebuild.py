@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import BinaryIO
 
 from rich.console import Console
-from small_mcap.data import (
+from small_mcap import (
     Attachment,
     AttachmentIndex,
     Channel,
@@ -12,6 +12,8 @@ from small_mcap.data import (
     ChunkIndex,
     DataEnd,
     Header,
+    LazyChunk,
+    McapError,
     Message,
     MessageIndex,
     Metadata,
@@ -19,10 +21,6 @@ from small_mcap.data import (
     Schema,
     Statistics,
     Summary,
-)
-from small_mcap.reader import (
-    LazyChunk,
-    McapError,
     breakup_chunk,
     get_header,
     get_summary,

@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import IO, TYPE_CHECKING
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
-from small_mcap.reader import (
+from small_mcap import (
     EndOfFileError,
     get_summary,
     read_message_decoded,
@@ -19,7 +19,7 @@ from digitalis.reader.source import PlaybackSource, SourceStatus
 from digitalis.reader.types import MessageEvent, SourceInfo, Topic
 
 if TYPE_CHECKING:
-    from small_mcap.data import Statistics, Summary
+    from small_mcap import Statistics, Summary
 
 logger = logging.getLogger(__name__)
 

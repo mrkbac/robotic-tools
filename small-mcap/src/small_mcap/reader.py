@@ -17,7 +17,7 @@ try:
 except ImportError:
     lz4_decompress = None  # type: ignore[assignment]
 
-from small_mcap.data import (
+from small_mcap.records import (
     MAGIC,
     MAGIC_SIZE,
     OPCODE_TO_RECORD,
