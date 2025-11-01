@@ -1,7 +1,9 @@
-import argparse
+from __future__ import annotations
+
 import io
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.table import Table
@@ -9,6 +11,9 @@ from small_mcap import InvalidMagicError
 
 from pymcap_cli.rebuild import Info, read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human
+
+if TYPE_CHECKING:
+    import argparse
 
 console = Console()
 
