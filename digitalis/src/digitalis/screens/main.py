@@ -16,7 +16,7 @@ from digitalis.screens.data import DataScreen
 from digitalis.utilities import get_file_paths
 
 
-class MainScreen(Screen):
+class MainScreen(Screen[None]):
     DEFAULT_CSS = """
     MainScreen {
         align: center middle;

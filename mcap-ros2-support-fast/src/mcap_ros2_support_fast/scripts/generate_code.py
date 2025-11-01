@@ -67,13 +67,13 @@ def main() -> None:
     all_encoder_struct_patterns = {}
     all_message_classes = set()
 
-    for factory in decoder_factories:
-        all_decoder_struct_patterns.update(factory.struct_patterns)
-        all_message_classes.update(factory.message_classes)
+    for decoder_factory in decoder_factories:
+        all_decoder_struct_patterns.update(decoder_factory.struct_patterns)
+        all_message_classes.update(decoder_factory.message_classes)
 
-    for factory in encoder_factories:
-        all_encoder_struct_patterns.update(factory.struct_patterns)
-        all_message_classes.update(factory.message_classes)
+    for encoder_factory in encoder_factories:
+        all_encoder_struct_patterns.update(encoder_factory.struct_patterns)
+        all_message_classes.update(encoder_factory.message_classes)
 
     # Start building the complete output file
     generated_lines = [

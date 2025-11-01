@@ -69,7 +69,7 @@ class TfTreeNode:
     transform_data: TransformData | None = None
 
 
-class TfTree(Tree):
+class TfTree(Tree[str]):
     data: reactive[dict[str, TransformData]] = reactive({})
 
     def __init__(self) -> None:
@@ -159,7 +159,7 @@ class TfTree(Tree):
                 self._update_children(root_node, frame_id, tree_nodes)
 
     def _update_children(
-        self, parent_tree_node: TreeNode, parent_frame_id: str, all_nodes: list[TfTreeNode]
+        self, parent_tree_node: TreeNode[str], parent_frame_id: str, all_nodes: list[TfTreeNode]
     ) -> None:
         # Build expected children structure
         expected_children = {}
@@ -201,7 +201,7 @@ class TfTree(Tree):
                 tree_child.expand()
 
     def _update_transform_children(
-        self, parent_node: TreeNode, tf_node: TfTreeNode, all_nodes: list[TfTreeNode]
+        self, parent_node: TreeNode[str], tf_node: TfTreeNode, all_nodes: list[TfTreeNode]
     ) -> None:
         """Update all children of a transform node using efficient in-place updates."""
         if not tf_node.transform_data:

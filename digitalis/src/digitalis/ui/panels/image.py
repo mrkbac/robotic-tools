@@ -11,7 +11,7 @@ from digitalis.reader.types import MessageEvent
 from digitalis.ui.panels import BasePanel
 
 
-class ImageViewer(BasePanel):
+class ImageViewer(BasePanel[MessageEvent]):
     SUPPORTED_SCHEMAS: ClassVar[set[str]] = {
         "sensor_msgs/msg/CompressedImage",  # ROS2
         "sensor_msgs/CompressedImage",  # ROS1

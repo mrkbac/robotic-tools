@@ -1,4 +1,4 @@
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -28,8 +28,8 @@ class DataView(Widget, can_focus=True):
         disabled: bool = False,
     ) -> None:
         super().__init__(name=name, id=id, classes=classes, disabled=disabled)
-        self._mounted_panel: BasePanel | None = None
-        self.available_panels: list[type[BasePanel]] = []
+        self._mounted_panel: BasePanel[Any] | None = None
+        self.available_panels: list[type[BasePanel[Any]]] = []
 
     def compose(self) -> ComposeResult:
         """Compose the DataView widget."""
@@ -80,7 +80,7 @@ class DataView(Widget, can_focus=True):
             self._mounted_panel.data = data
 
     async def action_switch_panel(
-        self, new_panel_type: type[BasePanel] | str | None, *, notify: bool = True
+        self, new_panel_type: type[BasePanel[Any]] | str | None, *, notify: bool = True
     ) -> None:
         """Switch to a new_panel_type panel type."""
 

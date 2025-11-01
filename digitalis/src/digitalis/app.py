@@ -24,7 +24,7 @@ logging.basicConfig(
 from digitalis.screens.data import DataScreen  # noqa: E402
 
 
-class DigitalisApp(App):
+class DigitalisApp(App[None]):
     """MCAP Topic Browser app."""
 
     CSS_PATH = "app.tcss"

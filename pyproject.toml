@@ -3,6 +3,9 @@ name = "robotic-tools"
 version = "0.1.0"
 requires-python = ">=3.10"
 
+[dependency-groups]
+dev = ["mypy>=1.18.2"]
+
 [tool.uv.sources]
 
 [tool.uv.workspace]
@@ -15,3 +18,57 @@ members = [
     "websocket-bridge",
     "ros-parser",
 ]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+exclude = ["tests/", "test_.*\\.py$", ".venv/", "build/"]
+
+
+[tool.ruff]
+required-version = ">=0.8.0"
+line-length = 100
+
+src = ['src']
+
+target-version = 'py310'
+
+
+[tool.ruff.lint]
+exclude = ['msgs']
+select = ['ALL']
+
+ignore = [
+    'ANN401',  # dynamically-typed-expression
+    'C901',    # complex-structure
+    'D',       # pydocstyle
+    'EM101',   # raw-string-in-exception
+    'EM102',   # f-string-in-exception
+    'FIX002',  # TODO
+    'PLR2004', # MagicValueComparisons
+    'S101',    # AssertUsed
+    'TD',      # TODO
+    'TRY003',  # raise-vanilla-args
+
+    # formatter
+    'COM812', # missing-trailing-comma
+    'ISC001', # single-line-implicit-string-concatenation
+
+    # TODO: reduce this
+    'FBT001',
+    'FBT002',
+    'A002',
+    'FBT003',
+    'ERA001',
+    'LOG015',
+    'G004',
+    'DTZ006',
+    'PLR0',
+    'PERF203',
+]
+
+
+[tool.ruff.lint.per-file-ignores]
+# Relaxed lints for test files
+"*/tests/*" = ["T201", "SLF001", "ANN", "PTH123"]
+"*/benchmarks/*" = ["T201", "INP001", "PLC0415", "PTH123"]

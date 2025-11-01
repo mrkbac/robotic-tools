@@ -52,7 +52,7 @@ class McapSource(PlaybackSource):
         self._subscribed_topics_id: set[int] = set()
         self._current_time: int | None = None
         self._playback_speed = 1.0
-        self._playback_task: asyncio.Task | None = None
+        self._playback_task: asyncio.Task[None] | None = None
         self._playback_condition = asyncio.Event()
         self._seek_flag = False
 

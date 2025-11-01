@@ -1,12 +1,14 @@
 """Foxglove WebSocket proxy bridge implementation."""
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
 import logging
 import struct
 from collections import defaultdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
 from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
@@ -24,6 +26,9 @@ from .types import (
     UnadvertiseMessage,
     UnsubscribeMessage,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +72,10 @@ class ProxyBridge:
 
         # Channel tracking - stores DOWNSTREAM channels (what clients see)
         # Key is downstream channel ID (original or transformed)
-        self.advertised_channels: dict[int, dict[str, Any]] = {}
+        self.advertised_channels: dict[int, ChannelInfo] = {}
 
         # Track upstream channel info for transformation lookup
-        self.upstream_channels: dict[int, dict[str, Any]] = {}
+        self.upstream_channels: dict[int, ChannelInfo] = {}
 
         # Transformed channel tracking
         # Maps upstream channel ID -> downstream transformed channel ID
@@ -95,12 +100,16 @@ class ProxyBridge:
         self.next_upstream_sub_id = 0
 
         # Message encoder/decoder cache (generated from schema)
-        self.message_decoders: dict[str, Any] = {}  # schema_name -> decoder function
-        self.message_encoders: dict[str, Any] = {}  # schema_name -> encoder function
+        self.message_decoders: dict[
+            str, Callable[[bytes], Any]
+        ] = {}  # schema_name -> decoder function
+        self.message_encoders: dict[
+            str, Callable[[dict[str, Any]], bytes]
+        ] = {}  # schema_name -> encoder function
 
         # Running state
         self.running = False
-        self.server_task: asyncio.Task | None = None
+        self.server_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the proxy bridge."""
@@ -380,7 +389,7 @@ class ProxyBridge:
             self._handle_client,
             self.listen_host,
             self.listen_port,
-            subprotocols=["foxglove.websocket.v1"],
+            subprotocols=[websockets.Subprotocol("foxglove.websocket.v1")],
         ):
             # Keep server running
             await asyncio.Future()  # Run forever
@@ -463,10 +472,10 @@ class ProxyBridge:
             # Increment reference count for the upstream channel
             self.upstream_sub_refcount[upstream_channel_id] += 1
 
-            channel_info = self.upstream_channels.get(upstream_channel_id, {})
+            channel_info: ChannelInfo | None = self.upstream_channels.get(upstream_channel_id)
             is_transformed = channel_id in self.transformed_to_upstream
             logger.info(
-                f"Client subscribed to {channel_info.get('topic', '?')} "
+                f"Client subscribed to {channel_info.get('topic', '?') if channel_info else '?'} "
                 f"(channel={channel_id}, upstream={upstream_channel_id}, transformed={is_transformed})"  # noqa: E501
             )
 
@@ -491,9 +500,9 @@ class ProxyBridge:
                     await self._unsubscribe_upstream(upstream_channel_id)
                     del self.upstream_sub_refcount[upstream_channel_id]
 
-                channel_info = self.upstream_channels.get(upstream_channel_id, {})
+                channel_info: ChannelInfo | None = self.upstream_channels.get(upstream_channel_id)
                 logger.info(
-                    f"Client unsubscribed from {channel_info.get('topic', '?')} (channel={channel_id})"  # noqa: E501
+                    f"Client unsubscribed from {channel_info.get('topic', '?') if channel_info else '?'} (channel={channel_id})"  # noqa: E501
                 )
 
     async def _subscribe_upstream(self, channel_id: int) -> None:
@@ -513,9 +522,9 @@ class ProxyBridge:
         await self.upstream_ws.send(json.dumps(subscribe_msg))
         self.upstream_subscriptions[channel_id] = upstream_sub_id
 
-        channel = self.upstream_channels.get(channel_id, {})
+        channel: ChannelInfo | None = self.upstream_channels.get(channel_id)
         logger.info(
-            f"Subscribed to upstream {channel.get('topic', '?')} (channel={channel_id}, upstream_sub={upstream_sub_id})"  # noqa: E501
+            f"Subscribed to upstream {channel.get('topic', '?') if channel else '?'} (channel={channel_id}, upstream_sub={upstream_sub_id})"  # noqa: E501
         )
 
     async def _unsubscribe_upstream(self, channel_id: int) -> None:
@@ -534,9 +543,10 @@ class ProxyBridge:
 
         await self.upstream_ws.send(json.dumps(unsubscribe_msg))
 
-        channel = self.upstream_channels.get(channel_id, {})
+        channel: ChannelInfo | None = self.upstream_channels.get(channel_id)
         logger.info(
-            f"Unsubscribed from upstream {channel.get('topic', '?')} (channel={channel_id})"
+            f"Unsubscribed from upstream {channel.get('topic', '?') if channel else '?'} "
+            f"(channel={channel_id})"
         )
 
     async def _cleanup_client(self, client: ServerConnection) -> None:
@@ -566,13 +576,14 @@ class ProxyBridge:
         Args:
             msg: The advertise message from upstream
         """
-        downstream_channels = []
+        downstream_channels: list[ChannelInfo] = []
 
         for channel in msg.get("channels", []):
             channel_id = channel["id"]
             schema_name = channel["schemaName"]
 
             # Track the upstream channel for transformation lookup
+            # Runtime validated by websocket protocol to match ChannelInfo
             self.upstream_channels[channel_id] = channel
             logger.info(
                 f"Upstream channel advertised: {channel['topic']} (id={channel_id}, schema={schema_name})"  # noqa: E501
@@ -598,7 +609,7 @@ class ProxyBridge:
                 output_schema_def = get_schema(output_schema)
 
                 # Create transformed channel info
-                transformed_channel = {
+                transformed_channel: ChannelInfo = {
                     "id": transformed_id,
                     "topic": channel["topic"],  # Same topic name
                     "encoding": channel["encoding"],  # Same encoding (cdr)

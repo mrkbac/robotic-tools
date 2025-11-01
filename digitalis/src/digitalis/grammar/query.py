@@ -313,17 +313,17 @@ class QueryExecutor:
         """
         try:
             if operator == "==":
-                return left == right
+                return bool(left == right)
             if operator == "!=":
-                return left != right
+                return bool(left != right)
             if operator == "<":
-                return left < right
+                return bool(left < right)
             if operator == "<=":
-                return left <= right
+                return bool(left <= right)
             if operator == ">":
-                return left > right
+                return bool(left > right)
             if operator == ">=":
-                return left >= right
+                return bool(left >= right)
             raise QueryError(f"Unsupported comparison operator: {operator}")
 
         except TypeError as e:

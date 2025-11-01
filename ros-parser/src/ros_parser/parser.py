@@ -2,14 +2,21 @@
 
 import re
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 # Import from standalone parser (pre-compiled grammar)
 from ._standalone_parser import Lark_StandAlone, Token, Transformer
-from .models import ActionDefinition, Constant, Field, MessageDefinition, ServiceDefinition, Type
+from .models import (
+    ActionDefinition,
+    Constant,
+    Field,
+    MessageDefinition,
+    ServiceDefinition,
+    Type,
+)
 
 
-class MessageTransformer(Transformer):
+class MessageTransformer(Transformer[MessageDefinition]):
     """Transforms Lark parse tree into ROS2 message data structures."""
 
     # Type normalization is NOT done at parse time
@@ -27,7 +34,7 @@ class MessageTransformer(Transformer):
         super().__init__()
         self.context_package_name = context_package_name
 
-    def start(self, items: list) -> MessageDefinition:
+    def start(self, items: list[Any]) -> MessageDefinition:
         """Process the complete message definition."""
         fields: list[Field] = []
         constants: list[Constant] = []
@@ -42,13 +49,15 @@ class MessageTransformer(Transformer):
 
         return MessageDefinition(name=None, fields=fields, constants=constants)
 
-    def content(self, items: list) -> Field | Constant | None:
+    def content(self, items: list[Any]) -> Field | Constant | None:
         """Extract content from line."""
         if len(items) == 0:
             return None
-        return items[0]
+        item = items[0]
+        assert isinstance(item, (Field, Constant)) or item is None
+        return item
 
-    def field_or_constant(self, items: list) -> Field | Constant:
+    def field_or_constant(self, items: list[Any]) -> Field | Constant:
         """Create a Field or Constant based on the tail."""
         type_spec = items[0]
         name = str(items[1])
@@ -74,8 +83,8 @@ class MessageTransformer(Transformer):
         return Field(type=type_spec, name=name, default_value=default_value)
 
     def field_or_const_tail(
-        self, items: list
-    ) -> tuple[bool, bool | int | float | str | list | None]:
+        self, items: list[Any]
+    ) -> tuple[bool, bool | int | float | str | list[Any] | None]:
         """
         Return (is_constant, value) tuple.
 
@@ -83,9 +92,12 @@ class MessageTransformer(Transformer):
         """
         if not items or items[0] is None:
             return (False, None)
-        return items[0]
+        item = items[0]
+        assert isinstance(item, tuple)
+        assert len(item) == 2
+        return item
 
-    def constant_tail(self, items: list) -> tuple[bool, bool | int | float | str]:
+    def constant_tail(self, items: list[Any]) -> tuple[bool, bool | int | float | str | None]:
         """Handle constant definition - returns (True, value)."""
         # Filter out None
         non_none_items = [
@@ -95,7 +107,9 @@ class MessageTransformer(Transformer):
             return (True, non_none_items[0])
         return (True, None)
 
-    def default_tail(self, items: list) -> tuple[bool, bool | int | float | str | list | None]:
+    def default_tail(
+        self, items: list[Any]
+    ) -> tuple[bool, bool | int | float | str | list[Any] | None]:
         """Handle field default value - returns (False, value)."""
         # Filter out None
         non_none_items = [
@@ -113,7 +127,7 @@ class MessageTransformer(Transformer):
             raise ValueError(f"Identifier '{name}' contains consecutive underscores")
         return name
 
-    def type_spec(self, items: list) -> Type:
+    def type_spec(self, items: list[Any]) -> Type:
         """Build a Type from primitive/complex type and optional bounds/arrays."""
         base_type = items[0]
 
@@ -162,7 +176,7 @@ class MessageTransformer(Transformer):
         """Return the numeric type name."""
         return str(items[0])
 
-    def complex_type(self, items: list) -> Type:
+    def complex_type(self, items: list[Any]) -> Type:
         """Build a complex type with package name."""
         # items[0] is PACKAGE_NAME, items[1] is TYPE_IDENTIFIER
         package_name = str(items[0])
@@ -184,12 +198,15 @@ class MessageTransformer(Transformer):
         """Extract string bound value."""
         return int(items[0])
 
-    def array_spec(self, items: list) -> tuple[bool, int | None, bool]:
+    def array_spec(self, items: list[Any]) -> tuple[bool, int | None, bool]:
         """Extract array specification from child rule."""
         # The child rule (unbounded_array, fixed_array, or bounded_array) returns a tuple
-        return items[0]
+        item = items[0]
+        assert isinstance(item, tuple)
+        assert len(item) == 3
+        return item
 
-    def unbounded_array(self, items: list) -> tuple[bool, int | None, bool]:  # noqa: ARG002
+    def unbounded_array(self, items: list[Any]) -> tuple[bool, int | None, bool]:  # noqa: ARG002
         """Return array specification for unbounded array."""
         return (True, None, False)
 
@@ -201,21 +218,27 @@ class MessageTransformer(Transformer):
         """Return array specification for bounded array."""
         return (True, int(items[0]), True)
 
-    def default_value(self, items: list) -> bool | int | float | str | list:
+    def default_value(self, items: list[Any]) -> bool | int | float | str | list[Any]:
         """Return default value."""
-        return items[0]
+        item = items[0]
+        assert isinstance(item, (bool, int, float, str, list))
+        return item
 
-    def constant_value(self, items: list) -> bool | int | float | str:
+    def constant_value(self, items: list[Any]) -> bool | int | float | str:
         """Return constant value."""
-        return items[0]
+        item = items[0]
+        assert isinstance(item, (bool, int, float, str))
+        return item
 
-    def array_literal(self, items: list) -> list:
+    def array_literal(self, items: list[Any]) -> list[Any]:
         """Build array from primitive values."""
         return list(items)
 
-    def primitive_literal(self, items: list) -> bool | int | float | str:
+    def primitive_literal(self, items: list[Any]) -> bool | int | float | str:
         """Return primitive literal value."""
-        return items[0]
+        item = items[0]
+        assert isinstance(item, (bool, int, float, str))
+        return item
 
     def quoted_string(self, items: list[Token]) -> str:
         """
@@ -307,11 +330,13 @@ class MessageTransformer(Transformer):
         return re.sub(r"\\U([0-9a-fA-F]{8})", lambda m: chr(int(m.group(1), 16)), result)
 
     # Line filtering - return None for lines we want to filter out
-    def line(self, items: list) -> Field | Constant | str | None:
+    def line(self, items: list[Any]) -> Field | Constant | str | None:
         """Process a line and filter out None values."""
         if len(items) == 0 or items[0] is None:
             return None
-        return items[0]
+        item = items[0]
+        assert isinstance(item, (Field, Constant, str)) or item is None
+        return item
 
 
 def parse_string(message_string: str, context_package_name: str | None = None) -> MessageDefinition:

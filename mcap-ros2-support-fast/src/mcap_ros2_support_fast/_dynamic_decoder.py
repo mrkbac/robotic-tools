@@ -1,6 +1,6 @@
 import codecs
 import struct
-from typing import Any
+from typing import Any, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
@@ -253,12 +253,12 @@ class DecoderGeneratorFactory:
 
             return
 
-        targets = []
+        field_vars: list[str] = []
         for field in fields:
-            targets.extend(self.generate_type(field))
+            field_vars.extend(self.generate_type(field))
 
         # Create instance
-        self.code.append(f"{plan_target} = {target_alias}({', '.join(targets)})")
+        self.code.append(f"{plan_target} = {target_alias}({', '.join(field_vars)})")
 
     def generate_decoder_code(self, func_name: str) -> str:
         """Generate Python source code for a decoder function"""
@@ -315,4 +315,4 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
     # print(code)  # Debug: show generated code
 
     exec(code, namespace)  # noqa: S102
-    return namespace[target_type_name]
+    return cast("DecoderFunction", namespace[target_type_name])

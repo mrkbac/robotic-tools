@@ -6,7 +6,12 @@ import logging
 from typing import Any
 
 import numpy as np
-from pointcloud2 import PointCloud2, PointField, dtype_from_fields, read_points
+from pointcloud2 import (  # type: ignore[import-untyped]
+    PointCloud2,
+    PointField,
+    dtype_from_fields,
+    read_points,
+)
 
 from . import Transformer, TransformError
 

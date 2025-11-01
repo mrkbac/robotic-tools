@@ -72,7 +72,7 @@ def _build_status(label: str, wrap: StaleStatusWrapper) -> Text:
     return Text.from_markup(f"[{color}]{name:5}[/{color}] [b]{label}[/b]")
 
 
-class DiagTree(Tree):
+class DiagTree(Tree[str]):
     data: reactive[dict[str, StaleStatusWrapper]] = reactive({})
 
     highlighter = ReprHighlighter()
@@ -83,7 +83,7 @@ class DiagTree(Tree):
         self.show_root = False
 
     def watch_data(self, data: dict[str, StaleStatusWrapper]) -> None:
-        _node_map: dict[str, TreeNode] = {
+        _node_map: dict[str, TreeNode[str]] = {
             kv.data: kv for kv in self.root.children if isinstance(kv.data, str)
         }  # pyright: ignore[reportAssignmentType]
 
@@ -102,7 +102,7 @@ class DiagTree(Tree):
                 parent_node = self.root.add(_build_status(key, wrap), data=key)
                 self._update_child_status(parent_node, wrap)
 
-    def _update_child_status(self, parent_node: TreeNode, wrap: StaleStatusWrapper) -> None:
+    def _update_child_status(self, parent_node: TreeNode[str], wrap: StaleStatusWrapper) -> None:
         # Build expected children: message first, then values in input order
         expected: dict[str, Text] = {
             "__message__": Text.assemble(

@@ -120,11 +120,11 @@ class MessagePathTransformer(
 
     def topic_plain(self, items: list[Token]) -> str:
         """Transform plain topic name."""
-        return items[0].value
+        return str(items[0].value)
 
     def topic_quoted(self, items: list[Token]) -> str:
         """Transform quoted topic name."""
-        return items[0].value.strip("\"'")
+        return str(items[0].value).strip("\"'")
 
     def path_component(self, items: list[PathComponent]) -> PathComponent:
         return items[0]
@@ -227,8 +227,10 @@ class MessagePathTransformer(
             if value.type == "SIGNED_FLOAT":
                 return float(value.value)
             if value.type in ("ESCAPED_STRING", "SINGLE_QUOTED_STRING"):
-                return value.value.strip("\"'")
-            return value.value
+                return str(value.value).strip("\"'")
+            return str(value.value)
+        # If not a Token, it must be a Variable or boolean from child rules
+        assert isinstance(value, (Variable, bool))
         return value
 
     # Boolean transformations
@@ -244,7 +246,7 @@ class MessagePathTransformer(
         return Variable(name=name, repr=f"${name}")
 
     def modifier(self, items: list[Token]) -> str:
-        return items[0].value
+        return str(items[0].value)
 
 
 class MessagePathParser:

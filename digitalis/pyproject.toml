@@ -37,6 +37,12 @@ dev = [
 [tool.ty.rules]
 invalid-assignment = "ignore" # causes issues with reactive
 
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+disallow_any_generics = true
+
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
 small-mcap = { workspace = true }

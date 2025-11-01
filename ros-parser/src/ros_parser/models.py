@@ -1,6 +1,7 @@
 """Data models for ROS2 message definitions."""
 
 from dataclasses import dataclass, field
+from typing import Any
 
 # ROS2 primitive type names
 PRIMITIVE_TYPE_NAMES = {
@@ -83,7 +84,7 @@ class Field:
 
     type: Type
     name: str
-    default_value: bool | int | float | str | list | None = None
+    default_value: bool | int | float | str | list[Any] | None = None
 
     def __str__(self) -> str:
         """Return the string representation of the field."""

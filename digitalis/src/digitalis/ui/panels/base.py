@@ -9,18 +9,18 @@ from digitalis.reader.types import MessageEvent
 T = TypeVar("T", bound=Any)
 
 
-_PANEL_SCHEMA_REGISTRY: dict[str, list[type["BasePanel"]]] = {}
-_PANEL_REGISTRY: list[type["BasePanel"]] = []
+_PANEL_SCHEMA_REGISTRY: dict[str, list[type["BasePanel[Any]"]]] = {}
+_PANEL_REGISTRY: list[type["BasePanel[Any]"]] = []
 
 SCHEMA_ANY = "ANY"
 
 
-def get_all_panels() -> list[type["BasePanel"]]:
+def get_all_panels() -> list[type["BasePanel[Any]"]]:
     """Get all registered panels."""
     return _PANEL_REGISTRY
 
 
-def get_available_panels(schema: str) -> list[type["BasePanel"]]:
+def get_available_panels(schema: str) -> list[type["BasePanel[Any]"]]:
     """Get all available panels for a given schema, sorted by priority then ANY_SCHEMA."""
     panels = []
 
@@ -41,7 +41,7 @@ def get_available_panels(schema: str) -> list[type["BasePanel"]]:
     return panels
 
 
-def get_default_panel(schema: str) -> type["BasePanel"] | None:
+def get_default_panel(schema: str) -> type["BasePanel[Any]"] | None:
     """Get the default panel for a schema (most specific first)."""
     panels = get_available_panels(schema)
     if not panels:

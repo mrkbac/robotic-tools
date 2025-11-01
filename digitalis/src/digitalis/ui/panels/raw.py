@@ -25,7 +25,7 @@ iso_highlighter = ISO8601Highlighter()
 
 
 def add_node(
-    name: str, node: TreeNode, obj: Any, expand_depth: int, auto_expand: bool = True
+    name: str, node: TreeNode[str], obj: Any, expand_depth: int, auto_expand: bool = True
 ) -> None:
     """Adds a node to the tree.
 
@@ -139,7 +139,7 @@ class QueryValidator(Validator):
         return None
 
 
-class TreeView(Tree):
+class TreeView(Tree[str]):
     data: reactive[MessageEvent | None] = reactive(None)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -221,7 +221,7 @@ class TreeView(Tree):
             header_node.set_label(dummy_label)
 
     def _update_node_incrementally(
-        self, node: TreeNode, new_obj: Any, path: str, expand_depth: int
+        self, node: TreeNode[str], new_obj: Any, path: str, expand_depth: int
     ) -> None:
         """Update a single node incrementally based on data comparison."""
         new_data = repr(new_obj)
@@ -285,7 +285,7 @@ class TreeView(Tree):
         self._update_children_incrementally(node, new_obj, path, expand_depth)
 
     def _update_children_incrementally(
-        self, parent_node: TreeNode, new_obj: Any, path: str, expand_depth: int
+        self, parent_node: TreeNode[str], new_obj: Any, path: str, expand_depth: int
     ) -> None:
         """Update children of a node incrementally."""
         existing_children = {
@@ -336,7 +336,12 @@ class TreeView(Tree):
                 child_node.remove()
 
     def _update_array_node(
-        self, array_node: TreeNode, new_array: list | tuple, slot: str, path: str, expand_depth: int
+        self,
+        array_node: TreeNode[str],
+        new_array: list[Any] | tuple[Any, ...],
+        slot: str,
+        path: str,
+        expand_depth: int,
     ) -> None:
         """Update an array node incrementally, comparing min(old_len, new_len) items."""
         new_array_data = f"array:{len(new_array)}"
@@ -432,7 +437,7 @@ class TreeView(Tree):
         self._update_tree_incrementally(channel_message)
 
 
-class Raw(BasePanel):
+class Raw(BasePanel[MessageEvent]):
     SUPPORTED_SCHEMAS: ClassVar[set[str]] = {SCHEMA_ANY}
     PRIORITY: ClassVar[int] = 1000  # Should be the last panel
 

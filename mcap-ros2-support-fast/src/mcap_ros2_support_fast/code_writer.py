@@ -6,10 +6,10 @@ from contextlib import contextmanager
 
 class CodeWriter:
     def __init__(self, *, comments: bool) -> None:
-        self._lines = []
+        self._lines: list[str] = []
         self._level = 0
         self._indentation = "    "
-        self._level_stack = []
+        self._level_stack: list[int] = []
         self._comments = comments
 
     def append(self, lines: "str | CodeWriter | None") -> None:

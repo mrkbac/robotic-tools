@@ -40,3 +40,12 @@ repos:
     rev: 0.9.5
     hooks:
       - id: uv-lock
+
+  - repo: local
+    hooks:
+      - id: mypy-check
+        name: mypy type check
+        entry: bash scripts/check_types.sh
+        language: system
+        pass_filenames: false
+        always_run: true

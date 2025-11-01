@@ -13,7 +13,7 @@ from digitalis.ui.panels.base import BasePanel
 from digitalis.utilities import RichRender, nanoseconds_to_iso
 
 
-class InteractiveRenderPanel(BasePanel):
+class InteractiveRenderPanel(BasePanel[MessageEvent]):
     """Base class for panels with interactive zoom/pan capabilities and background rendering.
 
     Provides shared functionality for:
@@ -276,7 +276,7 @@ class InteractiveRenderPanel(BasePanel):
             return self.MIN_RESOLUTION
 
         req_res = max(ranges[0] / self.size.width, ranges[1] / (self.size.height * 2)) * padding
-        return np.clip(req_res, self.MIN_RESOLUTION, self.MAX_RESOLUTION)
+        return float(np.clip(req_res, self.MIN_RESOLUTION, self.MAX_RESOLUTION))
 
     def _center_on_bounds(
         self, data_bounds: tuple[tuple[float, float], tuple[float, float]]

@@ -89,7 +89,7 @@ class PanelType(Provider):
                 )
 
 
-class DataScreen(Screen):
+class DataScreen(Screen[None]):
     COMMANDS: ClassVar[set[type[Provider] | Callable[[], type[Provider]]]] = {
         PanelSetTopic,
         PanelType,

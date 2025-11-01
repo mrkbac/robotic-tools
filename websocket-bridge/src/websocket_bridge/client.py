@@ -406,7 +406,10 @@ class WebSocketBridgeClient:
         await self.on_server_info(name, capabilities, session_id)
 
     async def on_server_info(
-        self, name: str, capabilities: list[str], session_id: str | None
+        self,
+        name: str,
+        capabilities: list[str],
+        session_id: str | None,  # noqa: ARG002
     ) -> None:
         """Callback for server info. Override in subclasses."""
         logger.debug(f"Server info: {name} with {len(capabilities)} capabilities")
@@ -423,7 +426,7 @@ class WebSocketBridgeClient:
         # Call the callback with processed data
         await self.on_status(level, message, status_id)
 
-    async def on_status(self, level: int, message: str, status_id: str | None) -> None:
+    async def on_status(self, level: int, message: str, status_id: str | None) -> None:  # noqa: ARG002
         """Callback for status messages. Override in subclasses."""
         logger.debug(f"Status message (level={level}): {message}")
 

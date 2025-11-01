@@ -1,7 +1,7 @@
 import codecs
 import dataclasses
 import struct
-from typing import Any
+from typing import Any, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
@@ -311,7 +311,5 @@ def create_encoder(plan: PlanList, *, comments: bool = True) -> EncoderFunction:
     code = factory.generate_encoder_code(target_type_name)
     namespace = factory.create_namespace()
 
-    # print(code)  # Debug: show generated code
-
     exec(code, namespace)  # noqa: S102
-    return namespace[target_type_name]
+    return cast("EncoderFunction", namespace[target_type_name])

@@ -234,8 +234,8 @@ class ImageToVideoTransformer(Transformer):
         # Input: JPEG from stdin
         # Output: H.264 Annex B format to stdout
         ffmpeg_path, _ = get_ffmpeg()
-        cmd = [
-            ffmpeg_path,
+        cmd: list[str] = [
+            str(ffmpeg_path),
             "-hide_banner",
             "-loglevel",
             "error",
