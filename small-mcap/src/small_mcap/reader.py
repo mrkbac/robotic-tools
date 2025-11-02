@@ -713,9 +713,15 @@ def read_message(
     )
 
 
+class _SchemaProtocol(Protocol):
+    id: int
+    name: str
+    encoding: str
+    data: bytes
+
 class DecoderFactoryProtocol(Protocol):
     def decoder_for(
-        self, message_encoding: str, schema: Schema | None
+        self, message_encoding: str, schema: _SchemaProtocol | None
     ) -> Callable[[bytes], Any] | None: ...
 
 
