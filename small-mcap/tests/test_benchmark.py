@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 from mcap.reader import make_reader
-
 from small_mcap import include_topics, read_message
 
 # Test file path - nuScenes MCAP file with 30,900 messages, 19.15s duration, 560 zstd chunks
@@ -38,11 +37,23 @@ class BenchmarkConfig:
 
 
 # Test configurations for all benchmark scenarios
+# Note: File timestamps are Unix time (2018-07-24 02:42:07 to 02:42:26)
+# Time range: 1532402927647 to 1532402946797 (ms), duration: 19,149 ms
 TEST_CONFIGS = [
     BenchmarkConfig(id="full-seekable", seekable=True),
     BenchmarkConfig(id="full-nonseekable", seekable=False),
-    BenchmarkConfig(id="time-seekable", seekable=True, start_time_ms=0, end_time_ms=5000),
-    BenchmarkConfig(id="time-nonseekable", seekable=False, start_time_ms=0, end_time_ms=5000),
+    BenchmarkConfig(
+        id="time-seekable",
+        seekable=True,
+        start_time_ms=1532402927647,
+        end_time_ms=1532402932647,
+    ),
+    BenchmarkConfig(
+        id="time-nonseekable",
+        seekable=False,
+        start_time_ms=1532402927647,
+        end_time_ms=1532402932647,
+    ),
     BenchmarkConfig(id="topic-seekable", seekable=True, topics=TEST_TOPICS),
     BenchmarkConfig(id="topic-nonseekable", seekable=False, topics=TEST_TOPICS),
 ]

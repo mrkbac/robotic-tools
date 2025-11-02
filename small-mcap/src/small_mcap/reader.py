@@ -719,6 +719,7 @@ class _SchemaProtocol(Protocol):
     encoding: str
     data: bytes
 
+
 class DecoderFactoryProtocol(Protocol):
     def decoder_for(
         self, message_encoding: str, schema: _SchemaProtocol | None
