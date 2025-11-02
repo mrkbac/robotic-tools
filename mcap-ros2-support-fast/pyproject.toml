@@ -16,9 +16,6 @@ build-backend = "uv_build"
 dev = [
     "small-mcap",
     "mcap-ros2-support>=0.5.5",
-    "pytest>=8.4.1",
-    "pytest-benchmark>=5.1.0",
-    "pytest-cov>=6.2.1",
 ]
 
 [tool.uv.sources]

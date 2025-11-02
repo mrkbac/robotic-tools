@@ -665,10 +665,7 @@ class McapWriter:
             raise RuntimeError("Writer already finished")
 
         # Finalize any in-progress chunk first
-        if self.chunk_builder is not None and (result := self.chunk_builder.finalize()):
-            chunk_obj, message_indices = result
-            self._write_chunk(chunk_obj, message_indices)
-            self.chunk_builder.reset()
+        self._finalize_current_chunk()
 
         # Write the pre-built chunk
         self._write_chunk(chunk, {idx.channel_id: idx for idx in indexes})
@@ -678,6 +675,7 @@ class McapWriter:
         if self.chunk_builder is not None and (result := self.chunk_builder.finalize()):
             chunk, message_indices = result
             self._write_chunk(chunk, message_indices)
+            self.chunk_builder.reset()
 
     def finish(self) -> None:
         """Finish writing the MCAP file."""

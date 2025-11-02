@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -89,6 +90,37 @@ def add_parser(
     return parser
 
 
+@dataclass(slots=True)
+class ChunkStats:
+    count: int = 0
+    compressed_size: int = 0
+    uncompressed_size: int = 0
+    min_size: int = 0
+    max_size: int = 0
+
+    durations_ns: list[float] = field(default_factory=list)
+
+    @property
+    def duration_stats(self) -> tuple[str, str, str]:
+        if not self.durations_ns:
+            return "0.0", "0.0", "0.0"
+        divider = 1_000_000
+
+        return (
+            f"{min(self.durations_ns) / divider:.2f}ms",
+            f"{sum(self.durations_ns) / len(self.durations_ns) / divider:.2f}ms",
+            f"{max(self.durations_ns) / divider:.2f}ms",
+        )
+
+    @property
+    def ratio(self) -> str:
+        return (
+            f"{self.compressed_size / self.uncompressed_size * 100:.1f}%"
+            if self.uncompressed_size > 0
+            else "N/A"
+        )
+
+
 def handle_command(args: argparse.Namespace) -> None:
     """Handle the info command execution."""
 
@@ -137,6 +169,7 @@ def handle_command(args: argparse.Namespace) -> None:
     date_end = datetime.fromtimestamp(statistics.message_end_time / 1_000_000_000)
 
     info_table.add_row("Messages:", f"[green]{statistics.message_count:,}[/green]")
+    info_table.add_row("Chunks:", f"[cyan]{statistics.chunk_count}[/cyan]")
     info_table.add_row(
         "Duration:",
         f"[yellow]{duration_ns / 1_000_000:.2f} ms[/yellow] [cyan]({duration_human})[/cyan]",
@@ -147,18 +180,21 @@ def handle_command(args: argparse.Namespace) -> None:
     console.print(info_table)
 
     # compression, count, compressed size, uncompressed size, min size, max size
-    chunks: dict[str, tuple[int, int, int, int, int]] = {}
+    chunks: dict[str, ChunkStats] = {}
+
     for x in summary.chunk_indexes:
-        count, compressed, uncompressed, min_size, max_size = chunks.get(
-            x.compression, (0, 0, 0, 0, 0)
+        stats = chunks.get(x.compression, ChunkStats())
+        stats.count += 1
+        stats.compressed_size += x.compressed_size
+        stats.uncompressed_size += x.uncompressed_size
+        stats.min_size = (
+            min(stats.min_size, x.uncompressed_size) if stats.min_size else x.uncompressed_size
         )
-        chunks[x.compression] = (
-            count + 1,
-            compressed + x.compressed_size,
-            uncompressed + x.uncompressed_size,
-            min(min_size, x.uncompressed_size) if min_size else x.uncompressed_size,
-            max(max_size, x.uncompressed_size) if max_size else x.uncompressed_size,
+        stats.max_size = (
+            max(stats.max_size, x.uncompressed_size) if stats.max_size else x.uncompressed_size
         )
+        stats.durations_ns.append(x.message_end_time - x.message_start_time)
+        chunks[x.compression] = stats
 
     compression_table = Table()
     compression_table.add_column("Type", style="bold cyan")
@@ -168,26 +204,24 @@ def handle_command(args: argparse.Namespace) -> None:
     compression_table.add_column("Ratio", justify="right", style="magenta")
     compression_table.add_column("Min Size", justify="right", style="yellow")
     compression_table.add_column("Max Size", justify="right", style="yellow")
+    compression_table.add_column("Min Dur", justify="right", style="green")
+    compression_table.add_column("Avg Dur", justify="right", style="yellow")
+    compression_table.add_column("Max Dur", justify="right", style="magenta")
 
-    chunks_count = len(summary.chunk_indexes)
-    for compression_type, (
-        count,
-        compressed_size,
-        uncompressed_size,
-        min_size,
-        max_size,
-    ) in chunks.items():
-        ratio = (
-            f"{compressed_size / uncompressed_size * 100:.1f}%" if uncompressed_size > 0 else "N/A"
-        )
+    for compression_type, chunk in chunks.items():
+        min_dur, avg_dur, max_dur = chunk.duration_stats
+
         compression_table.add_row(
             compression_type,
-            f"{count}/{chunks_count}",
-            bytes_to_human(compressed_size),
-            bytes_to_human(uncompressed_size),
-            ratio,
-            bytes_to_human(min_size),
-            bytes_to_human(max_size),
+            f"{chunk.count}",
+            bytes_to_human(chunk.compressed_size),
+            bytes_to_human(chunk.uncompressed_size),
+            chunk.ratio,
+            bytes_to_human(chunk.min_size),
+            bytes_to_human(chunk.max_size),
+            min_dur,
+            avg_dur,
+            max_dur,
         )
 
     console.print(compression_table)

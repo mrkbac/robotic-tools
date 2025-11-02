@@ -11,9 +11,6 @@ zstd = ["zstandard>=0.23.0"]
 lz4 = ["lz4>=4.3.3"]
 compression = ["small-mcap[zstd]", "small-mcap[lz4]"]
 dev = [
-    "pytest>=8.0",
-    "pytest-cov>=4.1",
-    "pytest-xdist>=3.5",
     "mcap>=1.0.0",
 ]
 
