@@ -1,7 +1,15 @@
 import argparse
 import sys
 
-from pymcap_cli.cmd import du_cmd, filter_cmd, info_cmd, list_cmd, process_cmd, recover_cmd
+from pymcap_cli.cmd import (
+    du_cmd,
+    filter_cmd,
+    info_cmd,
+    list_cmd,
+    process_cmd,
+    rechunk_cmd,
+    recover_cmd,
+)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -37,6 +45,9 @@ def create_parser() -> argparse.ArgumentParser:
     # Add unified process command
     process_cmd.add_parser(subparsers)
 
+    # Add rechunk command
+    rechunk_cmd.add_parser(subparsers)
+
     return parser
 
 
@@ -63,6 +74,8 @@ def main() -> None:
         filter_cmd.handle_compress_command(args)
     elif args.command == "process":
         process_cmd.handle_command(args)
+    elif args.command == "rechunk":
+        rechunk_cmd.handle_command(args)
     else:
         parser.print_help()
         sys.exit(1)

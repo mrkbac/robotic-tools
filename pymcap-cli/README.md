@@ -23,6 +23,9 @@ uv run pymcap_cli recover corrupted.mcap -o fixed.mcap
 # Filter messages by topic with compression
 uv run pymcap_cli process large.mcap -o filtered.mcap -y "/camera.*" --compression zstd
 
+# Rechunk by topic patterns
+uv run pymcap_cli rechunk data.mcap -o rechunked.mcap -p "/camera.*" -p "/lidar.*"
+
 # Show disk usage breakdown
 uv run pymcap_cli du large.mcap
 
@@ -74,6 +77,35 @@ uv run pymcap_cli process zstd.mcap -o lz4.mcap --compression lz4 -y "/important
 # Recovery mode with filtering (handles corrupt files)
 uv run pymcap_cli process corrupt.mcap -o recovered.mcap -y "/camera.*" --recovery-mode
 ```
+
+### `rechunk` - Topic-Based Rechunking
+
+Reorganize MCAP messages into separate chunk groups based on topic patterns. This is useful for optimizing file layout when different topics are accessed independently, improving playback performance for topic-specific queries.
+
+```bash
+# Group camera and lidar topics into separate chunks
+uv run pymcap_cli rechunk data.mcap -o rechunked.mcap -p "/camera.*" -p "/lidar.*"
+
+# Multiple patterns - each gets its own chunk group
+uv run pymcap_cli rechunk data.mcap -o rechunked.mcap \
+  -p "/camera/front.*" \
+  -p "/camera/rear.*" \
+  -p "/lidar.*" \
+  -p "/radar.*"
+
+# With custom chunk size and compression
+uv run pymcap_cli rechunk data.mcap -o rechunked.mcap \
+  -p "/high_freq.*" \
+  --chunk-size 8388608 \
+  --compression lz4
+```
+
+**How it works:**
+- Messages are grouped by the first matching pattern (first match wins)
+- Each pattern gets its own chunk group that can span multiple chunks
+- Topics not matching any pattern go into a separate "unmatched" group
+- Messages within each group preserve their original order
+- Useful for optimizing access patterns when different topics are read independently
 
 ### `filter` - Topic Filtering
 
@@ -178,6 +210,17 @@ uv run pymcap_cli process corrupt.mcap -o recovered.mcap \
 # Fast filtering with chunk copying for maximum performance
 uv run pymcap_cli process 100gb_file.mcap -o filtered.mcap \
   -y "/lidar.*" --chunk-copying --compression zstd
+```
+
+### Optimize for Topic-Specific Playback
+
+```bash
+# Rechunk by sensor type for faster topic-specific access
+uv run pymcap_cli rechunk robot_log.mcap -o optimized.mcap \
+  -p "/camera.*" \
+  -p "/lidar.*" \
+  -p "/imu.*" \
+  -p "/gps.*"
 ```
 
 ## 🔧 Technical Details
