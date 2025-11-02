@@ -151,14 +151,7 @@ def rebuild_summary(
         if pending_chunk is None:
             return
 
-        unpack = False
-        # contains new channels?
-        for msg_idx in pending_indexes:
-            if msg_idx.channel_id not in seen_channels:
-                unpack = True
-                break
-
-        if unpack:
+        if any(msg_idx.channel_id not in seen_channels for msg_idx in pending_indexes):
             for record in breakup_chunk(
                 pending_chunk,
                 validate_crc=validate_crc,
@@ -225,7 +218,8 @@ def rebuild_summary(
                 )
             pending_chunk = record
         elif isinstance(record, MessageIndex):
-            pending_indexes.append(record)
+            if len(record.records) > 0:
+                pending_indexes.append(record)
         elif isinstance(record, Attachment):
             statistics.attachment_count += 1
         elif isinstance(record, AttachmentIndex):
