@@ -52,7 +52,6 @@ _FOOTER_SIZE = _RECORD_HEADER_SIZE + 8 + 8 + 4
 
 # Limits and defaults
 _RECORD_SIZE_LIMIT = 4 * 2**30  # 4 GiB - maximum size for a single record
-_REMAP_ID_START = 10_000  # Starting ID for remapped schemas and channels
 
 # Type aliases for stream_reader return types
 # Records that come from inside chunks when emit_chunks=False
@@ -611,13 +610,21 @@ def _read_message_non_seeking(
 
 
 class _Remapper:
-    def __init__(self) -> None:
-        self._last_schema_id = _REMAP_ID_START
-        self._last_channel_id = _REMAP_ID_START
+    def __init__(self, summaries: list[tuple[int, Summary]] | None = None) -> None:
+        self._used_schema_ids: set[int] = set()
+        self._used_channel_ids: set[int] = set()
+
         self._schema_lookup_fast: dict[tuple[int, int], Schema | None] = {}
         self._channel_lookup_fast: dict[tuple[int, int], Channel] = {}
         self._schema_lookup_slow: dict[tuple[str, bytes], Schema | None] = {}
         self._channel_lookup_slow: dict[tuple[str, str], Channel] = {}
+
+        if summaries is not None:
+            for stream_id, summary in summaries:
+                for schema in summary.schemas.values():
+                    self.remap_schema(stream_id, schema)
+                for channel in summary.channels.values():
+                    self.remap_channel(stream_id, channel)
 
     def remap_schema(self, stream_id: int, schema: Schema | None) -> Schema | None:
         if schema is None:
@@ -630,16 +637,19 @@ class _Remapper:
             return mapped_schema
 
         # Slow path: lookup by schema content
-        schema_key = (schema.name, schema.data)
-        mapped_schema = self._schema_lookup_slow.get(schema_key)
+        slow_key = (schema.name, schema.data)
+        mapped_schema = self._schema_lookup_slow.get(slow_key)
         if mapped_schema:
             # Cache in fast lookup for future access
             self._schema_lookup_fast[fast_key] = mapped_schema
             return mapped_schema
 
-        self._last_schema_id += 1
-        mapped_schema = replace(schema, id=self._last_schema_id)
-        self._schema_lookup_slow[schema_key] = mapped_schema
+        new_id = schema.id
+        while new_id in self._used_schema_ids:
+            new_id += 1
+        self._used_schema_ids.add(new_id)
+        mapped_schema = replace(schema, id=new_id)
+        self._schema_lookup_slow[slow_key] = mapped_schema
         self._schema_lookup_fast[fast_key] = mapped_schema
         return mapped_schema
 
@@ -651,19 +661,22 @@ class _Remapper:
             return mapped_channel
 
         # Slow path: lookup by channel content
-        channel_key = (
+        slow_key = (
             channel.topic,
             channel.message_encoding,
         )  # TODO: include metadata
-        mapped_channel = self._channel_lookup_slow.get(channel_key)
+        mapped_channel = self._channel_lookup_slow.get(slow_key)
         if mapped_channel is not None:
             # Cache in fast lookup for future access
             self._channel_lookup_fast[fast_key] = mapped_channel
             return mapped_channel
 
-        self._last_channel_id += 1
-        mapped_channel = replace(channel, id=self._last_channel_id, schema_id=0)
-        self._channel_lookup_slow[channel_key] = mapped_channel
+        new_id = channel.id
+        while new_id in self._used_channel_ids:
+            new_id += 1
+        self._used_channel_ids.add(new_id)
+        mapped_channel = replace(channel, id=new_id, schema_id=0)
+        self._channel_lookup_slow[slow_key] = mapped_channel
         self._channel_lookup_fast[fast_key] = mapped_channel
         return mapped_channel
 
