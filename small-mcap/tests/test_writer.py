@@ -90,7 +90,7 @@ class TestMcapWriterBasics:
         with open(temp_mcap_file, "wb") as f:
             writer = McapWriter(f)
             with pytest.raises(RuntimeError, match="Writer not started"):
-                writer.add_schema(name="Test", encoding="json", data=b"{}")
+                writer.add_schema(schema_id=1, name="Test", encoding="json", data=b"{}")
 
     def test_write_after_finish_raises_error(self, temp_mcap_file: Path):
         """Test that writing after finish() raises an error."""
@@ -100,7 +100,7 @@ class TestMcapWriterBasics:
             writer.finish()
 
             with pytest.raises(RuntimeError, match="Writer already finished"):
-                writer.add_schema(name="Test", encoding="json", data=b"{}")
+                writer.add_schema(schema_id=1, name="Test", encoding="json", data=b"{}")
 
 
 class TestMcapWriterChunking:

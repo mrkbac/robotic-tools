@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -14,20 +15,17 @@ from rich.console import Console
 from small_mcap import (
     Attachment,
     Channel,
-    Chunk,
     CompressionType,
     DataEnd,
     Footer,
     Header,
-    McapError,
     McapWriter,
     Message,
-    MessageIndex,
     Metadata,
     Schema,
-    breakup_chunk,
     stream_reader,
 )
+from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
 from pymcap_cli.mcap_processor import compile_topic_patterns, str_to_compression_type
@@ -36,15 +34,33 @@ from pymcap_cli.utils import file_progress
 console = Console()
 
 
+class RechunkMode(Enum):
+    """Mode for rechunking operation."""
+
+    PATTERN = auto()  # Group by regex patterns
+    ALL = auto()  # Each topic in its own chunk group
+    AUTO = auto()  # Auto-group based on size (>15% threshold)
+
+
 class MessageGroup:
     """Manages a group of messages that will be chunked together independently."""
 
     def __init__(
-        self, writer: McapWriter, chunk_size: int, compression_type: CompressionType
+        self,
+        writer: McapWriter,
+        chunk_size: int,
+        compression_type: CompressionType,
+        schemas: dict[int, Schema],
+        channels: dict[int, Channel],
     ) -> None:
         self.writer = writer
         self.chunk_size = chunk_size
         self.message_count = 0
+        self.compress_fail_counter = 0
+        self.schemas = schemas
+        self.channels = channels
+        self.written_schemas: set[int] = set()
+        self.written_channels: set[int] = set()
         # Each group has its own chunk builder for independent chunking
         self.chunk_builder = _ChunkBuilder(
             chunk_size=chunk_size,
@@ -55,12 +71,32 @@ class MessageGroup:
     def add_message(self, message: Message) -> None:
         """Add message to this group's chunk builder."""
         # Add message to this group's chunk builder
-        result = self.chunk_builder.add(message)
+        if message.channel_id not in self.written_channels and (
+            channel := self.channels.get(message.channel_id)
+        ):
+            if channel.schema_id not in self.written_schemas and (
+                schema := self.schemas.get(channel.schema_id)
+            ):
+                self.chunk_builder.add(schema)
+                self.written_schemas.add(channel.schema_id)
+            self.chunk_builder.add(channel)
+            self.written_channels.add(message.channel_id)
+
+        self.chunk_builder.add(message)
 
         # If chunk builder returns a completed chunk, write it immediately
-        if result is not None:
+        if result := self.chunk_builder.maybe_finalize():
             chunk, message_indexes = result
+            if chunk.compression != self.chunk_builder.compression.value:
+                self.compress_fail_counter += 1
+                if self.compress_fail_counter > 2:
+                    console.print(
+                        "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
+                    )
+                    self.chunk_builder.compression = CompressionType.NONE
             self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
+            self.written_channels.clear()
+            self.written_schemas.clear()
 
         self.message_count += 1
 
@@ -70,6 +106,8 @@ class MessageGroup:
         if result is not None:
             chunk, message_indexes = result
             self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
+            self.written_channels.clear()
+            self.written_schemas.clear()
 
 
 class RechunkProcessor:
@@ -77,10 +115,12 @@ class RechunkProcessor:
 
     def __init__(
         self,
+        mode: RechunkMode,
         patterns: list[Pattern[str]],
         chunk_size: int,
         compression: str,
     ) -> None:
+        self.mode = mode
         self.patterns = patterns
         self.chunk_size = chunk_size
         self.compression = compression
@@ -91,8 +131,11 @@ class RechunkProcessor:
         self.written_schemas: set[int] = set()
         self.written_channels: set[int] = set()
 
-        # Message groups (one per pattern + one for unmatched)
-        self.groups: list[MessageGroup] = []
+        # Map channel_id to its MessageGroup (populated dynamically)
+        self.channel_to_group: dict[int, MessageGroup] = {}
+
+        # For AUTO mode: track which channels are "large" (>15% of total)
+        self.large_channels: set[int] = set()
 
         # Stats
         self.messages_processed = 0
@@ -143,6 +186,40 @@ class RechunkProcessor:
                 return i
         return None
 
+    def analyze_for_auto_grouping(self, input_stream: BinaryIO) -> None:
+        """Pre-analyze file to identify large channels (>15% of total uncompressed size)."""
+        console.print("[dim]Analyzing file for auto-grouping...[/dim]")
+
+        # Use rebuild_summary to estimate channel sizes
+        rebuild_info = rebuild_summary(
+            input_stream,
+            validate_crc=False,
+            calculate_channel_sizes=True,
+            exact_sizes=False,  # Use fast estimation
+        )
+
+        if not rebuild_info.channel_sizes:
+            console.print("[yellow]Warning: Could not determine channel sizes[/yellow]")
+            return
+
+        # Calculate 15% threshold
+        total_size = sum(rebuild_info.channel_sizes.values())
+        threshold = total_size * 0.15
+
+        # Identify large channels
+        self.large_channels = {
+            ch_id for ch_id, size in rebuild_info.channel_sizes.items() if size > threshold
+        }
+
+        if self.large_channels:
+            console.print(
+                f"[dim]Found {len(self.large_channels)} large channel(s) "
+                f"(>{threshold / 1024 / 1024:.1f}MB each)[/dim]"
+            )
+
+        # Reset stream position for main processing
+        input_stream.seek(0)
+
     def process(
         self,
         input_stream: BinaryIO,
@@ -150,6 +227,10 @@ class RechunkProcessor:
         file_size: int,
     ) -> None:
         """Main processing function - streaming approach."""
+        # For AUTO mode, pre-analyze to identify large channels
+        if self.mode == RechunkMode.AUTO:
+            self.analyze_for_auto_grouping(input_stream)
+
         # Initialize writer
         compression_type = str_to_compression_type(self.compression)
         writer = McapWriter(
@@ -159,134 +240,121 @@ class RechunkProcessor:
         )
 
         try:
-            writer_started = False
-
             with file_progress("[bold blue]Rechunking MCAP...", console) as progress:
                 task = progress.add_task("Processing", total=file_size)
 
-                records = stream_reader(input_stream, emit_chunks=True)
+                records = stream_reader(input_stream, emit_chunks=False)
 
-                try:
-                    for record in records:
-                        # Update progress
-                        progress.update(task, completed=input_stream.tell())
+                for record in records:
+                    # Update progress
+                    progress.update(task, completed=input_stream.tell())
 
-                        if isinstance(record, Header):
-                            # Start writer with header info
-                            writer.start(profile=record.profile, library=record.library)
-                            writer_started = True
-                            # Initialize message groups (N patterns + 1 unmatched)
-                            num_groups = len(self.patterns) + 1
-                            self.groups = [
-                                MessageGroup(writer, self.chunk_size, compression_type)
-                                for _ in range(num_groups)
-                            ]
+                    if isinstance(record, Header):
+                        # Start writer with header info
+                        writer.start(profile=record.profile, library=record.library)
 
-                        elif isinstance(record, Chunk):
-                            # Ensure writer is started
-                            if not writer_started:
-                                writer.start()
-                                writer_started = True
-                                num_groups = len(self.patterns) + 1
-                                self.groups = [
-                                    MessageGroup(writer, self.chunk_size, compression_type)
-                                    for _ in range(num_groups)
-                                ]
+                    elif isinstance(record, Schema):
+                        self.schemas[record.id] = record
 
-                            # Decode chunk and process records
-                            try:
-                                chunk_records = breakup_chunk(record, validate_crc=True)
-                                for chunk_record in chunk_records:
-                                    if isinstance(chunk_record, Schema):
-                                        self.schemas[chunk_record.id] = chunk_record
-                                    elif isinstance(chunk_record, Channel):
-                                        self.channels[chunk_record.id] = chunk_record
-                                    elif isinstance(chunk_record, Message):
-                                        self._process_message(chunk_record, writer)
-                            except McapError as e:
-                                console.print(
-                                    f"[yellow]Warning: Failed to decode chunk: {e}[/yellow]"
-                                )
+                    elif isinstance(record, Channel):
+                        self.channels[record.id] = record
 
-                        elif isinstance(record, MessageIndex):
-                            pass  # Skip message indexes
+                    elif isinstance(record, Message):
+                        self._process_message(record, writer)
 
-                        elif isinstance(record, Schema):
-                            self.schemas[record.id] = record
+                    elif isinstance(record, Attachment):
+                        writer.add_attachment(
+                            log_time=record.log_time,
+                            create_time=record.create_time,
+                            name=record.name,
+                            media_type=record.media_type,
+                            data=record.data,
+                        )
 
-                        elif isinstance(record, Channel):
-                            self.channels[record.id] = record
+                    elif isinstance(record, Metadata):
+                        writer.add_metadata(name=record.name, metadata=record.metadata)
 
-                        elif isinstance(record, Message):
-                            # Ensure writer is started
-                            if not writer_started:
-                                writer.start()
-                                writer_started = True
-                                num_groups = len(self.patterns) + 1
-                                self.groups = [
-                                    MessageGroup(writer, self.chunk_size, compression_type)
-                                    for _ in range(num_groups)
-                                ]
-                            self._process_message(record, writer)
+                    elif isinstance(record, (DataEnd, Footer)):
+                        break
 
-                        elif isinstance(record, Attachment):
-                            if not writer_started:
-                                writer.start()
-                                writer_started = True
-                            writer.add_attachment(
-                                log_time=record.log_time,
-                                create_time=record.create_time,
-                                name=record.name,
-                                media_type=record.media_type,
-                                data=record.data,
-                            )
+                # Flush all unique groups at the end
+                # Use set() to avoid flushing the same group multiple times
+                for group in set(self.channel_to_group.values()):
+                    group.flush()
 
-                        elif isinstance(record, Metadata):
-                            if not writer_started:
-                                writer.start()
-                                writer_started = True
-                            writer.add_metadata(name=record.name, metadata=record.metadata)
-
-                        elif isinstance(record, (DataEnd, Footer)):
-                            break
-
-                    # Flush all groups at the end
-                    for group in self.groups:
-                        group.flush()
-
-                    # Complete progress
-                    progress.update(task, completed=file_size)
-
-                except McapError as e:
-                    console.print(f"[yellow]Warning: Error reading file: {e}[/yellow]")
+                # Complete progress
+                progress.update(task, completed=file_size)
 
         finally:
             writer.finish()
 
     def _process_message(self, message: Message, writer: McapWriter) -> None:
-        """Process a single message - route to appropriate group."""
+        """Process a single message - route to appropriate group based on mode."""
         self.messages_processed += 1
 
-        # Get topic from channel
+        # Get channel for this message
         channel = self.channels.get(message.channel_id)
         if not channel:
             # Channel not yet seen - skip message
             return
 
-        # Find which pattern matches (first match wins)
-        pattern_idx = self.find_matching_pattern_index(channel.topic)
-
-        # Determine group index
-        # pattern_idx None → last group (unmatched)
-        # pattern_idx 0..N-1 → corresponding group
-        group_index = pattern_idx if pattern_idx is not None else len(self.patterns)
+        # Get or create the MessageGroup for this channel
+        if message.channel_id not in self.channel_to_group:
+            group = self._create_group_for_channel(message.channel_id, channel, writer)
+            self.channel_to_group[message.channel_id] = group
 
         # Ensure channel is written
         self.ensure_channel_written(message.channel_id, writer)
 
-        # Add message to group (group will auto-write chunks when full)
-        self.groups[group_index].add_message(message)
+        # Add message to its group
+        self.channel_to_group[message.channel_id].add_message(message)
         self.messages_written += 1
+
+    def _create_group_for_channel(
+        self, channel_id: int, channel: Channel, writer: McapWriter
+    ) -> MessageGroup:
+        """Create appropriate MessageGroup for a channel based on mode."""
+        compression_type = str_to_compression_type(self.compression)
+
+        if self.mode == RechunkMode.ALL:
+            # Each channel gets its own unique group
+            return MessageGroup(
+                writer, self.chunk_size, compression_type, self.schemas, self.channels
+            )
+
+        if self.mode == RechunkMode.AUTO:
+            # Large channels get their own group, small channels share one
+            if channel_id in self.large_channels:
+                # Create unique group for large channel
+                return MessageGroup(
+                    writer, self.chunk_size, compression_type, self.schemas, self.channels
+                )
+            # Reuse shared group for small channels (if exists)
+            # Look for any existing small-channel group
+            for ch_id, group in self.channel_to_group.items():
+                if ch_id not in self.large_channels:
+                    return group
+            # No shared group yet, create one
+            return MessageGroup(
+                writer, self.chunk_size, compression_type, self.schemas, self.channels
+            )
+
+        # RechunkMode.PATTERN
+        # Find which pattern matches this channel's topic
+        pattern_idx = self.find_matching_pattern_index(channel.topic)
+        group_key = pattern_idx if pattern_idx is not None else -1  # -1 for unmatched
+
+        # Check if we already have a group for this pattern
+        for ch_id, group in self.channel_to_group.items():
+            ch = self.channels.get(ch_id)
+            if ch:
+                other_pattern_idx = self.find_matching_pattern_index(ch.topic)
+                other_key = other_pattern_idx if other_pattern_idx is not None else -1
+                if other_key == group_key:
+                    return group
+
+        # No existing group for this pattern, create new one
+        return MessageGroup(writer, self.chunk_size, compression_type, self.schemas, self.channels)
 
 
 def add_parser(
@@ -320,7 +388,9 @@ def add_parser(
         required=True,
     )
 
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+
+    group.add_argument(
         "-p",
         "--pattern",
         action="append",
@@ -328,6 +398,19 @@ def add_parser(
         help="Regex pattern for topic grouping (can be used multiple times). "
         "Topics matching the first pattern go into chunk group 1, "
         "second pattern → group 2, etc. Unmatched topics → separate group.",
+    )
+
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="If set, all messages are placed into their own chunk",
+    )
+
+    group.add_argument(
+        "--auto",
+        action="store_true",
+        help="If set, automatically create chunk groups. "
+        "Topics taking up more than 15% of the uncompressed total size get their own chunk.",
     )
 
     parser.add_argument(
@@ -357,20 +440,33 @@ def handle_command(args: argparse.Namespace) -> None:
     output_file = Path(args.output)
     file_size = input_file.stat().st_size
 
-    # Compile patterns
-    try:
-        patterns = compile_topic_patterns(args.pattern)
-    except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
+    # Determine mode and compile patterns if needed
+    mode: RechunkMode
+    patterns: list[Pattern[str]] = []
 
-    if not patterns:
-        console.print(
-            "[yellow]Warning: No patterns specified. All messages will be in one group.[/yellow]"
-        )
+    if args.all:
+        mode = RechunkMode.ALL
+        console.print("[dim]Mode: Each topic in its own chunk group[/dim]")
+    elif args.auto:
+        mode = RechunkMode.AUTO
+        console.print("[dim]Mode: Auto-grouping based on size (>15% threshold)[/dim]")
+    else:
+        mode = RechunkMode.PATTERN
+        try:
+            patterns = compile_topic_patterns(args.pattern)
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            sys.exit(1)
+
+        if not patterns:
+            console.print(
+                "[yellow]Warning: No patterns specified. "
+                "All messages will be in one group.[/yellow]"
+            )
 
     # Create processor and run
     processor = RechunkProcessor(
+        mode=mode,
         patterns=patterns,
         chunk_size=args.chunk_size,
         compression=args.compression,
@@ -386,5 +482,14 @@ def handle_command(args: argparse.Namespace) -> None:
             f"wrote {processor.messages_written:,} messages"
         )
 
-        if patterns:
+        # Mode-specific stats
+        num_unique_groups = len(set(processor.channel_to_group.values()))
+        if mode == RechunkMode.ALL:
+            console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")
+        elif mode == RechunkMode.AUTO:
+            console.print(
+                f"Created {num_unique_groups} chunk group(s) "
+                f"({len(processor.large_channels)} large, rest shared)"
+            )
+        elif mode == RechunkMode.PATTERN and patterns:
             console.print(f"Used {len(patterns)} topic pattern(s) for grouping")

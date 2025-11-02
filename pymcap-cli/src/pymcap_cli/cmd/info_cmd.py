@@ -95,10 +95,21 @@ class ChunkStats:
     count: int = 0
     compressed_size: int = 0
     uncompressed_size: int = 0
-    min_size: int = 0
-    max_size: int = 0
+    uncompressed_sizes: list[int] = field(default_factory=list)
+
+    message_count: int = 0
 
     durations_ns: list[float] = field(default_factory=list)
+
+    @property
+    def size_stats(self) -> tuple[str, str, str]:
+        if not self.uncompressed_sizes:
+            return "0.0", "0.0", "0.0"
+        return (
+            bytes_to_human(min(self.uncompressed_sizes)),
+            bytes_to_human(sum(self.uncompressed_sizes) / len(self.uncompressed_sizes)),
+            bytes_to_human(max(self.uncompressed_sizes)),
+        )
 
     @property
     def duration_stats(self) -> tuple[str, str, str]:
@@ -181,19 +192,15 @@ def handle_command(args: argparse.Namespace) -> None:
 
     # compression, count, compressed size, uncompressed size, min size, max size
     chunks: dict[str, ChunkStats] = {}
-
     for x in summary.chunk_indexes:
         stats = chunks.get(x.compression, ChunkStats())
         stats.count += 1
         stats.compressed_size += x.compressed_size
         stats.uncompressed_size += x.uncompressed_size
-        stats.min_size = (
-            min(stats.min_size, x.uncompressed_size) if stats.min_size else x.uncompressed_size
-        )
-        stats.max_size = (
-            max(stats.max_size, x.uncompressed_size) if stats.max_size else x.uncompressed_size
-        )
+        stats.uncompressed_sizes.append(x.uncompressed_size)
         stats.durations_ns.append(x.message_end_time - x.message_start_time)
+        if info.chunk_information and (cinfo := info.chunk_information.get(x.chunk_start_offset)):
+            stats.message_count += sum(len(ci.records) for ci in cinfo)
         chunks[x.compression] = stats
 
     compression_table = Table()
@@ -203,26 +210,28 @@ def handle_command(args: argparse.Namespace) -> None:
     compression_table.add_column("Uncompressed", justify="right", style="yellow")
     compression_table.add_column("Ratio", justify="right", style="magenta")
     compression_table.add_column("Min Size", justify="right", style="yellow")
+    compression_table.add_column("Avg Size", justify="right", style="yellow")
     compression_table.add_column("Max Size", justify="right", style="yellow")
     compression_table.add_column("Min Dur", justify="right", style="green")
     compression_table.add_column("Avg Dur", justify="right", style="yellow")
     compression_table.add_column("Max Dur", justify="right", style="magenta")
+    if info.chunk_information:
+        compression_table.add_column("Msgs", justify="right", style="cyan")
 
     for compression_type, chunk in chunks.items():
-        min_dur, avg_dur, max_dur = chunk.duration_stats
-
-        compression_table.add_row(
+        row = [
             compression_type,
             f"{chunk.count}",
             bytes_to_human(chunk.compressed_size),
             bytes_to_human(chunk.uncompressed_size),
             chunk.ratio,
-            bytes_to_human(chunk.min_size),
-            bytes_to_human(chunk.max_size),
-            min_dur,
-            avg_dur,
-            max_dur,
-        )
+            *chunk.size_stats,
+            *chunk.duration_stats,
+        ]
+        if info.chunk_information:
+            row.append(f"{chunk.message_count}")
+
+        compression_table.add_row(*row)
 
     console.print(compression_table)
 
@@ -242,6 +251,7 @@ def handle_command(args: argparse.Namespace) -> None:
 
     # Channels table (improved)
     channels_table = Table()
+    channels_table.add_column("ID", style="bold blue", no_wrap=True, justify="right")
     channels_table.add_column("Topic", style="bold white")
     channels_table.add_column("Schema", style="blue")
     channels_table.add_column("Msgs", justify="right", style="green")
@@ -257,6 +267,7 @@ def handle_command(args: argparse.Namespace) -> None:
         hz = count / (duration_ns / 1_000_000_000) if duration_ns > 0 else 0
         schema = summary.schemas.get(channel.schema_id)
         row = [
+            str(channel_id),
             channel.topic,
             schema.name if schema else "[dim]unknown[/dim]",
             f"{count:,}",
@@ -269,9 +280,9 @@ def handle_command(args: argparse.Namespace) -> None:
                 if duration_ns > 0
                 else 0
             )
-            row.append(bytes_to_human(int(bps)) + "/s")
+            row.append(bytes_to_human(int(bps)))
             b_per_msg = info.channel_sizes.get(channel_id, 0) / count if count > 0 else 0
-            row.append(bytes_to_human(int(b_per_msg)) + "/msg")
+            row.append(bytes_to_human(int(b_per_msg)))
         channels_table.add_row(*row)
 
     console.print(channels_table)

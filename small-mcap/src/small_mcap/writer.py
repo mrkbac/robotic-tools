@@ -234,21 +234,7 @@ class _ChunkBuilder:
         self.message_indices: dict[int, MessageIndex] = {}
         self.num_messages = 0
 
-    def add(
-        self, record: Schema | Channel | Message
-    ) -> tuple[Chunk, dict[int, MessageIndex]] | None:
-        """
-        Add a record to the current chunk.
-        Returns (chunk, message_indices) if chunk is full and ready to write, None otherwise.
-        """
-        # Check if we need to finalize current chunk before adding this record
-        if self.buffer_pos >= self.chunk_size and self.num_messages > 0:
-            result = self.finalize()
-            self.reset()
-            # After reset, fall through to add the record to the new chunk
-        else:
-            result = None
-
+    def add(self, record: Schema | Channel | Message) -> None:
         # Add record to current chunk
         record_data = record.write_record()
         record_len = len(record_data)
@@ -279,7 +265,13 @@ class _ChunkBuilder:
             self.buffer_data[self.buffer_pos : self.buffer_pos + record_len] = record_data
             self.buffer_pos += record_len
 
-        return result
+    def maybe_finalize(self) -> tuple[Chunk, dict[int, MessageIndex]] | None:
+        # Check if we need to finalize current chunk before adding this record
+        if self.buffer_pos >= self.chunk_size and self.num_messages > 0:
+            result = self.finalize()
+            self.reset()
+            return result
+        return None
 
     def finalize(self) -> tuple[Chunk, dict[int, MessageIndex]] | None:
         """Build and return the final chunk from current buffer state."""
@@ -725,8 +717,9 @@ class McapWriter:
         if self.chunk_builder is None:
             return
 
+        self.chunk_builder.add(record)
         # Add to chunk builder
-        if result := self.chunk_builder.add(record):
+        if result := self.chunk_builder.maybe_finalize():
             # Chunk was completed, write it
             chunk, message_indices = result
             self._write_chunk(chunk, message_indices)

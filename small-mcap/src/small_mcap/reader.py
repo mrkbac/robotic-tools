@@ -152,10 +152,13 @@ class LazyChunk:
             data_len,
         )
 
-    def to_chunk(self, stream: IO[bytes]) -> Chunk:
+    def to_chunk(self, stream: IO[bytes] | io.BufferedIOBase) -> Chunk:
         """Convert to a full Chunk by reading from the stream."""
+        current_pos = stream.tell()
         stream.seek(self.record_start)
-        return Chunk.read_record(stream)
+        chunk = Chunk.read_record(stream)
+        stream.seek(current_pos)
+        return chunk
 
 
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
@@ -288,8 +291,8 @@ def stream_reader(
         if record_size_limit is not None and length > record_size_limit:
             raise RecordLengthLimitExceededError(opcode, length, record_size_limit)
 
-        cached_pos += _RECORD_HEADER_SIZE
         record_start = cached_pos
+        cached_pos += _RECORD_HEADER_SIZE
 
         # Handle lazy chunk loading when requested
         record: McapRecord | LazyChunk | None
@@ -507,61 +510,6 @@ def _read_message_seeking(
     )
 
 
-def _process_chunks_with_buffering(
-    stream: IO[bytes] | io.BufferedIOBase,
-    should_process_chunk: Callable[[Chunk, list[MessageIndex]], bool],
-    on_chunk_processed: Callable[[list[MessageIndex]], None],
-    validate_crc: bool,
-) -> Iterator[McapRecord]:
-    """Process records from stream, breaking up chunks based on a predicate.
-
-    This is the shared chunk buffering logic used by both message reading and summary rebuilding.
-
-    Args:
-        stream: The input stream to read from
-        should_process_chunk: Predicate to decide whether to decompress a chunk
-        on_chunk_processed: Callback invoked after chunk is processed with its MessageIndex list
-        validate_crc: Whether to validate CRC checksums
-
-    Yields:
-        Records from the stream, with chunks broken up based on the predicate
-    """
-    buffered_chunk: Chunk | None = None
-    chunk_message_indexes: list[MessageIndex] = []
-
-    for record in stream_reader(stream, emit_chunks=True, validate_crc=validate_crc):
-        if isinstance(record, MessageIndex):
-            # Ignore empty MessageIndex records
-            if len(record.records) > 0:
-                chunk_message_indexes.append(record)
-        elif isinstance(record, Chunk):
-            # Process any previously buffered chunk before storing the new one
-            if buffered_chunk is not None and should_process_chunk(
-                buffered_chunk, chunk_message_indexes
-            ):
-                yield from breakup_chunk(buffered_chunk, validate_crc=validate_crc)
-                on_chunk_processed(chunk_message_indexes)
-            buffered_chunk = record
-            chunk_message_indexes.clear()
-        else:
-            # Process buffered chunk before yielding other records
-            if buffered_chunk is not None and should_process_chunk(
-                buffered_chunk, chunk_message_indexes
-            ):
-                yield from breakup_chunk(buffered_chunk, validate_crc=validate_crc)
-                on_chunk_processed(chunk_message_indexes)
-            buffered_chunk = None
-            chunk_message_indexes.clear()
-            # At this point, record must be NonChunkRecord (not MessageIndex or Chunk)
-            assert not isinstance(record, (MessageIndex, Chunk, LazyChunk))
-            yield record
-
-    # Process final buffered chunk
-    if buffered_chunk is not None and should_process_chunk(buffered_chunk, chunk_message_indexes):
-        yield from breakup_chunk(buffered_chunk, validate_crc=validate_crc)
-        on_chunk_processed(chunk_message_indexes)
-
-
 def _read_message_non_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
     should_include: _ShouldIncludeType,
@@ -572,32 +520,56 @@ def _read_message_non_seeking(
     exclude_channels: set[int] = set()
     seen_channels: set[int] = set()
 
-    def should_process_chunk(chunk: Chunk, message_indexes: list[MessageIndex]) -> bool:
-        """Check if chunk should be processed based on time range and channel filtering."""
-        # Fast checks first: filter by time range (simple integer comparisons)
-        if start_time_ns is not None and chunk.message_end_time < start_time_ns:
-            return False
-        if end_time_ns is not None and chunk.message_start_time >= end_time_ns:
-            return False
-        # More expensive check: process if chunk has unseen channels
-        # (need Channel/Schema definitions)
-        if message_indexes and any(mi.channel_id not in seen_channels for mi in message_indexes):
-            return True
-        # Filter by channels - skip if all channels are excluded
-        return not (
-            message_indexes and all(mi.channel_id in exclude_channels for mi in message_indexes)
-        )
+    def _inner() -> Iterator[McapRecord]:
+        pending_chunk: Chunk | None = None
+        pending_message_indexes: list[MessageIndex] = []
+        for record in stream_reader(
+            stream, emit_chunks=True, validate_crc=validate_crc, lazy_chunks=False
+        ):
+            if not isinstance(record, MessageIndex) and pending_chunk:
+                new_channels = any(
+                    (msg_idx.channel_id not in seen_channels) for msg_idx in pending_message_indexes
+                )
+                all_excluded = all(
+                    (msg_idx.channel_id in exclude_channels) for msg_idx in pending_message_indexes
+                )
+                in_time_range = (
+                    pending_chunk.message_start_time < end_time_ns
+                    and pending_chunk.message_end_time >= start_time_ns
+                )
+                if new_channels or (
+                    in_time_range and (not all_excluded or not pending_message_indexes)
+                ):
+                    yield from breakup_chunk(pending_chunk, validate_crc=validate_crc)
+                    pending_chunk = None
+                    pending_message_indexes.clear()
 
-    def on_chunk_processed(message_indexes: list[MessageIndex]) -> None:
-        """Mark channels as seen after processing."""
-        for mi in message_indexes:
-            seen_channels.add(mi.channel_id)
+            if isinstance(record, Chunk):
+                pending_chunk = record
+            elif isinstance(record, MessageIndex):
+                # Ignore empty MessageIndex records
+                if len(record.records) > 0:
+                    pending_message_indexes.append(record)
+            else:
+                yield record
+
+        # Final chunks must always be decompressed fully since we can't ensure we got all message
+        # indexes
+        if pending_chunk:
+            in_time_range = (
+                pending_chunk.message_start_time < end_time_ns
+                and pending_chunk.message_end_time >= start_time_ns
+            )
+            if in_time_range:
+                yield from breakup_chunk(pending_chunk, validate_crc=validate_crc)
+
+    def _should_include_wrapper(channel: Channel, schema: Schema | None) -> bool:
+        seen_channels.add(channel.id)
+        return should_include(channel, schema)
 
     yield from _read_inner(
-        _process_chunks_with_buffering(
-            stream, should_process_chunk, on_chunk_processed, validate_crc
-        ),
-        should_include,
+        _inner(),
+        _should_include_wrapper,
         exclude_channels,
         start_time_ns,
         end_time_ns,

@@ -6,14 +6,13 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import IO
 
-from small_mcap.reader import McapError, breakup_chunk, stream_reader
+from small_mcap.reader import LazyChunk, McapError, breakup_chunk, stream_reader
 from small_mcap.records import (
     Attachment,
     AttachmentIndex,
     Channel,
     Chunk,
     ChunkIndex,
-    DataEnd,
     Header,
     Message,
     MessageIndex,
@@ -122,11 +121,14 @@ def rebuild_summary(
         metadata_count=0,
         schema_count=0,
     )
-    seen_channels: set[int] = set()
     channel_sizes: defaultdict[int, int] = defaultdict(int)
     # Track chunks and their MessageIndex for estimation mode
-    pending_chunk: Chunk | None = None
+    pending_chunk: LazyChunk | None = None
+    pending_chunk_start_offset: int = 0
     pending_indexes: list[MessageIndex] = []
+    pending_message_index_offsets: dict[int, int] = {}
+    # Store MessageIndex records per chunk for detailed analysis
+    chunk_information: dict[int, list[MessageIndex]] = {}
 
     def update_message(record: Message) -> None:
         # Update message time statistics
@@ -146,61 +148,92 @@ def rebuild_summary(
         if calculate_channel_sizes:
             channel_sizes[record.channel_id] += len(record.data)
 
-    def finish_chunk() -> None:
+    def finish_chunk(*, force: bool = False) -> None:
         nonlocal pending_chunk
         if pending_chunk is None:
             return
 
-        if any(msg_idx.channel_id not in seen_channels for msg_idx in pending_indexes):
+        if (
+            force
+            or exact_sizes
+            or any(msg_idx.channel_id not in summary.channels for msg_idx in pending_indexes)
+        ):
             for record in breakup_chunk(
-                pending_chunk,
+                pending_chunk.to_chunk(stream),
                 validate_crc=validate_crc,
             ):
                 if isinstance(record, Channel):
                     summary.channels[record.id] = record
-                    seen_channels.add(record.id)
                 elif isinstance(record, Schema):
                     summary.schemas[record.id] = record
                 elif isinstance(record, Message):
                     update_message(record)
-        elif calculate_channel_sizes:
-            estimated_sizes = _estimate_size_from_indexes(
-                pending_indexes, pending_chunk.uncompressed_size
-            )
-            for channel_id, size in estimated_sizes.items():
-                channel_sizes[channel_id] = channel_sizes.get(channel_id, 0) + size
+        else:
+            if calculate_channel_sizes:
+                estimated_sizes = _estimate_size_from_indexes(
+                    pending_indexes, pending_chunk.uncompressed_size
+                )
+                for channel_id, size in estimated_sizes.items():
+                    channel_sizes[channel_id] = channel_sizes.get(channel_id, 0) + size
+
+            for idx in pending_indexes:
+                statistics.message_count += len(idx.records)
+                statistics.channel_message_counts[idx.channel_id] += len(idx.records)
+
+        # Store MessageIndex records for this chunk before clearing
+        if pending_indexes:
+            chunk_information[pending_chunk_start_offset] = pending_indexes.copy()
 
         pending_indexes.clear()
+        pending_message_index_offsets.clear()
         pending_chunk = None
 
-    for record in stream_reader(stream, emit_chunks=True, validate_crc=validate_crc):
+    message_index_start_offset: int = 0
+    prev_pos: int = 0
+    last_message_index_end_offset: int = 0
+
+    for record in stream_reader(
+        stream, emit_chunks=True, lazy_chunks=True, validate_crc=validate_crc
+    ):
+        record_start_pos = prev_pos
+        current_pos = stream.tell()
+        prev_pos = current_pos
+
         if not isinstance(record, MessageIndex):
+            # Finish previous chunk and add its ChunkIndex
+            if pending_chunk is not None:
+                # Calculate message index section length
+                message_index_length = record_start_pos - message_index_start_offset
+
+                summary.chunk_indexes.append(
+                    ChunkIndex(
+                        chunk_length=message_index_start_offset - pending_chunk_start_offset,
+                        chunk_start_offset=pending_chunk_start_offset,
+                        compression=pending_chunk.compression,
+                        compressed_size=pending_chunk.data_len,
+                        message_end_time=pending_chunk.message_end_time,
+                        message_index_length=message_index_length,
+                        message_index_offsets=pending_message_index_offsets,
+                        message_start_time=pending_chunk.message_start_time,
+                        uncompressed_size=pending_chunk.uncompressed_size,
+                    )
+                )
             finish_chunk()
 
         if isinstance(record, Header):
             header = record
         elif isinstance(record, Channel):
             summary.channels[record.id] = record
-            seen_channels.add(record.id)
         elif isinstance(record, Schema):
             summary.schemas[record.id] = record
         elif isinstance(record, Message):
             update_message(record)
         elif isinstance(record, Chunk):
-            # Track chunk info
-            summary.chunk_indexes.append(
-                ChunkIndex(
-                    chunk_length=0,  # Not available without file position tracking
-                    chunk_start_offset=0,  # Not available without file position tracking
-                    compression=record.compression,
-                    compressed_size=len(record.data),
-                    message_end_time=record.message_end_time,
-                    message_index_length=0,  # Not available without file position tracking
-                    message_index_offsets={},
-                    message_start_time=record.message_start_time,
-                    uncompressed_size=record.uncompressed_size,
-                )
-            )
+            raise RuntimeError("Unreachable")  # noqa: TRY004
+        elif isinstance(record, LazyChunk):
+            pending_chunk_start_offset = record_start_pos
+            message_index_start_offset = current_pos
+
             statistics.chunk_count += 1
 
             # Update time statistics from chunk
@@ -220,6 +253,11 @@ def rebuild_summary(
         elif isinstance(record, MessageIndex):
             if len(record.records) > 0:
                 pending_indexes.append(record)
+                # Track the position of this MessageIndex for this channel
+                if record.channel_id not in pending_message_index_offsets:
+                    pending_message_index_offsets[record.channel_id] = record_start_pos
+            # Track the end position of MessageIndex records
+            last_message_index_end_offset = current_pos
         elif isinstance(record, Attachment):
             statistics.attachment_count += 1
         elif isinstance(record, AttachmentIndex):
@@ -228,8 +266,25 @@ def rebuild_summary(
             statistics.metadata_count += 1
         elif isinstance(record, MetadataIndex):
             summary.metadata_indexes.append(record)
-        elif isinstance(record, DataEnd):
-            break
+
+    # TODO: figure out how to handle partial message indexes of broken mcaps
+    # final ChunkIndex
+    if pending_chunk is not None:
+        message_index_length = last_message_index_end_offset - message_index_start_offset
+        summary.chunk_indexes.append(
+            ChunkIndex(
+                chunk_length=message_index_start_offset - pending_chunk_start_offset,
+                chunk_start_offset=pending_chunk_start_offset,
+                compression=pending_chunk.compression,
+                compressed_size=pending_chunk.data_len,
+                message_end_time=pending_chunk.message_end_time,
+                message_index_length=message_index_length,
+                message_index_offsets=pending_message_index_offsets,
+                message_start_time=pending_chunk.message_start_time,
+                uncompressed_size=pending_chunk.uncompressed_size,
+            )
+        )
+    finish_chunk()
 
     # Finalize statistics
     statistics.schema_count = len(summary.schemas)
@@ -244,4 +299,5 @@ def rebuild_summary(
         summary=summary,
         channel_sizes=channel_sizes if calculate_channel_sizes else None,
         estimated_channel_sizes=calculate_channel_sizes and not exact_sizes,
+        chunk_information=chunk_information if chunk_information else None,
     )
