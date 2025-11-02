@@ -43,7 +43,7 @@ else:
 
 
 # Buffer allocation multiplier for chunk builder
-BUFFER_SIZE_MULTIPLIER = 2  # Pre-allocate 2x chunk_size to avoid reallocations
+BUFFER_SIZE_MULTIPLIER = 1.25
 
 
 @dataclass(slots=True)
@@ -222,7 +222,7 @@ class _ChunkBuilder:
         self.enable_crcs = enable_crcs
         self.chunk_size = chunk_size
         # Pre-allocate buffer to avoid reallocations
-        self.buffer_data = bytearray(BUFFER_SIZE_MULTIPLIER * chunk_size)
+        self.buffer_data = bytearray(int(BUFFER_SIZE_MULTIPLIER * chunk_size))
         self.buffer_pos = 0
         self.reset()
 

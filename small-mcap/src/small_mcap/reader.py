@@ -4,7 +4,7 @@ import io
 import struct
 import sys
 import zlib
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import IO, TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, overload
 
@@ -73,7 +73,7 @@ NonChunkRecord = (
 )
 
 
-_ReaderReturnType = Iterator[tuple[Schema | None, Channel, Message]]
+_ReaderReturnType = Iterable[tuple[Schema | None, Channel, Message]]
 _ShouldIncludeType = Callable[[Channel, Schema | None], bool]
 
 
@@ -202,9 +202,8 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
     return data
 
 
-def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> list[McapRecord]:
+def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapRecord]:
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
-    records: list[McapRecord] = []
     pos = 0
 
     while pos < len(data):
@@ -213,15 +212,13 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> list[McapRecord]:
         record_data_end = pos + length
 
         if opcode == Opcode.CHANNEL:
-            records.append(Channel.read(data[pos:record_data_end]))
+            yield Channel.read(data[pos:record_data_end])
         elif opcode == Opcode.MESSAGE:
-            records.append(Message.read(data[pos:record_data_end]))
+            yield Message.read(data[pos:record_data_end])
         elif opcode == Opcode.SCHEMA:
-            records.append(Schema.read(data[pos:record_data_end]))
+            yield Schema.read(data[pos:record_data_end])
 
         pos = record_data_end
-
-    return records
 
 
 @overload
@@ -232,7 +229,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: Literal[True] = ...,
     lazy_chunks: Literal[True] = ...,
-) -> Iterator[NonChunkRecord | LazyChunk | MessageIndex]: ...
+) -> Iterable[NonChunkRecord | LazyChunk | MessageIndex]: ...
 
 
 @overload
@@ -243,7 +240,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: Literal[True] = ...,
     lazy_chunks: Literal[False] = ...,
-) -> Iterator[NonChunkRecord | Chunk | MessageIndex]: ...
+) -> Iterable[NonChunkRecord | Chunk | MessageIndex]: ...
 
 
 @overload
@@ -254,7 +251,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: Literal[False] = ...,
     lazy_chunks: Literal[False] = ...,
-) -> Iterator[NonChunkRecord | ChunkContentRecord]: ...
+) -> Iterable[NonChunkRecord | ChunkContentRecord]: ...
 
 
 def stream_reader(
@@ -264,7 +261,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: bool = False,
     lazy_chunks: bool = False,
-) -> Iterator[McapRecord] | Iterator[McapRecord | LazyChunk]:
+) -> Iterable[McapRecord] | Iterable[McapRecord | LazyChunk]:
     record_size_limit = _RECORD_SIZE_LIMIT
     checksum = 0
 
@@ -345,7 +342,7 @@ def stream_reader(
             break
 
 
-def _read_summary_from_iterator(stream_reader: Iterator[McapRecord | LazyChunk]) -> Summary | None:
+def _read_summary_from_iterable(stream_reader: Iterable[McapRecord | LazyChunk]) -> Summary | None:
     """read summary records from an MCAP stream reader, collecting them into a Summary."""
     summary = Summary()
     for record in stream_reader:
@@ -379,13 +376,13 @@ def get_summary(stream: IO[bytes] | io.BufferedIOBase) -> Summary | None:
         if magic != MAGIC:
             raise InvalidMagicError(magic)
         stream.seek(-(_FOOTER_SIZE + MAGIC_SIZE), io.SEEK_END)
-        footer = next(stream_reader(stream, skip_magic=True))
+        footer = next(iter(stream_reader(stream, skip_magic=True)))
         if not isinstance(footer, Footer):
             return None
         if footer.summary_start == 0:
             return None
         stream.seek(footer.summary_start, io.SEEK_SET)
-        return _read_summary_from_iterator(stream_reader(stream, skip_magic=True))
+        return _read_summary_from_iterable(stream_reader(stream, skip_magic=True))
     except (OSError, StopIteration, EndOfFileError):
         return None
 
@@ -394,14 +391,14 @@ def get_header(stream: IO[bytes]) -> Header:
     if stream.seekable():
         stream.seek(0, io.SEEK_SET)
 
-    header = next(stream_reader(stream, skip_magic=False))
+    header = next(iter(stream_reader(stream, skip_magic=False)))
     if not isinstance(header, Header):
         raise McapError(f"expected header at beginning of MCAP file, found {type(header)}")
     return header
 
 
 def _read_inner(
-    reader: Iterator[McapRecord],
+    reader: Iterable[McapRecord],
     should_include: _ShouldIncludeType,
     exclude_channels: set[int],
     start_time_ns: int,
@@ -459,7 +456,7 @@ def _read_message_seeking(
 
     def _lazy_yield(
         stream: IO[bytes] | io.BufferedIOBase, index: ChunkIndex
-    ) -> Iterator[McapRecord | ChunkIndex]:
+    ) -> Iterable[McapRecord | ChunkIndex]:
         # Emit the chunk index to prevent early loading and decompression of chunk
         yield index
         # late check for mcap with empty channel summary if this chunks is excluded entirely
@@ -478,7 +475,7 @@ def _read_message_seeking(
             return item.log_time
         return 0  # Other records are not yielded
 
-    lazy_iterators = (
+    lazy_iterables = (
         _lazy_yield(stream, cidx)
         for cidx in sorted(
             (
@@ -495,7 +492,7 @@ def _read_message_seeking(
     )
     reader = (
         item
-        for item in heapq.merge(*lazy_iterators, key=_lazy_sort)
+        for item in heapq.merge(*lazy_iterables, key=_lazy_sort)
         if not isinstance(item, ChunkIndex)  # Filter out sentinels
     )
 
@@ -520,7 +517,7 @@ def _read_message_non_seeking(
     exclude_channels: set[int] = set()
     seen_channels: set[int] = set()
 
-    def _inner() -> Iterator[McapRecord]:
+    def _inner() -> Iterable[McapRecord]:
         pending_chunk: Chunk | None = None
         pending_message_indexes: list[MessageIndex] = []
         for record in stream_reader(
@@ -577,7 +574,7 @@ def _read_message_non_seeking(
 
 
 class _Remapper:
-    def __init__(self, summaries: list[tuple[int, Summary]] | None = None) -> None:
+    def __init__(self, summaries: Iterable[tuple[int, Summary]] | None = None) -> None:
         self._used_schema_ids: set[int] = set()
         self._used_channel_ids: set[int] = set()
 
@@ -652,12 +649,12 @@ def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
     return True
 
 
-def include_topics(topics: Sequence[str]) -> Callable[[Channel, Schema | None], bool]:
+def include_topics(topics: Iterable[str]) -> Callable[[Channel, Schema | None], bool]:
     return lambda channel, _schema: channel.topic in topics
 
 
 def read_message(
-    stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
+    stream: IO[bytes] | io.BufferedIOBase | Iterable[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
@@ -734,12 +731,12 @@ class DecodedMessageTuple(NamedTuple):
 
 
 def read_message_decoded(
-    stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
+    stream: IO[bytes] | io.BufferedIOBase | Iterable[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
-) -> Iterator[DecodedMessageTuple]:
+) -> Iterable[DecodedMessageTuple]:
     decoders: dict[int, Callable[[bytes], Any]] = {}
 
     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:

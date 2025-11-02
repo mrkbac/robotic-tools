@@ -9,8 +9,7 @@ from mcap_ros2._dynamic import EncoderFunction, serialize_dynamic
 from mcap_ros2.decoder import DecoderFactory
 from mcap_ros2_support_fast.decoder import DecoderFactory as DecoderFactoryFast
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory as ROS2EncoderFactoryFast
-from small_mcap import McapWriter, read_message_decoded
-from small_mcap.reader import DecodedMessageTuple
+from small_mcap import DecodedMessageTuple, McapWriter, read_message_decoded
 
 
 class ROS2EncoderFactory:
