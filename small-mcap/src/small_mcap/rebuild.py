@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import IO
 
-from small_mcap.reader import McapError, _process_chunks_with_buffering
+from small_mcap.reader import McapError, breakup_chunk, stream_reader
 from small_mcap.records import (
     Attachment,
     AttachmentIndex,
@@ -78,6 +78,7 @@ class RebuildInfo:
     summary: Summary
     channel_sizes: dict[int, int] | None = None
     estimated_channel_sizes: bool = False
+    chunk_information: dict[int, list[MessageIndex]] | None = None
 
 
 def rebuild_summary(
@@ -127,61 +128,71 @@ def rebuild_summary(
     pending_chunk: Chunk | None = None
     pending_indexes: list[MessageIndex] = []
 
-    def should_process_chunk(chunk: Chunk, message_indexes: list[MessageIndex]) -> bool:
-        """Process chunks based on channel_sizes mode or unseen channels."""
-        # Store for estimation mode (processed in on_chunk_processed)
-        nonlocal pending_chunk, pending_indexes
-        pending_chunk = chunk
-        pending_indexes = message_indexes.copy()
+    def update_message(record: Message) -> None:
+        # Update message time statistics
+        if statistics.message_start_time == 0:
+            statistics.message_start_time = record.log_time
+        else:
+            statistics.message_start_time = min(statistics.message_start_time, record.log_time)
+        if statistics.message_end_time == 0:
+            statistics.message_end_time = record.log_time
+        else:
+            statistics.message_end_time = max(statistics.message_end_time, record.log_time)
 
-        # If calculating exact sizes, process all chunks to get message data
-        if calculate_channel_sizes and exact_sizes:
-            return bool(message_indexes)
-        # Otherwise only process chunks with unseen channels (for Channel/Schema definitions)
-        return bool(
-            message_indexes and any(mi.channel_id not in seen_channels for mi in message_indexes)
-        )
+        # Update channel message count
+        statistics.message_count += 1
+        statistics.channel_message_counts[record.channel_id] += 1
+        # Calculate channel sizes if requested
+        if calculate_channel_sizes:
+            channel_sizes[record.channel_id] += len(record.data)
 
-    def on_chunk_processed(message_indexes: list[MessageIndex]) -> None:
-        """Mark channels as seen and update statistics."""
-        nonlocal pending_chunk, pending_indexes
+    def finish_chunk() -> None:
+        nonlocal pending_chunk
+        if pending_chunk is None:
+            return
 
-        for mi in message_indexes:
-            seen_channels.add(mi.channel_id)
-            statistics.message_count += len(mi.records)
-            statistics.channel_message_counts[mi.channel_id] += len(mi.records)
+        unpack = False
+        # contains new channels?
+        for msg_idx in pending_indexes:
+            if msg_idx.channel_id not in seen_channels:
+                unpack = True
+                break
 
-        # Clear pending (already processed)
+        if unpack:
+            for record in breakup_chunk(
+                pending_chunk,
+                validate_crc=validate_crc,
+            ):
+                if isinstance(record, Channel):
+                    summary.channels[record.id] = record
+                    seen_channels.add(record.id)
+                elif isinstance(record, Schema):
+                    summary.schemas[record.id] = record
+                elif isinstance(record, Message):
+                    update_message(record)
+        elif calculate_channel_sizes:
+            estimated_sizes = _estimate_size_from_indexes(
+                pending_indexes, pending_chunk.uncompressed_size
+            )
+            for channel_id, size in estimated_sizes.items():
+                channel_sizes[channel_id] = channel_sizes.get(channel_id, 0) + size
+
+        pending_indexes.clear()
         pending_chunk = None
-        pending_indexes = []
 
-    for record in _process_chunks_with_buffering(
-        stream, should_process_chunk, on_chunk_processed, validate_crc
-    ):
+    for record in stream_reader(stream, emit_chunks=True, validate_crc=validate_crc):
+        if not isinstance(record, MessageIndex):
+            finish_chunk()
+
         if isinstance(record, Header):
             header = record
         elif isinstance(record, Channel):
             summary.channels[record.id] = record
+            seen_channels.add(record.id)
         elif isinstance(record, Schema):
             summary.schemas[record.id] = record
         elif isinstance(record, Message):
-            # Update message time statistics
-            if statistics.message_start_time == 0:
-                statistics.message_start_time = record.log_time
-            else:
-                statistics.message_start_time = min(statistics.message_start_time, record.log_time)
-            if statistics.message_end_time == 0:
-                statistics.message_end_time = record.log_time
-            else:
-                statistics.message_end_time = max(statistics.message_end_time, record.log_time)
-
-            # Update channel message count
-            statistics.message_count += 1
-            statistics.channel_message_counts[record.channel_id] += 1
-
-            # Calculate channel sizes if requested
-            if calculate_channel_sizes:
-                channel_sizes[record.channel_id] += len(record.data)
+            update_message(record)
         elif isinstance(record, Chunk):
             # Track chunk info
             summary.chunk_indexes.append(
@@ -212,17 +223,9 @@ def rebuild_summary(
                 statistics.message_end_time = max(
                     statistics.message_end_time, record.message_end_time
                 )
-
-            # For estimation mode: if chunk wasn't processed, estimate sizes from indexes
-            if calculate_channel_sizes and not exact_sizes and pending_chunk is record:
-                if pending_indexes:
-                    estimated_sizes = _estimate_size_from_indexes(
-                        pending_indexes, record.uncompressed_size
-                    )
-                    for channel_id, size in estimated_sizes.items():
-                        channel_sizes[channel_id] = channel_sizes.get(channel_id, 0) + size
-                pending_chunk = None
-                pending_indexes = []
+            pending_chunk = record
+        elif isinstance(record, MessageIndex):
+            pending_indexes.append(record)
         elif isinstance(record, Attachment):
             statistics.attachment_count += 1
         elif isinstance(record, AttachmentIndex):
