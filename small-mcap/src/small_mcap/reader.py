@@ -2,6 +2,7 @@ import contextlib
 import heapq
 import io
 import struct
+import sys
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -396,30 +397,12 @@ def get_header(stream: IO[bytes]) -> Header:
     return header
 
 
-def _chunks_matching_topics(
-    summary: Summary,
-    exclude_cache: set[int],
-    start_time_ns: int | None,
-    end_time_ns: int | None,
-) -> list[ChunkIndex]:
-    return sorted(
-        (
-            cidx
-            for cidx in summary.chunk_indexes
-            if not all(channel_id in exclude_cache for channel_id in cidx.message_index_offsets)
-            and (start_time_ns is None or cidx.message_end_time >= start_time_ns)
-            and (end_time_ns is None or cidx.message_start_time < end_time_ns)
-        ),
-        key=lambda c: c.message_start_time,
-    )
-
-
 def _read_inner(
     reader: Iterator[McapRecord],
     should_include: _ShouldIncludeType,
     exclude_channels: set[int],
-    start_time_ns: int | None,
-    end_time_ns: int | None,
+    start_time_ns: int,
+    end_time_ns: int,
     schemas: dict[int, Schema] | None = None,
     channels: dict[int, Channel] | None = None,
 ) -> _ReaderReturnType:
@@ -440,8 +423,8 @@ def _read_inner(
                 raise McapError(f"no channel record found with id {record.channel_id}")
             if (
                 (record.channel_id in exclude_channels)
-                or (start_time_ns is not None and record.log_time < start_time_ns)
-                or (end_time_ns is not None and record.log_time >= end_time_ns)
+                or (record.log_time < start_time_ns)
+                or (record.log_time >= end_time_ns)
             ):
                 continue
             channel = _channels[record.channel_id]
@@ -452,8 +435,8 @@ def _read_inner(
 def _read_message_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
     should_include: _ShouldIncludeType,
-    start_time_ns: int | None,
-    end_time_ns: int | None,
+    start_time_ns: int,
+    end_time_ns: int,
     validate_crc: bool,
 ) -> _ReaderReturnType:
     summary = get_summary(stream)
@@ -470,8 +453,6 @@ def _read_message_seeking(
         for channel in summary.channels.values()
         if not should_include(channel, summary.schemas.get(channel.schema_id))
     }
-
-    chunk_indexes = _chunks_matching_topics(summary, exclude_channels, start_time_ns, end_time_ns)
 
     def _lazy_yield(
         stream: IO[bytes] | io.BufferedIOBase, index: ChunkIndex
@@ -494,7 +475,21 @@ def _read_message_seeking(
             return item.log_time
         return 0  # Other records are not yielded
 
-    lazy_iterators = [_lazy_yield(stream, cidx) for cidx in chunk_indexes]
+    lazy_iterators = (
+        _lazy_yield(stream, cidx)
+        for cidx in sorted(
+            (
+                cidx
+                for cidx in summary.chunk_indexes
+                if not all(
+                    channel_id in exclude_channels for channel_id in cidx.message_index_offsets
+                )
+                and (cidx.message_end_time >= start_time_ns)
+                and (cidx.message_start_time < end_time_ns)
+            ),
+            key=lambda c: c.message_start_time,
+        )
+    )
     reader = (
         item
         for item in heapq.merge(*lazy_iterators, key=_lazy_sort)
@@ -570,8 +565,8 @@ def _process_chunks_with_buffering(
 def _read_message_non_seeking(
     stream: IO[bytes] | io.BufferedIOBase,
     should_include: _ShouldIncludeType,
-    start_time_ns: int | None,
-    end_time_ns: int | None,
+    start_time_ns: int,
+    end_time_ns: int,
     validate_crc: bool,
 ) -> _ReaderReturnType:
     exclude_channels: set[int] = set()
@@ -692,8 +687,8 @@ def include_topics(topics: Sequence[str]) -> Callable[[Channel, Schema | None], 
 def read_message(
     stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType = _should_include_all,
-    start_time_ns: int | None = None,
-    end_time_ns: int | None = None,
+    start_time_ns: int = 0,
+    end_time_ns: int = sys.maxsize,
     validate_crc: bool = False,
 ) -> _ReaderReturnType:
     if isinstance(stream, list):
@@ -762,8 +757,8 @@ class DecodedMessageTuple(NamedTuple):
 def read_message_decoded(
     stream: IO[bytes] | io.BufferedIOBase | list[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType = _should_include_all,
-    start_time_ns: int | None = None,
-    end_time_ns: int | None = None,
+    start_time_ns: int = 0,
+    end_time_ns: int = sys.maxsize,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
 ) -> Iterator[DecodedMessageTuple]:
     decoders: dict[int, Callable[[bytes], Any]] = {}
