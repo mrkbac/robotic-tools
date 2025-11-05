@@ -11,7 +11,7 @@ from rich.table import Table
 from small_mcap import Channel, ChunkIndex, InvalidMagicError
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
-from pymcap_cli.rebuild import read_info, rebuild_info
+from pymcap_cli.rebuild import Info, read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human
 
 if TYPE_CHECKING:
@@ -58,6 +58,51 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
     return len(max_concurrent_chunks), max_concurrent_bytes
 
 
+def _calculate_channel_durations(info: Info) -> dict[int, int]:
+    """Calculate per-channel duration in nanoseconds from message indexes.
+
+    Returns a dict mapping channel_id -> duration_ns (last_msg_time - first_msg_time).
+    Uses message index information from rebuild.
+    """
+    channel_durations: dict[int, int] = {}
+
+    # If no chunk information available, return empty dict
+    if not info.chunk_information:
+        return channel_durations
+
+    # Track first and last message times per channel
+    channel_times: dict[int, tuple[int, int]] = {}  # channel_id -> (first_time, last_time)
+
+    for chunk_info_list in info.chunk_information.values():
+        for chunk_info in chunk_info_list:
+            channel_id = chunk_info.channel_id
+
+            # Get timestamps from message index records
+            if not chunk_info.records:
+                continue
+
+            # Records are list of (timestamp, offset) tuples
+            timestamps = [record[0] for record in chunk_info.records]
+
+            if not timestamps:
+                continue
+
+            msg_first = min(timestamps)
+            msg_last = max(timestamps)
+
+            if channel_id in channel_times:
+                prev_first, prev_last = channel_times[channel_id]
+                channel_times[channel_id] = (min(prev_first, msg_first), max(prev_last, msg_last))
+            else:
+                channel_times[channel_id] = (msg_first, msg_last)
+
+    # Calculate durations
+    for channel_id, (first_time, last_time) in channel_times.items():
+        channel_durations[channel_id] = last_time - first_time
+
+    return channel_durations
+
+
 def add_parser(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> argparse.ArgumentParser:
@@ -99,6 +144,12 @@ def add_parser(
         "--reverse",
         action="store_true",
         help="Reverse sort order (descending)",
+    )
+
+    parser.add_argument(
+        "--index-duration",
+        action="store_true",
+        help="Calculate Hz per channel based on each channel's first/last message times rather than global MCAP duration",
     )
 
     return parser
@@ -271,6 +322,18 @@ def handle_command(args: argparse.Namespace) -> None:
         )
         console.print()
 
+    # Calculate per-channel durations if --index-duration is enabled
+    channel_durations: dict[int, int] = {}
+    if args.index_duration:
+        channel_durations = _calculate_channel_durations(info)
+        if not channel_durations and not info.chunk_information:
+            console.print(
+                "[yellow]Warning:[/yellow] --index-duration requires message index data. "
+                "Use [cyan]--rebuild[/cyan] to get per-channel timing information. "
+                "Falling back to global duration."
+            )
+            console.print()
+
     # Create sort key function
     def get_sort_key(channel: Channel) -> str | int | float:
         channel_id = channel.id
@@ -285,6 +348,10 @@ def handle_command(args: argparse.Namespace) -> None:
         if args.sort == "size":
             return info.channel_sizes.get(channel_id, 0) if info.channel_sizes else 0
         if args.sort == "hz":
+            # Use per-channel duration if available and flag is set
+            if args.index_duration and channel_id in channel_durations:
+                ch_duration_ns = channel_durations[channel_id]
+                return count / (ch_duration_ns / 1_000_000_000) if ch_duration_ns > 0 else 0
             return count / (duration_ns / 1_000_000_000) if duration_ns > 0 else 0
         if args.sort == "bps":
             if not info.channel_sizes or duration_ns == 0:
@@ -314,7 +381,10 @@ def handle_command(args: argparse.Namespace) -> None:
     for channel in sorted(summary.channels.values(), key=get_sort_key, reverse=args.reverse):
         channel_id = channel.id
         count = statistics.channel_message_counts.get(channel_id, 0)
-        hz = count / (duration_ns / 1_000_000_000) if duration_ns > 0 else 0
+
+        ch_duration_ns = channel_durations.get(channel_id, duration_ns)
+        hz = count / (ch_duration_ns / 1_000_000_000) if ch_duration_ns > 0 else 0
+
         schema = summary.schemas.get(channel.schema_id)
         row = [
             str(channel_id),
