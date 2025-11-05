@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.table import Table
-from small_mcap import ChunkIndex, InvalidMagicError
+from small_mcap import Channel, ChunkIndex, InvalidMagicError
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.rebuild import read_info, rebuild_info
@@ -85,6 +85,20 @@ def add_parser(
         "--debug",
         action="store_true",
         help="Enable debug mode",
+    )
+
+    parser.add_argument(
+        "-s",
+        "--sort",
+        choices=["topic", "id", "msgs", "size", "hz", "bps", "b_per_msg", "schema"],
+        default="topic",
+        help="Sort channels by field (default: topic)",
+    )
+
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Reverse sort order (descending)",
     )
 
     return parser
@@ -249,6 +263,42 @@ def handle_command(args: argparse.Namespace) -> None:
         )
         console.print(chunk_stats)
 
+    # Warn if sorting by size fields when channel_sizes is unavailable
+    if args.sort in ["size", "bps", "b_per_msg"] and not info.channel_sizes:
+        console.print(
+            "[yellow]Warning:[/yellow] Sorting by size fields requires channel size data. "
+            "Use [cyan]--rebuild[/cyan] to get accurate size information."
+        )
+        console.print()
+
+    # Create sort key function
+    def get_sort_key(channel: Channel) -> str | int | float:
+        channel_id = channel.id
+        count = statistics.channel_message_counts.get(channel_id, 0)
+
+        if args.sort == "topic":
+            return channel.topic
+        if args.sort == "id":
+            return channel_id
+        if args.sort == "msgs":
+            return count
+        if args.sort == "size":
+            return info.channel_sizes.get(channel_id, 0) if info.channel_sizes else 0
+        if args.sort == "hz":
+            return count / (duration_ns / 1_000_000_000) if duration_ns > 0 else 0
+        if args.sort == "bps":
+            if not info.channel_sizes or duration_ns == 0:
+                return 0
+            return info.channel_sizes.get(channel_id, 0) / (duration_ns / 1_000_000_000)
+        if args.sort == "b_per_msg":
+            if not info.channel_sizes or count == 0:
+                return 0
+            return info.channel_sizes.get(channel_id, 0) / count
+        if args.sort == "schema":
+            schema = summary.schemas.get(channel.schema_id)
+            return schema.name if schema else ""
+        return channel.topic  # fallback
+
     # Channels table (improved)
     channels_table = Table()
     channels_table.add_column("ID", style="bold blue", no_wrap=True, justify="right")
@@ -261,7 +311,7 @@ def handle_command(args: argparse.Namespace) -> None:
         channels_table.add_column("B/s", justify="right", style="magenta")
         channels_table.add_column("B/msg", justify="right", style="magenta")
 
-    for channel in sorted(summary.channels.values(), key=lambda c: c.topic):
+    for channel in sorted(summary.channels.values(), key=get_sort_key, reverse=args.reverse):
         channel_id = channel.id
         count = statistics.channel_message_counts.get(channel_id, 0)
         hz = count / (duration_ns / 1_000_000_000) if duration_ns > 0 else 0
