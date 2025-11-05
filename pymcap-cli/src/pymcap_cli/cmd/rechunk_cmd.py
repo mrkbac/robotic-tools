@@ -57,31 +57,19 @@ class MessageGroup:
         self.chunk_size = chunk_size
         self.message_count = 0
         self.compress_fail_counter = 0
-        self.schemas = schemas
-        self.channels = channels
-        self.written_schemas: set[int] = set()
-        self.written_channels: set[int] = set()
         # Each group has its own chunk builder for independent chunking
+        # Pass schemas/channels for auto-ensure
         self.chunk_builder = _ChunkBuilder(
             chunk_size=chunk_size,
             compression=compression_type,
             enable_crcs=writer.enable_crcs,
+            schemas=schemas,
+            channels=channels,
         )
 
     def add_message(self, message: Message) -> None:
         """Add message to this group's chunk builder."""
-        # Add message to this group's chunk builder
-        if message.channel_id not in self.written_channels and (
-            channel := self.channels.get(message.channel_id)
-        ):
-            if channel.schema_id not in self.written_schemas and (
-                schema := self.schemas.get(channel.schema_id)
-            ):
-                self.chunk_builder.add(schema)
-                self.written_schemas.add(channel.schema_id)
-            self.chunk_builder.add(channel)
-            self.written_channels.add(message.channel_id)
-
+        # ChunkBuilder auto-ensures channel and schema
         self.chunk_builder.add(message)
 
         # If chunk builder returns a completed chunk, write it immediately
@@ -95,8 +83,6 @@ class MessageGroup:
                     )
                     self.chunk_builder.compression = CompressionType.NONE
             self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
-            self.written_channels.clear()
-            self.written_schemas.clear()
 
         self.message_count += 1
 
@@ -106,8 +92,6 @@ class MessageGroup:
         if result is not None:
             chunk, message_indexes = result
             self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
-            self.written_channels.clear()
-            self.written_schemas.clear()
 
 
 class RechunkProcessor:
@@ -125,11 +109,9 @@ class RechunkProcessor:
         self.chunk_size = chunk_size
         self.compression = compression
 
-        # Track schemas and channels
+        # Track schemas and channels (shared with writer and chunk builders)
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
-        self.written_schemas: set[int] = set()
-        self.written_channels: set[int] = set()
 
         # Map channel_id to its MessageGroup (populated dynamically)
         self.channel_to_group: dict[int, MessageGroup] = {}
@@ -140,44 +122,6 @@ class RechunkProcessor:
         # Stats
         self.messages_processed = 0
         self.messages_written = 0
-
-    def ensure_schema_written(self, schema_id: int, writer: McapWriter) -> None:
-        """Ensure schema is written to output."""
-        if schema_id == 0 or schema_id in self.written_schemas:
-            return
-
-        schema = self.schemas.get(schema_id)
-        if not schema:
-            return
-
-        writer.add_schema(
-            name=schema.name,
-            encoding=schema.encoding,
-            data=schema.data,
-            schema_id=schema.id,
-        )
-        self.written_schemas.add(schema_id)
-
-    def ensure_channel_written(self, channel_id: int, writer: McapWriter) -> None:
-        """Ensure channel is written to output."""
-        if channel_id in self.written_channels:
-            return
-
-        channel = self.channels.get(channel_id)
-        if not channel:
-            return
-
-        # Ensure schema is written first
-        self.ensure_schema_written(channel.schema_id, writer)
-
-        writer.add_channel(
-            topic=channel.topic,
-            message_encoding=channel.message_encoding,
-            schema_id=channel.schema_id,
-            metadata=channel.metadata or {},
-            channel_id=channel.id,
-        )
-        self.written_channels.add(channel_id)
 
     def find_matching_pattern_index(self, topic: str) -> int | None:
         """Find first pattern that matches topic. Returns pattern index or None."""
@@ -231,13 +175,15 @@ class RechunkProcessor:
         if self.mode == RechunkMode.AUTO:
             self.analyze_for_auto_grouping(input_stream)
 
-        # Initialize writer
+        # Initialize writer and share schema/channel dicts for auto-ensure
         compression_type = str_to_compression_type(self.compression)
         writer = McapWriter(
             output_stream,
             chunk_size=self.chunk_size,
             compression=compression_type,
         )
+        writer.schemas = self.schemas
+        writer.channels = self.channels
 
         try:
             with file_progress("[bold blue]Rechunking MCAP...", console) as progress:
@@ -303,10 +249,10 @@ class RechunkProcessor:
             group = self._create_group_for_channel(message.channel_id, channel, writer)
             self.channel_to_group[message.channel_id] = group
 
-        # Ensure channel is written
-        self.ensure_channel_written(message.channel_id, writer)
+        # Ensure channel is written to main file (not in chunks)
+        writer.ensure_channel_written(message.channel_id)
 
-        # Add message to its group
+        # Add message to its group (chunk builder auto-ensures within chunks)
         self.channel_to_group[message.channel_id].add_message(message)
         self.messages_written += 1
 
