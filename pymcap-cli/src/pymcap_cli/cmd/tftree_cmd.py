@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
+from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from small_mcap import read_message_decoded
+from small_mcap.reader import include_topics
 
 if TYPE_CHECKING:
     import argparse
@@ -29,14 +31,6 @@ class TransformData:
     rotation: tuple[float, float, float, float]
     is_static: bool
     timestamp_ns: int
-
-
-def _filter_transforms(
-    transforms: dict[tuple[str, str], TransformData], static_only: bool
-) -> dict[tuple[str, str], TransformData]:
-    if not static_only:
-        return transforms
-    return {k: v for k, v in transforms.items() if v.is_static}
 
 
 def _build_tree_and_find_roots(
@@ -139,25 +133,22 @@ def _build_table_rows(
     return rows
 
 
-def _display_tf_tree(
-    all_transforms: dict[tuple[str, str], TransformData], static_only: bool
-) -> None:
-    if not all_transforms:
-        console.print("[yellow]No transforms found in MCAP file[/yellow]")
-        return
-
-    # Filter transforms if needed
-    transforms = _filter_transforms(all_transforms, static_only)
+def _build_tf_table(transforms: dict[tuple[str, str], TransformData]) -> Table | None:
+    if not transforms:
+        return None
 
     # Build tree structure and find roots in one pass
     tree_dict, root_frames = _build_tree_and_find_roots(transforms)
 
     if not root_frames:
-        console.print("[yellow]No root frames found[/yellow]")
-        return
+        return None
 
     # Create Rich table
-    table = Table(show_header=True, box=None, padding=(0, 1))
+    total = len(transforms)
+    static = sum(1 for t in transforms.values() if t.is_static)
+    title = f"TF Tree (Total: {total} | Static: {static} | Dynamic: {total - static})"
+
+    table = Table(show_header=True, box=None, padding=(0, 1), title=title)
     table.add_column("Frame", style="bold", no_wrap=True)
     table.add_column("Timestamp", style="dim", no_wrap=True)
     table.add_column("tx", style="cyan", justify="right")
@@ -187,16 +178,7 @@ def _display_tf_tree(
                 f"{yaw:.1f}",
             )
 
-    console.print(table)
-
-    # Display summary
-    total = len(all_transforms)
-    static = sum(1 for t in all_transforms.values() if t.is_static)
-
-    console.print()
-    console.print(f"[dim]Total transforms: {total}[/dim]")
-    console.print(f"[dim]  Static: [green]{static}[/green][/dim]")
-    console.print(f"[dim]  Dynamic: [yellow]{total - static}[/yellow][/dim]")
+    return table
 
 
 def add_parser(
@@ -234,11 +216,15 @@ def handle_command(args: argparse.Namespace) -> None:
 
     transforms: dict[tuple[str, str], TransformData] = {}
 
+    topics = ["/tf_static"]
+    if not args.static_only:
+        topics.append("/tf")
+
     try:
-        with file_path.open("rb") as f:
+        with file_path.open("rb") as f, Live(auto_refresh=False, console=console) as live:
             for msg in read_message_decoded(
                 f,
-                should_include=lambda ch, _: ch.topic in ("/tf", "/tf_static"),
+                should_include=include_topics(topics),
                 decoder_factories=[DecoderFactory()],
             ):
                 for transform_stamped in msg.decoded_message.transforms:
@@ -255,8 +241,18 @@ def handle_command(args: argparse.Namespace) -> None:
                         timestamp_ns=msg.message.log_time,
                     )
 
+                # Update display
+                table = _build_tf_table(transforms)
+                if table:
+                    live.update(table)
+                    live.refresh()
+
+            # Final update
+            table = _build_tf_table(transforms)
+            if table:
+                live.update(table)
+                live.refresh()
+
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error reading MCAP file: {e}[/red]")
         return
-
-    _display_tf_tree(transforms, args.static_only)
