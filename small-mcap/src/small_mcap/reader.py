@@ -412,7 +412,7 @@ def _read_inner(
     for record in reader:
         if isinstance(record, Schema):
             _schemas[record.id] = record
-        if isinstance(record, Channel):
+        if isinstance(record, Channel) and record.id not in _channels:  # New channel
             if record.schema_id != 0 and record.schema_id not in _schemas:
                 raise McapError(f"no schema record found with id {record.schema_id}")
             _channels[record.id] = record
