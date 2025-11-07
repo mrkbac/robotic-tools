@@ -10,6 +10,7 @@ from pymcap_cli.cmd import (
     process_cmd,
     rechunk_cmd,
     recover_cmd,
+    tftree_cmd,
 )
 
 
@@ -52,6 +53,9 @@ def create_parser() -> argparse.ArgumentParser:
     # Add rechunk command
     rechunk_cmd.add_parser(subparsers)
 
+    # Add tftree command
+    tftree_cmd.add_parser(subparsers)
+
     return parser
 
 
@@ -82,6 +86,8 @@ def main() -> None:
         process_cmd.handle_command(args)
     elif args.command == "rechunk":
         rechunk_cmd.handle_command(args)
+    elif args.command == "tftree":
+        tftree_cmd.handle_command(args)
     else:
         parser.print_help()
         sys.exit(1)

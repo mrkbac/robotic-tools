@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "rich>=14.1.0",
     "small-mcap[compression]",
+    "mcap-ros2-support-fast",
 ]
 
 [build-system]
@@ -24,3 +25,4 @@ dev = [
 
 [tool.uv.sources]
 small-mcap = { workspace = true }
+mcap-ros2-support-fast = { workspace = true }

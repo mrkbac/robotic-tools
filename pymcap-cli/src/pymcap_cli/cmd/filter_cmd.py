@@ -277,9 +277,7 @@ def handle_filter_command(args: argparse.Namespace) -> None:
             if stats.writer_statistics.attachment_count > 0:
                 console.print(f"Wrote {stats.writer_statistics.attachment_count} attachments")
             if stats.writer_statistics.metadata_count > 0:
-                console.print(
-                    f"Wrote {stats.writer_statistics.metadata_count} metadata records"
-                )
+                console.print(f"Wrote {stats.writer_statistics.metadata_count} metadata records")
             console.print(
                 f"Wrote {stats.writer_statistics.schema_count} schemas and "
                 f"{stats.writer_statistics.channel_count} channels"
