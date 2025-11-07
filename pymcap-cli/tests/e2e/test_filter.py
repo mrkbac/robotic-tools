@@ -32,9 +32,9 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should only include messages from camera topics
-        assert stats.messages_written > 0
-        assert stats.channels_written == 2  # /camera/front and /camera/back
-        assert stats.messages_processed >= stats.messages_written  # Total >= written
+        assert stats.writer_statistics.message_count > 0
+        assert stats.writer_statistics.channel_count == 2  # /camera/front and /camera/back
+        assert stats.messages_processed >= stats.writer_statistics.message_count  # Total >= written
 
     def test_filter_exclude_topic(self, multi_topic_mcap: Path, output_file: Path):
         """Test filtering with topic exclusion."""
@@ -56,8 +56,8 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should exclude debug topic (3 topics * 50 messages)
-        assert stats.messages_written >= 150
-        assert stats.channels_written == 3
+        assert stats.writer_statistics.message_count >= 150
+        assert stats.writer_statistics.channel_count == 3
 
     def test_filter_multiple_include_patterns(self, multi_topic_mcap: Path, output_file: Path):
         """Test filtering with multiple include patterns."""
@@ -79,8 +79,8 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should include 3 topics * 50 messages
-        assert stats.messages_written >= 150
-        assert stats.channels_written == 3
+        assert stats.writer_statistics.message_count >= 150
+        assert stats.writer_statistics.channel_count == 3
 
     def test_filter_time_range(self, multi_topic_mcap: Path, output_file: Path):
         """Test filtering with time range."""
@@ -103,8 +103,8 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should include only messages within time range
-        assert stats.messages_written < 200
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count < 200
+        assert stats.writer_statistics.message_count > 0
 
     def test_filter_topic_and_time(self, multi_topic_mcap: Path, output_file: Path):
         """Test filtering with both topic and time filters."""
@@ -127,9 +127,9 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should include only camera messages within time range
-        assert stats.messages_written < 100  # Less than all camera messages
-        assert stats.messages_written > 0
-        assert stats.channels_written <= 2  # Only camera channels
+        assert stats.writer_statistics.message_count < 100  # Less than all camera messages
+        assert stats.writer_statistics.message_count > 0
+        assert stats.writer_statistics.channel_count <= 2  # Only camera channels
 
     def test_filter_exclude_metadata(self, simple_mcap: Path, output_file: Path):
         """Test filtering with metadata excluded."""
@@ -189,8 +189,8 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should write no messages
-        assert stats.messages_written >= 0
-        assert stats.channels_written == 0
+        assert stats.writer_statistics.message_count >= 0
+        assert stats.writer_statistics.channel_count == 0
 
     def test_filter_exact_topic_match(self, multi_topic_mcap: Path, output_file: Path):
         """Test filtering with exact topic match."""
@@ -212,8 +212,8 @@ class TestFilter:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should only include one topic
-        assert stats.messages_written >= 50
-        assert stats.channels_written == 1
+        assert stats.writer_statistics.message_count >= 50
+        assert stats.writer_statistics.channel_count == 1
 
     def test_filter_with_compression_formats(self, multi_topic_mcap: Path, tmp_path: Path):
         """Test filtering with different compression formats."""
@@ -239,7 +239,7 @@ class TestFilter:
             ):
                 stats = processor.process(input_stream, output_stream, file_size)
 
-            assert stats.messages_written >= 100
+            assert stats.writer_statistics.message_count >= 100
             assert output_file.exists()
 
     def test_filter_statistics(self, multi_topic_mcap: Path, output_file: Path):
@@ -262,7 +262,7 @@ class TestFilter:
 
         # Verify all statistics are reasonable
         assert stats.messages_processed == 200
-        assert stats.messages_written >= 100
-        assert stats.schemas_written == 1
-        assert stats.channels_written == 2
+        assert stats.writer_statistics.message_count >= 100
+        assert stats.writer_statistics.schema_count == 1
+        assert stats.writer_statistics.channel_count == 2
         assert stats.chunks_processed > 0

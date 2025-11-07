@@ -99,9 +99,9 @@ def handle_command(args: argparse.Namespace) -> None:
             # Report results in recovery-style format
             console.print("[green]✓ Recovery completed successfully![/green]")
             console.print(
-                f"Recovered {stats.messages_written:,} messages, "
-                f"{stats.attachments_written} attachments, "
-                f"and {stats.metadata_written} metadata records."
+                f"Recovered {stats.writer_statistics.message_count:,} messages, "
+                f"{stats.writer_statistics.attachment_count} attachments, "
+                f"and {stats.writer_statistics.metadata_count} metadata records."
             )
             if stats.chunks_processed > 0:
                 console.print(

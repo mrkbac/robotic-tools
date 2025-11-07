@@ -272,14 +272,17 @@ def handle_filter_command(args: argparse.Namespace) -> None:
             console.print("[green]✓ Filter completed successfully![/green]")
             console.print(
                 f"Processed {stats.messages_processed:,} messages, "
-                f"wrote {stats.messages_written:,} messages"
+                f"wrote {stats.writer_statistics.message_count:,} messages"
             )
-            if stats.attachments_written > 0:
-                console.print(f"Wrote {stats.attachments_written} attachments")
-            if stats.metadata_written > 0:
-                console.print(f"Wrote {stats.metadata_written} metadata records")
+            if stats.writer_statistics.attachment_count > 0:
+                console.print(f"Wrote {stats.writer_statistics.attachment_count} attachments")
+            if stats.writer_statistics.metadata_count > 0:
+                console.print(
+                    f"Wrote {stats.writer_statistics.metadata_count} metadata records"
+                )
             console.print(
-                f"Wrote {stats.schemas_written} schemas and {stats.channels_written} channels"
+                f"Wrote {stats.writer_statistics.schema_count} schemas and "
+                f"{stats.writer_statistics.channel_count} channels"
             )
             if stats.chunks_processed > 0:
                 console.print(
@@ -330,7 +333,7 @@ def handle_compress_command(args: argparse.Namespace) -> None:
             console.print("[green]✓ Compression completed successfully![/green]")
             console.print(
                 f"Processed {stats.messages_processed:,} messages, "
-                f"wrote {stats.messages_written:,} messages"
+                f"wrote {stats.writer_statistics.message_count:,} messages"
             )
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during compression: {e}[/red]")

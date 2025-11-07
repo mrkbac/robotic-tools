@@ -25,7 +25,7 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Verify compression succeeded
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
         # Compressed file should be smaller
         assert output_file.stat().st_size < uncompressed_mcap.stat().st_size
@@ -46,7 +46,7 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Verify compression succeeded
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
         # Compressed file should be smaller
         assert output_file.stat().st_size < uncompressed_mcap.stat().st_size
@@ -67,7 +67,7 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Verify decompression succeeded
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
         # Uncompressed file should be larger
         assert output_file.stat().st_size > simple_mcap.stat().st_size
@@ -88,7 +88,7 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Verify recompression succeeded
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
 
     def test_recompress_lz4_to_zstd(self, lz4_mcap: Path, output_file: Path):
@@ -107,7 +107,7 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Verify recompression succeeded
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
 
     @pytest.mark.parametrize(
@@ -137,7 +137,7 @@ class TestCompress:
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             stats = processor.process(input_stream, output_stream, file_size)
 
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
 
     def test_compress_multi_topic_file(self, multi_topic_mcap: Path, output_file: Path):
@@ -156,8 +156,8 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should preserve all messages
-        assert stats.messages_written > 0
-        assert stats.channels_written == 4
+        assert stats.writer_statistics.message_count > 0
+        assert stats.writer_statistics.channel_count == 4
         assert output_file.exists()
 
     def test_compress_preserves_all_content(self, simple_mcap: Path, output_file: Path):
@@ -178,9 +178,9 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # All content should be preserved
-        assert stats.messages_written > 0
-        assert stats.schemas_written > 0
-        assert stats.channels_written > 0
+        assert stats.writer_statistics.message_count > 0
+        assert stats.writer_statistics.schema_count > 0
+        assert stats.writer_statistics.channel_count > 0
         assert output_file.exists()
 
     def test_compress_large_file(self, large_1mb_mcap: Path, output_file: Path):
@@ -199,7 +199,7 @@ class TestCompress:
             stats = processor.process(input_stream, output_stream, file_size)
 
         # Should process all messages
-        assert stats.messages_written > 0
+        assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
         assert stats.errors_encountered == 0
 
@@ -228,7 +228,7 @@ class TestCompress:
 
             compressed_size = output_file.stat().st_size
             ratios[compression] = compressed_size / uncompressed_size
-            assert stats.messages_written > 0
+            assert stats.writer_statistics.message_count > 0
 
         # Both should compress the file
         assert all(ratio < 1.0 for ratio in ratios.values())

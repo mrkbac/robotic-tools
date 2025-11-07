@@ -256,24 +256,25 @@ def handle_command(args: argparse.Namespace) -> None:
         # Basic stats
         console.print(
             f"Processed {stats.messages_processed:,} messages, "
-            f"wrote {stats.messages_written:,} messages"
+            f"wrote {stats.writer_statistics.message_count:,} messages"
         )
 
         # Content stats
-        if stats.attachments_processed > 0:
+        if stats.attachments_processed > 0 and stats.writer_statistics:
             console.print(
                 f"Processed {stats.attachments_processed} attachments, "
-                f"wrote {stats.attachments_written}"
+                f"wrote {stats.writer_statistics.attachment_count}"
             )
-        if stats.metadata_processed > 0:
+        if stats.metadata_processed > 0 and stats.writer_statistics:
             console.print(
                 f"Processed {stats.metadata_processed} metadata records, "
-                f"wrote {stats.metadata_written}"
+                f"wrote {stats.writer_statistics.metadata_count}"
             )
 
         # Schema/channel stats
         console.print(
-            f"Wrote {stats.schemas_written} schemas and {stats.channels_written} channels"
+            f"Wrote {stats.writer_statistics.schema_count} schemas and "
+            f"{stats.writer_statistics.channel_count} channels"
         )
 
         # Performance stats

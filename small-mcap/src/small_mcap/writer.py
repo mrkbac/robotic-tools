@@ -393,6 +393,10 @@ class McapWriter:
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
 
+        # Track which schemas/channels have been written to main file (not in chunks)
+        self._main_written_schemas: set[int] = set()
+        self._main_written_channels: set[int] = set()
+
         # Indexes
         self.chunk_indices: list[ChunkIndex] = []
         self.attachment_indexes: list[AttachmentIndex] = []
@@ -451,7 +455,6 @@ class McapWriter:
 
         schema = Schema(id=schema_id, name=name, encoding=encoding, data=data)
         self.schemas[schema.id] = schema
-        self.statistics.schema_count += 1
 
         self._write_record(schema)
 
@@ -484,9 +487,63 @@ class McapWriter:
             metadata=metadata or {},
         )
         self.channels[channel.id] = channel
-        self.statistics.channel_count += 1
 
         self._write_record(channel)
+
+    def ensure_schema_written(self, schema_id: int) -> None:
+        """Ensure a schema is written to the main file (not in chunks).
+
+        This is useful when using fast chunk copying - schemas must be written
+        to the main file before chunks that reference them.
+        """
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Skip if already written to main file
+        if schema_id in self._main_written_schemas:
+            return
+
+        # Skip schema_id 0 (no schema)
+        if schema_id == 0:
+            return
+
+        # Get the schema from our registry
+        schema = self.schemas.get(schema_id)
+        if schema is None:
+            raise ValueError(f"Schema ID {schema_id} not found in registry")
+
+        # Write directly to main file, bypassing chunk builder
+        self.crc_writer.write(schema.write_record())
+        self._main_written_schemas.add(schema_id)
+
+    def ensure_channel_written(self, channel_id: int) -> None:
+        """Ensure a channel is written to the main file (not in chunks).
+
+        This is useful when using fast chunk copying - channels must be written
+        to the main file before chunks that reference them.
+        """
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Skip if already written to main file
+        if channel_id in self._main_written_channels:
+            return
+
+        # Get the channel from our registry
+        channel = self.channels.get(channel_id)
+        if channel is None:
+            raise ValueError(f"Channel ID {channel_id} not found in registry")
+
+        # Ensure the channel's schema is written first
+        self.ensure_schema_written(channel.schema_id)
+
+        # Write directly to main file, bypassing chunk builder
+        self.crc_writer.write(channel.write_record())
+        self._main_written_channels.add(channel_id)
 
     def add_message(
         self,
@@ -812,6 +869,9 @@ class McapWriter:
         """Build summary section and return (summary_data, summary_offsets)."""
         summary_buffer = io.BytesIO()
         summary_offsets: list[SummaryOffset] = []
+
+        self.statistics.schema_count = len(self.schemas)
+        self.statistics.channel_count = len(self.channels)
 
         # Define sections to write (opcode, items, should_write)
         sections: list[tuple[Opcode, list[Any], bool]] = [
