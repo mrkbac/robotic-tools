@@ -57,14 +57,18 @@ _builtin_types = {
     # https://github.com/ros2/rcl_interfaces/blob/rolling/builtin_interfaces/msg/Time.msg
     "builtin_interfaces/Time": MessageDefinition(
         name="builtin_interfaces/Time",
-        fields=[Field(Type(type_name="int32"), "sec"), Field(Type(type_name="uint32"), "nanosec")],
-        constants=[],
+        fields_all=[
+            Field(Type(type_name="int32"), "sec"),
+            Field(Type(type_name="uint32"), "nanosec"),
+        ],
     ),
     # https://github.com/ros2/rcl_interfaces/blob/rolling/builtin_interfaces/msg/Duration.msg
     "builtin_interfaces/Duration": MessageDefinition(
         name="builtin_interfaces/Duration",
-        fields=[Field(Type(type_name="int32"), "sec"), Field(Type(type_name="uint32"), "nanosec")],
-        constants=[],
+        fields_all=[
+            Field(Type(type_name="int32"), "sec"),
+            Field(Type(type_name="uint32"), "nanosec"),
+        ],
     ),
 }
 
@@ -212,8 +216,7 @@ def _for_each_msgdef(
         # This is the standard ROS2 message type format used in _type field
         msgdef = MessageDefinition(
             name=short_name,
-            fields=msgdef.fields,
-            constants=msgdef.constants,
+            fields_all=msgdef.fields_all,
         )
 
         fn(cur_schema_name, short_name, msgdef)

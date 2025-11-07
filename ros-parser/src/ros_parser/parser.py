@@ -36,18 +36,15 @@ class MessageTransformer(Transformer[MessageDefinition]):
 
     def start(self, items: list[Any]) -> MessageDefinition:
         """Process the complete message definition."""
-        fields: list[Field] = []
-        constants: list[Constant] = []
+        fields_all: list[Field | Constant] = []
 
         for item in items:
             if item is None:
                 continue
-            if isinstance(item, Field):
-                fields.append(item)
-            elif isinstance(item, Constant):
-                constants.append(item)
+            if isinstance(item, (Field, Constant)):
+                fields_all.append(item)
 
-        return MessageDefinition(name=None, fields=fields, constants=constants)
+        return MessageDefinition(name=None, fields_all=fields_all)
 
     def content(self, items: list[Any]) -> Field | Constant | None:
         """Extract content from line."""

@@ -1,6 +1,7 @@
 """Data models for ROS2 message definitions."""
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 # ROS2 primitive type names
@@ -124,22 +125,27 @@ class MessageDefinition:
 
     # Message name (e.g., "geometry_msgs/Point" or None for anonymous messages)
     name: str | None
-    fields: list[Field] = field(default_factory=list)
-    constants: list[Constant] = field(default_factory=list)
+    fields_all: list[Field | Constant] = field(default_factory=list)
+
+    @cached_property
+    def fields(self) -> list[Field]:
+        """Return only Field objects from fields_all."""
+        return [item for item in self.fields_all if isinstance(item, Field)]
+
+    @cached_property
+    def constants(self) -> list[Constant]:
+        """Return only Constant objects from fields_all."""
+        return [item for item in self.fields_all if isinstance(item, Constant)]
 
     def __post_init__(self) -> None:
         """Validate message definition after initialization."""
-        # Check for duplicate field names
-        field_names = [f.name for f in self.fields]
-        if len(field_names) != len(set(field_names)):
-            duplicates = {name for name in field_names if field_names.count(name) > 1}
-            raise ValueError(f"Duplicate field names: {', '.join(sorted(duplicates))}")
+        # Collect all names from fields_all
+        all_names = [item.name for item in self.fields_all]
 
-        # Check for duplicate constant names
-        constant_names = [c.name for c in self.constants]
-        if len(constant_names) != len(set(constant_names)):
-            duplicates = {name for name in constant_names if constant_names.count(name) > 1}
-            raise ValueError(f"Duplicate constant names: {', '.join(sorted(duplicates))}")
+        # Check for duplicate names (across both fields and constants)
+        if len(all_names) != len(set(all_names)):
+            duplicates = {name for name in all_names if all_names.count(name) > 1}
+            raise ValueError(f"Duplicate field/constant names: {', '.join(sorted(duplicates))}")
 
     def __str__(self) -> str:
         """Return the string representation of the message."""
@@ -147,8 +153,8 @@ class MessageDefinition:
         if self.name:
             lines.append(f"# {self.name}")
 
-        lines.extend(str(constant) for constant in self.constants)
-        lines.extend(str(fld) for fld in self.fields)
+        # Output in original order from fields_all
+        lines.extend(str(item) for item in self.fields_all)
 
         return "\n".join(lines)
 
