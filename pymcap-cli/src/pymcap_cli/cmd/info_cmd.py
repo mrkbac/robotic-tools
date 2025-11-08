@@ -15,6 +15,10 @@ from small_mcap import InvalidMagicError
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
+from pymcap_cli.display_utils import (
+    format_schema_with_link,
+    schema_to_color,
+)
 from pymcap_cli.rebuild import read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human
 
@@ -24,67 +28,6 @@ if TYPE_CHECKING:
     from pymcap_cli.types import McapInfoOutput
 
 console = Console()
-
-
-def _schema_to_color(schema_name: str | None) -> str:
-    """Generate a deterministic color from a schema name.
-
-    Args:
-        schema_name: The schema name to hash
-
-    Returns:
-        Rich color name string
-    """
-    if not schema_name:
-        return "white"
-
-    colors = [
-        "blue",
-        "bright_cyan",
-        "bright_green",
-        "bright_magenta",
-        "bright_red",
-        "bright_yellow",
-        "cyan",
-        "green",
-        "magenta",
-        "red",
-        "yellow",
-    ]
-
-    # Use Python's built-in hash for deterministic value
-    hash_value = hash(schema_name)
-    color_index = hash_value % len(colors)
-
-    return colors[color_index]
-
-
-def _create_ros_docs_url(schema_name: str, distro: str = "jazzy") -> str:
-    parts = schema_name.split("/")
-    if len(parts) == 2:
-        # Old format: package_name/MessageType
-        package_name, message_type = parts
-        return f"https://docs.ros.org/en/{distro}/p/{package_name}/msg/{message_type}.html"
-    if len(parts) == 3:
-        # New format: package_name/msg/MessageType
-        package_name, msg_dir, message_type = parts
-        return f"https://docs.ros.org/en/{distro}/p/{package_name}/{msg_dir}/{message_type}.html"
-
-    return ""
-
-
-def _format_schema_with_link(schema_name: str | None, distro: str = "jazzy") -> str:
-    if not schema_name:
-        return "[dim]unknown[/dim]"
-
-    # Skip non-ROS schemas (foxglove, malformed)
-    if "/" not in schema_name:
-        return schema_name
-
-    # Create clickable link for ROS schemas
-    url = _create_ros_docs_url(schema_name, distro)
-    color = _schema_to_color(schema_name)
-    return f"[{color} link={url}]{schema_name}[/]"
 
 
 class DistributionBar(JupyterMixin):
@@ -361,13 +304,13 @@ def _display_channels_table(data: McapInfoOutput, args: argparse.Namespace) -> N
         )
 
         # Apply color based on schema
-        topic_color = _schema_to_color(channel["schema_name"])
+        topic_color = schema_to_color(channel["schema_name"])
         colored_topic = f"[{topic_color}]{channel['topic']}[/{topic_color}]"
 
         row = [
             str(channel["id"]),
             colored_topic,
-            _format_schema_with_link(channel["schema_name"]),
+            format_schema_with_link(channel["schema_name"]),
             f"{channel['message_count']:,}",
             f"{hz:.2f}",
         ]
@@ -417,6 +360,13 @@ def add_parser(
     )
 
     parser.add_argument(
+        "--exact-sizes",
+        "-e",
+        action="store_true",
+        help="Use exact sizes for message data (may be slower, requires --rebuild)",
+    )
+
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug mode",
@@ -463,13 +413,13 @@ def handle_command(args: argparse.Namespace) -> None:
             f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
 
         if args.rebuild:
-            info = rebuild_info(f_buffered, file_size)
+            info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
         else:
             try:
                 info = read_info(f_buffered)
             except InvalidMagicError:
                 console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
-                info = rebuild_info(f_buffered, file_size)
+                info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
 
     if debug_wrapper:
         debug_wrapper.print_stats(file_size)

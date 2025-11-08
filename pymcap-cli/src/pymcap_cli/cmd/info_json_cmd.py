@@ -292,6 +292,13 @@ def add_parser(
     )
 
     parser.add_argument(
+        "--exact-sizes",
+        "-e",
+        action="store_true",
+        help="Use exact sizes for message data (may be slower, requires --rebuild)",
+    )
+
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug mode",
@@ -542,14 +549,14 @@ def handle_command(args: argparse.Namespace) -> None:
             f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
 
         if args.rebuild:
-            info = rebuild_info(f_buffered, file_size)
+            info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
         else:
             try:
                 info = read_info(f_buffered)
             except InvalidMagicError:
                 if not args.debug:
                     # Silently rebuild if invalid magic and not in debug mode
-                    info = rebuild_info(f_buffered, file_size)
+                    info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
                 else:
                     raise
 
