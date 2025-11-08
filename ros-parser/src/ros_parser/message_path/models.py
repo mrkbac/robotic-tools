@@ -47,12 +47,10 @@ class FieldAccess(Action):
             )
 
         # Try attribute access for objects
-        if hasattr(type(obj), self.field_name):
+        try:
             return getattr(obj, self.field_name)
-
-        # Check if it's a dataclass or similar with __dict__
-        if hasattr(obj, "__dict__") and self.field_name in obj.__dict__:
-            return obj.__dict__[self.field_name]
+        except AttributeError:
+            pass
 
         # If we get here, the field doesn't exist
         obj_type = type(obj).__name__
@@ -161,13 +159,14 @@ class Filter(Action):
                 if part not in field_value:
                     raise MessagePathError(f"Field '{part}' not found in mapping")
                 field_value = field_value[part]
-            elif hasattr(type(field_value), part):
-                field_value = getattr(field_value, part)
-            elif hasattr(field_value, "__dict__") and part in field_value.__dict__:
-                field_value = field_value.__dict__[part]
             else:
-                obj_type = type(field_value).__name__
-                raise MessagePathError(f"Field '{part}' not found on object of type '{obj_type}'")
+                try:
+                    field_value = getattr(field_value, part)
+                except AttributeError:
+                    obj_type = type(field_value).__name__
+                    raise MessagePathError(
+                        f"Field '{part}' not found on object of type '{obj_type}'"
+                    ) from None
         return field_value
 
     def _compare(self, field_value: Any, compare_value: Any) -> bool:

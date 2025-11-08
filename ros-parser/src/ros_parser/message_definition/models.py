@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Any
 
 # ROS2 primitive type names
 PRIMITIVE_TYPE_NAMES = {
@@ -85,7 +84,7 @@ class Field:
 
     type: Type
     name: str
-    default_value: bool | int | float | str | list[Any] | None = None
+    default_value: bool | int | float | str | list[bool | int | float | str] | None = None
 
     def __str__(self) -> str:
         """Return the string representation of the field."""

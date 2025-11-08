@@ -649,7 +649,9 @@ def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
     return True
 
 
-def include_topics(topics: Iterable[str]) -> Callable[[Channel, Schema | None], bool]:
+def include_topics(topics: str | Iterable[str]) -> Callable[[Channel, Schema | None], bool]:
+    if isinstance(topics, str):
+        topics = {topics}
     return lambda channel, _schema: channel.topic in topics
 
 
