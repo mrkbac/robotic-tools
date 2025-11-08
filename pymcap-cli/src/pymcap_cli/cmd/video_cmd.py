@@ -247,7 +247,7 @@ def _get_encoder_quality_params(
     return params
 
 
-def _scan_mcap(mcap_path: Path, topic: str) -> tuple[ImageType, int, float]:
+def _scan_mcap(mcap_path: Path, topic: str) -> tuple[ImageType, int]:
     with mcap_path.open("rb") as f:
         summary = get_summary(f)
 
@@ -284,11 +284,8 @@ def _scan_mcap(mcap_path: Path, topic: str) -> tuple[ImageType, int, float]:
         raise VideoEncoderError("MCAP file has no statistics, try rebuilding it")
 
     message_count = summary.statistics.channel_message_counts.get(channel.id, 0)
-    # TODO: improve FPS calculation
-    duration_ns = summary.statistics.message_end_time - summary.statistics.message_start_time
-    fps = message_count / (duration_ns / 1e9) if duration_ns > 0 else 0.0
 
-    return message_type, message_count, fps
+    return message_type, message_count
 
 
 def _process_compressed_image(message: Any) -> bytes:
@@ -499,7 +496,7 @@ def encode_video(
     encoder = _detect_encoder(codec, encoder_preference)
     console.print(f"[cyan]Encoder:[/cyan] {encoder}")
 
-    message_type, message_count, fps = _scan_mcap(mcap_path, topic)
+    message_type, message_count = _scan_mcap(mcap_path, topic)
 
     if message_count == 0:
         raise VideoEncoderError(f"No messages found for topic: {topic}")
@@ -518,7 +515,6 @@ def encode_video(
         codec=codec,
         encoder=encoder,
         quality=quality,
-        fps=fps,
     )
 
     console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
@@ -533,7 +529,6 @@ def _encode_frames(
     codec: VideoCodec,
     encoder: str,
     quality: int,
-    fps: float,
 ) -> None:
     """Extract frames from MCAP and encode to video with accurate timing.
 
@@ -546,7 +541,6 @@ def _encode_frames(
         codec: Video codec
         encoder: Encoder name
         quality: Quality value
-        fps: Frames per second
 
     Raises:
         VideoEncoderError: If encoding fails
@@ -558,7 +552,10 @@ def _encode_frames(
     frames_written = 0
     width: int | None = None
     height: int | None = None
+    fps: float | None = None
+    first_timestamp: int | None = None
     fps_pts: list[int] = []  # List of presentation timestamps for FPS calculation
+    first_frame_data: bytes | None = None  # Buffer for the first frame
 
     with Progress(
         SpinnerColumn(),
@@ -579,6 +576,15 @@ def _encode_frames(
                 should_include=include_topics(topic),
                 decoder_factories=[decoder_factory],
             ):
+                # Track timestamps for FPS calculation
+                if first_timestamp is None:
+                    first_timestamp = msg.message.log_time
+                elif fps is None:
+                    second_timestamp = msg.message.log_time
+                    # Calculate FPS from time between first two messages
+                    duration_ns = second_timestamp - first_timestamp
+                    fps = 1.0 / (duration_ns / 1e9) if duration_ns > 0 else 30.0
+
                 # Extract frame data based on message type
                 if message_type == ImageType.COMPRESSED:
                     frame_data = _process_compressed_image(msg.decoded_message)
@@ -591,8 +597,13 @@ def _encode_frames(
                         width = img_width
                         height = img_height
 
-                # Start ffmpeg on first frame
-                if ffmpeg_process is None:
+                # Buffer the first frame
+                if first_frame_data is None:
+                    first_frame_data = frame_data
+
+                # Start ffmpeg once we have dimensions and FPS
+                # For single-frame videos, we'll use a default FPS of 1
+                if ffmpeg_process is None and fps is not None:
                     if width is None or height is None:
                         raise VideoEncoderError("Failed to determine image dimensions")
                     ffmpeg_process = _start_ffmpeg(
@@ -606,10 +617,16 @@ def _encode_frames(
                         fps=fps,
                     )
 
-                # Write frame
-                assert ffmpeg_process.stdin is not None
-                ffmpeg_process.stdin.write(frame_data)
-                frames_written += 1
+                    # Write the buffered first frame
+                    assert ffmpeg_process.stdin is not None
+                    ffmpeg_process.stdin.write(first_frame_data)
+                    frames_written += 1
+
+                # Write current frame (skip if it's the first frame, already written from buffer)
+                if ffmpeg_process is not None and frames_written > 0:
+                    assert ffmpeg_process.stdin is not None
+                    ffmpeg_process.stdin.write(frame_data)
+                    frames_written += 1
 
                 # Track timestamp for FPS calculation
                 fps_pts.append(msg.message.log_time)
