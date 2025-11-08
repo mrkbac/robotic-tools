@@ -23,7 +23,7 @@ PASSED_PACKAGES=()
 for package in "${PACKAGES[@]}"; do
     echo "📦 Checking $package..."
     if [ -d "$package/src" ]; then
-        if uv run --frozen --all-extras --all-groups --no-progress mypy "$package/src" --strict; then
+        if uv run --frozen --all-extras --all-groups --all-packages --no-progress mypy "$package/src" --strict; then
             PASSED_PACKAGES+=("$package")
             echo "✅ $package passed"
         else

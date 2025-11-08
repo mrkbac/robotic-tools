@@ -3,14 +3,13 @@ from typing import Any, ClassVar
 
 from rich.highlighter import ISO8601Highlighter, ReprHighlighter
 from rich.text import Text
+from ros_parser.message_path import MessagePath, MessagePathError, parse_message_path
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.validation import ValidationResult, Validator
 from textual.widgets import Input, Tree
 from textual.widgets.tree import TreeNode
 
-from digitalis.grammar import ParsedMessagePath, parse_message_path
-from digitalis.grammar.query import QueryError, apply_query
 from digitalis.reader.types import MessageEvent
 from digitalis.ui.panels.base import SCHEMA_ANY, BasePanel
 from digitalis.utilities import (
@@ -98,7 +97,7 @@ class QueryValidator(Validator):
 
     def __init__(self) -> None:
         super().__init__()
-        self._cached_parsed: ParsedMessagePath | None = None
+        self._cached_parsed: MessagePath | None = None
         self._cached_query: str = ""
 
     def validate(self, value: str) -> ValidationResult:
@@ -125,7 +124,7 @@ class QueryValidator(Validator):
             self._cached_query = value
             return self.failure(f"Invalid query syntax: {e}")
 
-    def get_cached_parsed(self, query: str) -> ParsedMessagePath | None:
+    def get_cached_parsed(self, query: str) -> MessagePath | None:
         """Get cached parsed result if query matches.
 
         Args:
@@ -441,7 +440,7 @@ class Raw(BasePanel[MessageEvent]):
     SUPPORTED_SCHEMAS: ClassVar[set[str]] = {SCHEMA_ANY}
     PRIORITY: ClassVar[int] = 1000  # Should be the last panel
 
-    parsed_query: reactive[ParsedMessagePath | None] = reactive(None)
+    parsed_query: reactive[MessagePath | None] = reactive(None)
 
     def __init__(self) -> None:
         super().__init__()
@@ -463,14 +462,14 @@ class Raw(BasePanel[MessageEvent]):
 
         if self.parsed_query and self.data and self.parsed_query:
             try:
-                filtered_message = apply_query(self.parsed_query, self.data.message)
+                filtered_message = self.parsed_query.apply(self.data.message)
                 tree.data = MessageEvent(
                     topic=self.data.topic,
                     message=filtered_message,
                     timestamp_ns=self.data.timestamp_ns,
                     schema_name=self.data.schema_name,
                 )
-            except QueryError:
+            except MessagePathError:
                 # Ignore for now
                 pass
         else:

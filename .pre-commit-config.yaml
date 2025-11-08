@@ -1,5 +1,5 @@
 # ignore all vendored files and generated files
-exclude: ^.*vendor/.*$|^ros-parser/src/ros_parser/_standalone_parser\.py$|^ros-parser/tests/reference_parser\.py$
+exclude: ^.*vendor/.*$|^ros-parser/src/ros_parser/_standalone_parser\.py$|^ros-parser/src/ros_parser/_lark_standalone_runtime\.py$|^ros-parser/src/ros_parser/message_definition/_standalone_parser\.py$|^ros-parser/src/ros_parser/message_path/_standalone_parser\.py$|^ros-parser/tests/reference_parser\.py$
 default_install_hook_types:
   - pre-commit
   - commit-msg

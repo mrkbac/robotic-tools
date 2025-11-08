@@ -1,13 +1,14 @@
-"""ROS2 message, service, and action definition parser."""
+"""ROS message definition parsing."""
 
-# Re-export from message_definition for backward compatibility
-from .message_definition import (
+from .models import (
     ActionDefinition,
     Constant,
     Field,
     MessageDefinition,
     ServiceDefinition,
     Type,
+)
+from .parser import (
     parse_action_file,
     parse_action_string,
     parse_message_file,

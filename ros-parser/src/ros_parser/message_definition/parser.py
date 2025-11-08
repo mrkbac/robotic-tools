@@ -2,10 +2,11 @@
 
 import re
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 # Import from standalone parser (pre-compiled grammar)
-from ._standalone_parser import Lark_StandAlone, Token, Transformer
+from .._lark_standalone_runtime import Token, Transformer
+from ._standalone_parser import Lark_StandAlone
 from .models import (
     ActionDefinition,
     Constant,
@@ -16,7 +17,7 @@ from .models import (
 )
 
 
-class MessageTransformer(Transformer[MessageDefinition]):
+class MessageTransformer(Transformer[Any, MessageDefinition]):
     """Transforms Lark parse tree into ROS2 message data structures."""
 
     # Type normalization is NOT done at parse time
@@ -355,9 +356,9 @@ def parse_string(message_string: str, context_package_name: str | None = None) -
     cleaned = cleaned.rstrip()
 
     # Create parser with context package name
-    transformer = MessageTransformer(context_package_name=context_package_name)
-    parser = Lark_StandAlone(transformer=transformer)
-    return parser.parse(cleaned)
+    transformer: Any = MessageTransformer(context_package_name=context_package_name)
+    parser: Any = Lark_StandAlone(transformer=transformer)
+    return cast("MessageDefinition", parser.parse(cleaned))
 
 
 def parse_file(file_path: str | Path, package_name: str | None = None) -> MessageDefinition:

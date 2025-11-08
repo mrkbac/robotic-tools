@@ -28,7 +28,7 @@ members = [
 [tool.mypy]
 strict = true
 python_version = "3.10"
-exclude = ["tests/", "test_.*\\.py$", ".venv/", "build/"]
+exclude = ["tests/", "test_.*\\.py$", ".venv/", "build/", ".*/_standalone.*\\.py$", ".*/_lark_standalone.*\\.py$"]
 
 
 [tool.ruff]
@@ -54,6 +54,7 @@ ignore = [
     'PLR2004', # MagicValueComparisons
     'S101',    # AssertUsed
     'TD',      # TODO
+    'TID252',  # relative-imports (allow relative imports from parent modules)
     'TRY003',  # raise-vanilla-args
 
     # formatter

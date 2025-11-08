@@ -18,11 +18,16 @@ dev = [
 [tool.mypy]
 strict = true
 python_version = "3.10"
-exclude = ["^src/ros_parser/_standalone_parser\\.py$"]
+exclude = [
+    "^.*/_standalone.*\\.py$",
+    "^.*/_lark_standalone.*\\.py$",
+]
 
 [tool.ruff]
 extend = "../pyproject.toml"
 extend-exclude = [
-    'src/ros_parser/_standalone_parser.py',
+    '**/_standalone*.py',
+    '**/_lark_standalone*.py',
     'tests/reference_parser.py',
+    '_generate_standalone.py',
 ]

@@ -8,6 +8,7 @@ dependencies = [
     "lark>=1.2.2",
     "mcap-ros2-support-fast",
     "pointcloud2>=0.2.3",
+    "ros-parser",
     "small-mcap[compression]",
     "textual>=5.1.1",
     "textual-image>=0.8.3",
@@ -43,5 +44,6 @@ disallow_any_generics = true
 
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
+ros-parser = { workspace = true }
 small-mcap = { workspace = true }
 websocket-bridge = { workspace = true }
