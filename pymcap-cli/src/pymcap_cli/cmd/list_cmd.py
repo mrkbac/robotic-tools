@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING
 import shtab
 from rich.console import Console
 from rich.table import Table
-from small_mcap import InvalidMagicError
+from small_mcap import InvalidMagicError, RebuildInfo
 
-from pymcap_cli.rebuild import Info, read_info, rebuild_info
-from pymcap_cli.utils import bytes_to_human
+from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
 if TYPE_CHECKING:
     import argparse
@@ -92,7 +91,7 @@ def handle_command(args: argparse.Namespace) -> None:
         console.print("[red]No subcommand specified. Use --help for options.[/red]")
 
 
-def _read_mcap_info(file_path: str) -> Info:
+def _read_mcap_info(file_path: str) -> RebuildInfo:
     """Read MCAP file info, with automatic rebuild on invalid magic."""
     file = Path(file_path)
     file_size = file.stat().st_size

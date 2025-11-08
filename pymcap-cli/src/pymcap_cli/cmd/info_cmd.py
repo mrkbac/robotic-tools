@@ -17,8 +17,7 @@ from small_mcap import InvalidMagicError
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
-from pymcap_cli.rebuild import read_info, rebuild_info
-from pymcap_cli.utils import bytes_to_human
+from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
 if TYPE_CHECKING:
     import argparse

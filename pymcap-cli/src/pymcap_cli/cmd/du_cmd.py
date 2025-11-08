@@ -8,7 +8,7 @@ from rich.console import Console
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
-from pymcap_cli.rebuild import rebuild_info
+from pymcap_cli.utils import rebuild_info
 
 console = Console()
 

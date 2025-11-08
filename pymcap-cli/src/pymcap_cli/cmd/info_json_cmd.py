@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import shtab
-from small_mcap import ChunkIndex, InvalidMagicError
+from small_mcap import ChunkIndex, InvalidMagicError, RebuildInfo
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
-from pymcap_cli.rebuild import Info, read_info, rebuild_info
+from pymcap_cli.utils import read_info, rebuild_info
 
 if TYPE_CHECKING:
     import argparse
@@ -66,7 +66,7 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
     return len(max_concurrent_chunks), max_concurrent_bytes
 
 
-def _calculate_channel_durations(info: Info) -> dict[int, int]:
+def _calculate_channel_durations(info: RebuildInfo) -> dict[int, int]:
     """Calculate per-channel duration in nanoseconds from message indexes.
 
     Returns a dict mapping channel_id -> duration_ns (last_msg_time - first_msg_time).
@@ -160,7 +160,7 @@ def _calculate_optimal_bucket_count(duration_ns: int) -> int:
 
 
 def _calculate_message_distribution(
-    info: Info, start_time: int, end_time: int
+    info: RebuildInfo, start_time: int, end_time: int
 ) -> MessageDistribution:
     """Calculate message distribution across dynamic time buckets.
 
@@ -221,7 +221,7 @@ def _calculate_message_distribution(
 
 
 def _calculate_per_channel_distributions(
-    info: Info, bucket_count: int, bucket_duration_ns: int, start_time: int
+    info: RebuildInfo, bucket_count: int, bucket_duration_ns: int, start_time: int
 ) -> dict[int, list[int]]:
     """Calculate message distribution per channel using global time buckets.
 
@@ -309,7 +309,7 @@ def add_parser(
     return parser
 
 
-def info_to_dict(info: Info, file_path: str, file_size: int) -> McapInfoOutput:
+def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoOutput:
     """Transform MCAP Info object into a JSON-serializable dictionary.
 
     Args:

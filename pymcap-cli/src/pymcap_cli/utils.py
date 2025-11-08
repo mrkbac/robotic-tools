@@ -1,5 +1,5 @@
 import io
-from typing import IO, Any
+from typing import IO, Any, BinaryIO
 
 from rich.console import Console
 from rich.progress import (
@@ -13,6 +13,7 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
+from small_mcap import RebuildInfo, get_header, get_summary, rebuild_summary
 
 
 def bytes_to_human(size_bytes: float) -> str:
@@ -138,3 +139,52 @@ class ProgressTrackingIO(io.RawIOBase):
     def isatty(self) -> bool:
         """Return whether this is a tty device."""
         return self._stream.isatty()
+
+
+def rebuild_info(
+    f: BinaryIO, file_size: int, *, exact_sizes: bool = False, console: Console | None = None
+) -> RebuildInfo:
+    """Rebuild MCAP summary with progress bar.
+
+    Thin wrapper around small-mcap's rebuild_summary that adds progress visualization.
+
+    Args:
+        f: Input file stream
+        file_size: Total file size for progress tracking
+        exact_sizes: Whether to calculate exact sizes (True) or estimate from indexes (False)
+
+    Returns:
+        Info (RebuildInfo) with header, summary, and channel_sizes
+    """
+    with file_progress("[bold blue]Rebuilding MCAP info...", console) as progress:
+        task = progress.add_task("Processing", total=file_size)
+
+        # Wrap stream to track progress
+        wrapped_stream = ProgressTrackingIO(f, task, progress)
+
+        result = rebuild_summary(
+            wrapped_stream,  # type: ignore[arg-type]
+            validate_crc=False,
+            calculate_channel_sizes=True,
+            exact_sizes=exact_sizes,
+        )
+
+        # Complete progress
+        progress.update(task, completed=file_size, visible=False)
+
+    return result
+
+
+def read_info(f: BinaryIO) -> RebuildInfo:
+    """Read existing MCAP summary from file.
+
+    Args:
+        f: Input file stream
+
+    Returns:
+        Info (RebuildInfo) with header, summary, and no channel_sizes
+    """
+    header = get_header(f)
+    summary = get_summary(f)
+    assert summary is not None, "Summary should not be None"
+    return RebuildInfo(header=header, summary=summary)
