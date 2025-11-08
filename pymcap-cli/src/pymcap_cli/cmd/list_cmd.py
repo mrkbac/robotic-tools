@@ -60,7 +60,9 @@ def add_parser(
         "attachments",
         help="List attachments in an MCAP file",
     )
-    attachments_file_arg = attachments_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    attachments_file_arg = attachments_parser.add_argument(
+        "file", help="Path to the MCAP file", type=str
+    )
     attachments_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # list metadata

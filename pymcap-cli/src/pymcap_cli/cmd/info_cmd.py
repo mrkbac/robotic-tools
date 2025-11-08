@@ -16,10 +16,7 @@ from small_mcap import InvalidMagicError
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
-from pymcap_cli.display_utils import (
-    format_schema_with_link,
-    schema_to_color,
-)
+from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
 from pymcap_cli.rebuild import read_info, rebuild_info
 from pymcap_cli.utils import bytes_to_human
 
@@ -251,90 +248,26 @@ def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> No
 
 def _display_channels_table(data: McapInfoOutput, args: argparse.Namespace) -> None:
     """Display channels table with sorting support."""
-
-    # Dictionary of sort key functions
-    sort_keys = {
-        "topic": lambda c: c["topic"],
-        "id": lambda c: c["id"],
-        "msgs": lambda c: c["message_count"],
-        "size": lambda c: c.get("size_bytes") or 0,
-        "hz": lambda c: (c["hz_channel"] if args.index_duration and c["hz_channel"] else c["hz"]),
-        "bps": lambda c: c.get("bytes_per_second") or 0,
-        "b_per_msg": lambda c: c.get("bytes_per_message") or 0,
-        "schema": lambda c: c.get("schema_name") or "",
-    }
-    get_sort_key = sort_keys.get(args.sort, sort_keys["topic"])
-
-    # Check if size data is available
-    has_size_data = any(ch["size_bytes"] is not None for ch in data["channels"])
-
-    # Check if distribution data is available
-    has_distribution_data = any(
-        ch.get("message_distribution") and len(ch["message_distribution"]) > 0
-        for ch in data["channels"]
+    display_channels_table(
+        data,
+        console,
+        sort_key=args.sort,
+        reverse=args.reverse,
+        columns=(
+            ChannelTableColumn.ID
+            | ChannelTableColumn.TOPIC
+            | ChannelTableColumn.SCHEMA
+            | ChannelTableColumn.MSGS
+            | ChannelTableColumn.HZ
+            | ChannelTableColumn.SIZE
+            | ChannelTableColumn.BPS
+            | ChannelTableColumn.B_PER_MSG
+            | ChannelTableColumn.DISTRIBUTION
+        ),
+        responsive=True,
+        index_duration=args.index_duration,
+        distribution_bar_class=DistributionBar,
     )
-
-    # Detect terminal width and determine which columns to show
-    terminal_width = console.width
-    show_size = terminal_width >= 80 and has_size_data
-    show_bps = terminal_width >= 100 and has_size_data
-    show_b_per_msg = terminal_width >= 120 and has_size_data
-    show_distribution = terminal_width >= 140 and has_distribution_data
-
-    # Channels table
-    channels_table = Table()
-    channels_table.add_column("ID", style="bold blue", no_wrap=True, justify="right")
-    channels_table.add_column("Topic", overflow="fold")
-    channels_table.add_column("Schema", style="blue")
-    channels_table.add_column("Msgs", justify="right", style="green")
-    channels_table.add_column("Hz", justify="right", style="yellow")
-    if show_size:
-        channels_table.add_column("Size", justify="right", style="yellow")
-    if show_bps:
-        channels_table.add_column("B/s", justify="right", style="magenta")
-    if show_b_per_msg:
-        channels_table.add_column("B/msg", justify="right", style="magenta")
-    if show_distribution:
-        channels_table.add_column("Distribution")
-
-    for channel in sorted(data["channels"], key=get_sort_key, reverse=args.reverse):
-        hz = (
-            channel["hz_channel"]
-            if args.index_duration and channel["hz_channel"]
-            else channel["hz"]
-        )
-
-        # Apply color based on schema
-        topic_color = schema_to_color(channel["schema_name"])
-        colored_topic = f"[{topic_color}]{channel['topic']}[/{topic_color}]"
-
-        row = [
-            str(channel["id"]),
-            colored_topic,
-            format_schema_with_link(channel["schema_name"]),
-            f"{channel['message_count']:,}",
-            f"{hz:.2f}",
-        ]
-        if show_size:
-            size = channel.get("size_bytes") or 0
-            row.append(bytes_to_human(size))
-        if show_bps:
-            bps = channel["bytes_per_second"] if channel["bytes_per_second"] is not None else 0
-            row.append(bytes_to_human(int(bps)))
-        if show_b_per_msg:
-            b_per_msg = (
-                channel["bytes_per_message"] if channel["bytes_per_message"] is not None else 0
-            )
-            row.append(bytes_to_human(int(b_per_msg)))
-
-        # Add distribution bar if available
-        if show_distribution:
-            distribution = channel.get("message_distribution", [])
-            row.append(DistributionBar(distribution))  # type: ignore[arg-type]
-
-        channels_table.add_row(*row)
-
-    console.print(channels_table)
 
 
 def add_parser(
