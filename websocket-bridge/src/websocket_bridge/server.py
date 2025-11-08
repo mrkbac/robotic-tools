@@ -209,6 +209,25 @@ class WebSocketBridgeServer:
         """Return a snapshot of the active connections."""
         return list(self._connections.values())
 
+    def get_subscriptions_for_channel(self, channel_id: int) -> list[tuple[ServerConnection, int]]:
+        """Get all (websocket, subscription_id) pairs for a specific channel.
+
+        This is useful for custom message routing in proxies and other advanced
+        use cases where you need to know which clients are subscribed to a channel.
+
+        Args:
+            channel_id: The channel ID to query subscriptions for
+
+        Returns:
+            List of (websocket, subscription_id) tuples for all subscriptions to this channel
+        """
+        results: list[tuple[ServerConnection, int]] = []
+        for state in self._connections.values():
+            for sub_id, subscribed_channel in state.subscriptions.items():
+                if subscribed_channel == channel_id:
+                    results.append((state.websocket, sub_id))
+        return results
+
     async def advertise_all(self) -> None:
         """Broadcast current channel advertisement to every connected client."""
         if not self._channels:
@@ -254,6 +273,37 @@ class WebSocketBridgeServer:
                     await state.websocket.send(bytes(frame_prefix) + payload)
                 except ConnectionClosed:
                     Logger.debug("Skipping closed connection during publish")
+
+    async def send_message_to_subscription(
+        self,
+        websocket: ServerConnection,
+        subscription_id: int,
+        payload: bytes,
+        *,
+        timestamp_ns: int | None = None,
+    ) -> None:
+        """Send a binary message to a specific client subscription.
+
+        This is useful for proxies and custom message routing logic where you need
+        to send messages to specific clients rather than broadcasting to all
+        subscribers of a channel.
+
+        Args:
+            websocket: The client websocket connection
+            subscription_id: The subscription ID for this client
+            payload: The message payload bytes
+            timestamp_ns: Optional timestamp in nanoseconds (defaults to current time)
+        """
+        timestamp = timestamp_ns if timestamp_ns is not None else time.time_ns()
+        frame_prefix = bytearray(1 + 4 + 8)
+        frame_prefix[0] = int(BinaryOpCodes.MESSAGE_DATA)
+        struct.pack_into("<I", frame_prefix, 1, subscription_id)
+        struct.pack_into("<Q", frame_prefix, 5, timestamp)
+
+        try:
+            await websocket.send(bytes(frame_prefix) + payload)
+        except ConnectionClosed:
+            Logger.debug("Client disconnected while sending message")
 
     async def send_status(
         self,

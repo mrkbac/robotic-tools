@@ -54,6 +54,16 @@ class WebSocketSource(WebSocketBridgeClient, Source):
         self._topics: dict[str, Topic] = {}
         self._play_back = True
 
+        # Register callbacks using the new registration pattern
+        self.on_connect(self._on_connect_callback)
+        self.on_disconnect(self._on_disconnect_callback)
+        self.on_reconnecting(self._on_reconnecting_callback)
+        self.on_server_info(self._on_server_info_callback)
+        self.on_advertised_channel(self._on_advertised_channel_callback)
+        self.on_channel_unadvertised(self._on_channel_unadvertised_callback)
+        self.on_message(self._on_message_callback)
+        self.on_time_update(self._on_time_update_callback)
+
     async def initialize(self) -> SourceInfo:
         """Initialize the WebSocket connection with persistent retry logic."""
         logger.info(f"Initializing WebSocket source: {self._url}")
@@ -88,17 +98,17 @@ class WebSocketSource(WebSocketBridgeClient, Source):
         await self.disconnect()
         logger.info("WebSocket source closed")
 
-    async def on_connection_status_changed(self, status: ConnectionStatus) -> None:
-        """Map ConnectionStatus to SourceStatus and notify handler."""
-        status_map = {
-            ConnectionStatus.DISCONNECTED: SourceStatus.DISCONNECTED,
-            ConnectionStatus.CONNECTING: SourceStatus.CONNECTING,
-            ConnectionStatus.CONNECTED: SourceStatus.CONNECTED,
-            ConnectionStatus.RECONNECTING: SourceStatus.RECONNECTING,
-        }
+    def _on_connect_callback(self) -> None:
+        """Handle connection established event."""
+        self._notify_status(SourceStatus.CONNECTED)
 
-        source_status = status_map.get(status, SourceStatus.DISCONNECTED)
-        self._notify_status(source_status)
+    def _on_disconnect_callback(self) -> None:
+        """Handle disconnection event."""
+        self._notify_status(SourceStatus.DISCONNECTED)
+
+    def _on_reconnecting_callback(self) -> None:
+        """Handle reconnection event."""
+        self._notify_status(SourceStatus.RECONNECTING)
 
     def get_status(self) -> SourceStatus:
         """Get current source status, mapping ConnectionStatus to SourceStatus."""
@@ -111,7 +121,7 @@ class WebSocketSource(WebSocketBridgeClient, Source):
         }
         return status_map.get(connection_status, SourceStatus.DISCONNECTED)
 
-    async def on_server_info(
+    def _on_server_info_callback(
         self, name: str, capabilities: list[str], session_id: str | None
     ) -> None:
         """Handle server info."""
@@ -120,7 +130,7 @@ class WebSocketSource(WebSocketBridgeClient, Source):
         if session_id:
             logger.info(f"Session ID: {session_id}")
 
-    async def on_advertised_channel(self, channel: ChannelInfo) -> None:
+    def _on_advertised_channel_callback(self, channel: ChannelInfo) -> None:
         """Handle newly advertised channels and convert to Topics."""
         topic = Topic(
             name=channel["topic"],
@@ -135,12 +145,12 @@ class WebSocketSource(WebSocketBridgeClient, Source):
         source_info = SourceInfo(topics=all_topics)
         self._notify_source_info(source_info)
 
-    async def on_channel_unadvertised(self, channel: ChannelInfo) -> None:
+    def _on_channel_unadvertised_callback(self, channel: ChannelInfo) -> None:
         """Handle unadvertised channels."""
         self._topics.pop(channel["topic"], None)
         logger.info(f"Topic unadvertised: {channel['topic']}")
 
-    async def on_message(
+    def _on_message_callback(
         self,
         channel: ChannelInfo,
         timestamp: int,
@@ -180,7 +190,7 @@ class WebSocketSource(WebSocketBridgeClient, Source):
         # Notify time handler with message timestamp
         self._notify_time(timestamp)
 
-    async def on_time_update(self, server_time: int) -> None:
+    def _on_time_update_callback(self, server_time: int) -> None:
         """Handle server time updates."""
         logger.debug(f"Received server time: {server_time}")
         self._notify_time(server_time)

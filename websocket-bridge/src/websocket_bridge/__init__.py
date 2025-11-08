@@ -1,5 +1,13 @@
 """WebSocket bridge for Foxglove WebSocket protocol."""
 
-from .client import WebSocketBridgeClient
+from websockets.asyncio.server import ServerConnection
 
-__all__ = ["WebSocketBridgeClient"]
+from .client import WebSocketBridgeClient
+from .server import ConnectionState, WebSocketBridgeServer
+
+__all__ = [
+    "ConnectionState",
+    "ServerConnection",
+    "WebSocketBridgeClient",
+    "WebSocketBridgeServer",
+]

@@ -5,9 +5,11 @@ import contextlib
 import json
 import logging
 import struct
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import websockets
+from websockets.typing import Subprotocol
 
 from .ws_types import (
     BinaryOpCodes,
@@ -25,6 +27,17 @@ if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
 
 logger = logging.getLogger(__name__)
+
+
+# Handler type aliases
+ConnectHandler = Callable[[], Awaitable[None] | None]
+DisconnectHandler = Callable[[], Awaitable[None] | None]
+ReconnectingHandler = Callable[[], Awaitable[None] | None]
+ServerInfoHandler = Callable[[str, list[str], str | None], Awaitable[None] | None]
+StatusHandler = Callable[[int, str, str | None], Awaitable[None] | None]
+ChannelHandler = Callable[[ChannelInfo], Awaitable[None] | None]
+MessageHandler = Callable[[ChannelInfo, int, bytes], Awaitable[None] | None]
+TimeUpdateHandler = Callable[[int], Awaitable[None] | None]
 
 
 # Constants for binary message structure
@@ -78,6 +91,17 @@ class WebSocketBridgeClient:
         self._server_info: ServerInfoMessage | None = None
 
         self._lock = asyncio.Lock()
+
+        # Handler storage lists
+        self._on_connect: list[ConnectHandler] = []
+        self._on_disconnect: list[DisconnectHandler] = []
+        self._on_reconnecting: list[ReconnectingHandler] = []
+        self._on_server_info: list[ServerInfoHandler] = []
+        self._on_status: list[StatusHandler] = []
+        self._on_advertised_channel: list[ChannelHandler] = []
+        self._on_channel_unadvertised: list[ChannelHandler] = []
+        self._on_message: list[MessageHandler] = []
+        self._on_time_update: list[TimeUpdateHandler] = []
 
     async def connect(self) -> None:
         """Open the websocket connection and start receiving frames."""
@@ -149,17 +173,68 @@ class WebSocketBridgeClient:
         """Get the current connection status."""
         return self._connection_status
 
+    def on_connect(self, handler: ConnectHandler) -> None:
+        """Register a callback for connection established events."""
+        self._on_connect.append(handler)
+
+    def on_disconnect(self, handler: DisconnectHandler) -> None:
+        """Register a callback for connection closed events."""
+        self._on_disconnect.append(handler)
+
+    def on_reconnecting(self, handler: ReconnectingHandler) -> None:
+        """Register a callback for reconnection attempt events."""
+        self._on_reconnecting.append(handler)
+
+    def on_server_info(self, handler: ServerInfoHandler) -> None:
+        """Register a callback for server info messages."""
+        self._on_server_info.append(handler)
+
+    def on_status(self, handler: StatusHandler) -> None:
+        """Register a callback for status messages."""
+        self._on_status.append(handler)
+
+    def on_advertised_channel(self, handler: ChannelHandler) -> None:
+        """Register a callback for channel advertisement events."""
+        self._on_advertised_channel.append(handler)
+
+    def on_channel_unadvertised(self, handler: ChannelHandler) -> None:
+        """Register a callback for channel unadvertisement events."""
+        self._on_channel_unadvertised.append(handler)
+
+    def on_message(self, handler: MessageHandler) -> None:
+        """Register a callback for received messages."""
+        self._on_message.append(handler)
+
+    def on_time_update(self, handler: TimeUpdateHandler) -> None:
+        """Register a callback for server time updates."""
+        self._on_time_update.append(handler)
+
+    async def _invoke_handlers(self, handlers: list[Any], *args: Any) -> None:
+        """Invoke a list of handlers with the given arguments.
+
+        Handles both sync and async handlers.
+        """
+        for handler in handlers:
+            try:
+                result = handler(*args)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("Error in handler")
+
     async def _set_connection_status(self, status: ConnectionStatus) -> None:
         """Update connection status and notify via callback."""
         if self._connection_status != status:
             self._connection_status = status
-            logger.debug(f"Connection status changed to: {status.value}")
-            # Call the callback method for subclasses to override
-            await self.on_connection_status_changed(status)
+            logger.debug("Connection status changed to: %s", status.value)
 
-    async def on_connection_status_changed(self, status: ConnectionStatus) -> None:
-        """Callback for connection status changes. Override in subclasses."""
-        logger.debug(f"Connection status: {status.value}")
+            # Call appropriate handlers based on status
+            if status == ConnectionStatus.CONNECTED:
+                await self._invoke_handlers(self._on_connect)
+            elif status == ConnectionStatus.DISCONNECTED:
+                await self._invoke_handlers(self._on_disconnect)
+            elif status == ConnectionStatus.RECONNECTING:
+                await self._invoke_handlers(self._on_reconnecting)
 
     async def _backoff_sleep(self) -> None:
         """Sleep with exponential backoff based on consecutive failures."""
@@ -174,8 +249,10 @@ class WebSocketBridgeClient:
 
     async def _attempt_connection(self) -> None:
         """Attempt a single connection to the WebSocket server."""
-        subprotocol = websockets.Subprotocol(self._subprotocol)
-        self._websocket = await websockets.connect(self._url, subprotocols=[subprotocol])
+        self._websocket = await websockets.connect(
+            self._url,
+            subprotocols=[Subprotocol("foxglove.websocket.v1"), Subprotocol("foxglove.sdk.v1")]
+        )
         logger.info(f"Connected to {self._url}")
 
     async def _connect_continuously(self) -> None:
@@ -226,12 +303,12 @@ class WebSocketBridgeClient:
             if channel_id is not None:
                 await self._subscribe_to_channel(channel_id)
             else:
-                logger.debug(f"Topic {topic} not yet re-advertised, will subscribe when available")
+                logger.debug("Topic %s not yet re-advertised, will subscribe when available", topic)
 
     async def subscribe(self, topic: str) -> None:
         """Subscribe to messages from a topic."""
         if topic in self._subscribed_topics:
-            logger.debug(f"Already subscribed to topic {topic}")
+            logger.debug("Already subscribed to topic %s", topic)
             return
 
         # Track the subscription intent persistently
@@ -318,6 +395,85 @@ class WebSocketBridgeClient:
         if channel_id is not None:
             self._channel_to_subscription.pop(channel_id, None)
 
+    @property
+    def is_connected(self) -> bool:
+        """Check if the client is currently connected to the server.
+
+        Returns:
+            True if connected, False otherwise
+        """
+        return self._websocket is not None and self._running
+
+    async def subscribe_to_channel(self, subscription_id: int, channel_id: int) -> None:
+        """Subscribe to a specific channel with a custom subscription ID.
+
+        This is an advanced method for proxy/bridge use cases where you need
+        control over subscription IDs. For normal usage, use subscribe(topic) instead.
+
+        Args:
+            subscription_id: Custom subscription ID to use
+            channel_id: Channel ID to subscribe to
+
+        Raises:
+            RuntimeError: If not connected to server
+        """
+        if not self._websocket:
+            raise RuntimeError("Not connected to server")
+
+        msg: SubscribeMessage = {
+            "op": JsonOpCodes.SUBSCRIBE.value,
+            "subscriptions": [{"id": subscription_id, "channelId": channel_id}],
+        }
+        await self._websocket.send(json.dumps(msg))
+        logger.info(f"Subscribed to channel {channel_id} with subscription ID {subscription_id}")
+
+        # Update internal state tracking (required for message routing in _handle_message_data)
+        self._active_subscriptions.add(subscription_id)
+        self._subscription_to_channel[subscription_id] = channel_id
+        self._channel_to_subscription[channel_id] = subscription_id
+
+    async def unsubscribe_from_channel(self, subscription_id: int) -> None:
+        """Unsubscribe using a specific subscription ID.
+
+        This is an advanced method for proxy/bridge use cases. For normal usage,
+        use unsubscribe(topic) instead.
+
+        Args:
+            subscription_id: Subscription ID to unsubscribe
+
+        Raises:
+            RuntimeError: If not connected to server
+        """
+        if not self._websocket:
+            raise RuntimeError("Not connected to server")
+
+        msg: UnsubscribeMessage = {
+            "op": JsonOpCodes.UNSUBSCRIBE.value,
+            "subscriptionIds": [subscription_id],
+        }
+        await self._websocket.send(json.dumps(msg))
+        logger.info(f"Unsubscribed subscription ID {subscription_id}")
+
+        # Clean up internal state tracking (mirrors _unsubscribe_from_channel behavior)
+        self._active_subscriptions.discard(subscription_id)
+        channel_id = self._subscription_to_channel.pop(subscription_id, None)
+        if channel_id is not None:
+            self._channel_to_subscription.pop(channel_id, None)
+
+    async def _send_json(self, message: str) -> bool:
+        """Send a raw JSON message to the server (internal use only).
+
+        Args:
+            message: JSON string to send
+
+        Returns:
+            True if message was sent, False if not connected
+        """
+        if not self._websocket:
+            return False
+        await self._websocket.send(message)
+        return True
+
     async def _handle_messages_loop(self) -> None:
         """Main message handling loop with automatic reconnection."""
         while self._should_connect:
@@ -384,9 +540,9 @@ class WebSocketBridgeClient:
             elif op == JsonOpCodes.CONNECTION_GRAPH_UPDATE.value:
                 pass  # TODO: Connection graph handling
             else:
-                logger.debug(f"Unknown JSON operation: {op}")
+                logger.debug("Unknown JSON operation: %s", op)
         except Exception:
-            logger.exception(f"Failed to handle JSON message: {text}")
+            logger.exception("Failed to handle JSON message: %s", text)
 
     async def _handle_server_info(self, msg: ServerInfoMessage) -> None:
         """Handle server info message."""
@@ -402,17 +558,8 @@ class WebSocketBridgeClient:
         if session_id:
             logger.info(f"Session ID: {session_id}")
 
-        # Call the callback with processed data
-        await self.on_server_info(name, capabilities, session_id)
-
-    async def on_server_info(
-        self,
-        name: str,
-        capabilities: list[str],
-        session_id: str | None,  # noqa: ARG002
-    ) -> None:
-        """Callback for server info. Override in subclasses."""
-        logger.debug(f"Server info: {name} with {len(capabilities)} capabilities")
+        # Call registered handlers
+        await self._invoke_handlers(self._on_server_info, name, capabilities, session_id)
 
     async def _handle_status(self, msg: StatusMessage) -> None:
         """Handle status message."""
@@ -421,18 +568,14 @@ class WebSocketBridgeClient:
         message = msg["message"]
         status_id = msg.get("id")
 
-        logger.debug(f"Status {status_id}: {message}")
+        logger.debug("Status %s: %s", status_id, message)
 
-        # Call the callback with processed data
-        await self.on_status(level, message, status_id)
-
-    async def on_status(self, level: int, message: str, status_id: str | None) -> None:  # noqa: ARG002
-        """Callback for status messages. Override in subclasses."""
-        logger.debug(f"Status message (level={level}): {message}")
+        # Call registered handlers
+        await self._invoke_handlers(self._on_status, level, message, status_id)
 
     async def _handle_remove_status(self, msg: RemoveStatusMessage) -> None:
         """Handle remove status message."""
-        logger.debug(f"Removing status messages: {', '.join(msg['statusIds'])}")
+        logger.debug("Removing status messages: %s", ", ".join(msg["statusIds"]))
 
     async def _handle_advertise(self, msg: dict[str, Any]) -> None:
         """Handle topic advertisement from the server."""
@@ -450,11 +593,7 @@ class WebSocketBridgeClient:
 
         if new_topics:
             for channel in new_topics:
-                await self.on_advertised_channel(channel)
-
-    async def on_advertised_channel(self, channel: ChannelInfo) -> None:
-        """Callback for when a channel is advertised. Override in subclasses."""
-        logger.debug(f"Channel advertised: {channel['topic']} (ID: {channel['id']})")
+                await self._invoke_handlers(self._on_advertised_channel, channel)
 
     async def _handle_unadvertise(self, msg: dict[str, Any]) -> None:
         """Handle topic unadvertisement from the server."""
@@ -462,11 +601,7 @@ class WebSocketBridgeClient:
             channel = self._advertised_channels.pop(channel_id, None)
             if channel:
                 logger.info(f"Topic unadvertised: {channel['topic']}")
-                await self.on_channel_unadvertised(channel)
-
-    async def on_channel_unadvertised(self, channel: ChannelInfo) -> None:
-        """Callback for when a channel is unadvertised. Override in subclasses."""
-        logger.debug(f"Channel unadvertised: {channel['topic']} (ID: {channel['id']})")
+                await self._invoke_handlers(self._on_channel_unadvertised, channel)
 
     async def _handle_binary(self, data: bytes) -> None:
         """Handle binary message data."""
@@ -480,7 +615,7 @@ class WebSocketBridgeClient:
         elif opcode == BinaryOpCodes.FETCH_ASSET_RESPONSE:
             pass  # TODO: Implement fetch asset response handling
         else:
-            logger.debug(f"Unknown binary opcode: {opcode}")
+            logger.debug("Unknown binary opcode: %d", opcode)
 
     async def _handle_message_data(self, data: bytes) -> None:
         """Handle binary message data."""
@@ -503,32 +638,15 @@ class WebSocketBridgeClient:
             logger.warning(f"No channel info for channel {channel_id}")
             return
 
-        await self.on_message(channel, timestamp, payload)
-
-    async def on_message(
-        self,
-        channel: ChannelInfo,
-        timestamp: int,
-        payload: bytes,
-    ) -> None:
-        """Callback for received messages. Override in subclasses."""
-        logger.debug(
-            f"Received message on topic {channel['topic']} "
-            f"(channel ID: {channel['id']}, timestamp: {timestamp}, "
-            f"payload size: {len(payload)} bytes)"
-        )
+        await self._invoke_handlers(self._on_message, channel, timestamp, payload)
 
     async def _handle_time_data(self, data: bytes) -> None:
         """Handle server time updates."""
         if len(data) >= _TIME_MESSAGE_SIZE:
             server_time = struct.unpack_from("<Q", data, 1)[0]
-            await self.on_time_update(server_time)
+            await self._invoke_handlers(self._on_time_update, server_time)
         else:
             logger.warning("Invalid time message format")
-
-    async def on_time_update(self, server_time: int) -> None:
-        """Callback for server time updates. Override in subclasses."""
-        logger.debug(f"Server time updated: {server_time}")
 
     # TODO: Implement service call support (protocol: Service Call Response/Request binary messages)
 

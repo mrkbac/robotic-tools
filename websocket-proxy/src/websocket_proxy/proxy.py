@@ -3,34 +3,97 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import logging
-import struct
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
-import websockets
 from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
-from websockets.asyncio.server import ServerConnection, serve
+from websocket_bridge import (
+    ConnectionState,
+    ServerConnection,
+    WebSocketBridgeClient,
+    WebSocketBridgeServer,
+)
+from websocket_bridge.server import Channel
 
 from .schemas import get_schema
 from .transformers import TransformerRegistry, TransformError
-from .types import (
-    AdvertiseMessage,
-    BinaryOpCodes,
-    ChannelInfo,
-    JsonOpCodes,
-    ServerInfoMessage,
-    SubscribeMessage,
-    UnadvertiseMessage,
-    UnsubscribeMessage,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from websocket_bridge.ws_types import ChannelInfo
+
 logger = logging.getLogger(__name__)
+
+
+class MessageCodecCache:
+    """Cache for message encoders and decoders with lazy generation."""
+
+    def __init__(self) -> None:
+        """Initialize the codec cache."""
+        self._encoders: dict[str, Callable[[dict[str, Any]], bytes]] = {}
+        self._decoders: dict[str, Callable[[bytes], Any]] = {}
+
+    def get_decoder(self, schema_name: str, schema_def: str) -> Callable[[bytes], Any]:
+        """Get or create a decoder for the given schema.
+
+        Args:
+            schema_name: Name of the message schema
+            schema_def: Schema definition string
+
+        Returns:
+            Decoder function that takes bytes and returns decoded message
+        """
+        if schema_name not in self._decoders:
+            self._decoders[schema_name] = generate_dynamic(schema_name, schema_def)
+        return self._decoders[schema_name]
+
+    def get_encoder(self, schema_name: str, schema_def: str) -> Callable[[dict[str, Any]], bytes]:
+        """Get or create an encoder for the given schema.
+
+        Args:
+            schema_name: Name of the message schema
+            schema_def: Schema definition string
+
+        Returns:
+            Encoder function that takes a message dict and returns CDR bytes
+        """
+        if schema_name not in self._encoders:
+            self._encoders[schema_name] = serialize_dynamic(schema_name, schema_def)
+        return self._encoders[schema_name]
+
+
+class _ProxyUpstreamClient(WebSocketBridgeClient):
+    """Minimal wrapper for upstream client to register callbacks."""
+
+    def __init__(self, url: str, proxy: ProxyBridge) -> None:
+        super().__init__(url=url)
+        self.proxy = proxy
+
+        # Register callbacks using the new callback registration pattern
+        self.on_server_info(self._on_server_info_callback)
+        self.on_advertised_channel(self._on_advertised_channel_callback)
+        self.on_channel_unadvertised(self._on_channel_unadvertised_callback)
+        self.on_message(self._on_message_callback)
+
+    def _on_server_info_callback(
+        self,
+        name: str,
+        capabilities: list[str],  # noqa: ARG002
+        session_id: str | None,  # noqa: ARG002
+    ) -> None:
+        logger.info(f"Received upstream server info: {name}")
+
+    async def _on_advertised_channel_callback(self, channel: ChannelInfo) -> None:
+        await self.proxy.handle_upstream_advertise(channel)
+
+    async def _on_channel_unadvertised_callback(self, channel: ChannelInfo) -> None:
+        await self.proxy.handle_upstream_unadvertise(channel)
+
+    async def _on_message_callback(
+        self, channel: ChannelInfo, timestamp: int, payload: bytes
+    ) -> None:
+        await self.proxy.handle_upstream_message(channel, timestamp, payload)
 
 
 class ProxyBridge:
@@ -63,12 +126,21 @@ class ProxyBridge:
         self.default_throttle_hz = default_throttle_hz
         self.topic_throttle_overrides = dict(topic_throttle_overrides or {})
 
-        # Upstream connection
-        self.upstream_ws: websockets.ClientConnection | None = None
-        self.upstream_connected = asyncio.Event()
+        # Create upstream client and downstream server
+        self.upstream_client = _ProxyUpstreamClient(url=upstream_url, proxy=self)
+        self.downstream_server = WebSocketBridgeServer(
+            host=listen_host,
+            port=listen_port,
+            name="FoxBridge Proxy",
+            capabilities=[],
+            metadata={"proxy": "true"},
+            supported_encodings=["cdr"],
+        )
 
-        # Server info from upstream
-        self.server_info: ServerInfoMessage | None = None
+        # Register callbacks for downstream server
+        self.downstream_server.on_subscribe(self._on_client_subscribe)
+        self.downstream_server.on_unsubscribe(self._on_client_unsubscribe)
+        self.downstream_server.on_disconnect(self._on_client_disconnected)
 
         # Channel tracking - stores DOWNSTREAM channels (what clients see)
         # Key is downstream channel ID (original or transformed)
@@ -88,214 +160,212 @@ class ProxyBridge:
         self.channel_throttle_hz: dict[int, float | None] = {}
         self.channel_last_sent_time: dict[int, float] = {}
 
-        # Downstream client tracking
-        self.downstream_clients: set[ServerConnection] = set()
-        self.client_subscriptions: dict[
-            ServerConnection, dict[int, int]
-        ] = {}  # client -> {client_sub_id: channel_id}
+        # Downstream client subscription tracking
+        # Maps client websocket -> {client_sub_id: (channel_id, upstream_sub_id)}
+        self.client_subscriptions: dict[ServerConnection, dict[int, tuple[int, int]]] = {}
 
         # Upstream subscription tracking (reference counting)
-        self.upstream_subscriptions: dict[int, int] = {}  # channel_id -> upstream_sub_id
-        self.upstream_sub_refcount: dict[int, int] = defaultdict(int)  # channel_id -> count
+        # Maps channel_id -> (upstream_sub_id, ref_count)
+        self.upstream_subscriptions: dict[int, tuple[int, int]] = {}
         self.next_upstream_sub_id = 0
 
         # Message encoder/decoder cache (generated from schema)
-        self.message_decoders: dict[
-            str, Callable[[bytes], Any]
-        ] = {}  # schema_name -> decoder function
-        self.message_encoders: dict[
-            str, Callable[[dict[str, Any]], bytes]
-        ] = {}  # schema_name -> encoder function
+        self.codec_cache = MessageCodecCache()
 
-        # Running state
-        self.running = False
-        self.server_task: asyncio.Task[None] | None = None
+        # Shutdown event to keep start() alive until stop() is called
+        self._shutdown_event = asyncio.Event()
+
+    async def _on_client_subscribe(
+        self,
+        state: ConnectionState,
+        subscription_id: int,
+        channel_id: int,
+    ) -> None:
+        """Handle client subscription (callback for downstream server).
+
+        Args:
+            state: Client connection state
+            subscription_id: Client subscription ID
+            channel_id: Channel ID to subscribe to
+        """
+        await self.handle_client_subscribe(state.websocket, subscription_id, channel_id)
+
+    async def _on_client_unsubscribe(
+        self,
+        state: ConnectionState,
+        subscription_id: int,
+        channel_id: int,  # noqa: ARG002
+    ) -> None:
+        """Handle client unsubscribe (callback for downstream server).
+
+        Args:
+            state: Client connection state
+            subscription_id: Client subscription ID to unsubscribe
+            channel_id: Channel ID (not used in current implementation)
+        """
+        await self.handle_client_unsubscribe(state.websocket, subscription_id)
+
+    async def _on_client_disconnected(self, state: ConnectionState) -> None:
+        """Handle client disconnection (callback for downstream server).
+
+        Args:
+            state: Client connection state
+        """
+        await self.handle_client_disconnected(state.websocket)
 
     async def start(self) -> None:
-        """Start the proxy bridge."""
+        """Start the proxy bridge and run until stop() is called."""
         logger.info(
             f"Starting Foxglove proxy bridge: {self.upstream_url} -> ws://{self.listen_host}:{self.listen_port}"
         )
-        self.running = True
 
-        # Start upstream connection
-        upstream_task = asyncio.create_task(self._connect_upstream())
+        # Start both upstream client and downstream server
+        await asyncio.gather(
+            self.upstream_client.connect(),
+            self.downstream_server.start(),
+        )
 
-        # Start downstream server
-        self.server_task = asyncio.create_task(self._run_server())
-
-        # Wait for both tasks
-        await asyncio.gather(upstream_task, self.server_task)
+        # Wait until stop() is called (which will set the shutdown event)
+        await self._shutdown_event.wait()
 
     async def stop(self) -> None:
         """Stop the proxy bridge."""
         logger.info("Stopping proxy bridge")
-        self.running = False
 
-        # Close all downstream clients
-        if self.downstream_clients:
-            await asyncio.gather(
-                *[client.close() for client in self.downstream_clients],
-                return_exceptions=True,
+        # Signal the shutdown event to unblock start()
+        self._shutdown_event.set()
+
+        await asyncio.gather(
+            self.upstream_client.disconnect(),
+            self.downstream_server.stop(),
+            return_exceptions=True,
+        )
+
+    async def handle_upstream_advertise(self, channel: ChannelInfo) -> None:
+        """Handle advertise message from upstream, creating transformed channels.
+
+        Args:
+            channel: The advertised channel from upstream
+        """
+        channel_id = channel["id"]
+        schema_name = channel["schemaName"]
+
+        # Track the upstream channel for transformation lookup
+        self.upstream_channels[channel_id] = channel
+        logger.info(
+            f"Upstream channel advertised: {channel['topic']} "
+            f"(id={channel_id}, schema={schema_name})"
+        )
+
+        # Initialize throttling for this channel
+        throttle_hz = self.topic_throttle_overrides.get(channel["topic"], self.default_throttle_hz)
+        self.channel_throttle_hz[channel_id] = throttle_hz
+        self.channel_last_sent_time.pop(channel_id, None)
+
+        # Check if we have a transformer for this schema
+        transformer = self.transformer_registry.get_transformer(schema_name)
+        logger.debug(f"Transformer lookup for schema {schema_name}: {transformer}")
+
+        downstream_channel: ChannelInfo
+        if transformer:
+            # Create a transformed channel
+            transformed_id = self.next_channel_id
+            self.next_channel_id += 1
+
+            output_schema = transformer.get_output_schema()
+            output_schema_def = get_schema(output_schema)
+
+            # Create transformed channel info
+            downstream_channel = {
+                "id": transformed_id,
+                "topic": channel["topic"],  # Same topic name
+                "encoding": channel["encoding"],  # Same encoding (cdr)
+                "schemaName": output_schema,
+                "schema": output_schema_def,
+                "schemaEncoding": channel.get("schemaEncoding", "ros2msg"),
+            }
+
+            # Track the transformation mapping
+            self.transformed_channels[channel_id] = transformed_id
+            self.transformed_to_upstream[transformed_id] = channel_id
+
+            logger.info(
+                f"Created transformed channel: {schema_name} -> {output_schema} "
+                f"(upstream_id={channel_id}, downstream_id={transformed_id})"
             )
-
-        # Close upstream connection
-        if self.upstream_ws:
-            await self.upstream_ws.close()
-
-        # Cancel server task
-        if self.server_task:
-            self.server_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.server_task
-
-    async def _connect_upstream(self) -> None:
-        """Connect to upstream Foxglove bridge with reconnection logic."""
-        retry_delay = 1.0
-        max_retry_delay = 30.0
-
-        while self.running:
-            try:
-                logger.info(f"Connecting to upstream: {self.upstream_url}")
-                subprotocol = websockets.Subprotocol("foxglove.websocket.v1")
-                self.upstream_ws = await websockets.connect(
-                    self.upstream_url, subprotocols=[subprotocol]
-                )
-                logger.info("Connected to upstream bridge")
-
-                # Signal connection established
-                self.upstream_connected.set()
-                retry_delay = 1.0  # Reset retry delay on successful connection
-
-                # Handle upstream messages
-                async for message in self.upstream_ws:
-                    if isinstance(message, str):
-                        await self._handle_upstream_json(message)
-                    elif isinstance(message, bytes):
-                        await self._handle_upstream_binary(message)
-
-            except websockets.ConnectionClosed:
-                logger.warning("Upstream connection closed, reconnecting...")
-                self.upstream_connected.clear()
-                self.upstream_ws = None
-            except Exception:
-                logger.exception("Error in upstream connection")
-                self.upstream_connected.clear()
-                self.upstream_ws = None
-
-            if self.running:
-                logger.info(f"Retrying upstream connection in {retry_delay}s")
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_retry_delay)
-
-    async def _handle_upstream_json(self, message: str) -> None:
-        """Handle JSON messages from upstream."""
-        try:
-            msg = json.loads(message)
-            op = msg.get("op")
-
-            if op == JsonOpCodes.SERVER_INFO.value:
-                # Store server info and forward to all clients
-                self.server_info = msg
-                logger.info(f"Received server info: {msg.get('name')}")
-                await self._broadcast_to_clients(message)
-
-            elif op == JsonOpCodes.ADVERTISE.value:
-                # Track advertised channels and create transformed channels
-                await self._handle_advertise_upstream(msg)
-
-            elif op == JsonOpCodes.UNADVERTISE.value:
-                downstream_ids: list[int] = []
-
-                for upstream_channel_id in msg.get("channelIds", []):
-                    transformed_id = self.transformed_channels.pop(upstream_channel_id, None)
-
-                    if transformed_id is not None:
-                        channel = self.advertised_channels.pop(transformed_id, None)
-                        self.transformed_to_upstream.pop(transformed_id, None)
-                        if channel:
-                            downstream_ids.append(transformed_id)
-                            logger.info(
-                                "Transformed channel unadvertised: "
-                                "%s (upstream_id=%s, downstream_id=%s)",
-                                channel.get("topic", "?"),
-                                upstream_channel_id,
-                                transformed_id,
-                            )
-                    else:
-                        channel = self.advertised_channels.pop(upstream_channel_id, None)
-                        if channel:
-                            downstream_ids.append(upstream_channel_id)
-                            logger.info(
-                                "Channel unadvertised: %s (id=%s)",
-                                channel.get("topic", "?"),
-                                upstream_channel_id,
-                            )
-
-                    self.upstream_channels.pop(upstream_channel_id, None)
-                    self.channel_throttle_hz.pop(upstream_channel_id, None)
-                    self.channel_last_sent_time.pop(upstream_channel_id, None)
-
-                if downstream_ids:
-                    unadvertise_msg: UnadvertiseMessage = {
-                        "op": JsonOpCodes.UNADVERTISE.value,
-                        "channelIds": downstream_ids,
-                    }
-                    await self._broadcast_to_clients(json.dumps(unadvertise_msg))
-
-            elif op in (
-                JsonOpCodes.STATUS.value,
-                JsonOpCodes.REMOVE_STATUS.value,
-            ):
-                # Forward status messages
-                await self._broadcast_to_clients(message)
-
-            else:
-                logger.debug(f"Ignoring upstream JSON message: {op}")
-
-        except Exception:
-            logger.exception("Error handling upstream JSON message")
-
-    async def _handle_upstream_binary(self, data: bytes) -> None:
-        """Handle binary messages from upstream."""
-        if len(data) < 1:
-            return
-
-        opcode = data[0]
-
-        if opcode == BinaryOpCodes.MESSAGE_DATA:
-            # Forward message data to subscribed clients
-            await self._forward_message_data(data)
-        elif opcode == BinaryOpCodes.TIME:
-            # Forward time messages to all clients
-            await self._broadcast_binary_to_clients(data)
         else:
-            logger.debug(f"Ignoring upstream binary opcode: {opcode}")
+            # No transformer - forward original channel
+            downstream_channel = channel
+            logger.info(f"Forwarding original channel: {schema_name} (id={channel_id})")
 
-    async def _forward_message_data(self, data: bytes) -> None:
-        """Forward message data from upstream to subscribed clients."""
-        if len(data) < 5:
-            return
+        # Store DOWNSTREAM channel
+        self.advertised_channels[downstream_channel["id"]] = downstream_channel
 
-        # Extract upstream subscription ID from binary message
-        upstream_sub_id = struct.unpack_from("<I", data, 1)[0]
+        # Convert ChannelInfo to Channel object and advertise to all downstream clients
+        channel_obj = Channel(
+            id=downstream_channel["id"],
+            topic=downstream_channel["topic"],
+            encoding=downstream_channel["encoding"],
+            schema_name=downstream_channel["schemaName"],
+            schema=downstream_channel["schema"],
+            schema_encoding=downstream_channel.get("schemaEncoding"),
+        )
+        await self.downstream_server.advertise_channel(channel_obj)
 
-        # Find which channel this subscription belongs to
-        channel_id = None
-        for ch_id, up_sub_id in self.upstream_subscriptions.items():
-            if up_sub_id == upstream_sub_id:
-                channel_id = ch_id
-                break
+    async def handle_upstream_unadvertise(self, channel: ChannelInfo) -> None:
+        """Handle unadvertise message from upstream.
 
-        if channel_id is None:
-            logger.warning(f"Received message for unknown upstream subscription: {upstream_sub_id}")
-            return
+        Args:
+            channel: The unadvertised channel from upstream
+        """
+        upstream_channel_id = channel["id"]
 
-        # Check if this channel has a transformer
-        transformed_channel_id = self.transformed_channels.get(channel_id)
+        # Check if this channel was transformed
+        transformed_id = self.transformed_channels.pop(upstream_channel_id, None)
 
-        # Determine which downstream channel ID to use
-        downstream_channel_id = transformed_channel_id if transformed_channel_id else channel_id
+        if transformed_id is not None:
+            # This was a transformed channel
+            downstream_channel = self.advertised_channels.pop(transformed_id, None)
+            self.transformed_to_upstream.pop(transformed_id, None)
+            downstream_channel_id = transformed_id
+            if downstream_channel:
+                logger.info(
+                    f"Transformed channel unadvertised: {downstream_channel.get('topic', '?')} "
+                    f"(upstream_id={upstream_channel_id}, downstream_id={transformed_id})"
+                )
+        else:
+            # Original channel (not transformed)
+            downstream_channel = self.advertised_channels.pop(upstream_channel_id, None)
+            downstream_channel_id = upstream_channel_id
+            if downstream_channel:
+                logger.info(
+                    f"Channel unadvertised: {downstream_channel.get('topic', '?')} "
+                    f"(id={upstream_channel_id})"
+                )
+
+        # Clean up tracking
+        self.upstream_channels.pop(upstream_channel_id, None)
+        self.channel_throttle_hz.pop(upstream_channel_id, None)
+        self.channel_last_sent_time.pop(upstream_channel_id, None)
+
+        # Unadvertise from downstream clients
+        if downstream_channel:
+            await self.downstream_server.unadvertise([downstream_channel_id])
+
+    async def handle_upstream_message(
+        self,
+        channel: ChannelInfo,
+        timestamp: int,
+        payload: bytes,
+    ) -> None:
+        """Handle message from upstream.
+
+        Args:
+            channel: The channel this message belongs to
+            timestamp: Message timestamp in nanoseconds
+            payload: Message payload
+        """
+        channel_id = channel["id"]
 
         # Apply throttling before performing any transformations or forwarding
         throttle_hz = self.channel_throttle_hz.get(channel_id, self.default_throttle_hz)
@@ -314,390 +384,189 @@ class ProxyBridge:
 
             self.channel_last_sent_time[channel_id] = now
 
-        # Forward to all clients subscribed to the downstream channel
-        for client, subs in self.client_subscriptions.items():
-            for client_sub_id, client_channel_id in subs.items():
-                # Check if client subscribed to this channel's downstream representation
-                if client_channel_id == downstream_channel_id:
-                    # Apply transformation if needed
-                    if transformed_channel_id:
-                        # This channel is transformed - apply transformation
-                        try:
-                            transformed_data = await self._transform_message(channel_id, data)
-                            if transformed_data:
-                                # Rewrite subscription ID for transformed message
-                                rewritten_data = bytearray(transformed_data)
-                                struct.pack_into("<I", rewritten_data, 1, client_sub_id)
+        # Check if this channel has a transformer
+        transformed_channel_id = self.transformed_channels.get(channel_id)
 
-                                await client.send(bytes(rewritten_data))
-                        except TransformError as e:
-                            logger.warning(f"Transform failed: {e}")
-                        except websockets.ConnectionClosed:
-                            logger.debug("Client disconnected while sending transformed message")
-                        except Exception:
-                            logger.exception("Unexpected error during transformation")
-                    else:
-                        # No transformer - forward as-is
-                        rewritten_data = bytearray(data)
-                        struct.pack_into("<I", rewritten_data, 1, client_sub_id)
+        if transformed_channel_id:
+            # This channel is transformed - apply transformation
+            try:
+                transformed_msg = self._transform_message_dict(channel, payload)
+                if transformed_msg:
+                    # Get output schema and encode
+                    transformer = self.transformer_registry.get_transformer(channel["schemaName"])
+                    if transformer:
+                        output_schema = transformer.get_output_schema()
+                        output_payload = self._encode_message(output_schema, transformed_msg)
 
-                        try:
-                            await client.send(bytes(rewritten_data))
-                        except websockets.ConnectionClosed:
-                            logger.debug("Client disconnected while sending message")
+                        # Send to all subscribed clients
+                        await self._send_to_subscribed_clients(
+                            transformed_channel_id,
+                            timestamp,
+                            output_payload,
+                        )
+            except TransformError as e:
+                logger.warning(f"Transform failed: {e}")
+            except Exception:
+                logger.exception("Unexpected error during transformation")
+        else:
+            # No transformer - forward as-is
+            await self._send_to_subscribed_clients(channel_id, timestamp, payload)
 
-    async def _broadcast_to_clients(self, message: str) -> None:
-        """Broadcast a JSON message to all connected clients."""
-        if not self.downstream_clients:
-            return
-
-        # Send to all clients concurrently
-        await asyncio.gather(
-            *[self._send_to_client(client, message) for client in self.downstream_clients],
-            return_exceptions=True,
-        )
-
-    async def _broadcast_binary_to_clients(self, data: bytes) -> None:
-        """Broadcast a binary message to all connected clients."""
-        if not self.downstream_clients:
-            return
-
-        await asyncio.gather(
-            *[self._send_binary_to_client(client, data) for client in self.downstream_clients],
-            return_exceptions=True,
-        )
-
-    async def _send_to_client(self, client: ServerConnection, message: str) -> None:
-        """Send a message to a specific client."""
-        try:
-            await client.send(message)
-        except websockets.ConnectionClosed:
-            logger.debug("Client disconnected while sending")
-
-    async def _send_binary_to_client(self, client: ServerConnection, data: bytes) -> None:
-        """Send binary data to a specific client."""
-        try:
-            await client.send(data)
-        except websockets.ConnectionClosed:
-            logger.debug("Client disconnected while sending binary")
-
-    async def _run_server(self) -> None:
-        """Run the downstream WebSocket server."""
-        logger.info(f"Starting downstream server on ws://{self.listen_host}:{self.listen_port}")
-
-        async with serve(
-            self._handle_client,
-            self.listen_host,
-            self.listen_port,
-            subprotocols=[websockets.Subprotocol("foxglove.websocket.v1")],
-        ):
-            # Keep server running
-            await asyncio.Future()  # Run forever
-
-    async def _handle_client(self, websocket: ServerConnection) -> None:
-        """Handle a downstream client connection."""
-        logger.info(f"Client connected: {websocket.remote_address}")
-        self.downstream_clients.add(websocket)
-        self.client_subscriptions[websocket] = {}
-
-        try:
-            # Wait for upstream to be connected
-            await self.upstream_connected.wait()
-
-            # Send server info to new client
-            if self.server_info:
-                await websocket.send(json.dumps(self.server_info))
-
-            # Send current advertised channels
-            if self.advertised_channels:
-                advertise_msg: AdvertiseMessage = {
-                    "op": "advertise",
-                    "channels": list(self.advertised_channels.values()),
-                }
-                await websocket.send(json.dumps(advertise_msg))
-
-            # Handle client messages
-            async for message in websocket:
-                if isinstance(message, str):
-                    await self._handle_client_json(websocket, message)
-                elif isinstance(message, bytes):
-                    await self._handle_client_binary(websocket, message)
-
-        except websockets.ConnectionClosed:
-            logger.info(f"Client disconnected: {websocket.remote_address}")
-        except Exception:
-            logger.exception("Error handling client")
-        finally:
-            await self._cleanup_client(websocket)
-
-    async def _handle_client_json(self, client: ServerConnection, message: str) -> None:
-        """Handle JSON messages from downstream client."""
-        try:
-            msg = json.loads(message)
-            op = msg.get("op")
-
-            if op == JsonOpCodes.SUBSCRIBE.value:
-                await self._handle_client_subscribe(client, msg)
-            elif op == JsonOpCodes.UNSUBSCRIBE.value:
-                await self._handle_client_unsubscribe(client, msg)
-            else:
-                logger.debug(f"Ignoring client JSON message: {op}")
-
-        except Exception:
-            logger.exception("Error handling client JSON message")
-
-    async def _handle_client_binary(self, _client: ServerConnection, _data: bytes) -> None:
-        """Handle binary messages from downstream client."""
-        # For initial pass-through, we don't handle client publishing
-        logger.debug("Ignoring client binary message (client publish not supported)")
-
-    async def _handle_client_subscribe(
-        self, client: ServerConnection, msg: SubscribeMessage
+    async def _send_to_subscribed_clients(
+        self,
+        channel_id: int,
+        timestamp: int,
+        payload: bytes,
     ) -> None:
-        """Handle subscribe request from client."""
-        for sub in msg.get("subscriptions", []):
-            client_sub_id = sub["id"]
-            channel_id = sub["channelId"]
+        """Send message to all clients subscribed to a channel.
 
-            # Track client subscription
-            self.client_subscriptions[client][client_sub_id] = channel_id
+        Args:
+            channel_id: The downstream channel ID
+            timestamp: Message timestamp in nanoseconds
+            payload: Message payload
+        """
+        # Find all clients subscribed to this channel
+        for websocket, subs in self.client_subscriptions.items():
+            for client_sub_id, (subscribed_channel_id, _) in subs.items():
+                if subscribed_channel_id == channel_id:
+                    # Send message to this client
+                    await self.downstream_server.send_message_to_subscription(
+                        websocket,
+                        client_sub_id,
+                        payload,
+                        timestamp_ns=timestamp,
+                    )
 
-            # Check if this is a transformed channel
-            upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
+    async def handle_client_subscribe(
+        self,
+        websocket: ServerConnection,
+        subscription_id: int,
+        channel_id: int,
+    ) -> None:
+        """Handle subscribe request from client.
 
-            # Subscribe to upstream if not already subscribed
-            if upstream_channel_id not in self.upstream_subscriptions:
-                await self._subscribe_upstream(upstream_channel_id)
+        Args:
+            websocket: The client websocket connection
+            subscription_id: Client subscription ID
+            channel_id: Channel ID to subscribe to
+        """
+        # Initialize client subscription dict if needed
+        if websocket not in self.client_subscriptions:
+            self.client_subscriptions[websocket] = {}
 
-            # Increment reference count for the upstream channel
-            self.upstream_sub_refcount[upstream_channel_id] += 1
+        # Check if this is a transformed channel
+        upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
 
-            channel_info: ChannelInfo | None = self.upstream_channels.get(upstream_channel_id)
-            is_transformed = channel_id in self.transformed_to_upstream
+        # Subscribe to upstream if not already subscribed (or increment ref count)
+        upstream_sub_id: int
+        if upstream_channel_id in self.upstream_subscriptions:
+            # Already subscribed, increment ref count
+            existing_sub_id, ref_count = self.upstream_subscriptions[upstream_channel_id]
+            upstream_sub_id = existing_sub_id
+            self.upstream_subscriptions[upstream_channel_id] = (existing_sub_id, ref_count + 1)
+        else:
+            # Subscribe to upstream
+            upstream_sub_id = self.next_upstream_sub_id
+            self.next_upstream_sub_id += 1
+
+            # Subscribe to upstream channel with custom subscription ID
+            await self.upstream_client.subscribe_to_channel(upstream_sub_id, upstream_channel_id)
+
+            self.upstream_subscriptions[upstream_channel_id] = (upstream_sub_id, 1)
+
             logger.info(
-                f"Client subscribed to {channel_info.get('topic', '?') if channel_info else '?'} "
-                f"(channel={channel_id}, upstream={upstream_channel_id}, transformed={is_transformed})"  # noqa: E501
+                f"Subscribed to upstream channel {upstream_channel_id} "
+                f"(upstream_sub={upstream_sub_id})"
             )
 
-    async def _handle_client_unsubscribe(
-        self, client: ServerConnection, msg: UnsubscribeMessage
+        # Track client subscription
+        self.client_subscriptions[websocket][subscription_id] = (channel_id, upstream_sub_id)
+
+        channel_info = self.upstream_channels.get(upstream_channel_id)
+        is_transformed = channel_id in self.transformed_to_upstream
+        logger.info(
+            f"Client subscribed to {channel_info.get('topic', '?') if channel_info else '?'} "
+            f"(channel={channel_id}, upstream={upstream_channel_id}, transformed={is_transformed})"
+        )
+
+    async def handle_client_unsubscribe(
+        self,
+        websocket: ServerConnection,
+        subscription_id: int,
     ) -> None:
-        """Handle unsubscribe request from client."""
-        client_subs = self.client_subscriptions.get(client, {})
+        """Handle unsubscribe request from client.
 
-        for client_sub_id in msg.get("subscriptionIds", []):
-            channel_id = client_subs.pop(client_sub_id, None)
+        Args:
+            websocket: The client websocket connection
+            subscription_id: Client subscription ID to unsubscribe
+        """
+        client_subs = self.client_subscriptions.get(websocket, {})
+        subscription_info = client_subs.pop(subscription_id, None)
 
-            if channel_id is not None:
-                # Check if this is a transformed channel
-                upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
+        if subscription_info is not None:
+            channel_id, upstream_sub_id = subscription_info  # noqa: RUF059
 
-                # Decrement reference count for upstream channel
-                self.upstream_sub_refcount[upstream_channel_id] -= 1
-
-                # Unsubscribe from upstream if no more clients need it
-                if self.upstream_sub_refcount[upstream_channel_id] <= 0:
-                    await self._unsubscribe_upstream(upstream_channel_id)
-                    del self.upstream_sub_refcount[upstream_channel_id]
-
-                channel_info: ChannelInfo | None = self.upstream_channels.get(upstream_channel_id)
-                logger.info(
-                    f"Client unsubscribed from {channel_info.get('topic', '?') if channel_info else '?'} (channel={channel_id})"  # noqa: E501
-                )
-
-    async def _subscribe_upstream(self, channel_id: int) -> None:
-        """Subscribe to a channel on the upstream bridge."""
-        if not self.upstream_ws:
-            logger.warning("Cannot subscribe upstream: not connected")
-            return
-
-        upstream_sub_id = self.next_upstream_sub_id
-        self.next_upstream_sub_id += 1
-
-        subscribe_msg: SubscribeMessage = {
-            "op": "subscribe",
-            "subscriptions": [{"id": upstream_sub_id, "channelId": channel_id}],
-        }
-
-        await self.upstream_ws.send(json.dumps(subscribe_msg))
-        self.upstream_subscriptions[channel_id] = upstream_sub_id
-
-        channel: ChannelInfo | None = self.upstream_channels.get(channel_id)
-        logger.info(
-            f"Subscribed to upstream {channel.get('topic', '?') if channel else '?'} (channel={channel_id}, upstream_sub={upstream_sub_id})"  # noqa: E501
-        )
-
-    async def _unsubscribe_upstream(self, channel_id: int) -> None:
-        """Unsubscribe from a channel on the upstream bridge."""
-        if not self.upstream_ws:
-            return
-
-        upstream_sub_id = self.upstream_subscriptions.pop(channel_id, None)
-        if upstream_sub_id is None:
-            return
-
-        unsubscribe_msg: UnsubscribeMessage = {
-            "op": "unsubscribe",
-            "subscriptionIds": [upstream_sub_id],
-        }
-
-        await self.upstream_ws.send(json.dumps(unsubscribe_msg))
-
-        channel: ChannelInfo | None = self.upstream_channels.get(channel_id)
-        logger.info(
-            f"Unsubscribed from upstream {channel.get('topic', '?') if channel else '?'} "
-            f"(channel={channel_id})"
-        )
-
-    async def _cleanup_client(self, client: ServerConnection) -> None:
-        """Clean up after a client disconnects."""
-        # Remove from tracking
-        self.downstream_clients.discard(client)
-
-        # Unsubscribe from all channels this client was subscribed to
-        client_subs = self.client_subscriptions.pop(client, {})
-        for channel_id in client_subs.values():
             # Check if this is a transformed channel
             upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
 
             # Decrement reference count for upstream channel
-            self.upstream_sub_refcount[upstream_channel_id] -= 1
+            if upstream_channel_id in self.upstream_subscriptions:
+                sub_id, ref_count = self.upstream_subscriptions[upstream_channel_id]
+                new_ref_count = ref_count - 1
 
-            # Unsubscribe from upstream if no more clients need it
-            if self.upstream_sub_refcount[upstream_channel_id] <= 0:
-                await self._unsubscribe_upstream(upstream_channel_id)
-                del self.upstream_sub_refcount[upstream_channel_id]
+                if new_ref_count <= 0:
+                    # Unsubscribe from upstream
+                    await self.upstream_client.unsubscribe_from_channel(sub_id)
 
-        logger.info(f"Client cleanup complete: {client.remote_address}")
+                    del self.upstream_subscriptions[upstream_channel_id]
+                    logger.info(
+                        f"Unsubscribed from upstream channel {upstream_channel_id} "
+                        f"(upstream_sub={sub_id})"
+                    )
+                else:
+                    # Update ref count
+                    self.upstream_subscriptions[upstream_channel_id] = (sub_id, new_ref_count)
 
-    async def _handle_advertise_upstream(self, msg: dict[str, Any]) -> None:
-        """Handle advertise message from upstream, creating transformed channels.
+            channel_info = self.upstream_channels.get(upstream_channel_id)
+            topic_name = channel_info.get("topic", "?") if channel_info else "?"
+            logger.info(f"Client unsubscribed from {topic_name} (channel={channel_id})")
+
+    async def handle_client_disconnected(self, websocket: ServerConnection) -> None:
+        """Handle client disconnection.
 
         Args:
-            msg: The advertise message from upstream
+            websocket: The client websocket connection
         """
-        downstream_channels: list[ChannelInfo] = []
+        # Unsubscribe from all channels this client was subscribed to
+        client_subs = self.client_subscriptions.pop(websocket, {})
+        for subscription_id in list(client_subs.keys()):
+            await self.handle_client_unsubscribe(websocket, subscription_id)
 
-        for channel in msg.get("channels", []):
-            channel_id = channel["id"]
-            schema_name = channel["schemaName"]
+        logger.info("Client cleanup complete")
 
-            # Track the upstream channel for transformation lookup
-            # Runtime validated by websocket protocol to match ChannelInfo
-            self.upstream_channels[channel_id] = channel
-            logger.info(
-                f"Upstream channel advertised: {channel['topic']} (id={channel_id}, schema={schema_name})"  # noqa: E501
-            )
-
-            # Initialize throttling for this channel
-            throttle_hz = self.topic_throttle_overrides.get(
-                channel["topic"], self.default_throttle_hz
-            )
-            self.channel_throttle_hz[channel_id] = throttle_hz
-            self.channel_last_sent_time.pop(channel_id, None)
-
-            # Check if we have a transformer for this schema
-            transformer = self.transformer_registry.get_transformer(schema_name)
-            logger.debug(f"Transformer lookup for schema {schema_name}: {transformer}")
-
-            if transformer:
-                # Create a transformed channel
-                transformed_id = self.next_channel_id
-                self.next_channel_id += 1
-
-                output_schema = transformer.get_output_schema()
-                output_schema_def = get_schema(output_schema)
-
-                # Create transformed channel info
-                transformed_channel: ChannelInfo = {
-                    "id": transformed_id,
-                    "topic": channel["topic"],  # Same topic name
-                    "encoding": channel["encoding"],  # Same encoding (cdr)
-                    "schemaName": output_schema,
-                    "schema": output_schema_def,
-                    "schemaEncoding": channel.get("schemaEncoding", "ros2msg"),
-                }
-
-                # Track the transformation mapping
-                self.transformed_channels[channel_id] = transformed_id
-                self.transformed_to_upstream[transformed_id] = channel_id
-
-                # Store DOWNSTREAM (transformed) channel
-                self.advertised_channels[transformed_id] = transformed_channel
-                downstream_channels.append(transformed_channel)
-
-                logger.info(
-                    f"Created transformed channel: {schema_name} -> {output_schema} "
-                    f"(upstream_id={channel_id}, downstream_id={transformed_id})"
-                )
-            else:
-                # No transformer - forward original channel
-                # Store DOWNSTREAM (original) channel
-                self.advertised_channels[channel_id] = channel
-                downstream_channels.append(channel)
-
-                logger.info(f"Forwarding original channel: {schema_name} (id={channel_id})")
-
-        # Send advertise message to downstream clients
-        if downstream_channels:
-            advertise_msg: AdvertiseMessage = {
-                "op": "advertise",
-                "channels": downstream_channels,
-            }
-            await self._broadcast_to_clients(json.dumps(advertise_msg))
-
-    async def _transform_message(self, channel_id: int, data: bytes) -> bytes | None:
-        """Transform a binary message using the registered transformer.
+    def _transform_message_dict(
+        self, channel: ChannelInfo, payload: bytes
+    ) -> dict[str, Any] | None:
+        """Transform a message using the registered transformer.
 
         Args:
-            channel_id: The upstream channel ID
-            data: The binary message data (including header)
+            channel: The channel info
+            payload: The message payload (CDR-encoded)
 
         Returns:
-            Transformed binary message data, or None if transformation failed
+            Transformed message as a dictionary, or None if transformation failed
         """
-        # Get upstream channel info (for the original schema)
-        channel = self.upstream_channels.get(channel_id)
-        if not channel:
-            return None
-
         schema_name = channel["schemaName"]
-
         transformer = self.transformer_registry.get_transformer(schema_name)
         if not transformer:
             return None
 
         try:
-            # Extract the message payload (skip opcode, sub_id, timestamp)
-            if len(data) < 13:
-                return None
-
-            opcode = data[0]
-            sub_id = struct.unpack_from("<I", data, 1)[0]
-            timestamp = struct.unpack_from("<Q", data, 5)[0]
-            payload = data[13:]
-
             # Decode the input message
             input_msg = self._decode_message(channel, payload)
 
             # Transform the message
-            output_msg = transformer.transform(input_msg)
-
-            # Get output schema
-            output_schema = transformer.get_output_schema()
-
-            # Encode the output message
-            output_payload = self._encode_message(output_schema, output_msg)
-
-            # Reconstruct binary message with same header
-            result = bytearray()
-            result.append(opcode)
-            result.extend(struct.pack("<I", sub_id))
-            result.extend(struct.pack("<Q", timestamp))
-            result.extend(output_payload)
-
-            return bytes(result)
-
+            return transformer.transform(input_msg)
         except Exception:
             logger.exception("Message transformation failed")
             return None
@@ -713,17 +582,8 @@ class ProxyBridge:
             Decoded message as a dictionary
         """
         schema_name = channel["schemaName"]
-
-        # Get or create decoder for this schema
-        if schema_name not in self.message_decoders:
-            schema_def = channel["schema"]
-            # Generate decoder function for this schema
-            decoder = generate_dynamic(schema_name, schema_def)
-            self.message_decoders[schema_name] = decoder
-
-        decoder = self.message_decoders[schema_name]
-
-        # Decode the message
+        schema_def = channel["schema"]
+        decoder = self.codec_cache.get_decoder(schema_name, schema_def)
         return decoder(payload)
 
     def _encode_message(self, schema_name: str, message: dict[str, Any]) -> bytes:
@@ -736,14 +596,6 @@ class ProxyBridge:
         Returns:
             CDR-encoded bytes
         """
-        # Get or create encoder for this schema
-        if schema_name not in self.message_encoders:
-            schema_def = get_schema(schema_name)
-            # Generate encoder function for this schema
-            encoder = serialize_dynamic(schema_name, schema_def)
-            self.message_encoders[schema_name] = encoder
-
-        encoder = self.message_encoders[schema_name]
-
-        # Encode the message
+        schema_def = get_schema(schema_name)
+        encoder = self.codec_cache.get_encoder(schema_name, schema_def)
         return encoder(message)

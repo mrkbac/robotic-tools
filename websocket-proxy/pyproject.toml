@@ -12,6 +12,7 @@ dependencies = [
     "portable-ffmpeg>=0.1.0",
     "pillow>=12.0.0",
     "mcap-ros2-support-fast",
+    "websocket-bridge",
 ]
 
 [project.scripts]
@@ -23,3 +24,4 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
+websocket-bridge = { workspace = true }

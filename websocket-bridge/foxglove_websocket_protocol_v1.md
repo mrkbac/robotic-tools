@@ -1,5 +1,7 @@
 # Foxglove WebSocket protocol v1
 
+> **Note**: This protocol has been extended by `foxglove.sdk.v1`, which adds experimental features.
+
 ## Protocol overview
 
 - An application wishing to provide data for streamed consumption by Foxglove hosts a [WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API) server.
