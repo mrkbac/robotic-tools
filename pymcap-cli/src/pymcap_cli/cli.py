@@ -2,6 +2,7 @@ import argparse
 import sys
 
 from pymcap_cli.cmd import (
+    completion_cmd,
     du_cmd,
     filter_cmd,
     info_cmd,
@@ -60,6 +61,9 @@ def create_parser() -> argparse.ArgumentParser:
     # Add video command
     video_cmd.add_parser(subparsers)
 
+    # Add completion command
+    completion_cmd.add_parser(subparsers)
+
     return parser
 
 
@@ -94,6 +98,8 @@ def main() -> None:
         tftree_cmd.handle_command(args)
     elif args.command == "video":
         video_cmd.handle_command(args)
+    elif args.command == "completion":
+        completion_cmd.handle_command(args)
     else:
         parser.print_help()
         sys.exit(1)

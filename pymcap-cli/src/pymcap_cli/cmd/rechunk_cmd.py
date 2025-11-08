@@ -356,7 +356,7 @@ def add_parser(
         "--auto",
         action="store_true",
         help="If set, automatically create chunk groups. "
-        "Topics taking up more than 15% of the uncompressed total size get their own chunk.",
+        "Topics taking up more than 15%% of the uncompressed total size get their own chunk.",
     )
 
     parser.add_argument(
