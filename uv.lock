@@ -1833,6 +1833,7 @@ dependencies = [
     { name = "pointcloud2" },
     { name = "portable-ffmpeg" },
     { name = "typing-extensions" },
+    { name = "websocket-bridge" },
     { name = "websockets" },
 ]
 
@@ -1844,6 +1845,7 @@ requires-dist = [
     { name = "pointcloud2", specifier = ">=0.2.3" },
     { name = "portable-ffmpeg", specifier = ">=0.1.0" },
     { name = "typing-extensions", specifier = ">=4.12.2" },
+    { name = "websocket-bridge", editable = "websocket-bridge" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
 

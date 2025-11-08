@@ -33,6 +33,27 @@ class TransformData:
     timestamp_ns: int
 
 
+def _detect_multiple_parents(
+    transforms: dict[tuple[str, str], TransformData],
+) -> dict[str, set[str]]:
+    """Detect frames that have multiple parent frames (violates tree structure).
+
+    Args:
+        transforms: Dictionary of all transforms keyed by (parent, child)
+
+    Returns:
+        Dictionary mapping child frame names to their set of parent frames,
+        only including children with multiple parents
+    """
+    child_to_parents: dict[str, set[str]] = defaultdict(set)
+
+    for parent, child in transforms:
+        child_to_parents[child].add(parent)
+
+    # Return only frames with multiple parents
+    return {child: parents for child, parents in child_to_parents.items() if len(parents) > 1}
+
+
 def _build_tree_and_find_roots(
     transforms: dict[tuple[str, str], TransformData],
 ) -> tuple[dict[str, list[str]], list[str]]:
@@ -252,6 +273,18 @@ def handle_command(args: argparse.Namespace) -> None:
             if table:
                 live.update(table)
                 live.refresh()
+
+        # Post-processing validation: check for multiple parents
+        multiple_parents = _detect_multiple_parents(transforms)
+        if multiple_parents:
+            console.print()  # Add spacing
+            console.print("[yellow]⚠ Tree Structure Violations Detected:[/yellow]")
+            description = "[dim]The following frames have multiple parents, "
+            console.print(description)
+            for child, parents in sorted(multiple_parents.items()):
+                parents_str = ", ".join(f"'{p}'" for p in sorted(parents))
+                frame_msg = f"  - Frame [bold]'{child}'[/bold] has parents: {parents_str}"
+                console.print(frame_msg, style="yellow")
 
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error reading MCAP file: {e}[/red]")
