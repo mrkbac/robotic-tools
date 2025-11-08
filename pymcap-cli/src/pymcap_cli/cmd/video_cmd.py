@@ -400,6 +400,7 @@ def _start_ffmpeg(
     encoder: str,
     quality: int,
     fps: float,
+    watermark_text: str | None = None,
 ) -> subprocess.Popen[bytes]:
     cmd: list[str] = [
         "ffmpeg",
@@ -447,6 +448,28 @@ def _start_ffmpeg(
     quality_params = _get_encoder_quality_params(codec, encoder, quality)
     cmd.extend(quality_params)
 
+    # Add watermark if specified
+    if watermark_text:
+        # Escape special characters for ffmpeg drawtext filter
+        # Replace single quotes and colons which are special in ffmpeg filter syntax
+        escaped_text = (
+            watermark_text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
+        )
+
+        # Calculate font size based on video height (2.5% of height)
+        font_size = max(12, int(height * 0.025))
+
+        drawtext_filter = (
+            f"drawtext=text='{escaped_text}':"
+            f"x=10:y=10:"
+            f"fontsize={font_size}:"
+            f"fontcolor=white:"
+            f"box=1:"
+            f"boxcolor=black@0.5:"
+            f"boxborderw=5"
+        )
+        cmd.extend(["-vf", drawtext_filter])
+
     # Pixel format for compatibility
     cmd.extend(["-pix_fmt", "yuv420p"])
 
@@ -473,6 +496,7 @@ def encode_video(
     codec: VideoCodec = VideoCodec.H264,
     encoder_preference: Literal["auto", "software"] | HardwareBackend = "auto",
     quality: int = 23,
+    watermark: bool = True,
 ) -> None:
     """Encode an image topic from MCAP to video.
 
@@ -483,6 +507,7 @@ def encode_video(
         codec: Video codec
         encoder_preference: Encoder backend preference ("auto", "software", or HardwareBackend)
         quality: Quality value (CRF or equivalent)
+        watermark: Whether to add watermark showing filename and topic (default: True)
 
     Raises:
         VideoEncoderError: If encoding fails
@@ -504,6 +529,9 @@ def encode_video(
     console.print(f"[green]✓[/green] Found {message_count:,} messages")
     console.print(f"[green]✓[/green] Message type: {message_type}")
 
+    # Generate watermark text if enabled
+    watermark_text = f"{mcap_path.name} | {topic}" if watermark else None
+
     # Encode video
     console.print("\n[yellow]Encoding video...[/yellow]")
     _encode_frames(
@@ -515,6 +543,7 @@ def encode_video(
         codec=codec,
         encoder=encoder,
         quality=quality,
+        watermark_text=watermark_text,
     )
 
     console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
@@ -529,6 +558,7 @@ def _encode_frames(
     codec: VideoCodec,
     encoder: str,
     quality: int,
+    watermark_text: str | None = None,
 ) -> None:
     """Extract frames from MCAP and encode to video with accurate timing.
 
@@ -541,6 +571,7 @@ def _encode_frames(
         codec: Video codec
         encoder: Encoder name
         quality: Quality value
+        watermark_text: Optional watermark text to overlay on video
 
     Raises:
         VideoEncoderError: If encoding fails
@@ -615,6 +646,7 @@ def _encode_frames(
                         encoder=encoder,
                         quality=quality,
                         fps=fps,
+                        watermark_text=watermark_text,
                     )
 
                     # Write the buffered first frame
@@ -715,6 +747,12 @@ def add_parser(
         help="Encoder backend (default: auto - detect hardware, fallback to software)",
     )
 
+    parser.add_argument(
+        "--watermark",
+        action="store_true",
+        help="Enable watermark showing filename and topic (watermark disabled by default)",
+    )
+
     return parser
 
 
@@ -762,6 +800,7 @@ def handle_command(args: argparse.Namespace) -> None:
             codec=codec,
             encoder_preference=encoder_pref,
             quality=quality_value,
+            watermark=args.watermark,
         )
     except VideoEncoderError as e:
         console.print(f"[red]Error:[/red] {e}")
