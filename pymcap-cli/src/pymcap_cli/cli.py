@@ -11,6 +11,7 @@ from pymcap_cli.cmd import (
     rechunk_cmd,
     recover_cmd,
     tftree_cmd,
+    video_cmd,
 )
 
 
@@ -56,6 +57,9 @@ def create_parser() -> argparse.ArgumentParser:
     # Add tftree command
     tftree_cmd.add_parser(subparsers)
 
+    # Add video command
+    video_cmd.add_parser(subparsers)
+
     return parser
 
 
@@ -88,6 +92,8 @@ def main() -> None:
         rechunk_cmd.handle_command(args)
     elif args.command == "tftree":
         tftree_cmd.handle_command(args)
+    elif args.command == "video":
+        video_cmd.handle_command(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -1,3 +1,4 @@
+import io
 from typing import IO
 
 from rich.console import Console
@@ -12,6 +13,7 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
+from typing_extensions import Buffer
 
 
 def bytes_to_human(size_bytes: float) -> str:
@@ -36,7 +38,7 @@ def file_progress(title: str, console: Console | None = None) -> Progress:
     )
 
 
-class ProgressTrackingIO:
+class ProgressTrackingIO(io.RawIOBase):
     """Read-only IO[bytes] wrapper that updates progress bar as data is read.
 
     Wraps a binary stream and automatically updates a Rich progress bar
@@ -88,7 +90,7 @@ class ProgressTrackingIO:
         self._progress.update(self._progress_task, completed=self._stream.tell())
         return data
 
-    def readinto(self, b: memoryview) -> int | None:
+    def readinto(self, b: Buffer) -> int | None:
         """Read bytes into buffer and update progress."""
         result: int | None = self._stream.readinto(b)  # type: ignore[attr-defined]
         self._progress.update(self._progress_task, completed=self._stream.tell())
@@ -129,18 +131,6 @@ class ProgressTrackingIO:
     def writable(self) -> bool:
         """Return whether the stream is writable (always False)."""
         return False
-
-    def write(self, b: bytes) -> int:
-        """Write operation not supported."""
-        raise NotImplementedError("ProgressTrackingIO is read-only")
-
-    def writelines(self, lines: list[bytes]) -> None:
-        """Write operation not supported."""
-        raise NotImplementedError("ProgressTrackingIO is read-only")
-
-    def truncate(self, size: int | None = None) -> int:
-        """Truncate operation not supported."""
-        raise NotImplementedError("ProgressTrackingIO is read-only")
 
     def fileno(self) -> int:
         """Return underlying file descriptor."""

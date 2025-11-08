@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.image_mcap_generator import ensure_image_fixtures
 from tests.fixtures.mcap_generator import ensure_fixtures
 
 
@@ -17,6 +18,12 @@ def fixtures_dir(tmp_path_factory) -> Path:
 def test_fixtures(fixtures_dir) -> dict[str, Path]:
     """Generate all test MCAP fixtures once per session."""
     return ensure_fixtures(fixtures_dir)
+
+
+@pytest.fixture(scope="session")
+def image_fixtures(fixtures_dir) -> dict[str, Path]:
+    """Generate all image MCAP fixtures once per session."""
+    return ensure_image_fixtures(fixtures_dir)
 
 
 @pytest.fixture
@@ -82,3 +89,21 @@ def nuscenes_mcap() -> Path:
         / "data"
         / "nuScenes-v1.0-mini-scene-0061-ros2.mcap"
     )
+
+
+@pytest.fixture
+def image_rgb_mcap(image_fixtures) -> Path:
+    """MCAP file with RGB Image messages."""
+    return image_fixtures["image_rgb"]
+
+
+@pytest.fixture
+def image_compressed_mcap(image_fixtures) -> Path:
+    """MCAP file with CompressedImage messages."""
+    return image_fixtures["image_compressed"]
+
+
+@pytest.fixture
+def image_small_mcap(image_fixtures) -> Path:
+    """Small MCAP file with few image frames for quick tests."""
+    return image_fixtures["image_small"]

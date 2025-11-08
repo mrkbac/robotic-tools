@@ -14,3 +14,6 @@ data/
 *.mcap
 .coverage
 small-mcap/tests/conformance_data
+*.mp4
+*.webm
+*.mkv
