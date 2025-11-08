@@ -4,6 +4,7 @@ import io
 import struct
 from pathlib import Path
 
+from PIL import Image
 from small_mcap import CompressionType, McapWriter
 
 # ROS2 message schema for sensor_msgs/msg/Image
@@ -92,8 +93,6 @@ def create_jpeg_frame(width: int, height: int, frame_idx: int) -> bytes:
     # This is a placeholder - in real tests we'd use PIL or similar
     # For now, create a simple solid color JPEG
     try:
-        from PIL import Image
-
         rgb_data = create_simple_rgb_frame(width, height, frame_idx)
         img = Image.frombytes("RGB", (width, height), rgb_data)
         output = io.BytesIO()

@@ -251,7 +251,7 @@ class WebSocketBridgeClient:
         """Attempt a single connection to the WebSocket server."""
         self._websocket = await websockets.connect(
             self._url,
-            subprotocols=[Subprotocol("foxglove.websocket.v1"), Subprotocol("foxglove.sdk.v1")]
+            subprotocols=[Subprotocol("foxglove.websocket.v1"), Subprotocol("foxglove.sdk.v1")],
         )
         logger.info(f"Connected to {self._url}")
 

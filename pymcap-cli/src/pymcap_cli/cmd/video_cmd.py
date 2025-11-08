@@ -16,12 +16,15 @@ from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
     Progress,
+    ProgressColumn,
     SpinnerColumn,
+    Task,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.text import Text
 from small_mcap import get_summary, include_topics, read_message_decoded
 
 if TYPE_CHECKING:
@@ -93,6 +96,17 @@ QUALITY_PRESETS = {
 VIDEOTOOLBOX_BASE_BITRATE = 20  # Mbps at CRF 18
 VIDEOTOOLBOX_CRF_REFERENCE = 10
 VIDEOTOOLBOX_CRF_SCALE = 5
+
+
+class FPSColumn(ProgressColumn):
+    """Custom column to display encoding frames per second."""
+
+    def render(self, task: Task) -> Text:
+        """Render the FPS."""
+        speed = task.finished_speed or task.speed
+        if speed is None:
+            return Text("-- fps/s", style="progress.data.speed")
+        return Text(f"{speed:.0f} fps/s", style="progress.data.speed")
 
 
 def _test_encoder(encoder_name: str) -> bool:
@@ -551,6 +565,7 @@ def _encode_frames(
         BarColumn(),
         TaskProgressColumn(),
         MofNCompleteColumn(),
+        FPSColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
