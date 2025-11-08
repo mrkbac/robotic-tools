@@ -2,6 +2,11 @@
 
 set -e
 
+# Change to repository root
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
 echo "===================="
 echo "Type checking all packages with mypy --strict"
 echo "===================="
