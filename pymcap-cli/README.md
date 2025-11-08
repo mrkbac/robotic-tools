@@ -29,9 +29,8 @@ uv run pymcap_cli rechunk data.mcap -o rechunked.mcap -p "/camera.*" -p "/lidar.
 # Show disk usage breakdown
 uv run pymcap_cli du large.mcap
 
-# Compress/decompress files
+# Compress files
 uv run pymcap_cli compress input.mcap -o compressed.mcap --compression lz4
-uv run pymcap_cli decompress compressed.mcap -o uncompressed.mcap
 ```
 
 ## 📋 Available Commands
@@ -119,7 +118,7 @@ uv run pymcap_cli filter data.mcap -o filtered.mcap --include-topics "/camera/im
 uv run pymcap_cli filter data.mcap -o filtered.mcap --exclude-topics "/debug.*" "/test.*"
 ```
 
-### `compress` / `decompress` - Compression Tools
+### `compress` - Compression Tool
 
 Change MCAP file compression.
 
@@ -127,9 +126,6 @@ Change MCAP file compression.
 # Compress with different algorithms
 uv run pymcap_cli compress input.mcap -o output.mcap --compression zstd
 uv run pymcap_cli compress input.mcap -o output.mcap --compression lz4
-
-# Decompress to uncompressed format
-uv run pymcap_cli decompress compressed.mcap -o uncompressed.mcap
 ```
 
 ### `du` - Disk Usage Analysis
@@ -138,6 +134,81 @@ Analyze MCAP file size breakdown by chunks, schemas, channels, and message count
 
 ```bash
 uv run pymcap_cli du large.mcap
+```
+
+### `list` - List Records
+
+List various record types in an MCAP file with detailed information.
+
+```bash
+# List channels
+uv run pymcap_cli list channels data.mcap
+
+# List chunks
+uv run pymcap_cli list chunks data.mcap
+
+# List schemas
+uv run pymcap_cli list schemas data.mcap
+
+# List attachments
+uv run pymcap_cli list attachments data.mcap
+
+# List metadata
+uv run pymcap_cli list metadata data.mcap
+```
+
+### `info-json` - JSON Statistics
+
+Output comprehensive MCAP file statistics as JSON, including message distribution, channel rates, and compression stats.
+
+```bash
+# Basic JSON output
+uv run pymcap_cli info-json data.mcap
+
+# Rebuild from scratch with exact sizes
+uv run pymcap_cli info-json data.mcap --rebuild --exact-sizes
+```
+
+### `tftree` - TF Transform Tree
+
+Display ROS TF transform tree from MCAP files with visual hierarchy.
+
+```bash
+# Show complete TF tree (both /tf and /tf_static)
+uv run pymcap_cli tftree data.mcap
+
+# Show only static transforms
+uv run pymcap_cli tftree data.mcap --static-only
+```
+
+### `video` - Video Generation
+
+Generate MP4 videos from image topics (CompressedImage or Image) using hardware-accelerated encoding.
+
+```bash
+# Basic video generation
+uv run pymcap_cli video data.mcap --topic /camera/front --output front.mp4
+
+# With quality preset
+uv run pymcap_cli video data.mcap --topic /camera/rear --output rear.mp4 --quality high
+
+# Use specific codec and encoder
+uv run pymcap_cli video data.mcap --topic /lidar/image --output lidar.mp4 --codec h265 --encoder videotoolbox
+
+# Manual CRF quality control
+uv run pymcap_cli video data.mcap --topic /camera/debug --output debug.mp4 --crf 18
+```
+
+### `completion` - Shell Autocompletion
+
+Generate shell autocompletion scripts for bash, zsh, or tcsh.
+
+```bash
+# Generate bash completion
+uv run pymcap_cli completion bash > ~/.local/share/bash-completion/completions/pymcap_cli
+
+# Generate zsh completion
+uv run pymcap_cli completion zsh > ~/.zfunc/_pymcap_cli
 ```
 
 ## 🚀 Advanced Usage

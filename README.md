@@ -22,13 +22,13 @@ uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=pymcap-
 
 `pymcap-cli` is pure python a command-line interface for working with MCAP files.
 
-## fox-bridge
+## websocket-proxy
 
 ```sh
-uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=fox-bridge" fox-bridge
+uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=websocket-proxy" bridge
 ```
 
-`fox-bridge` is a simple proxy of [Foxglove Bridge](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge) which converts messages just in time and forwards via Foxglove Bridge compatible protocol.
+`websocket-proxy` is a simple proxy of [Foxglove Bridge](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge) which converts messages just in time and forwards via Foxglove Bridge compatible protocol.
 
 ## License
 

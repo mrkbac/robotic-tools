@@ -262,24 +262,3 @@ This parser will:
 ## References
 
 - [Foxglove Message Path Syntax Documentation](https://docs.foxglove.dev/docs/visualization/message-path-syntax)
-
-## Development
-
-### Standalone Parser Generation
-
-This module uses a pre-compiled standalone Lark parser for better performance and reduced runtime dependencies. The parser consists of two parts:
-
-1. **Shared Runtime** (`_lark_standalone_runtime.py`): Common Lark parser engine code shared by all parsers
-2. **Grammar-Specific Data** (`_standalone_parser.py`): Parser state machine and grammar data
-
-#### When to Regenerate
-
-Regenerate the standalone parsers whenever you modify any `.lark` grammar file:
-
-```bash
-uv run _generate_standalone.py \
-  src/ros_parser/message_definition/grammar.lark \
-  src/ros_parser/message_path/grammar.lark \
-  --output-dir src/ros_parser \
-  --lexer contextual
-```
