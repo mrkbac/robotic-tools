@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import shtab
 from rich.console import Console
 from rich.table import Table
 from small_mcap import InvalidMagicError
@@ -35,35 +36,40 @@ def add_parser(
         "channels",
         help="List channels in an MCAP file",
     )
-    channels_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    channels_file_arg = channels_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    channels_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # list chunks
     chunks_parser = list_subparsers.add_parser(
         "chunks",
         help="List chunks in an MCAP file",
     )
-    chunks_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    chunks_file_arg = chunks_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    chunks_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # list schemas
     schemas_parser = list_subparsers.add_parser(
         "schemas",
         help="List schemas in an MCAP file",
     )
-    schemas_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    schemas_file_arg = schemas_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    schemas_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # list attachments
     attachments_parser = list_subparsers.add_parser(
         "attachments",
         help="List attachments in an MCAP file",
     )
-    attachments_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    attachments_file_arg = attachments_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    attachments_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # list metadata
     metadata_parser = list_subparsers.add_parser(
         "metadata",
         help="List metadata in an MCAP file",
     )
-    metadata_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    metadata_file_arg = metadata_parser.add_argument("file", help="Path to the MCAP file", type=str)
+    metadata_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     return parser
 

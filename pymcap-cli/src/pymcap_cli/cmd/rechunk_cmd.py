@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, BinaryIO
 if TYPE_CHECKING:
     from re import Pattern
 
+import shtab
 from rich.console import Console
 from small_mcap import (
     Attachment,
@@ -320,19 +321,21 @@ def add_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to rechunk",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
-    parser.add_argument(
+    output_arg = parser.add_argument(
         "-o",
         "--output",
         help="Output filename (required)",
         type=str,
         required=True,
     )
+    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     group = parser.add_mutually_exclusive_group(required=True)
 

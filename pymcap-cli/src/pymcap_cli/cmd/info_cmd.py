@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import shtab
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.jupyter import JupyterMixin
 from rich.measure import Measurement
@@ -346,11 +347,12 @@ def add_parser(
         description="Report statistics about an MCAP file",
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to analyze",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     parser.add_argument(
         "-r",

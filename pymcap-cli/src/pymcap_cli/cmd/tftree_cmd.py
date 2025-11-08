@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import shtab
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.live import Live
@@ -212,11 +213,12 @@ def add_parser(
         description="Display TF transform tree from MCAP file",
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to analyze",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     parser.add_argument(
         "--static-only",

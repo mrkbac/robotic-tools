@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import shtab
@@ -30,11 +31,11 @@ def add_parser(
 
 def handle_command(args: argparse.Namespace) -> None:
     """Handle the completion command execution."""
-    # Import here to avoid circular dependency
-    from pymcap_cli.cli import create_parser
+    from pymcap_cli.cli import create_parser  # noqa: PLC0415
 
     # Create a fresh parser for completion generation
     parser = create_parser()
 
     # Generate and print the completion script
-    print(shtab.complete(parser, shell=args.shell))
+    sys.stdout.write(shtab.complete(parser, shell=args.shell))
+    sys.stdout.write("\n")

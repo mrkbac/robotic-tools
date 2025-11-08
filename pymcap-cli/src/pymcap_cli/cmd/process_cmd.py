@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import shtab
 from rich.console import Console
 
 from pymcap_cli.mcap_processor import (
@@ -43,19 +44,21 @@ def add_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to process",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
-    parser.add_argument(
+    output_arg = parser.add_argument(
         "-o",
         "--output",
         help="Output filename (required)",
         type=str,
         required=True,
     )
+    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # Recovery options
     recovery_group = parser.add_argument_group("Recovery options")

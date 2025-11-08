@@ -10,6 +10,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import shtab
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.progress import (
@@ -645,11 +646,12 @@ def add_parser(
         description="Generate MP4 video from topics using ffmpeg",
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     parser.add_argument(
         "--topic",
@@ -658,13 +660,14 @@ def add_parser(
         type=str,
     )
 
-    parser.add_argument(
+    output_arg = parser.add_argument(
         "--output",
         "-o",
         required=True,
         help="Output video file path (e.g., output.mp4)",
         type=str,
     )
+    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     parser.add_argument(
         "--codec",

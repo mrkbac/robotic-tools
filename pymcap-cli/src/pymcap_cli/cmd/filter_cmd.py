@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import shtab
 from rich.console import Console
 
 from pymcap_cli.mcap_processor import (
@@ -43,19 +44,21 @@ def add_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
+file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to filter",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
-    parser.add_argument(
+output_arg = parser.add_argument(
         "-o",
         "--output",
         help="Output filename (required)",
         type=str,
         required=True,
     )
+    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     # Topic filtering
     parser.add_argument(
@@ -166,19 +169,21 @@ def add_compress_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
+file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to compress",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
-    parser.add_argument(
+output_arg = parser.add_argument(
         "-o",
         "--output",
         help="Output filename (required)",
         type=str,
         required=True,
     )
+    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     parser.add_argument(
         "--chunk-size",

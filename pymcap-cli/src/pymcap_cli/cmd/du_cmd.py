@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import shtab
 from rich.console import Console
 from rich.table import Table
 
@@ -29,11 +30,13 @@ def add_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to analyze",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
+
     parser.add_argument(
         "--exact-sizes",
         "-e",

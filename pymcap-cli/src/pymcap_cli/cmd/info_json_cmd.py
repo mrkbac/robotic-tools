@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import shtab
 from small_mcap import ChunkIndex, InvalidMagicError
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
@@ -278,11 +279,12 @@ def add_parser(
         description="Output MCAP file statistics as JSON with all available data",
     )
 
-    parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to analyze",
         type=str,
     )
+    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
     parser.add_argument(
         "-r",
