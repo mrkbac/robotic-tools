@@ -1,5 +1,5 @@
 import io
-from typing import IO
+from typing import IO, Any
 
 from rich.console import Console
 from rich.progress import (
@@ -13,7 +13,6 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
-from typing_extensions import Buffer
 
 
 def bytes_to_human(size_bytes: float) -> str:
@@ -90,7 +89,7 @@ class ProgressTrackingIO(io.RawIOBase):
         self._progress.update(self._progress_task, completed=self._stream.tell())
         return data
 
-    def readinto(self, b: Buffer) -> int | None:
+    def readinto(self, b: Any) -> int | None:
         """Read bytes into buffer and update progress."""
         result: int | None = self._stream.readinto(b)  # type: ignore[attr-defined]
         self._progress.update(self._progress_task, completed=self._stream.tell())
