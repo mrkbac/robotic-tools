@@ -18,7 +18,7 @@ from pymcap_cli.cmd import (
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mcap",
+        prog="pymcap-cli",
         description="CLI tool for slicing and dicing MCAP files.",
     )
 
