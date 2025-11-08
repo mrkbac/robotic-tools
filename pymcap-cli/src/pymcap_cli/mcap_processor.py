@@ -1,10 +1,12 @@
 """Unified MCAP processor combining recovery and filtering capabilities."""
 
+import heapq
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from re import Pattern
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from rich.console import Console
 from small_mcap import (
@@ -20,15 +22,26 @@ from small_mcap import (
     Message,
     MessageIndex,
     Metadata,
+    Remapper,
     Schema,
     Statistics,
     breakup_chunk,
+    get_summary,
     stream_reader,
 )
 
 from pymcap_cli.utils import file_progress
 
 console = Console()
+
+
+class PendingChunk(NamedTuple):
+    """Chunk with its indexes and metadata for ordered processing."""
+
+    chunk: Chunk
+    indexes: list[MessageIndex]
+    stream_id: int
+    timestamp: int  # message_start_time for ordering
 
 
 def str_to_compression_type(compression: str) -> CompressionType:
@@ -151,11 +164,18 @@ def compile_topic_patterns(patterns: list[str]) -> list[Pattern[str]]:
 
 
 class McapProcessor:
-    """Unified MCAP processor combining recovery and filtering capabilities."""
+    """Unified MCAP processor combining recovery and filtering capabilities.
+
+    Supports processing single or multiple MCAP files with smart schema/channel ID
+    remapping to minimize the need for chunk decoding.
+    """
 
     def __init__(self, options: ProcessingOptions) -> None:
         self.options = options
         self.stats = ProcessingStats()
+
+        # ID remapper for handling multiple files (zero overhead for single file)
+        self.remapper = Remapper()
 
         # Track schemas and channels (shared with writer for auto-ensure)
         self.schemas: dict[int, Schema] = {}
@@ -170,7 +190,38 @@ class McapProcessor:
         # Track which channels we've already seen to optimize metadata extraction
         self.known_channels: set[int] = set()
 
-    def process_message(self, message: Message, writer: McapWriter) -> None:
+    def _compute_channel_filter_decision(self, topic: str) -> bool:
+        """Compute whether a channel with given topic should be included.
+
+        Returns True if the channel should be included, False otherwise.
+        """
+        if self.options.include_topics:
+            return any(p.search(topic) for p in self.options.include_topics)
+        if self.options.exclude_topics:
+            return not any(p.search(topic) for p in self.options.exclude_topics)
+        return True
+
+    def _get_remapped_schema_id(self, stream_id: int, original_schema_id: int) -> int:
+        """Get the remapped schema ID for an original schema ID.
+
+        Args:
+            stream_id: The stream ID
+            original_schema_id: The original schema ID from the input file
+
+        Returns:
+            The remapped schema ID, or 0 if schema not found
+        """
+        if original_schema_id == 0:
+            return 0
+
+        # Use Remapper's built-in lookup
+        return self.remapper.get_remapped_schema(stream_id, original_schema_id)
+
+    def process_message(
+        self,
+        message: Message,
+        writer: McapWriter,
+    ) -> None:
         """Process a message record."""
         self.stats.messages_processed += 1
 
@@ -184,12 +235,7 @@ class McapProcessor:
             # Channel not yet seen - this shouldn't happen in well-formed MCAP
             # but handle it gracefully
             topic = self.channel_topics.get(message.channel_id, "")
-            if self.options.include_topics:
-                should_include = any(p.search(topic) for p in self.options.include_topics)
-            elif self.options.exclude_topics:
-                should_include = not any(p.search(topic) for p in self.options.exclude_topics)
-            else:
-                should_include = True
+            should_include = self._compute_channel_filter_decision(topic)
             self.channel_filter_cache[message.channel_id] = should_include
 
         if not should_include:
@@ -204,13 +250,157 @@ class McapProcessor:
             publish_time=message.publish_time,
         )
 
+    def _handle_channel_record(self, channel: Channel, stream_id: int) -> None:
+        """Handle a channel record from the stream."""
+        remapped_channel = self.remapper.remap_channel(stream_id, channel)
+
+        # Restore schema_id (Remapper zeros it out to avoid stale refs)
+        if channel.schema_id != 0:
+            remapped_schema_id = self._get_remapped_schema_id(stream_id, channel.schema_id)
+            if remapped_schema_id != 0:
+                remapped_channel = replace(remapped_channel, schema_id=remapped_schema_id)
+
+        if remapped_channel.id not in self.channels:
+            self.channels[remapped_channel.id] = remapped_channel
+            self.channel_topics[remapped_channel.id] = remapped_channel.topic
+            self.known_channels.add(remapped_channel.id)
+            # Pre-compute filtering decision for this channel
+            self.channel_filter_cache[remapped_channel.id] = self._compute_channel_filter_decision(
+                remapped_channel.topic
+            )
+
+    def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
+        """Handle a message record from the stream."""
+        original_channel_id = message.channel_id
+        message_to_process: Message = message
+        if self.remapper.was_channel_remapped(stream_id, original_channel_id):
+            # Look up the remapped channel
+            original_channel = Channel(
+                id=original_channel_id,
+                schema_id=0,
+                topic="",
+                message_encoding="",
+                metadata={},
+            )
+            remapped_channel = self.remapper.remap_channel(stream_id, original_channel)
+            message_to_process = Message(
+                channel_id=remapped_channel.id,
+                sequence=message.sequence,
+                log_time=message.log_time,
+                publish_time=message.publish_time,
+                data=message.data,
+            )
+        self.process_message(message_to_process, writer)
+
+    def _handle_attachment_record(self, attachment: Attachment, writer: McapWriter) -> None:
+        """Handle an attachment record from the stream."""
+        self.stats.attachments_processed += 1
+        if self.options.include_attachments and (
+            self.options.start_time <= attachment.log_time < self.options.end_time
+        ):
+            writer.add_attachment(
+                log_time=attachment.log_time,
+                create_time=attachment.create_time,
+                name=attachment.name,
+                media_type=attachment.media_type,
+                data=attachment.data,
+            )
+
+    def _generate_chunks_from_stream(
+        self, input_stream: BinaryIO, stream_id: int, writer: McapWriter
+    ) -> Iterator[PendingChunk]:
+        """Generate chunks from a single stream in file order.
+
+        Yields PendingChunk objects with timestamp for ordered merging.
+        Non-chunk records (Schema, Channel, Message, Attachment, Metadata) are processed directly.
+        """
+        last_chunk: Chunk | None = None
+        last_chunk_message_indexes: list[MessageIndex] = []
+
+        try:
+            records = stream_reader(input_stream, emit_chunks=True)
+
+            for record in records:
+                # Yield pending chunk when we see a non-MessageIndex record
+                if not isinstance(record, MessageIndex) and last_chunk:
+                    yield PendingChunk(
+                        chunk=last_chunk,
+                        indexes=last_chunk_message_indexes,
+                        stream_id=stream_id,
+                        timestamp=last_chunk.message_start_time,
+                    )
+                    last_chunk = None
+                    last_chunk_message_indexes = []
+
+                # Process current record
+                if isinstance(record, Header):
+                    pass  # Header handled separately
+                elif isinstance(record, Chunk):
+                    self.stats.chunks_processed += 1
+                    last_chunk = record
+                    last_chunk_message_indexes = []
+                elif isinstance(record, MessageIndex):
+                    last_chunk_message_indexes.append(record)
+                elif isinstance(record, Schema):
+                    # Remap schema ID and store
+                    remapped_schema = self.remapper.remap_schema(stream_id, record)
+                    if remapped_schema:
+                        self.schemas[remapped_schema.id] = remapped_schema
+                elif isinstance(record, Channel):
+                    self._handle_channel_record(record, stream_id)
+                elif isinstance(record, Message):
+                    self._handle_message_record(record, writer, stream_id)
+                elif isinstance(record, Attachment):
+                    self._handle_attachment_record(record, writer)
+                elif isinstance(record, Metadata):
+                    self.stats.metadata_processed += 1
+                    if self.options.include_metadata:
+                        writer.add_metadata(name=record.name, metadata=record.metadata)
+                elif isinstance(record, (DataEnd, Footer)):
+                    break
+
+        except McapError as e:
+            # Catch errors from iteration itself (e.g., truncated file)
+            if self.options.recovery_mode:
+                console.print(f"[yellow]Warning (stream {stream_id}): {e}[/yellow]")
+                self.stats.errors_encountered += 1
+                # If we have a pending chunk, yield it for processing
+                if last_chunk:
+                    yield PendingChunk(
+                        chunk=last_chunk,
+                        indexes=last_chunk_message_indexes,
+                        stream_id=stream_id,
+                        timestamp=last_chunk.message_start_time,
+                    )
+                    last_chunk = None
+            else:
+                raise
+
+        # Yield the final pending chunk if any
+        if last_chunk:
+            yield PendingChunk(
+                chunk=last_chunk,
+                indexes=last_chunk_message_indexes,
+                stream_id=stream_id,
+                timestamp=last_chunk.message_start_time,
+            )
+
     def process(
         self,
-        input_stream: BinaryIO,
+        input_streams: Sequence[BinaryIO],
         output_stream: BinaryIO,
-        file_size: int,
+        file_sizes: Sequence[int],
     ) -> ProcessingStats:
-        """Main processing function combining recovery and filtering."""
+        """Main processing function supporting single or multiple input files.
+
+        Args:
+            input_streams: List of input MCAP file streams
+            output_stream: Output MCAP file stream
+            file_sizes: List of file sizes for progress tracking
+
+        Returns:
+            Processing statistics
+        """
         # Initialize writer and share schema/channel dicts for auto-ensure
         writer = McapWriter(
             output_stream,
@@ -219,105 +409,69 @@ class McapProcessor:
         )
         writer.schemas = self.schemas
         writer.channels = self.channels
-        writer_started = False
+
+        # Start writer (use default profile/library for merged files)
+        writer.start()
 
         try:
-            with file_progress("[bold blue]Processing MCAP...", console) as progress:
-                task = progress.add_task("Processing", total=file_size)
-                # Always emit chunks so we can track statistics and handle them properly
-                records = stream_reader(input_stream, emit_chunks=True)
+            # Pre-load schemas and channels from all files' summaries
+            # This ensures we have all metadata before processing any chunks
+            for stream_id, input_stream in enumerate(input_streams):
+                if summary := get_summary(input_stream):
+                    # Remap and store all schemas
+                    for schema in summary.schemas.values():
+                        remapped_schema = self.remapper.remap_schema(stream_id, schema)
+                        if remapped_schema:
+                            self.schemas[remapped_schema.id] = remapped_schema
 
-                last_chunk: Chunk | None = None
-                last_chunk_message_indexes: list[MessageIndex] = []
+                    # Remap and store all channels
+                    for channel in summary.channels.values():
+                        remapped_channel = self.remapper.remap_channel(stream_id, channel)
 
-                try:
-                    for record in records:
-                        # Update progress
-                        progress.update(task, completed=input_stream.tell())
-
-                        # Ensure writer is started before processing any records
-                        if not writer_started:
-                            if isinstance(record, Header):
-                                writer.start(profile=record.profile, library=record.library)
-                            else:
-                                writer.start()
-                            writer_started = True
-
-                        # Finalize pending chunk when we see a non-MessageIndex record
-                        if not isinstance(record, MessageIndex) and last_chunk:
-                            self._process_chunk_smart(
-                                last_chunk, last_chunk_message_indexes, writer
+                        # Restore schema_id (Remapper zeros it out to avoid stale refs)
+                        if channel.schema_id != 0:
+                            remapped_schema_id = self._get_remapped_schema_id(
+                                stream_id, channel.schema_id
                             )
-                            last_chunk = None
-                            last_chunk_message_indexes = []
-
-                        # Process current record
-                        if isinstance(record, Header):
-                            pass  # Already processed above
-                        elif isinstance(record, Chunk):
-                            self.stats.chunks_processed += 1
-                            last_chunk = record
-                            last_chunk_message_indexes = []
-                        elif isinstance(record, MessageIndex):
-                            last_chunk_message_indexes.append(record)
-                        elif isinstance(record, Schema):
-                            self.schemas[record.id] = record
-                        elif isinstance(record, Channel):
-                            if record.id not in self.channels:
-                                self.channels[record.id] = record
-                                self.channel_topics[record.id] = record.topic
-                                self.known_channels.add(record.id)
-                                # Pre-compute filtering decision for this channel
-                                if self.options.include_topics:
-                                    self.channel_filter_cache[record.id] = any(
-                                        p.search(record.topic) for p in self.options.include_topics
-                                    )
-                                elif self.options.exclude_topics:
-                                    self.channel_filter_cache[record.id] = not any(
-                                        p.search(record.topic) for p in self.options.exclude_topics
-                                    )
-                                else:
-                                    self.channel_filter_cache[record.id] = True
-                        elif isinstance(record, Message):
-                            self.process_message(record, writer)
-                        elif isinstance(record, Attachment):
-                            self.stats.attachments_processed += 1
-                            if self.options.include_attachments and (
-                                self.options.start_time <= record.log_time < self.options.end_time
-                            ):
-                                writer.add_attachment(
-                                    log_time=record.log_time,
-                                    create_time=record.create_time,
-                                    name=record.name,
-                                    media_type=record.media_type,
-                                    data=record.data,
+                            if remapped_schema_id != 0:
+                                remapped_channel = replace(
+                                    remapped_channel, schema_id=remapped_schema_id
                                 )
-                        elif isinstance(record, Metadata):
-                            self.stats.metadata_processed += 1
-                            if self.options.include_metadata:
-                                writer.add_metadata(name=record.name, metadata=record.metadata)
-                        elif isinstance(record, (DataEnd, Footer)):
-                            break
 
-                except McapError as e:
-                    # Catch errors from iteration itself (e.g., truncated file)
-                    if self.options.recovery_mode:
-                        console.print(f"[yellow]Warning: {e}[/yellow]")
-                        self.stats.errors_encountered += 1
-                        # If we have a pending chunk, decode it to recover what we can
-                        if last_chunk:
-                            self._process_chunk_fallback(last_chunk, writer)
-                            last_chunk = None
-                    else:
-                        raise
+                        if remapped_channel.id not in self.channels:
+                            self.channels[remapped_channel.id] = remapped_channel
+                            self.channel_topics[remapped_channel.id] = remapped_channel.topic
+                            self.known_channels.add(remapped_channel.id)
+                            # Pre-compute filtering decision
+                            self.channel_filter_cache[remapped_channel.id] = (
+                                self._compute_channel_filter_decision(remapped_channel.topic)
+                            )
 
-                # Process final pending chunk
-                if last_chunk:
-                    self._process_chunk_smart(last_chunk, last_chunk_message_indexes, writer)
+                # Seek back to start for processing
+                input_stream.seek(0)
+
+            total_size = sum(file_sizes)
+            with file_progress("[bold blue]Processing MCAP...", console) as progress:
+                task = progress.add_task("Processing", total=total_size)
+
+                # Create chunk generators for each stream
+                chunk_generators = [
+                    self._generate_chunks_from_stream(input_stream, stream_id, writer)
+                    for stream_id, input_stream in enumerate(input_streams)
+                ]
+
+                # Process chunks in timestamp order using heapq.merge
+                # This maintains global ordering while allowing fast-copy optimization
+                for pending_chunk in heapq.merge(*chunk_generators, key=lambda x: x.timestamp):
+                    self._process_chunk_smart(
+                        pending_chunk.chunk,
+                        pending_chunk.indexes,
+                        writer,
+                        pending_chunk.stream_id,
+                    )
 
                 # Complete progress
-                if task and file_size:
-                    progress.update(task, completed=file_size)
+                progress.update(task, completed=total_size)
 
         finally:
             writer.finish()
@@ -327,7 +481,38 @@ class McapProcessor:
 
         return self.stats
 
-    def _should_decode_chunk(self, chunk: Chunk, indexes: list[MessageIndex]) -> tuple[bool, bool]:
+    def _get_remapped_channel_ids(
+        self, indexes: list[MessageIndex], stream_id: int
+    ) -> tuple[set[int], bool]:
+        """Get remapped channel IDs for indexes and check if metadata extraction is needed.
+
+        Returns:
+            (remapped_channel_ids, needs_metadata_extraction)
+        """
+        remapped_channel_ids = set()
+        needs_metadata_extraction = False
+
+        for idx in indexes:
+            original_id = idx.channel_id
+            remapped_channel = self.remapper.get_remapped_channel(stream_id, original_id)
+            if remapped_channel:
+                remapped_id = remapped_channel.id
+            else:
+                # Not yet in remapper - will keep original ID, but need to extract metadata
+                remapped_id = original_id
+                needs_metadata_extraction = True
+
+            remapped_channel_ids.add(remapped_id)
+
+            # Check if this remapped ID is in known_channels
+            if remapped_id not in self.known_channels:
+                needs_metadata_extraction = True
+
+        return remapped_channel_ids, needs_metadata_extraction
+
+    def _should_decode_chunk(
+        self, chunk: Chunk, indexes: list[MessageIndex], stream_id: int
+    ) -> tuple[bool, bool]:
         """Determine if chunk should be decoded or can be fast-copied.
 
         Returns:
@@ -357,6 +542,16 @@ class McapProcessor:
         ):
             return (False, True)
 
+        # Check if any channel was remapped - must decode to fix channel IDs
+        # Also check if we have metadata for all channels (they might not be loaded yet)
+        for idx in indexes:
+            # Check if channel metadata is available
+            if not self.remapper.has_channel(stream_id, idx.channel_id):
+                # Channel not yet seen - must decode to discover it
+                return (False, True)
+            if self.remapper.was_channel_remapped(stream_id, idx.channel_id):
+                return (False, True)
+
         # Check topic filtering in a single pass over indexes
         if self.options.has_topic_filter:
             has_include = False
@@ -383,32 +578,39 @@ class McapProcessor:
         return (False, False)
 
     def _process_chunk_smart(
-        self, chunk: Chunk, indexes: list[MessageIndex], writer: McapWriter
+        self, chunk: Chunk, indexes: list[MessageIndex], writer: McapWriter, stream_id: int
     ) -> None:
         """Smart chunk processing with fast copying when possible."""
-        should_skip, should_decode = self._should_decode_chunk(chunk, indexes)
+        should_skip, should_decode = self._should_decode_chunk(chunk, indexes, stream_id)
 
         if should_skip:
             return
 
         if should_decode:
-            self._process_chunk_fallback(chunk, writer)
+            self._process_chunk_fallback(chunk, writer, stream_id)
         else:
-            # Fast-copy path: extract schemas and channels first (only if needed)
-            all_channels_known = all(idx.channel_id in self.known_channels for idx in indexes)
-            if not all_channels_known:
+            # Fast-copy path: extract schemas/channels first (only if needed)
+            remapped_channel_ids, needs_metadata_extraction = self._get_remapped_channel_ids(
+                indexes, stream_id
+            )
+
+            if needs_metadata_extraction:
                 # Extract schemas/channels metadata without writing messages
-                self._process_chunk_fallback(chunk, None)
+                self._process_chunk_fallback(chunk, None, stream_id)
+                # Re-build the remapped channel IDs after extraction
+                remapped_channel_ids, _ = self._get_remapped_channel_ids(indexes, stream_id)
 
             # Ensure all channels (and their schemas) are written before fast-copying chunk
-            for idx in indexes:
-                writer.ensure_channel_written(idx.channel_id)
+            for channel_id in remapped_channel_ids:
+                writer.ensure_channel_written(channel_id)
 
             # Fast-copy the chunk with its indexes
             writer.add_chunk_with_indexes(chunk, indexes)
             self.stats.chunks_copied += 1
 
-    def _process_chunk_fallback(self, chunk: Chunk, writer: McapWriter | None) -> None:
+    def _process_chunk_fallback(
+        self, chunk: Chunk, writer: McapWriter | None, stream_id: int
+    ) -> None:
         """Fallback to decode chunk into individual records."""
         try:
             chunk_records = breakup_chunk(chunk, validate_crc=True)
@@ -418,29 +620,59 @@ class McapProcessor:
 
             for chunk_record in chunk_records:
                 if isinstance(chunk_record, Schema):
-                    self.schemas[chunk_record.id] = chunk_record
+                    # Remap schema and store
+                    remapped_schema = self.remapper.remap_schema(stream_id, chunk_record)
+                    if remapped_schema:
+                        self.schemas[remapped_schema.id] = remapped_schema
                 elif isinstance(chunk_record, Channel):
-                    if chunk_record.id not in self.channels:
-                        self.channels[chunk_record.id] = chunk_record
-                        self.channel_topics[chunk_record.id] = chunk_record.topic
-                        self.known_channels.add(chunk_record.id)
+                    # Remap channel and store
+                    remapped_channel = self.remapper.remap_channel(stream_id, chunk_record)
+
+                    # Restore schema_id (Remapper zeros it out to avoid stale refs)
+                    if chunk_record.schema_id != 0:
+                        remapped_schema_id = self._get_remapped_schema_id(
+                            stream_id, chunk_record.schema_id
+                        )
+                        if remapped_schema_id != 0:
+                            remapped_channel = replace(
+                                remapped_channel, schema_id=remapped_schema_id
+                            )
+
+                    if remapped_channel.id not in self.channels:
+                        self.channels[remapped_channel.id] = remapped_channel
+                        self.channel_topics[remapped_channel.id] = remapped_channel.topic
+                        self.known_channels.add(remapped_channel.id)
                         # Pre-compute filtering decision for this channel
-                        if self.options.include_topics:
-                            self.channel_filter_cache[chunk_record.id] = any(
-                                p.search(chunk_record.topic) for p in self.options.include_topics
-                            )
-                        elif self.options.exclude_topics:
-                            self.channel_filter_cache[chunk_record.id] = not any(
-                                p.search(chunk_record.topic) for p in self.options.exclude_topics
-                            )
-                        else:
-                            self.channel_filter_cache[chunk_record.id] = True
-                elif isinstance(chunk_record, Message) and writer:
-                    self.process_message(chunk_record, writer)
+                        self.channel_filter_cache[remapped_channel.id] = (
+                            self._compute_channel_filter_decision(remapped_channel.topic)
+                        )
+                elif isinstance(chunk_record, Message):
+                    if not writer:
+                        continue
+                    # Remap message channel ID if needed
+                    original_channel_id = chunk_record.channel_id
+                    message_to_write = chunk_record
+                    if self.remapper.was_channel_remapped(stream_id, original_channel_id):
+                        # Look up the remapped channel
+                        original_channel = Channel(
+                            id=original_channel_id,
+                            schema_id=0,
+                            topic="",
+                            message_encoding="",
+                            metadata={},
+                        )
+                        remapped_channel = self.remapper.remap_channel(stream_id, original_channel)
+                        message_to_write = replace(
+                            chunk_record,
+                            channel_id=remapped_channel.id,
+                        )
+                    self.process_message(message_to_write, writer)
 
         except McapError as e:
             if self.options.recovery_mode:
-                console.print(f"[yellow]Warning: Failed to decode chunk: {e}[/yellow]")
+                console.print(
+                    f"[yellow]Warning (stream {stream_id}): Failed to decode chunk: {e}[/yellow]"
+                )
                 self.stats.errors_encountered += 1
             else:
                 raise

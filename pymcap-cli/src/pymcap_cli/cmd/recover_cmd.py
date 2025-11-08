@@ -26,14 +26,14 @@ def add_parser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-file_arg = parser.add_argument(
+    file_arg = parser.add_argument(
         "file",
         help="Path to the MCAP file to recover",
         type=str,
     )
     file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
 
-output_arg = parser.add_argument(
+    output_arg = parser.add_argument(
         "-o",
         "--output",
         help="Output filename (writes to stdout if not provided)",
@@ -97,7 +97,7 @@ def handle_command(args: argparse.Namespace) -> None:
 
     with input_file.open("rb") as input_stream, output_file.open("wb") as output_stream:
         try:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
             # Report results in recovery-style format
             console.print("[green]✓ Recovery completed successfully![/green]")

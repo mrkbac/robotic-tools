@@ -573,7 +573,13 @@ def _read_message_non_seeking(
     )
 
 
-class _Remapper:
+class Remapper:
+    """Smart ID remapper that minimizes remapping by preserving original IDs when possible.
+
+    Tracks schema and channel IDs across multiple streams, only remapping when conflicts occur.
+    Deduplicates identical schemas/channels by content to avoid duplicates.
+    """
+
     def __init__(self, summaries: Iterable[tuple[int, Summary]] | None = None) -> None:
         self._used_schema_ids: set[int] = set()
         self._used_channel_ids: set[int] = set()
@@ -582,6 +588,10 @@ class _Remapper:
         self._channel_lookup_fast: dict[tuple[int, int], Channel] = {}
         self._schema_lookup_slow: dict[tuple[str, bytes], Schema | None] = {}
         self._channel_lookup_slow: dict[tuple[str, str], Channel] = {}
+
+        # Track which IDs were actually remapped for fast-copy optimization
+        self._remapped_schemas: set[tuple[int, int]] = set()  # (stream_id, original_id)
+        self._remapped_channels: set[tuple[int, int]] = set()  # (stream_id, original_id)
 
         if summaries is not None:
             for stream_id, summary in summaries:
@@ -600,17 +610,25 @@ class _Remapper:
         if mapped_schema is not None:
             return mapped_schema
 
-        # Slow path: lookup by schema content
+        # Slow path: lookup by schema content (deduplication)
         slow_key = (schema.name, schema.data)
         mapped_schema = self._schema_lookup_slow.get(slow_key)
         if mapped_schema:
             # Cache in fast lookup for future access
             self._schema_lookup_fast[fast_key] = mapped_schema
+            # Track if ID changed
+            if mapped_schema.id != schema.id:
+                self._remapped_schemas.add(fast_key)
             return mapped_schema
 
+        # Try to preserve original ID if not in use
         new_id = schema.id
-        while new_id in self._used_schema_ids:
-            new_id += 1
+        if new_id in self._used_schema_ids:
+            # ID conflict - must remap
+            while new_id in self._used_schema_ids:
+                new_id += 1
+            self._remapped_schemas.add(fast_key)
+
         self._used_schema_ids.add(new_id)
         mapped_schema = replace(schema, id=new_id)
         self._schema_lookup_slow[slow_key] = mapped_schema
@@ -624,7 +642,7 @@ class _Remapper:
         if mapped_channel is not None:
             return mapped_channel
 
-        # Slow path: lookup by channel content
+        # Slow path: lookup by channel content (deduplication)
         slow_key = (
             channel.topic,
             channel.message_encoding,
@@ -633,16 +651,45 @@ class _Remapper:
         if mapped_channel is not None:
             # Cache in fast lookup for future access
             self._channel_lookup_fast[fast_key] = mapped_channel
+            # Track if ID changed
+            if mapped_channel.id != channel.id:
+                self._remapped_channels.add(fast_key)
             return mapped_channel
 
+        # Try to preserve original ID if not in use
         new_id = channel.id
-        while new_id in self._used_channel_ids:
-            new_id += 1
+        if new_id in self._used_channel_ids:
+            # ID conflict - must remap
+            while new_id in self._used_channel_ids:
+                new_id += 1
+            self._remapped_channels.add(fast_key)
+
         self._used_channel_ids.add(new_id)
         mapped_channel = replace(channel, id=new_id, schema_id=0)
         self._channel_lookup_slow[slow_key] = mapped_channel
         self._channel_lookup_fast[fast_key] = mapped_channel
         return mapped_channel
+
+    def was_schema_remapped(self, stream_id: int, original_id: int) -> bool:
+        """Check if a schema ID was changed during remapping."""
+        return (stream_id, original_id) in self._remapped_schemas
+
+    def was_channel_remapped(self, stream_id: int, original_id: int) -> bool:
+        """Check if a channel ID was changed during remapping."""
+        return (stream_id, original_id) in self._remapped_channels
+
+    def has_channel(self, stream_id: int, original_id: int) -> bool:
+        """Check if a channel has been seen and mapped."""
+        return (stream_id, original_id) in self._channel_lookup_fast
+
+    def get_remapped_channel(self, stream_id: int, original_id: int) -> Channel | None:
+        """Get the remapped channel for a given stream and original ID."""
+        return self._channel_lookup_fast.get((stream_id, original_id))
+
+    def get_remapped_schema(self, stream_id: int, original_schema_id: int) -> int:
+        """Get the remapped schema ID for a given stream and original schema ID."""
+        mapped_schema = self._schema_lookup_fast.get((stream_id, original_schema_id))
+        return mapped_schema.id if mapped_schema else 0
 
 
 def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
@@ -663,7 +710,7 @@ def read_message(
     validate_crc: bool = False,
 ) -> _ReaderReturnType:
     if isinstance(stream, list):
-        remapper = _Remapper()
+        remapper = Remapper()
 
         def remap_schema_channel(
             generator: _ReaderReturnType,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -46,7 +47,8 @@ def add_parser(
 
     file_arg = parser.add_argument(
         "file",
-        help="Path to the MCAP file to process",
+        nargs="+",
+        help="Path(s) to MCAP file(s) to process (or merge if multiple)",
         type=str,
     )
     file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
@@ -239,22 +241,33 @@ def handle_command(args: argparse.Namespace) -> None:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
 
-    input_file = Path(args.file)
-    if not input_file.exists():
-        console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
-        sys.exit(1)
+    # Handle single or multiple input files
+    input_files = [Path(f) for f in args.file]
+
+    # Validate all input files exist
+    for input_file in input_files:
+        if not input_file.exists():
+            console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
+            sys.exit(1)
 
     output_file = Path(args.output)
-    file_size = input_file.stat().st_size
+    file_sizes = [f.stat().st_size for f in input_files]
 
     # Create processor and run
     processor = McapProcessor(options)
 
-    with input_file.open("rb") as input_stream, output_file.open("wb") as output_stream:
-        stats = processor.process(input_stream, output_stream, file_size)
+    # Use ExitStack to manage multiple file handles
+    with contextlib.ExitStack() as stack:
+        input_streams = [stack.enter_context(f.open("rb")) for f in input_files]
+        output_stream = stack.enter_context(output_file.open("wb"))
+
+        stats = processor.process(input_streams, output_stream, file_sizes)
 
         # Report results
-        console.print("[green]✓ Processing completed successfully![/green]")
+        if len(input_files) > 1:
+            console.print(f"[green]✓ Merged {len(input_files)} files successfully![/green]")
+        else:
+            console.print("[green]✓ Processing completed successfully![/green]")
 
         # Basic stats
         console.print(
