@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
+import os
 import platform
 import shutil
 import subprocess
 import sys
+import threading
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
 
 import shtab
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -20,6 +24,7 @@ from rich.progress import (
     ProgressColumn,
     SpinnerColumn,
     Task,
+    TaskID,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
@@ -30,6 +35,7 @@ from small_mcap import get_summary, include_topics, read_message_decoded
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -38,6 +44,16 @@ console = Console()
 COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
 RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
 IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
+
+
+@dataclass(slots=True)
+class TopicStreamSpec:
+    topic: str
+    message_type: ImageType
+    width: int
+    height: int
+    fps: float
+    message_count: int
 
 
 class ImageType(Enum):
@@ -91,6 +107,243 @@ QUALITY_PRESETS = {
     VideoCodec.VP9: {"high": 30, "medium": 35, "low": 40},
     VideoCodec.AV1: {"high": 25, "medium": 30, "low": 35},
 }
+
+
+def _determine_layout(topic_count: int) -> tuple[int, int]:
+    if topic_count <= 1:
+        return (1, 1)
+    if topic_count == 2:
+        return (1, 2)
+    rows = math.ceil(math.sqrt(topic_count))
+    cols = math.ceil(topic_count / rows)
+    return (rows, cols)
+
+
+def _build_filter_complex(
+    layout: tuple[int, int],
+    stream_count: int,
+    target_width: int,
+    target_height: int,
+    topic_names: list[str] | None = None,
+) -> str:
+    cols = layout[1]
+
+    # Single topic case
+    if stream_count == 1:
+        filter_str = f"[0:v]scale={target_width}:{target_height}"
+        if topic_names:
+            drawtext = _build_drawtext_filter(topic_names[0], target_height)
+            filter_str += f",{drawtext}"
+        filter_str += "[out]"
+        return filter_str
+
+    # Multi-topic case: scale and add watermark to each stream
+    filters = []
+    for idx in range(stream_count):
+        filter_chain = f"[{idx}:v]scale={target_width}:{target_height}"
+        if topic_names and idx < len(topic_names):
+            drawtext = _build_drawtext_filter(topic_names[idx], target_height)
+            filter_chain += f",{drawtext}"
+        filter_chain += f"[s{idx}]"
+        filters.append(filter_chain)
+
+    layout_entries = [
+        f"{(idx % cols) * target_width}_{(idx // cols) * target_height}"
+        for idx in range(stream_count)
+    ]
+
+    stacked_inputs = "".join(f"[s{idx}]" for idx in range(stream_count))
+    layout_str = "|".join(layout_entries)
+    filters.append(
+        f"{stacked_inputs}xstack=inputs={stream_count}:layout={layout_str}:fill=black[out]"
+    )
+    return ";".join(filters)
+
+
+def _collect_topic_stream_spec(mcap_path: Path, topic: str) -> TopicStreamSpec:
+    message_type, message_count = _scan_mcap(mcap_path, topic)
+
+    if message_count == 0:
+        raise VideoEncoderError(f"No messages found for topic: {topic}")
+
+    decoder_factory = DecoderFactory()
+    width: int | None = None
+    height: int | None = None
+    first_timestamp: int | None = None
+    last_timestamp: int | None = None
+    fps: float | None = None
+    frames_sampled = 0
+    max_samples = min(10, message_count)
+
+    with mcap_path.open("rb") as handle:
+        for msg in read_message_decoded(
+            handle,
+            should_include=include_topics(topic),
+            decoder_factories=[decoder_factory],
+        ):
+            # Track timestamps for FPS calculation
+            if first_timestamp is None:
+                first_timestamp = msg.message.log_time
+            last_timestamp = msg.message.log_time
+            frames_sampled += 1
+
+            # Get dimensions from first frame
+            if width is None or height is None:
+                if message_type == ImageType.COMPRESSED:
+                    frame_data = _process_compressed_image(msg.decoded_message)
+                    width, height = _get_compressed_dimensions(frame_data)
+                else:
+                    frame_data, img_width, img_height = _process_raw_image(msg.decoded_message)
+                    width = img_width
+                    height = img_height
+
+            # Stop after sampling enough frames and getting dimensions
+            if width is not None and height is not None and frames_sampled >= max_samples:
+                break
+
+    if width is None or height is None:
+        raise VideoEncoderError(f"Failed to determine dimensions for topic: {topic}")
+
+    # Calculate FPS from sampled frames
+    if (
+        first_timestamp is not None
+        and last_timestamp is not None
+        and frames_sampled > 1
+        and last_timestamp > first_timestamp
+    ):
+        duration_s = (last_timestamp - first_timestamp) / 1e9
+        fps = (frames_sampled - 1) / duration_s
+    else:
+        fps = 1.0
+
+    return TopicStreamSpec(
+        topic=topic,
+        message_type=message_type,
+        width=width,
+        height=height,
+        fps=fps,
+        message_count=message_count,
+    )
+
+
+def _start_multi_topic_ffmpeg(
+    topic_specs: Sequence[TopicStreamSpec],
+    layout: tuple[int, int],
+    output_path: Path,
+    codec: VideoCodec,
+    encoder: str,
+    quality: int,
+    enable_watermarks: bool,
+    target_width: int,
+    target_height: int,
+    target_fps: float,
+) -> tuple[subprocess.Popen[bytes], list[BinaryIO]]:
+    cmd: list[str] = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    read_fds: list[int] = []
+    write_fds: list[int] = []
+
+    for spec in topic_specs:
+        read_fd, write_fd = os.pipe()
+        read_fds.append(read_fd)
+        write_fds.append(write_fd)
+
+        if spec.message_type == ImageType.COMPRESSED:
+            cmd.extend(
+                [
+                    "-f",
+                    "image2pipe",
+                    "-framerate",
+                    f"{spec.fps:.6f}",
+                    "-i",
+                    f"pipe:{read_fd}",
+                ]
+            )
+        else:
+            cmd.extend(
+                [
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    "rgb24",
+                    "-video_size",
+                    f"{spec.width}x{spec.height}",
+                    "-framerate",
+                    f"{spec.fps:.6f}",
+                    "-i",
+                    f"pipe:{read_fd}",
+                ]
+            )
+
+    # Build filter complex with per-topic watermarks if enabled
+    topic_names = [spec.topic for spec in topic_specs] if enable_watermarks else None
+    filter_str = _build_filter_complex(
+        layout, len(topic_specs), target_width, target_height, topic_names
+    )
+
+    cmd.extend(["-filter_complex", filter_str, "-map", "[out]"])
+    cmd.extend(["-c:v", encoder])
+    cmd.extend(_get_encoder_quality_params(codec, encoder, quality))
+    if target_fps > 0:
+        cmd.extend(["-r", f"{target_fps:.6f}"])
+    cmd.extend(["-pix_fmt", "yuv420p", str(output_path)])
+
+    try:
+        process = subprocess.Popen(  # noqa: S603
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            pass_fds=tuple(read_fds),
+        )
+    except FileNotFoundError as exc:
+        for fd in read_fds + write_fds:
+            os.close(fd)
+        raise VideoEncoderError("ffmpeg not found") from exc
+    except Exception:
+        for fd in read_fds + write_fds:
+            os.close(fd)
+        raise
+
+    for fd in read_fds:
+        os.close(fd)
+
+    writers = [cast("BinaryIO", os.fdopen(fd, "wb", buffering=0)) for fd in write_fds]
+    return process, writers
+
+
+def _stream_topic_worker(
+    spec: TopicStreamSpec,
+    mcap_path: Path,
+    writer: BinaryIO,
+    error_bucket: list[tuple[str, Exception]],
+    error_lock: threading.Lock,
+    progress: Progress | None = None,
+    task_id: TaskID | None = None,
+) -> None:
+    decoder_factory = DecoderFactory()
+    try:
+        with mcap_path.open("rb") as handle:
+            for msg in read_message_decoded(
+                handle,
+                should_include=include_topics(spec.topic),
+                decoder_factories=[decoder_factory],
+            ):
+                if spec.message_type == ImageType.COMPRESSED:
+                    frame_data = _process_compressed_image(msg.decoded_message)
+                else:
+                    frame_data, _, _ = _process_raw_image(msg.decoded_message)
+                writer.write(frame_data)
+
+                # Update progress if available
+                if progress is not None and task_id is not None:
+                    progress.update(task_id, advance=1)
+    except Exception as exc:  # noqa: BLE001
+        with error_lock:
+            error_bucket.append((spec.topic, exc))
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+
 
 # VideoToolbox bitrate calculation constants
 # Formula: bitrate = BASE_BITRATE * 2^(-(crf - CRF_REFERENCE) / CRF_SCALE)
@@ -391,203 +644,98 @@ def _get_compressed_dimensions(compressed_data: bytes) -> tuple[int, int]:
         raise VideoEncoderError(f"Failed to get image dimensions: {e}") from e
 
 
-def _start_ffmpeg(
-    output_path: Path,
-    width: int,
-    height: int,
-    message_type: ImageType,
-    codec: VideoCodec,
-    encoder: str,
-    quality: int,
-    fps: float,
-    watermark_text: str | None = None,
-) -> subprocess.Popen[bytes]:
-    cmd: list[str] = [
-        "ffmpeg",
-        "-y",  # Overwrite output
-        "-hide_banner",
-        "-loglevel",
-        "error",
-    ]
-
-    # Input format differs based on message type
-    if message_type == ImageType.COMPRESSED:
-        # Read compressed images (JPEG/PNG) from stdin
-        # Let ffmpeg auto-detect the image format
-        cmd.extend(
-            [
-                "-f",
-                "image2pipe",
-                "-framerate",
-                str(fps),
-                "-i",
-                "pipe:0",
-            ]
-        )
-    else:  # Raw Image
-        # Read raw RGB24 frames from stdin
-        cmd.extend(
-            [
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "rgb24",
-                "-video_size",
-                f"{width}x{height}",
-                "-framerate",
-                str(fps),
-                "-i",
-                "pipe:0",
-            ]
-        )
-
-    # Output encoder
-    cmd.extend(["-c:v", encoder])
-
-    # Add encoder-specific quality parameters
-    quality_params = _get_encoder_quality_params(codec, encoder, quality)
-    cmd.extend(quality_params)
-
-    # Add watermark if specified
-    if watermark_text:
-        # Escape special characters for ffmpeg drawtext filter
-        # Replace single quotes and colons which are special in ffmpeg filter syntax
-        escaped_text = (
-            watermark_text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
-        )
-
-        # Calculate font size based on video height (2.5% of height)
-        font_size = max(12, int(height * 0.025))
-
-        drawtext_filter = (
-            f"drawtext=text='{escaped_text}':"
-            f"x=10:y=10:"
-            f"fontsize={font_size}:"
-            f"fontcolor=white:"
-            f"box=1:"
-            f"boxcolor=black@0.5:"
-            f"boxborderw=5"
-        )
-        cmd.extend(["-vf", drawtext_filter])
-
-    # Pixel format for compatibility
-    cmd.extend(["-pix_fmt", "yuv420p"])
-
-    # Output file
-    cmd.append(str(output_path))
-
-    try:
-        return subprocess.Popen(  # noqa: S603
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError as e:
-        raise VideoEncoderError("ffmpeg not found") from e
-    except Exception as e:
-        raise VideoEncoderError(f"Failed to start ffmpeg: {e}") from e
+def _build_drawtext_filter(watermark_text: str, frame_height: int) -> str:
+    escaped_text = (
+        watermark_text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
+    )
+    font_size = max(12, int(frame_height * 0.025))
+    return (
+        f"drawtext=text='{escaped_text}':"
+        f"x=10:y=10:"
+        f"fontsize={font_size}:"
+        f"fontcolor=white:"
+        f"box=1:"
+        f"boxcolor=black@0.5:"
+        f"boxborderw=5"
+    )
 
 
 def encode_video(
     mcap_path: Path,
-    topic: str,
+    topics: list[str],
     output_path: Path,
-    codec: VideoCodec = VideoCodec.H264,
-    encoder_preference: Literal["auto", "software"] | HardwareBackend = "auto",
-    quality: int = 23,
-    watermark: bool = True,
+    codec: VideoCodec,
+    encoder_preference: Literal["auto", "software"] | HardwareBackend,
+    quality: int,
+    watermark: bool,
 ) -> None:
-    """Encode an image topic from MCAP to video.
+    """Encode image topics from MCAP to video.
 
     Args:
         mcap_path: Path to input MCAP file
-        topic: Topic name to extract images from
+        topics: List of topic names to extract images from (1+ topics)
         output_path: Path to output video file
         codec: Video codec
         encoder_preference: Encoder backend preference ("auto", "software", or HardwareBackend)
         quality: Quality value (CRF or equivalent)
-        watermark: Whether to add watermark showing filename and topic (default: True)
+        watermark: Whether to add per-topic watermarks showing topic names
 
     Raises:
         VideoEncoderError: If encoding fails
     """
+    if len(topics) < 1:
+        raise VideoEncoderError("At least one topic is required")
+
     console.print(f"[cyan]Reading MCAP file:[/cyan] {mcap_path}")
-    console.print(f"[cyan]Topic:[/cyan] {topic}")
+    console.print(f"[cyan]Topics:[/cyan] {', '.join(topics)}")
     console.print(f"[cyan]Output:[/cyan] {output_path}")
     console.print(f"[cyan]Codec:[/cyan] {codec.value}")
 
-    # Detect encoder
     encoder = _detect_encoder(codec, encoder_preference)
     console.print(f"[cyan]Encoder:[/cyan] {encoder}")
 
-    message_type, message_count = _scan_mcap(mcap_path, topic)
+    layout = _determine_layout(len(topics))
+    console.print(f"[green]✓[/green] Layout: {layout[0]} row(s) x {layout[1]} column(s)")
 
-    if message_count == 0:
-        raise VideoEncoderError(f"No messages found for topic: {topic}")
+    console.print("\n[yellow]Collecting topic metadata...[/yellow]")
+    topic_specs: list[TopicStreamSpec] = []
+    for topic in topics:
+        spec = _collect_topic_stream_spec(mcap_path, topic)
+        topic_specs.append(spec)
+        console.print(
+            f"[green]✓[/green] {topic}: {spec.width}x{spec.height} @ {spec.fps:.2f} fps"
+            f" ({spec.message_count:,} frames)"
+        )
 
-    console.print(f"[green]✓[/green] Found {message_count:,} messages")
-    console.print(f"[green]✓[/green] Message type: {message_type}")
+    target_width = max(2, min(spec.width for spec in topic_specs))
+    target_height = max(2, min(spec.height for spec in topic_specs))
+    target_width -= target_width % 2
+    target_height -= target_height % 2
+    target_fps = max((spec.fps for spec in topic_specs), default=1.0)
 
-    # Generate watermark text if enabled
-    watermark_text = f"{mcap_path.name} | {topic}" if watermark else None
+    console.print(
+        f"\n[yellow]Encoding video at {target_width}x{target_height}"
+        f" @ {target_fps:.2f} fps...[/yellow]"
+    )
 
-    # Encode video
-    console.print("\n[yellow]Encoding video...[/yellow]")
-    _encode_frames(
-        mcap_path=mcap_path,
-        topic=topic,
+    ffmpeg_process, writers = _start_multi_topic_ffmpeg(
+        topic_specs=topic_specs,
+        layout=layout,
         output_path=output_path,
-        message_type=message_type,
-        message_count=message_count,
         codec=codec,
         encoder=encoder,
         quality=quality,
-        watermark_text=watermark_text,
+        enable_watermarks=watermark,
+        target_width=target_width,
+        target_height=target_height,
+        target_fps=target_fps,
     )
 
-    console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
+    error_lock = threading.Lock()
+    errors: list[tuple[str, Exception]] = []
+    threads: list[threading.Thread] = []
 
-
-def _encode_frames(
-    mcap_path: Path,
-    topic: str,
-    output_path: Path,
-    message_type: ImageType,
-    message_count: int,
-    codec: VideoCodec,
-    encoder: str,
-    quality: int,
-    watermark_text: str | None = None,
-) -> None:
-    """Extract frames from MCAP and encode to video with accurate timing.
-
-    Args:
-        mcap_path: Path to MCAP file
-        topic: Topic to extract
-        output_path: Output video path
-        message_type: Type of image message (compressed or raw)
-        message_count: Expected number of messages for progress tracking
-        codec: Video codec
-        encoder: Encoder name
-        quality: Quality value
-        watermark_text: Optional watermark text to overlay on video
-
-    Raises:
-        VideoEncoderError: If encoding fails
-    """
-    decoder_factory = DecoderFactory()
-
-    # Start ffmpeg process
-    ffmpeg_process = None
-    frames_written = 0
-    width: int | None = None
-    height: int | None = None
-    fps: float | None = None
-    first_timestamp: int | None = None
-    fps_pts: list[int] = []  # List of presentation timestamps for FPS calculation
-    first_frame_data: bytes | None = None  # Buffer for the first frame
-
+    # Create progress bar
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -599,90 +747,49 @@ def _encode_frames(
         TimeRemainingColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Encoding video...", total=message_count)
+        # Create progress tasks for each topic
+        task_ids = []
+        for spec in topic_specs:
+            task_id = progress.add_task(
+                f"Encoding {spec.topic}",
+                total=spec.message_count,
+            )
+            task_ids.append(task_id)
 
-        with mcap_path.open("rb") as f:
-            for msg in read_message_decoded(
-                f,
-                should_include=include_topics(topic),
-                decoder_factories=[decoder_factory],
-            ):
-                # Track timestamps for FPS calculation
-                if first_timestamp is None:
-                    first_timestamp = msg.message.log_time
-                elif fps is None:
-                    second_timestamp = msg.message.log_time
-                    # Calculate FPS from time between first two messages
-                    duration_ns = second_timestamp - first_timestamp
-                    fps = 1.0 / (duration_ns / 1e9) if duration_ns > 0 else 30.0
+        # Start worker threads with progress tracking
+        for spec, writer, task_id in zip(topic_specs, writers, task_ids, strict=True):
+            thread = threading.Thread(
+                target=_stream_topic_worker,
+                name=f"pymcap-{spec.topic}",
+                args=(spec, mcap_path, writer, errors, error_lock, progress, task_id),
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
 
-                # Extract frame data based on message type
-                if message_type == ImageType.COMPRESSED:
-                    frame_data = _process_compressed_image(msg.decoded_message)
-                    # For compressed images, we need to get dimensions from first frame
-                    if width is None or height is None:
-                        width, height = _get_compressed_dimensions(frame_data)
-                else:  # Image
-                    frame_data, img_width, img_height = _process_raw_image(msg.decoded_message)
-                    if width is None or height is None:
-                        width = img_width
-                        height = img_height
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
 
-                # Buffer the first frame
-                if first_frame_data is None:
-                    first_frame_data = frame_data
-
-                # Start ffmpeg once we have dimensions and FPS
-                # For single-frame videos, we'll use a default FPS of 1
-                if ffmpeg_process is None and fps is not None:
-                    if width is None or height is None:
-                        raise VideoEncoderError("Failed to determine image dimensions")
-                    ffmpeg_process = _start_ffmpeg(
-                        output_path=output_path,
-                        width=width,
-                        height=height,
-                        message_type=message_type,
-                        codec=codec,
-                        encoder=encoder,
-                        quality=quality,
-                        fps=fps,
-                        watermark_text=watermark_text,
-                    )
-
-                    # Write the buffered first frame
-                    assert ffmpeg_process.stdin is not None
-                    ffmpeg_process.stdin.write(first_frame_data)
-                    frames_written += 1
-
-                # Write current frame (skip if it's the first frame, already written from buffer)
-                if ffmpeg_process is not None and frames_written > 0:
-                    assert ffmpeg_process.stdin is not None
-                    ffmpeg_process.stdin.write(frame_data)
-                    frames_written += 1
-
-                # Track timestamp for FPS calculation
-                fps_pts.append(msg.message.log_time)
-
-                progress.update(task, advance=1)
-
-    # Close ffmpeg
-    if ffmpeg_process:
-        if ffmpeg_process.stdin:
-            ffmpeg_process.stdin.close()
-        return_code = ffmpeg_process.wait()
-
-        if return_code != 0 and ffmpeg_process.stderr:
+    if errors:
+        ffmpeg_process.terminate()
+        stderr = ""
+        if ffmpeg_process.stderr:
             stderr = ffmpeg_process.stderr.read().decode("utf-8", errors="ignore")
-            raise VideoEncoderError(f"ffmpeg encoding failed:\n{stderr}")
+        ffmpeg_process.wait()
+        failed_topic, exc = errors[0]
+        raise VideoEncoderError(
+            f"Failed to stream topic '{failed_topic}': {exc}\n{stderr}"
+        ) from exc
 
-    # Calculate and display statistics
-    if frames_written > 0 and len(fps_pts) >= 2:
-        duration_ns = fps_pts[-1] - fps_pts[0]
-        duration_s = duration_ns / 1e9
-        avg_fps = (frames_written - 1) / duration_s if duration_s > 0 else 0
-        console.print(f"[dim]Frames written: {frames_written:,}")
-        console.print(f"[dim]Duration: {duration_s:.2f}s")
-        console.print(f"[dim]Average FPS: {avg_fps:.2f}[/dim]")
+    return_code = ffmpeg_process.wait()
+    if return_code != 0:
+        stderr = ""
+        if ffmpeg_process.stderr:
+            stderr = ffmpeg_process.stderr.read().decode("utf-8", errors="ignore")
+        raise VideoEncoderError(f"ffmpeg encoding failed:\n{stderr}")
+
+    console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
 
 
 def add_parser(
@@ -704,8 +811,11 @@ def add_parser(
 
     parser.add_argument(
         "--topic",
+        "-t",
+        dest="topics",
+        action="append",
         required=True,
-        help="Image topic to convert (e.g., /camera/front)",
+        help="Image topic to convert (repeat for multiple topics)",
         type=str,
     )
 
@@ -750,7 +860,7 @@ def add_parser(
     parser.add_argument(
         "--watermark",
         action="store_true",
-        help="Enable watermark showing filename and topic (watermark disabled by default)",
+        help="Enable per-topic watermarks showing topic names (watermark disabled by default)",
     )
 
     return parser
@@ -783,19 +893,19 @@ def handle_command(args: argparse.Namespace) -> None:
     codec = VideoCodec(args.codec)
 
     # Convert encoder preference to enum if it's a hardware backend
-    encoder_pref: Literal["auto", "software"] | HardwareBackend
-    if args.encoder in ("auto", "software"):
-        encoder_pref = args.encoder
-    else:
-        encoder_pref = HardwareBackend(args.encoder)
+    encoder_pref: Literal["auto", "software"] | HardwareBackend = (
+        args.encoder if args.encoder in ("auto", "software") else HardwareBackend(args.encoder)
+    )
 
     # Determine quality value
     quality_value = args.crf if args.crf is not None else QUALITY_PRESETS[codec][args.quality]
 
+    topics: list[str] = args.topics
+
     try:
         encode_video(
             mcap_path=input_file,
-            topic=args.topic,
+            topics=topics,
             output_path=output_file,
             codec=codec,
             encoder_preference=encoder_pref,
