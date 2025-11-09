@@ -3,6 +3,7 @@
 import typer
 
 from pymcap_cli.cmd import (
+    compress_cmd,
     du_cmd,
     filter_cmd,
     info_cmd,
@@ -24,7 +25,6 @@ app = typer.Typer(
 
 
 # Register all commands
-# For single-command modules, register the command directly
 app.command(name="info")(info_cmd.info)
 app.command(name="info-json")(info_json_cmd.info_json)
 app.command(name="recover")(recover_cmd.recover)
@@ -33,11 +33,10 @@ app.command(name="process")(process_cmd.process)
 app.command(name="rechunk")(rechunk_cmd.rechunk)
 app.command(name="tftree")(tftree_cmd.tftree)
 app.command(name="video")(video_cmd.video)
+app.command(name="filter")(filter_cmd.filter_cmd)
+app.command(name="compress")(compress_cmd.compress)
 
-# For multi-command modules (filter has both filter and compress), add as sub-app
-app.add_typer(filter_cmd.app)
-
-# For command groups (list has 5 subcommands), add as sub-app
+# Command groups (list has 5 subcommands)
 app.add_typer(list_cmd.list_app)
 
 

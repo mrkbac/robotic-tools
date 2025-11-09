@@ -274,6 +274,6 @@ def tftree(
                 frame_msg = f"  - Frame [bold]'{child}'[/bold] has parents: {parents_str}"
                 console.print(frame_msg, style="yellow")
 
-    except Exception as e:  # noqa: BLE001
+    except (OSError, ValueError, RuntimeError) as e:
         console.print(f"[red]Error reading MCAP file: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e

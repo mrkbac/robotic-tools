@@ -31,6 +31,27 @@ class CompressionType(str, Enum):
     NONE = "none"
 
 
+class RecoveryMode(str, Enum):
+    """Recovery mode choices."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class MetadataMode(str, Enum):
+    """Metadata inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
+class AttachmentsMode(str, Enum):
+    """Attachments inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
 def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
     """Parse timestamp with precedence: date_or_nanos > nanoseconds > seconds."""
     if date_or_nanos:
@@ -49,14 +70,11 @@ def build_processing_options(
     end: str,
     end_nsecs: int,
     end_secs: int,
-    include_metadata: bool,
-    exclude_metadata: bool,
-    include_attachments: bool,
-    exclude_attachments: bool,
+    metadata_mode: MetadataMode,
+    attachments_mode: AttachmentsMode,
     compression: str,
     chunk_size: int,
-    recovery_mode: bool,
-    no_recovery: bool,
+    recovery_mode: RecoveryMode,
     always_decode_chunk: bool,
 ) -> ProcessingOptions:
     """Build ProcessingOptions from command line arguments."""
@@ -68,7 +86,7 @@ def build_processing_options(
     if include_topic_regex and exclude_topic_regex:
         raise ValueError("Cannot use both --include-topic-regex and --exclude-topic-regex")
 
-    recovery = False if no_recovery and recovery_mode else not no_recovery
+    recovery = recovery_mode == RecoveryMode.ENABLED
 
     # Parse time arguments
     try:
@@ -90,8 +108,8 @@ def build_processing_options(
     exclude_topics = compile_topic_patterns(exclude_topic_regex)
 
     # Handle content filtering
-    include_meta = include_metadata and not exclude_metadata
-    include_attach = include_attachments and not exclude_attachments
+    include_meta = metadata_mode == MetadataMode.INCLUDE
+    include_attach = attachments_mode == AttachmentsMode.INCLUDE
 
     return ProcessingOptions(
         # Recovery options
@@ -131,19 +149,12 @@ def process(
     ],
     # Recovery options
     recovery_mode: Annotated[
-        bool,
+        RecoveryMode,
         typer.Option(
-            "--recovery-mode",
-            help="Enable recovery mode (handle errors gracefully, default: enabled)",
+            "--recovery",
+            help="Recovery mode: enabled (handle errors gracefully) or disabled (fail on errors)",
         ),
-    ] = True,
-    no_recovery: Annotated[
-        bool,
-        typer.Option(
-            "--no-recovery",
-            help="Disable recovery mode (fail on any errors)",
-        ),
-    ] = False,
+    ] = RecoveryMode.ENABLED,
     always_decode_chunk: Annotated[
         bool,
         typer.Option(
@@ -196,7 +207,11 @@ def process(
         int,
         typer.Option(
             "--start-nsecs",
-            help="(Deprecated, use --start) Include messages at or after this time in nanoseconds",
+            help=(
+                "[DEPRECATED - use --start instead] "
+                "Include messages at or after this time in nanoseconds"
+            ),
+            hidden=True,
         ),
     ] = 0,
     end: Annotated[
@@ -219,44 +234,34 @@ def process(
         int,
         typer.Option(
             "--end-nsecs",
-            help="(Deprecated, use --end) Include messages before this time in nanoseconds",
+            help=(
+                "[DEPRECATED - use --end instead] Include messages before this time in nanoseconds"
+            ),
+            hidden=True,
         ),
     ] = 0,
     # Content filtering
-    include_metadata: Annotated[
-        bool,
+    metadata_mode: Annotated[
+        MetadataMode,
         typer.Option(
-            "--include-metadata",
-            help="Include metadata records in output (default: enabled)",
+            "--metadata",
+            help="Metadata handling: include or exclude metadata records",
         ),
-    ] = True,
-    exclude_metadata: Annotated[
-        bool,
+    ] = MetadataMode.INCLUDE,
+    attachments_mode: Annotated[
+        AttachmentsMode,
         typer.Option(
-            "--exclude-metadata",
-            help="Exclude metadata records from output",
+            "--attachments",
+            help="Attachments handling: include or exclude attachment records",
         ),
-    ] = False,
-    include_attachments: Annotated[
-        bool,
-        typer.Option(
-            "--include-attachments",
-            help="Include attachment records in output (default: enabled)",
-        ),
-    ] = True,
-    exclude_attachments: Annotated[
-        bool,
-        typer.Option(
-            "--exclude-attachments",
-            help="Exclude attachment records from output",
-        ),
-    ] = False,
+    ] = AttachmentsMode.INCLUDE,
     # Output options
     chunk_size: Annotated[
         int,
         typer.Option(
             "--chunk-size",
-            help="Chunk size of output file (default: 4MB)",
+            min=1,
+            help="Chunk size of output file in bytes (default: 4MB)",
         ),
     ] = 4 * 1024 * 1024,  # 4MB
     compression: Annotated[
@@ -286,14 +291,11 @@ def process(
             end=end,
             end_nsecs=end_nsecs,
             end_secs=end_secs,
-            include_metadata=include_metadata,
-            exclude_metadata=exclude_metadata,
-            include_attachments=include_attachments,
-            exclude_attachments=exclude_attachments,
+            metadata_mode=metadata_mode,
+            attachments_mode=attachments_mode,
             compression=compression.value,
             chunk_size=chunk_size,
             recovery_mode=recovery_mode,
-            no_recovery=no_recovery,
             always_decode_chunk=always_decode_chunk,
         )
     except ValueError as e:

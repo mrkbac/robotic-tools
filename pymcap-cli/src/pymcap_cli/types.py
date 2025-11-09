@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import TypedDict
 
 
@@ -122,3 +123,11 @@ class McapInfoOutput(TypedDict):
     channels: list[ChannelInfo]
     schemas: list[SchemaInfo]
     message_distribution: MessageDistribution
+
+
+class CompressionType(str, Enum):
+    """Compression algorithm types."""
+
+    ZSTD = "zstd"
+    LZ4 = "lz4"
+    NONE = "none"

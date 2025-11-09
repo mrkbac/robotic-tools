@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
@@ -8,18 +7,9 @@ import typer
 from rich.console import Console
 
 from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
+from pymcap_cli.types import CompressionType
 
 console = Console()
-
-
-class CompressionType(str, Enum):
-    """Compression algorithm choices."""
-
-    zstd = "zstd"
-    lz4 = "lz4"
-    none = "none"
-
-
 app = typer.Typer()
 
 
@@ -46,7 +36,8 @@ def recover(
         int,
         typer.Option(
             "--chunk-size",
-            help="Chunk size of output file (default: 4MB)",
+            min=1,
+            help="Chunk size of output file in bytes (default: 4MB)",
         ),
     ] = 4 * 1024 * 1024,
     compression: Annotated[
@@ -55,7 +46,7 @@ def recover(
             "--compression",
             help="Compression algorithm to use on output file (default: zstd)",
         ),
-    ] = CompressionType.zstd,
+    ] = CompressionType.ZSTD,
     always_decode_chunk: Annotated[
         bool,
         typer.Option(

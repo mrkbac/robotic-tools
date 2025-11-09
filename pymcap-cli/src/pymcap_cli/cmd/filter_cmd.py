@@ -16,17 +16,24 @@ from pymcap_cli.mcap_processor import (
     compile_topic_patterns,
     parse_time_arg,
 )
+from pymcap_cli.types import CompressionType
 
 console = Console()
 app = typer.Typer()
 
 
-class CompressionType(str, Enum):
-    """Compression algorithm types."""
+class MetadataMode(str, Enum):
+    """Metadata inclusion mode."""
 
-    ZSTD = "zstd"
-    LZ4 = "lz4"
-    NONE = "none"
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
+class AttachmentsMode(str, Enum):
+    """Attachments inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
 
 
 def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
@@ -140,29 +147,30 @@ def filter_cmd(
             hidden=True,
         ),
     ] = 0,
-    include_metadata: Annotated[
-        bool,
+    metadata_mode: Annotated[
+        MetadataMode,
         typer.Option(
-            "--include-metadata",
-            help="Include metadata records in output",
+            "--metadata",
+            help="Metadata handling: include or exclude metadata records",
             rich_help_panel="Content Filtering",
             show_default=True,
         ),
-    ] = False,
-    include_attachments: Annotated[
-        bool,
+    ] = MetadataMode.EXCLUDE,
+    attachments_mode: Annotated[
+        AttachmentsMode,
         typer.Option(
-            "--include-attachments",
-            help="Include attachment records in output",
+            "--attachments",
+            help="Attachments handling: include or exclude attachment records",
             rich_help_panel="Content Filtering",
             show_default=True,
         ),
-    ] = False,
+    ] = AttachmentsMode.EXCLUDE,
     chunk_size: Annotated[
         int,
         typer.Option(
             "--chunk-size",
-            help="Chunk size of output file",
+            min=1,
+            help="Chunk size of output file in bytes",
             rich_help_panel="Output Options",
             envvar="PYMCAP_CHUNK_SIZE",
             show_default="4MB",
@@ -219,8 +227,8 @@ def filter_cmd(
         exclude_topics=compile_topic_patterns(exclude_topic_regex),
         start_time=start_time,
         end_time=end_time,
-        include_metadata=include_metadata,
-        include_attachments=include_attachments,
+        include_metadata=metadata_mode == MetadataMode.INCLUDE,
+        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
         # Output options
         compression=compression.value,
         chunk_size=chunk_size,
@@ -261,90 +269,4 @@ def filter_cmd(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during filtering: {e}[/red]")
-            raise typer.Exit(1)
-
-
-@app.command()
-def compress(
-    file: Annotated[
-        Path,
-        typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to compress",
-        ),
-    ],
-    output: Annotated[
-        Path,
-        typer.Option(
-            ...,
-            "-o",
-            "--output",
-            help="Output filename",
-        ),
-    ],
-    chunk_size: Annotated[
-        int,
-        typer.Option(
-            "--chunk-size",
-            help="Chunk size of output file",
-            envvar="PYMCAP_CHUNK_SIZE",
-            show_default="4MB",
-        ),
-    ] = 4 * 1024 * 1024,
-    compression: Annotated[
-        CompressionType,
-        typer.Option(
-            "--compression",
-            help="Compression algorithm for output file",
-            envvar="PYMCAP_COMPRESSION",
-            show_default=True,
-        ),
-    ] = CompressionType.ZSTD,
-) -> None:
-    """Create a compressed copy of an MCAP file.
-
-    Copy data in an MCAP file to a new file, compressing the output.
-
-    Usage:
-      mcap compress in.mcap -o out.mcap
-    """
-    # Convert compress args to unified processing options (include everything)
-    processing_options = ProcessingOptions(
-        # Recovery mode with all content included
-        recovery_mode=True,
-        always_decode_chunk=False,
-        # No filtering - include everything
-        include_topics=[],
-        exclude_topics=[],
-        start_time=0,
-        end_time=2**63 - 1,
-        include_metadata=True,
-        include_attachments=True,
-        # Output options with specified compression
-        compression=compression.value,
-        chunk_size=chunk_size,
-    )
-
-    if not file.exists():
-        console.print(f"[red]Error: Input file '{file}' does not exist[/red]")
-        raise typer.Exit(1)
-
-    file_size = file.stat().st_size
-
-    console.print(f"[blue]Compressing '{file}' to '{output}'[/blue]")
-
-    processor = McapProcessor(processing_options)
-
-    with file.open("rb") as input_stream, output.open("wb") as output_stream:
-        try:
-            stats = processor.process([input_stream], output_stream, [file_size])
-
-            console.print("[green]✓ Compression completed successfully![/green]")
-            console.print(
-                f"Processed {stats.messages_processed:,} messages, "
-                f"wrote {stats.writer_statistics.message_count:,} messages"
-            )
-        except Exception as e:  # noqa: BLE001
-            console.print(f"[red]Error during compression: {e}[/red]")
             raise typer.Exit(1)

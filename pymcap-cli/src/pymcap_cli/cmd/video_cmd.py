@@ -709,9 +709,6 @@ def encode_video(
     Raises:
         VideoEncoderError: If encoding fails
     """
-    if len(topics) < 1:
-        raise VideoEncoderError("At least one topic is required")
-
     console.print(f"[cyan]Reading MCAP file:[/cyan] {mcap_path}")
     console.print(f"[cyan]Topics:[/cyan] {', '.join(topics)}")
     console.print(f"[cyan]Output:[/cyan] {output_path}")
@@ -818,13 +815,24 @@ def encode_video(
     console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
 
 
+def _validate_topics(topics: list[str]) -> list[str]:
+    """Validate that at least one topic is provided."""
+    if not topics:
+        raise typer.BadParameter(
+            "At least one topic is required. Use --topic TOPIC_NAME or -t TOPIC_NAME"
+        )
+    return topics
+
+
 @app.command()
 def video(
     file: Annotated[
         Path,
         typer.Argument(
             exists=True,
+            file_okay=True,
             dir_okay=False,
+            readable=True,
             help="Path to the MCAP file",
         ),
     ],
@@ -833,6 +841,7 @@ def video(
         typer.Option(
             "--topic",
             "-t",
+            callback=_validate_topics,
             help="Image topic to convert (repeat for multiple topics)",
             autocompletion=complete_image_topics,
         ),
@@ -881,7 +890,7 @@ def video(
         bool,
         typer.Option(
             "--watermark",
-            help="Enable per-topic watermarks showing topic names",
+            help="Add topic name overlay in top-left corner of each video stream",
         ),
     ] = False,
 ) -> None:
@@ -889,12 +898,7 @@ def video(
 
     Generate MP4 video from topics using ffmpeg.
     """
-    # Validate input file exists
-    if not file.exists():
-        console.print(f"[red]Error:[/red] Input file not found: {file}")
-        raise typer.Exit(1)
-
-    # Validate output directory exists
+    # Validate output directory exists (input file is validated by typer with exists=True)
     if not output.parent.exists():
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
         raise typer.Exit(1)

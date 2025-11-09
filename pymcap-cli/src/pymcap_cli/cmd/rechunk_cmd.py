@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum, auto
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, BinaryIO
 
@@ -14,7 +14,6 @@ from rich.console import Console
 from small_mcap import (
     Attachment,
     Channel,
-    CompressionType,
     DataEnd,
     Footer,
     Header,
@@ -24,31 +23,27 @@ from small_mcap import (
     Schema,
     stream_reader,
 )
+from small_mcap import (
+    CompressionType as SmallMcapCompressionType,
+)
 from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
 from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.mcap_processor import compile_topic_patterns, str_to_compression_type
+from pymcap_cli.types import CompressionType
 from pymcap_cli.utils import file_progress
 
 console = Console()
 app = typer.Typer()
 
 
-class RechunkMode(Enum):
-    """Mode for rechunking operation."""
+class RechunkStrategy(str, Enum):
+    """Strategy for rechunking operation."""
 
-    PATTERN = auto()  # Group by regex patterns
-    ALL = auto()  # Each topic in its own chunk group
-    AUTO = auto()  # Auto-group based on size (>15% threshold)
-
-
-class CompressionChoice(str, Enum):
-    """Compression algorithm choices."""
-
-    ZSTD = "zstd"
-    LZ4 = "lz4"
-    NONE = "none"
+    PATTERN = "pattern"  # Group by regex patterns
+    ALL = "all"  # Each topic in its own chunk group
+    AUTO = "auto"  # Auto-group based on size (>15% threshold)
 
 
 class MessageGroup:
@@ -58,7 +53,7 @@ class MessageGroup:
         self,
         writer: McapWriter,
         chunk_size: int,
-        compression_type: CompressionType,
+        compression_type: SmallMcapCompressionType,
         schemas: dict[int, Schema],
         channels: dict[int, Channel],
     ) -> None:
@@ -90,7 +85,7 @@ class MessageGroup:
                     console.print(
                         "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
                     )
-                    self.chunk_builder.compression = CompressionType.NONE
+                    self.chunk_builder.compression = SmallMcapCompressionType.NONE
             self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
 
         self.message_count += 1
@@ -108,7 +103,7 @@ class RechunkProcessor:
 
     def __init__(
         self,
-        mode: RechunkMode,
+        mode: RechunkStrategy,
         patterns: list[Pattern[str]],
         chunk_size: int,
         compression: str,
@@ -181,7 +176,7 @@ class RechunkProcessor:
     ) -> None:
         """Main processing function - streaming approach."""
         # For AUTO mode, pre-analyze to identify large channels
-        if self.mode == RechunkMode.AUTO:
+        if self.mode == RechunkStrategy.AUTO:
             self.analyze_for_auto_grouping(input_stream)
 
         # Initialize writer and share schema/channel dicts for auto-ensure
@@ -271,13 +266,13 @@ class RechunkProcessor:
         """Create appropriate MessageGroup for a channel based on mode."""
         compression_type = str_to_compression_type(self.compression)
 
-        if self.mode == RechunkMode.ALL:
+        if self.mode == RechunkStrategy.ALL:
             # Each channel gets its own unique group
             return MessageGroup(
                 writer, self.chunk_size, compression_type, self.schemas, self.channels
             )
 
-        if self.mode == RechunkMode.AUTO:
+        if self.mode == RechunkStrategy.AUTO:
             # Large channels get their own group, small channels share one
             if channel_id in self.large_channels:
                 # Create unique group for large channel
@@ -294,7 +289,7 @@ class RechunkProcessor:
                 writer, self.chunk_size, compression_type, self.schemas, self.channels
             )
 
-        # RechunkMode.PATTERN
+        # RechunkStrategy.PATTERN
         # Find which pattern matches this channel's topic
         pattern_idx = self.find_matching_pattern_index(channel.topic)
         group_key = pattern_idx if pattern_idx is not None else -1  # -1 for unmatched
@@ -331,50 +326,46 @@ def rechunk(
             help="Output filename (required)",
         ),
     ],
+    strategy: Annotated[
+        RechunkStrategy,
+        typer.Option(
+            "--strategy",
+            "-s",
+            help=(
+                "Rechunking strategy: pattern (group by regex), "
+                "all (each topic separate), or auto (size-based grouping)"
+            ),
+        ),
+    ],
     pattern: Annotated[
         list[str] | None,
         typer.Option(
             "-p",
             "--pattern",
             help=(
-                "Regex pattern for topic grouping (can be used multiple times). "
+                "Regex pattern for topic grouping (can be used multiple times, "
+                "only with --strategy=pattern). "
                 "Topics matching the first pattern go into chunk group 1, "
                 "second pattern → group 2, etc. Unmatched topics → separate group."
             ),
             autocompletion=complete_all_topics,
         ),
     ] = None,
-    all_topics: Annotated[
-        bool,
-        typer.Option(
-            "--all",
-            help="If set, all messages are placed into their own chunk",
-        ),
-    ] = False,
-    auto: Annotated[
-        bool,
-        typer.Option(
-            "--auto",
-            help=(
-                "If set, automatically create chunk groups. "
-                "Topics taking up more than 15% of the uncompressed total size get their own chunk."
-            ),
-        ),
-    ] = False,
     chunk_size: Annotated[
         int,
         typer.Option(
             "--chunk-size",
+            min=1,
             help="Chunk size in bytes (default: 4MB)",
         ),
     ] = 4 * 1024 * 1024,
     compression: Annotated[
-        CompressionChoice,
+        CompressionType,
         typer.Option(
             "--compression",
             help="Compression algorithm for output file (default: zstd)",
         ),
-    ] = CompressionChoice.ZSTD,
+    ] = CompressionType.ZSTD,
 ) -> None:
     """Reorganize MCAP messages into chunks based on topic patterns.
 
@@ -386,13 +377,12 @@ def rechunk(
     Usage:
       pymcap-cli rechunk in.mcap -o out.mcap -p '/camera.*' -p '/lidar.*'
     """
-    # Validate mutually exclusive options
-    mode_count = sum([bool(pattern), all_topics, auto])
-    if mode_count == 0:
-        console.print("[red]Error: One of --pattern, --all, or --auto is required[/red]")
-        raise typer.Exit(1)
-    if mode_count > 1:
-        console.print("[red]Error: --pattern, --all, and --auto are mutually exclusive[/red]")
+    # Validate pattern is provided when using PATTERN strategy
+    if strategy == RechunkStrategy.PATTERN and not pattern:
+        console.print(
+            "[red]Error: --strategy=pattern requires at least one regex pattern. "
+            "Use -p PATTERN[/red]"
+        )
         raise typer.Exit(1)
 
     input_file = Path(file)
@@ -403,18 +393,15 @@ def rechunk(
     output_file = Path(output)
     file_size = input_file.stat().st_size
 
-    # Determine mode and compile patterns if needed
-    mode: RechunkMode
+    # Compile patterns if using PATTERN strategy
     patterns: list[Pattern[str]] = []
 
-    if all_topics:
-        mode = RechunkMode.ALL
-        console.print("[dim]Mode: Each topic in its own chunk group[/dim]")
-    elif auto:
-        mode = RechunkMode.AUTO
-        console.print("[dim]Mode: Auto-grouping based on size (>15% threshold)[/dim]")
-    else:
-        mode = RechunkMode.PATTERN
+    if strategy == RechunkStrategy.ALL:
+        console.print("[dim]Strategy: Each topic in its own chunk group[/dim]")
+    elif strategy == RechunkStrategy.AUTO:
+        console.print("[dim]Strategy: Auto-grouping based on size (>15% threshold)[/dim]")
+    else:  # PATTERN
+        console.print("[dim]Strategy: Pattern-based grouping[/dim]")
         try:
             patterns = compile_topic_patterns(pattern or [])
         except ValueError as e:
@@ -429,7 +416,7 @@ def rechunk(
 
     # Create processor and run
     processor = RechunkProcessor(
-        mode=mode,
+        mode=strategy,
         patterns=patterns,
         chunk_size=chunk_size,
         compression=compression.value,
@@ -445,14 +432,14 @@ def rechunk(
             f"wrote {processor.messages_written:,} messages"
         )
 
-        # Mode-specific stats
+        # Strategy-specific stats
         num_unique_groups = len(set(processor.channel_to_group.values()))
-        if mode == RechunkMode.ALL:
+        if strategy == RechunkStrategy.ALL:
             console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")
-        elif mode == RechunkMode.AUTO:
+        elif strategy == RechunkStrategy.AUTO:
             console.print(
                 f"Created {num_unique_groups} chunk group(s) "
                 f"({len(processor.large_channels)} large, rest shared)"
             )
-        elif mode == RechunkMode.PATTERN and patterns:
+        elif strategy == RechunkStrategy.PATTERN and patterns:
             console.print(f"Used {len(patterns)} topic pattern(s) for grouping")
