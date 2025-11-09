@@ -48,6 +48,13 @@ jobs:
       - name: Download test data
         run: bash scripts/download_test_mcap.sh
 
+      - name: Install mcap CLI
+        run: |
+          curl -L https://github.com/foxglove/mcap/releases/download/releases%2Fmcap-cli%2Fv0.0.57/mcap-linux-amd64 -o /tmp/mcap
+          chmod +x /tmp/mcap
+          sudo mv /tmp/mcap /usr/local/bin/mcap
+          mcap version
+
       - name: Run tests with coverage
         run: |
           uv run pytest small-mcap/tests -v --cov=small_mcap
