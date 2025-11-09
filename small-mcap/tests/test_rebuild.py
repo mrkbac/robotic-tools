@@ -2,12 +2,14 @@
 
 from pathlib import Path
 
+import pytest
 from small_mcap import get_summary, rebuild_summary
 
 # Path to conformance test data
 CONFORMANCE_DIR = Path(__file__).parent.parent.parent / "data" / "conformance"
 
 
+@pytest.mark.conformance
 def test_rebuild_simple_chunked_file():
     """Test rebuilding summary from a simple chunked MCAP file."""
     test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch.mcap"
@@ -33,6 +35,7 @@ def test_rebuild_simple_chunked_file():
         assert summary.statistics.chunk_count >= 1
 
 
+@pytest.mark.conformance
 def test_rebuild_with_indexes():
     """Test rebuilding preserves chunk and message indexes."""
     test_file = CONFORMANCE_DIR / "OneMessage" / "OneMessage-ch-chx-mx.mcap"
@@ -50,6 +53,7 @@ def test_rebuild_with_indexes():
             assert len(rebuild_info.chunk_information) > 0
 
 
+@pytest.mark.conformance
 def test_rebuild_with_attachments():
     """Test rebuilding preserves attachments."""
     test_file = CONFORMANCE_DIR / "OneAttachment" / "OneAttachment-ax.mcap"
@@ -64,6 +68,7 @@ def test_rebuild_with_attachments():
         assert rebuild_info.summary.statistics.attachment_count == 1
 
 
+@pytest.mark.conformance
 def test_rebuild_with_metadata():
     """Test rebuilding preserves metadata."""
     test_file = CONFORMANCE_DIR / "OneMetadata" / "OneMetadata-mdx.mcap"
@@ -78,6 +83,7 @@ def test_rebuild_with_metadata():
         assert rebuild_info.summary.statistics.metadata_count == 1
 
 
+@pytest.mark.conformance
 def test_rebuild_multiple_messages():
     """Test rebuilding file with multiple messages."""
     test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch-chx-mx.mcap"
@@ -99,6 +105,7 @@ def test_rebuild_multiple_messages():
         assert len(rebuild_info.summary.chunk_indexes) > 0
 
 
+@pytest.mark.conformance
 def test_rebuild_channel_sizes_exact():
     """Test rebuilding with exact channel size calculation."""
     test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch.mcap"
@@ -120,6 +127,7 @@ def test_rebuild_channel_sizes_exact():
             assert size > 0
 
 
+@pytest.mark.conformance
 def test_rebuild_channel_sizes_estimated():
     """Test rebuilding with estimated channel size calculation."""
     test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch-chx-mx.mcap"
@@ -141,6 +149,7 @@ def test_rebuild_channel_sizes_estimated():
             assert size > 0
 
 
+@pytest.mark.conformance
 def test_rebuild_full_features():
     """Test rebuilding file with all MCAP features."""
     test_file = CONFORMANCE_DIR / "OneMessage" / "OneMessage-ch-chx-mx-pad-rch-rsh-st-sum.mcap"
@@ -167,6 +176,7 @@ def test_rebuild_full_features():
         assert len(rebuild_info.summary.chunk_indexes) > 0
 
 
+@pytest.mark.conformance
 def test_rebuild_matches_original_summary():
     """Test that rebuilding produces a summary matching the original."""
     test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch-chx-mx-pad-rch-rsh-st-sum.mcap"
