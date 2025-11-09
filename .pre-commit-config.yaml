@@ -49,3 +49,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: pytest-fast
+        name: pytest (fast tests only)
+        entry: bash -c 'for dir in small-mcap pymcap-cli mcap-ros2-support-fast ros-parser; do echo "Testing $dir..."; uv run pytest $dir/tests -m "not (conformance or compat or benchmark or e2e)" --ignore="$dir/tests/test_benchmark.py" --ignore="$dir/tests/benchmark" --no-cov -q; code=$?; if [ $code -ne 0 ] && [ $code -ne 5 ]; then exit 1; fi; done'
+        language: system
+        pass_filenames: false
+        always_run: true

@@ -6,6 +6,7 @@ import pytest
 from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
 
 
+@pytest.mark.e2e
 class TestCompress:
     """Test compress command functionality."""
 

@@ -1,0 +1,60 @@
+name: Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Git LFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: true
+
+      - name: Install Python
+        run: |
+          uv pip install pip
+
+      - name: Download test data
+        run: bash scripts/download_test_mcap.sh
+
+      - name: Run tests with coverage
+        run: |
+          uv run pytest small-mcap/tests -v --cov=small_mcap
+          uv run pytest pymcap-cli/tests -v --cov=pymcap_cli --cov-append
+          uv run pytest mcap-ros2-support-fast/tests -v --cov=mcap_ros2_support_fast --cov-append
+          uv run pytest ros-parser/tests -v --cov=ros_parser --cov-append
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: matrix.python-version == '3.10'
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false

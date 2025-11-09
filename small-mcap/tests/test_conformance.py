@@ -49,7 +49,7 @@ def pytest_generate_tests(metafunc):
     """Generate parametrized tests for conformance files."""
     if "mcap_file" in metafunc.fixturenames and "json_file" in metafunc.fixturenames:
         # Load conformance data path
-        conformance_data = Path(__file__).parent / "conformance_data"
+        conformance_data = Path(__file__).parent.parent.parent / "data" / "conformance"
 
         if not conformance_data.exists():
             pytest.skip("Conformance test data not available")

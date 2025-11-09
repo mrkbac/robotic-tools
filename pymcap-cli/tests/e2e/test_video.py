@@ -7,6 +7,7 @@ import pytest
 from pymcap_cli.cmd.video_cmd import VideoCodec, VideoEncoderError, encode_video
 
 
+@pytest.mark.e2e
 class TestVideoCommand:
     """Test video command functionality."""
 

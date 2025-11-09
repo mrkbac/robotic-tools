@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from pymcap_cli.mcap_processor import (
     McapProcessor,
     ProcessingOptions,
@@ -9,6 +10,7 @@ from pymcap_cli.mcap_processor import (
 )
 
 
+@pytest.mark.e2e
 class TestFilter:
     """Test filter command functionality."""
 

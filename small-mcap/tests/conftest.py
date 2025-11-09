@@ -16,7 +16,7 @@ from small_mcap import (
 )
 
 # Path to official MCAP conformance test files
-CONFORMANCE_DATA = Path(__file__).parent / "conformance_data"
+CONFORMANCE_DATA = Path(__file__).parent.parent.parent / "data" / "conformance"
 DEMO_MCAP = Path(__file__).parent.parent.parent / "mcap" / "testdata" / "mcap" / "demo.mcap"
 
 
