@@ -50,11 +50,7 @@ jobs:
           uv run pytest mcap-ros2-support-fast/tests -v --cov=mcap_ros2_support_fast --cov-append
           uv run pytest ros-parser/tests -v --cov=ros_parser --cov-append
 
-      - name: Upload coverage to Codecov
+      - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
-        if: matrix.python-version == '3.10'
         with:
-          files: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

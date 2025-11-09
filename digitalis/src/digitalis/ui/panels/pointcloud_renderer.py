@@ -4,6 +4,7 @@ from functools import partial
 from typing import TypeVar
 
 import numpy as np
+import numpy.typing as npt
 from rich.color import Color
 from rich.segment import Segment
 from rich.style import Style
@@ -21,7 +22,7 @@ CH_LOWER = "▄"
 
 
 def turbo_color_from_value(
-    value: float | np.ndarray, value_range: tuple[float, float], *, clip: bool = True
+    value: float | npt.NDArray[np.floating], value_range: tuple[float, float], *, clip: bool = True
 ) -> Color | None:
     """Map value to turbo colormap hex string.
 
@@ -55,10 +56,10 @@ def _batched(iterable: Iterable[_T], n: int) -> Iterable[tuple[_T, ...]]:
 
 
 def render_halfblock_grid(
-    occupancy_grid: np.ndarray,
-    value_grid: np.ndarray,
+    occupancy_grid: npt.NDArray[np.bool_],
+    value_grid: npt.NDArray[np.floating],
     size: HalfCellSize,
-    color_mapper: Callable[[float | np.ndarray], Color | None],
+    color_mapper: Callable[[float | npt.NDArray[np.floating]], Color | None],
     background_style: Style | None = None,
 ) -> Iterable[Segment]:
     """Render a grid using half-block characters.
@@ -110,7 +111,10 @@ def render_halfblock_grid(
 
 
 def _validate_inputs(
-    points: np.ndarray, size: HalfCellSize, resolution: float, center_point: CenterPoint
+    points: npt.NDArray[np.floating],
+    size: HalfCellSize,
+    resolution: float,
+    center_point: CenterPoint,
 ) -> None:
     """Validate input parameters."""
     if not isinstance(points, np.ndarray) or points.shape[-1:] != (3,):
@@ -125,8 +129,11 @@ def _validate_inputs(
 
 
 def _create_grids(
-    points: np.ndarray, size: HalfCellSize, resolution: float, center_point: CenterPoint
-) -> tuple[np.ndarray, np.ndarray]:
+    points: npt.NDArray[np.floating],
+    size: HalfCellSize,
+    resolution: float,
+    center_point: CenterPoint,
+) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.floating]]:
     """Create occupancy and z-value grids from points."""
     width_chars, height_chars = size
     grid_h, grid_w = height_chars * 2, width_chars
@@ -173,7 +180,7 @@ def _create_grids(
 
 
 def render_pointcloud(
-    points: np.ndarray,
+    points: npt.NDArray[np.floating],
     size: HalfCellSize,
     resolution: float,
     center_point: CenterPoint,

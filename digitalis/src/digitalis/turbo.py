@@ -1,5 +1,6 @@
 # Turbo colormap RGB lookup table (256 entries, RGB values 0.0-1.0)
 import numpy as np
+import numpy.typing as npt
 
 TURBO_COLORMAP_DATA = [
     [0.18995, 0.07176, 0.23217],
@@ -261,7 +262,7 @@ TURBO_COLORMAP_DATA = [
 ]
 
 
-def interpolate_turbo_color(x: float | np.ndarray) -> tuple[float, float, float]:
+def interpolate_turbo_color(x: float | npt.NDArray[np.floating]) -> tuple[float, float, float]:
     """Interpolate RGB color from turbo colormap for normalized value x in [0,1]."""
     x = np.clip(x, 0.0, 1.0)
 

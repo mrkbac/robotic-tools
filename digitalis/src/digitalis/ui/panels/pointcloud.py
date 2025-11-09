@@ -2,6 +2,7 @@ import logging
 from typing import ClassVar
 
 import numpy as np
+import numpy.typing as npt
 import pointcloud2  # type: ignore[import-untyped]
 from textual import work
 from textual.binding import Binding, BindingType
@@ -32,7 +33,7 @@ class PointCloud(InteractiveRenderPanel):
 
     def __init__(self) -> None:
         super().__init__(default_resolution=0.1)
-        self.points3d: np.ndarray | None = None
+        self.points3d: npt.NDArray[np.floating] | None = None
 
     def watch_data(self, data: MessageEvent | None) -> None:
         """Update the point cloud data."""

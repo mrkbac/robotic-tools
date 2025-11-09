@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from pointcloud2 import (  # type: ignore[import-untyped]
     PointCloud2,
     PointField,
@@ -61,7 +62,7 @@ class PointCloudVoxelTransformer(Transformer):
         except Exception as exc:
             raise TransformError(f"Point cloud voxel compression failed: {exc}") from exc
 
-    def _extract_xyz(self, cloud: PointCloud2) -> np.ndarray:
+    def _extract_xyz(self, cloud: PointCloud2) -> npt.NDArray[np.float32]:
         """Read XYZ coordinates from the point cloud."""
         try:
             point_array = read_points(
@@ -78,7 +79,7 @@ class PointCloudVoxelTransformer(Transformer):
         stacked = np.column_stack([point_array[name] for name in XYZ_FIELDS])
         return np.asarray(stacked, dtype=np.float32)
 
-    def _voxel_downsample(self, points: np.ndarray) -> np.ndarray:
+    def _voxel_downsample(self, points: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
         """Keep one point per voxel cell."""
         if points.shape[0] == 0:
             return points
@@ -90,7 +91,7 @@ class PointCloudVoxelTransformer(Transformer):
         unique_indices.sort()
         return points[unique_indices]
 
-    def _build_output(self, message: Any, points: np.ndarray) -> dict[str, Any]:
+    def _build_output(self, message: Any, points: npt.NDArray[np.float32]) -> dict[str, Any]:
         """Package downsampled XYZ points into a PointCloud2 dictionary."""
         points = np.asarray(points, dtype=np.float32, order="C")
 

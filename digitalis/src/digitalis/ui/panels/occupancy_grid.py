@@ -1,6 +1,7 @@
 from typing import Any, ClassVar, Protocol
 
 import numpy as np
+import numpy.typing as npt
 from textual import work
 from textual.binding import Binding, BindingType
 from textual.widgets import Static
@@ -47,7 +48,7 @@ class OccupancyGrid(InteractiveRenderPanel):
 
     def __init__(self) -> None:
         super().__init__(default_resolution=0.1)  # 10cm default resolution
-        self.grid_data: np.ndarray | None = None
+        self.grid_data: npt.NDArray[np.int8] | None = None
         self.grid_width: int = 0
         self.grid_height: int = 0
         self.grid_resolution: float = 0.0  # The actual resolution from the occupancy grid
@@ -95,7 +96,7 @@ class OccupancyGrid(InteractiveRenderPanel):
         # Use centralized auto-fit logic
         self._handle_first_data_auto_fit()
 
-    def _grid_to_points(self) -> np.ndarray:
+    def _grid_to_points(self) -> npt.NDArray[np.floating]:
         """Convert occupancy grid to point cloud format.
 
         Returns:
