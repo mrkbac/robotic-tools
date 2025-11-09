@@ -1,3 +1,5 @@
+"""TF tree command - display transform tree from MCAP file."""
+
 from __future__ import annotations
 
 import math
@@ -5,9 +7,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import shtab
+import typer
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.live import Live
@@ -16,10 +17,8 @@ from rich.text import Text
 from small_mcap import read_message_decoded
 from small_mcap.reader import include_topics
 
-if TYPE_CHECKING:
-    import argparse
-
 console = Console()
+app = typer.Typer()
 
 
 @dataclass
@@ -203,48 +202,22 @@ def _build_tf_table(transforms: dict[tuple[str, str], TransformData]) -> Table |
     return table
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the tftree command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "tftree",
-        help="Display TF transform tree from MCAP file",
-        description="Display TF transform tree from MCAP file",
-    )
-
-    file_arg = parser.add_argument(
-        "file",
-        help="Path to the MCAP file to analyze",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    parser.add_argument(
-        "--static-only",
-        action="store_true",
-        help="Show only static transforms (/tf_static)",
-    )
-
-    return parser
-
-
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the tftree command execution."""
-    file_path = Path(args.file)
-
-    if not file_path.exists():
-        console.print(f"[red]Error: File not found: {file_path}[/red]")
-        return
-
+@app.command()
+def tftree(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to MCAP file"),
+    static_only: bool = typer.Option(
+        False, "--static-only", help="Show only static transforms (/tf_static)"
+    ),
+) -> None:
+    """Display TF transform tree from MCAP file."""
     transforms: dict[tuple[str, str], TransformData] = {}
 
     topics = ["/tf_static"]
-    if not args.static_only:
+    if not static_only:
         topics.append("/tf")
 
     try:
-        with file_path.open("rb") as f, Live(auto_refresh=False, console=console) as live:
+        with file.open("rb") as f, Live(auto_refresh=False, console=console) as live:
             for msg in read_message_decoded(
                 f,
                 should_include=include_topics(topics),
@@ -290,4 +263,4 @@ def handle_command(args: argparse.Namespace) -> None:
 
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error reading MCAP file: {e}[/red]")
-        return
+        raise typer.Exit(1)

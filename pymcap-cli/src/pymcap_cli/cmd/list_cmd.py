@@ -3,100 +3,25 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import shtab
+import typer
 from rich.console import Console
 from rich.table import Table
 from small_mcap import InvalidMagicError, RebuildInfo
 
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
-if TYPE_CHECKING:
-    import argparse
-
 console = Console()
 
-
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the list command and its subcommands to the subparsers."""
-    parser = subparsers.add_parser(
-        "list",
-        help="List records in an MCAP file",
-        description="List records in an MCAP file",
-    )
-
-    list_subparsers = parser.add_subparsers(dest="list_subcommand", help="Record type to list")
-
-    # list channels
-    channels_parser = list_subparsers.add_parser(
-        "channels",
-        help="List channels in an MCAP file",
-    )
-    channels_file_arg = channels_parser.add_argument("file", help="Path to the MCAP file", type=str)
-    channels_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    # list chunks
-    chunks_parser = list_subparsers.add_parser(
-        "chunks",
-        help="List chunks in an MCAP file",
-    )
-    chunks_file_arg = chunks_parser.add_argument("file", help="Path to the MCAP file", type=str)
-    chunks_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    # list schemas
-    schemas_parser = list_subparsers.add_parser(
-        "schemas",
-        help="List schemas in an MCAP file",
-    )
-    schemas_file_arg = schemas_parser.add_argument("file", help="Path to the MCAP file", type=str)
-    schemas_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    # list attachments
-    attachments_parser = list_subparsers.add_parser(
-        "attachments",
-        help="List attachments in an MCAP file",
-    )
-    attachments_file_arg = attachments_parser.add_argument(
-        "file", help="Path to the MCAP file", type=str
-    )
-    attachments_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    # list metadata
-    metadata_parser = list_subparsers.add_parser(
-        "metadata",
-        help="List metadata in an MCAP file",
-    )
-    metadata_file_arg = metadata_parser.add_argument("file", help="Path to the MCAP file", type=str)
-    metadata_file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    return parser
+# Create the list sub-app
+list_app = typer.Typer(name="list", help="List records in an MCAP file")
 
 
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the list command execution by routing to appropriate subcommand."""
-    if args.list_subcommand == "channels":
-        handle_channels(args)
-    elif args.list_subcommand == "chunks":
-        handle_chunks(args)
-    elif args.list_subcommand == "schemas":
-        handle_schemas(args)
-    elif args.list_subcommand == "attachments":
-        handle_attachments(args)
-    elif args.list_subcommand == "metadata":
-        handle_metadata(args)
-    else:
-        console.print("[red]No subcommand specified. Use --help for options.[/red]")
-
-
-def _read_mcap_info(file_path: str) -> RebuildInfo:
+def _read_mcap_info(file_path: Path) -> RebuildInfo:
     """Read MCAP file info, with automatic rebuild on invalid magic."""
-    file = Path(file_path)
-    file_size = file.stat().st_size
+    file_size = file_path.stat().st_size
 
-    with file.open("rb", buffering=0) as f_raw:
+    with file_path.open("rb", buffering=0) as f_raw:
         f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
         try:
             info = read_info(f_buffered)
@@ -107,9 +32,12 @@ def _read_mcap_info(file_path: str) -> RebuildInfo:
     return info
 
 
-def handle_channels(args: argparse.Namespace) -> None:
-    """List all channels in the MCAP file."""
-    info = _read_mcap_info(args.file)
+@list_app.command()
+def channels(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+) -> None:
+    """List channels in an MCAP file."""
+    info = _read_mcap_info(file)
     summary = info.summary
 
     if not summary.channels:
@@ -137,9 +65,12 @@ def handle_channels(args: argparse.Namespace) -> None:
     console.print(table)
 
 
-def handle_chunks(args: argparse.Namespace) -> None:
-    """List all chunks in the MCAP file."""
-    info = _read_mcap_info(args.file)
+@list_app.command()
+def chunks(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+) -> None:
+    """List chunks in an MCAP file."""
+    info = _read_mcap_info(file)
     summary = info.summary
 
     if not summary.chunk_indexes:
@@ -192,9 +123,12 @@ def handle_chunks(args: argparse.Namespace) -> None:
     console.print(table)
 
 
-def handle_schemas(args: argparse.Namespace) -> None:
-    """List all schemas in the MCAP file."""
-    info = _read_mcap_info(args.file)
+@list_app.command()
+def schemas(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+) -> None:
+    """List schemas in an MCAP file."""
+    info = _read_mcap_info(file)
     summary = info.summary
 
     if not summary.schemas:
@@ -233,9 +167,12 @@ def handle_schemas(args: argparse.Namespace) -> None:
     console.print(table)
 
 
-def handle_attachments(args: argparse.Namespace) -> None:
-    """List all attachments in the MCAP file."""
-    info = _read_mcap_info(args.file)
+@list_app.command()
+def attachments(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+) -> None:
+    """List attachments in an MCAP file."""
+    info = _read_mcap_info(file)
     summary = info.summary
 
     if not summary.attachment_indexes:
@@ -273,9 +210,12 @@ def handle_attachments(args: argparse.Namespace) -> None:
     console.print(table)
 
 
-def handle_metadata(args: argparse.Namespace) -> None:
-    """List all metadata records in the MCAP file."""
-    info = _read_mcap_info(args.file)
+@list_app.command()
+def metadata(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+) -> None:
+    """List metadata records in an MCAP file."""
+    info = _read_mcap_info(file)
     summary = info.summary
 
     if not summary.metadata_indexes:

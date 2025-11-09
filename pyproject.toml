@@ -79,3 +79,5 @@ ignore = [
 # Relaxed lints for test files
 "*/tests/*" = ["T201", "SLF001", "ANN", "PTH123"]
 "*/benchmarks/*" = ["T201", "INP001", "PLC0415", "PTH123"]
+# Typer commands - function call in defaults is required pattern
+"*/cmd/*_cmd.py" = ["B008", "B904", "TC003"]

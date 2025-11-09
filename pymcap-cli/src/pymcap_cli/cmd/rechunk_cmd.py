@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-import sys
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
@@ -11,7 +9,7 @@ from typing import TYPE_CHECKING, BinaryIO
 if TYPE_CHECKING:
     from re import Pattern
 
-import shtab
+import typer
 from rich.console import Console
 from small_mcap import (
     Attachment,
@@ -33,6 +31,7 @@ from pymcap_cli.mcap_processor import compile_topic_patterns, str_to_compression
 from pymcap_cli.utils import file_progress
 
 console = Console()
+app = typer.Typer()
 
 
 class RechunkMode(Enum):
@@ -41,6 +40,14 @@ class RechunkMode(Enum):
     PATTERN = auto()  # Group by regex patterns
     ALL = auto()  # Each topic in its own chunk group
     AUTO = auto()  # Auto-group based on size (>15% threshold)
+
+
+class CompressionChoice(str, Enum):
+    """Compression algorithm choices."""
+
+    ZSTD = "zstd"
+    LZ4 = "lz4"
+    NONE = "none"
 
 
 class MessageGroup:
@@ -304,108 +311,94 @@ class RechunkProcessor:
         return MessageGroup(writer, self.chunk_size, compression_type, self.schemas, self.channels)
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the rechunk command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "rechunk",
-        help="Reorganize MCAP messages into chunks based on topic patterns",
-        description=(
-            "Rechunk MCAP files by organizing messages into separate chunk groups "
-            "based on topic regex patterns. Each pattern creates a separate chunk group, "
-            "with unmatched topics going into their own group. Messages are written "
-            "in a streaming fashion as they are read."
-            "\n\nusage:\n  pymcap-cli rechunk in.mcap -o out.mcap -p '/camera.*' -p '/lidar.*'"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    file_arg = parser.add_argument(
-        "file",
+@app.command()
+def rechunk(
+    file: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
         help="Path to the MCAP file to rechunk",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    output_arg = parser.add_argument(
+    ),
+    output: Path = typer.Option(
+        ...,
         "-o",
         "--output",
         help="Output filename (required)",
-        type=str,
-        required=True,
-    )
-    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    group = parser.add_mutually_exclusive_group(required=True)
-
-    group.add_argument(
+    ),
+    pattern: list[str] = typer.Option(
+        [],
         "-p",
         "--pattern",
-        action="append",
-        default=[],
         help="Regex pattern for topic grouping (can be used multiple times). "
         "Topics matching the first pattern go into chunk group 1, "
         "second pattern → group 2, etc. Unmatched topics → separate group.",
-    )
-
-    group.add_argument(
+    ),
+    all_topics: bool = typer.Option(
+        False,
         "--all",
-        action="store_true",
         help="If set, all messages are placed into their own chunk",
-    )
-
-    group.add_argument(
+    ),
+    auto: bool = typer.Option(
+        False,
         "--auto",
-        action="store_true",
         help="If set, automatically create chunk groups. "
-        "Topics taking up more than 15%% of the uncompressed total size get their own chunk.",
-    )
-
-    parser.add_argument(
+        "Topics taking up more than 15% of the uncompressed total size get their own chunk.",
+    ),
+    chunk_size: int = typer.Option(
+        4 * 1024 * 1024,
         "--chunk-size",
-        type=int,
-        default=4 * 1024 * 1024,  # 4MB
         help="Chunk size in bytes (default: 4MB)",
-    )
-
-    parser.add_argument(
+    ),
+    compression: CompressionChoice = typer.Option(
+        CompressionChoice.ZSTD,
         "--compression",
-        choices=["zstd", "lz4", "none"],
-        default="zstd",
         help="Compression algorithm for output file (default: zstd)",
-    )
+    ),
+) -> None:
+    """Reorganize MCAP messages into chunks based on topic patterns.
 
-    return parser
+    Rechunk MCAP files by organizing messages into separate chunk groups
+    based on topic regex patterns. Each pattern creates a separate chunk group,
+    with unmatched topics going into their own group. Messages are written
+    in a streaming fashion as they are read.
 
+    Usage:
+      pymcap-cli rechunk in.mcap -o out.mcap -p '/camera.*' -p '/lidar.*'
+    """
+    # Validate mutually exclusive options
+    mode_count = sum([bool(pattern), all_topics, auto])
+    if mode_count == 0:
+        console.print("[red]Error: One of --pattern, --all, or --auto is required[/red]")
+        raise typer.Exit(1)
+    if mode_count > 1:
+        console.print("[red]Error: --pattern, --all, and --auto are mutually exclusive[/red]")
+        raise typer.Exit(1)
 
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the rechunk command execution."""
-    input_file = Path(args.file)
+    input_file = Path(file)
     if not input_file.exists():
         console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
-        sys.exit(1)
+        raise typer.Exit(1)
 
-    output_file = Path(args.output)
+    output_file = Path(output)
     file_size = input_file.stat().st_size
 
     # Determine mode and compile patterns if needed
     mode: RechunkMode
     patterns: list[Pattern[str]] = []
 
-    if args.all:
+    if all_topics:
         mode = RechunkMode.ALL
         console.print("[dim]Mode: Each topic in its own chunk group[/dim]")
-    elif args.auto:
+    elif auto:
         mode = RechunkMode.AUTO
         console.print("[dim]Mode: Auto-grouping based on size (>15% threshold)[/dim]")
     else:
         mode = RechunkMode.PATTERN
         try:
-            patterns = compile_topic_patterns(args.pattern)
+            patterns = compile_topic_patterns(pattern)
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-            sys.exit(1)
+            raise typer.Exit(1)
 
         if not patterns:
             console.print(
@@ -417,8 +410,8 @@ def handle_command(args: argparse.Namespace) -> None:
     processor = RechunkProcessor(
         mode=mode,
         patterns=patterns,
-        chunk_size=args.chunk_size,
-        compression=args.compression,
+        chunk_size=chunk_size,
+        compression=compression.value,
     )
 
     with input_file.open("rb") as input_stream, output_file.open("wb") as output_stream:

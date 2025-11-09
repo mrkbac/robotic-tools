@@ -7,15 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import shtab
+import typer
 from small_mcap import ChunkIndex, InvalidMagicError, RebuildInfo
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.utils import read_info, rebuild_info
 
 if TYPE_CHECKING:
-    import argparse
-
     from small_mcap import Channel, Schema
 
     from pymcap_cli.types import (
@@ -26,6 +24,9 @@ if TYPE_CHECKING:
         SchemaInfo,
         Stats,
     )
+
+
+app = typer.Typer()
 
 
 def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int]:
@@ -269,46 +270,6 @@ def _calculate_per_channel_distributions(
     return channel_distributions
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the info-json command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "info-json",
-        help="Output MCAP file statistics as JSON",
-        description="Output MCAP file statistics as JSON with all available data",
-    )
-
-    file_arg = parser.add_argument(
-        "file",
-        help="Path to the MCAP file to analyze",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    parser.add_argument(
-        "-r",
-        "--rebuild",
-        action="store_true",
-        help="Rebuild the MCAP file from scratch",
-    )
-
-    parser.add_argument(
-        "--exact-sizes",
-        "-e",
-        action="store_true",
-        help="Use exact sizes for message data (may be slower, requires --rebuild)",
-    )
-
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode",
-    )
-
-    return parser
-
-
 def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoOutput:
     """Transform MCAP Info object into a JSON-serializable dictionary.
 
@@ -536,29 +497,52 @@ class ChunkStats:
     durations_ns: list[float] = field(default_factory=list)
 
 
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the info-json command execution."""
-
-    file = Path(args.file)
+@app.command(name="info-json")
+def info_json(
+    file: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        help="Path to the MCAP file to analyze",
+    ),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        "-r",
+        help="Rebuild the MCAP file from scratch",
+    ),
+    exact_sizes: bool = typer.Option(
+        False,
+        "--exact-sizes",
+        "-e",
+        help="Use exact sizes for message data (may be slower, requires --rebuild)",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug mode",
+    ),
+) -> None:
+    """Output MCAP file statistics as JSON with all available data."""
     file_size = file.stat().st_size
 
     debug_wrapper = None
     with file.open("rb", buffering=0) as f_raw:
-        if args.debug:
+        if debug:
             debug_wrapper = DebugStreamWrapper(f_raw)
             f_buffered: io.BufferedReader = io.BufferedReader(debug_wrapper, buffer_size=1024)
         else:
             f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
 
-        if args.rebuild:
-            info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
+        if rebuild:
+            info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
         else:
             try:
                 info = read_info(f_buffered)
             except InvalidMagicError:
-                if not args.debug:
+                if not debug:
                     # Silently rebuild if invalid magic and not in debug mode
-                    info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
+                    info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
                 else:
                     raise
 

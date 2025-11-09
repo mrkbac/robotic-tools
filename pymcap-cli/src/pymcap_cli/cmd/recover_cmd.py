@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import argparse
-import sys
+from enum import Enum
 from pathlib import Path
 
-import shtab
+import typer
 from rich.console import Console
 
 from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
@@ -12,74 +11,64 @@ from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
 console = Console()
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the recover command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "recover",
-        help="Recover data from a potentially corrupt MCAP file",
-        description=(
-            "This subcommand reads a potentially corrupt MCAP file and copies data to a new file."
-            "\n\nusage:\n  mcap recover in.mcap -o out.mcap"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+class CompressionType(str, Enum):
+    """Compression algorithm choices."""
 
-    file_arg = parser.add_argument(
-        "file",
+    zstd = "zstd"
+    lz4 = "lz4"
+    none = "none"
+
+
+app = typer.Typer()
+
+
+@app.command()
+def recover(
+    file: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
         help="Path to the MCAP file to recover",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    output_arg = parser.add_argument(
-        "-o",
+    ),
+    output: Path = typer.Option(
+        ...,
         "--output",
+        "-o",
         help="Output filename (writes to stdout if not provided)",
-        type=str,
-    )
-    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    parser.add_argument(
+    ),
+    chunk_size: int = typer.Option(
+        4 * 1024 * 1024,
         "--chunk-size",
-        type=int,
-        default=4 * 1024 * 1024,  # 4MB
         help="Chunk size of output file (default: 4MB)",
-    )
-
-    parser.add_argument(
+    ),
+    compression: CompressionType = typer.Option(
+        CompressionType.zstd,
         "--compression",
-        choices=["zstd", "lz4", "none"],
-        default="zstd",
         help="Compression algorithm to use on output file (default: zstd)",
-    )
-
-    parser.add_argument(
-        "-a",
+    ),
+    always_decode_chunk: bool = typer.Option(
+        False,
         "--always-decode-chunk",
-        action="store_true",
+        "-a",
         help="Always decode chunks, even if the file is not chunked",
-    )
+    ),
+) -> None:
+    """Recover data from a potentially corrupt MCAP file.
 
-    return parser
+    This subcommand reads a potentially corrupt MCAP file and copies data to a new file.
 
-
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the recover command execution using unified processor."""
-    input_file = Path(args.file)
-    if not input_file.exists():
-        console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
-        sys.exit(1)
-
-    output_file = Path(args.output)
+    usage:
+      mcap recover in.mcap -o out.mcap
+    """
+    input_file = file
+    output_file = output
     file_size = input_file.stat().st_size
 
     # Convert recover options to unified processing options
     processing_options = ProcessingOptions(
         # Recovery mode enabled with all content included
         recovery_mode=True,
-        always_decode_chunk=args.always_decode_chunk,
+        always_decode_chunk=always_decode_chunk,
         # No filtering - include everything
         include_topics=[],
         exclude_topics=[],
@@ -88,8 +77,8 @@ def handle_command(args: argparse.Namespace) -> None:
         include_metadata=True,
         include_attachments=True,
         # Output options
-        compression=args.compression,
-        chunk_size=args.chunk_size,
+        compression=compression.value,
+        chunk_size=chunk_size,
     )
 
     # Create processor and run
@@ -123,7 +112,7 @@ def handle_command(args: argparse.Namespace) -> None:
                 console.print("No valid MCAP data found to recover")
             else:
                 console.print(f"[red]Error during recovery: {e}[/red]")
-                sys.exit(1)
+                raise typer.Exit(1)
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during recovery: {e}[/red]")
-            sys.exit(1)
+            raise typer.Exit(1)

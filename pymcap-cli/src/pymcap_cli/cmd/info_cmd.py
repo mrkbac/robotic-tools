@@ -1,11 +1,14 @@
+"""Info command - report statistics about an MCAP file."""
+
 from __future__ import annotations
 
 import io
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import shtab
+import typer
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.jupyter import JupyterMixin
 from rich.measure import Measurement
@@ -20,11 +23,23 @@ from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
 if TYPE_CHECKING:
-    import argparse
-
     from pymcap_cli.types import McapInfoOutput
 
 console = Console()
+app = typer.Typer()
+
+
+class SortChoice(str, Enum):
+    """Sort field choices for channel display."""
+
+    TOPIC = "topic"
+    ID = "id"
+    MSGS = "msgs"
+    SIZE = "size"
+    HZ = "hz"
+    BPS = "bps"
+    B_PER_MSG = "b_per_msg"
+    SCHEMA = "schema"
 
 
 class DistributionBar(JupyterMixin):
@@ -245,13 +260,18 @@ def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> No
         console.print(overlap_table)
 
 
-def _display_channels_table(data: McapInfoOutput, args: argparse.Namespace) -> None:
+def _display_channels_table(
+    data: McapInfoOutput,
+    sort_key: str,
+    reverse: bool,
+    index_duration: bool,
+) -> None:
     """Display channels table with sorting support."""
     display_channels_table(
         data,
         console,
-        sort_key=args.sort,
-        reverse=args.reverse,
+        sort_key=sort_key,
+        reverse=reverse,
         columns=(
             ChannelTableColumn.ID
             | ChannelTableColumn.TOPIC
@@ -264,106 +284,92 @@ def _display_channels_table(data: McapInfoOutput, args: argparse.Namespace) -> N
             | ChannelTableColumn.DISTRIBUTION
         ),
         responsive=True,
-        index_duration=args.index_duration,
+        index_duration=index_duration,
         distribution_bar_class=DistributionBar,
     )
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the info command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "info",
-        help="Report statistics about an MCAP file",
-        description="Report statistics about an MCAP file",
-    )
-
-    file_arg = parser.add_argument(
-        "file",
+@app.command()
+def info(
+    file: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
         help="Path to the MCAP file to analyze",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    parser.add_argument(
-        "-r",
+    ),
+    rebuild: bool = typer.Option(
+        False,
         "--rebuild",
-        action="store_true",
+        "-r",
         help="Rebuild the MCAP file from scratch",
-    )
-
-    parser.add_argument(
+    ),
+    exact_sizes: bool = typer.Option(
+        False,
         "--exact-sizes",
         "-e",
-        action="store_true",
         help="Use exact sizes for message data (may be slower, requires --rebuild)",
-    )
-
-    parser.add_argument(
+    ),
+    debug: bool = typer.Option(
+        False,
         "--debug",
-        action="store_true",
         help="Enable debug mode",
-    )
-
-    parser.add_argument(
-        "-s",
+    ),
+    sort: SortChoice = typer.Option(
+        SortChoice.TOPIC,
         "--sort",
-        choices=["topic", "id", "msgs", "size", "hz", "bps", "b_per_msg", "schema"],
-        default="topic",
-        help="Sort channels by field (default: topic)",
-    )
-
-    parser.add_argument(
+        "-s",
+        help="Sort channels by field",
+    ),
+    reverse: bool = typer.Option(
+        False,
         "--reverse",
-        action="store_true",
         help="Reverse sort order (descending)",
-    )
-
-    parser.add_argument(
+    ),
+    index_duration: bool = typer.Option(
+        False,
         "--index-duration",
-        action="store_true",
         help=(
             "Calculate Hz per channel based on each channel's first/last "
             "message times rather than global MCAP duration"
         ),
-    )
+    ),
+) -> None:
+    """Report statistics about an MCAP file.
 
-    return parser
-
-
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the info command execution."""
-
-    file = Path(args.file)
+    This command displays comprehensive statistics about an MCAP file including:
+    - File metadata and summary statistics
+    - Message distribution over time
+    - Compression statistics by type
+    - Channel information with message counts, data rates, and distributions
+    """
     file_size = file.stat().st_size
 
     debug_wrapper = None
     with file.open("rb", buffering=0) as f_raw:
-        if args.debug:
+        if debug:
             debug_wrapper = DebugStreamWrapper(f_raw)
             f_buffered: io.BufferedReader = io.BufferedReader(debug_wrapper, buffer_size=1024)
         else:
             f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
 
-        if args.rebuild:
-            info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
+        if rebuild:
+            info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
         else:
             try:
-                info = read_info(f_buffered)
+                info_data = read_info(f_buffered)
             except InvalidMagicError:
                 console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
-                info = rebuild_info(f_buffered, file_size, exact_sizes=args.exact_sizes)
+                info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
 
     if debug_wrapper:
         debug_wrapper.print_stats(file_size)
 
     # Get structured JSON data
-    data = info_to_dict(info, str(file), file_size)
+    data = info_to_dict(info_data, str(file), file_size)
 
     # Warn if sorting by size fields when channel_sizes is unavailable
     has_size_data = any(ch["size_bytes"] is not None for ch in data["channels"])
-    if args.sort in ["size", "bps", "b_per_msg"] and not has_size_data:
+    if sort.value in ["size", "bps", "b_per_msg"] and not has_size_data:
         console.print(
             "[yellow]Warning:[/yellow] Sorting by size fields requires channel size data. "
             "Use [cyan]--rebuild[/cyan] to get accurate size information."
@@ -372,7 +378,7 @@ def handle_command(args: argparse.Namespace) -> None:
 
     # Warn if --index-duration is enabled but no per-channel duration data available
     has_channel_durations = any(ch["hz_channel"] is not None for ch in data["channels"])
-    if args.index_duration and not has_channel_durations:
+    if index_duration and not has_channel_durations:
         console.print(
             "[yellow]Warning:[/yellow] --index-duration requires message index data. "
             "Use [cyan]--rebuild[/cyan] to get per-channel timing information. "
@@ -383,5 +389,5 @@ def handle_command(args: argparse.Namespace) -> None:
     # Display all sections
     _display_file_info_and_summary(data)
     _display_message_distribution(data)
-    _display_compression_table(data, info.chunk_information is not None)
-    _display_channels_table(data, args)
+    _display_compression_table(data, info_data.chunk_information is not None)
+    _display_channels_table(data, sort.value, reverse, index_duration)

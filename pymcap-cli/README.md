@@ -199,16 +199,31 @@ uv run pymcap_cli video data.mcap --topic /lidar/image --output lidar.mp4 --code
 uv run pymcap_cli video data.mcap --topic /camera/debug --output debug.mp4 --crf 18
 ```
 
-### `completion` - Shell Autocompletion
+### Shell Autocompletion
 
-Generate shell autocompletion scripts for bash, zsh, or tcsh.
+pymcap-cli supports automatic shell completion for bash, zsh, fish, and PowerShell using Typer's built-in completion system.
 
+#### Quick Install (recommended)
 ```bash
-# Generate bash completion
-uv run pymcap_cli completion bash > ~/.local/share/bash-completion/completions/pymcap_cli
+# Automatically install completion for your current shell
+pymcap-cli --install-completion
 
-# Generate zsh completion
-uv run pymcap_cli completion zsh > ~/.zfunc/_pymcap_cli
+# That's it! Restart your shell or source your config file
+```
+
+#### Manual Install
+```bash
+# Bash - add to ~/.bashrc
+eval "$(pymcap-cli --show-completion bash)"
+
+# Zsh - add to ~/.zshrc
+eval "$(pymcap-cli --show-completion zsh)"
+
+# Fish - add to ~/.config/fish/config.fish
+pymcap-cli --show-completion fish | source
+
+# PowerShell - add to your profile
+Invoke-Expression (& pymcap-cli --show-completion powershell)
 ```
 
 ## 🚀 Advanced Usage

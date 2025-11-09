@@ -1,3 +1,5 @@
+"""Video encoding command for pymcap-cli."""
+
 from __future__ import annotations
 
 import contextlib
@@ -7,14 +9,13 @@ import os
 import platform
 import shutil
 import subprocess
-import sys
 import threading
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
 
-import shtab
+import typer
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.progress import (
@@ -34,11 +35,11 @@ from rich.text import Text
 from small_mcap import get_summary, include_topics, read_message_decoded
 
 if TYPE_CHECKING:
-    import argparse
     from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 console = Console()
+app = typer.Typer()
 
 # Supported image message schemas
 COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
@@ -66,6 +67,24 @@ class VideoCodec(Enum):
     H265 = "h265"
     VP9 = "vp9"
     AV1 = "av1"
+
+
+class QualityPreset(str, Enum):
+    """Quality preset for video encoding."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class EncoderBackend(str, Enum):
+    """Encoder backend selection."""
+
+    AUTO = "auto"
+    SOFTWARE = "software"
+    VIDEOTOOLBOX = "videotoolbox"
+    NVENC = "nvenc"
+    VAAPI = "vaapi"
 
 
 class HardwareBackend(Enum):
@@ -792,94 +811,68 @@ def encode_video(
     console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the video command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "video",
-        help="Generate video from image topics in MCAP files",
-        description="Generate MP4 video from topics using ffmpeg",
-    )
-
-    file_arg = parser.add_argument(
-        "file",
+@app.command()
+def video(
+    file: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
         help="Path to the MCAP file",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    parser.add_argument(
+    ),
+    topics: list[str] = typer.Option(
+        ...,
         "--topic",
         "-t",
-        dest="topics",
-        action="append",
-        required=True,
         help="Image topic to convert (repeat for multiple topics)",
-        type=str,
-    )
-
-    output_arg = parser.add_argument(
+    ),
+    output: Path = typer.Option(
+        ...,
         "--output",
         "-o",
-        required=True,
         help="Output video file path (e.g., output.mp4)",
-        type=str,
-    )
-    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    parser.add_argument(
+    ),
+    codec: VideoCodec = typer.Option(
+        VideoCodec.H264,
         "--codec",
-        choices=[c.value for c in VideoCodec],
-        default=VideoCodec.H264.value,
-        help="Video codec to use (default: h264)",
-    )
-
-    # Quality options (mutually exclusive)
-    quality_group = parser.add_mutually_exclusive_group()
-    quality_group.add_argument(
+        case_sensitive=False,
+        help="Video codec to use",
+    ),
+    quality: QualityPreset = typer.Option(
+        QualityPreset.MEDIUM,
         "--quality",
-        choices=["high", "medium", "low"],
-        default="medium",
-        help="Quality preset (default: medium)",
-    )
-    quality_group.add_argument(
+        help="Quality preset",
+    ),
+    crf: int | None = typer.Option(
+        None,
         "--crf",
-        type=int,
-        metavar="<0-51>",
+        min=0,
+        max=51,
         help="Manual CRF/quality value (lower = better quality, overrides --quality)",
-    )
-
-    parser.add_argument(
+    ),
+    encoder: EncoderBackend = typer.Option(
+        EncoderBackend.AUTO,
         "--encoder",
-        choices=["auto", "software"] + [b.value for b in HardwareBackend],
-        default="auto",
-        help="Encoder backend (default: auto - detect hardware, fallback to software)",
-    )
-
-    parser.add_argument(
+        help="Encoder backend",
+    ),
+    watermark: bool = typer.Option(
+        False,
         "--watermark",
-        action="store_true",
-        help="Enable per-topic watermarks showing topic names (watermark disabled by default)",
-    )
+        help="Enable per-topic watermarks showing topic names",
+    ),
+) -> None:
+    """Generate video from image topics in MCAP files.
 
-    return parser
-
-
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the video command execution."""
-    input_file = Path(args.file)
-    output_file = Path(args.output)
-
+    Generate MP4 video from topics using ffmpeg.
+    """
     # Validate input file exists
-    if not input_file.exists():
-        console.print(f"[red]Error:[/red] Input file not found: {input_file}")
-        sys.exit(1)
+    if not file.exists():
+        console.print(f"[red]Error:[/red] Input file not found: {file}")
+        raise typer.Exit(1)
 
     # Validate output directory exists
-    if not output_file.parent.exists():
-        console.print(f"[red]Error:[/red] Output directory not found: {output_file.parent}")
-        sys.exit(1)
+    if not output.parent.exists():
+        console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
+        raise typer.Exit(1)
 
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError(
@@ -889,29 +882,27 @@ def handle_command(args: argparse.Namespace) -> None:
             "  Windows: Download from https://ffmpeg.org/"
         )
 
-    # Convert codec string to enum
-    codec = VideoCodec(args.codec)
-
-    # Convert encoder preference to enum if it's a hardware backend
-    encoder_pref: Literal["auto", "software"] | HardwareBackend = (
-        args.encoder if args.encoder in ("auto", "software") else HardwareBackend(args.encoder)
-    )
+    # Convert encoder preference to the appropriate type
+    encoder_pref: Literal["auto", "software"] | HardwareBackend
+    if encoder.value in ("auto", "software"):
+        encoder_pref = encoder.value  # type: ignore[assignment]
+    else:
+        # Map to HardwareBackend enum
+        encoder_pref = HardwareBackend(encoder.value)
 
     # Determine quality value
-    quality_value = args.crf if args.crf is not None else QUALITY_PRESETS[codec][args.quality]
-
-    topics: list[str] = args.topics
+    quality_value = crf if crf is not None else QUALITY_PRESETS[codec][quality.value]
 
     try:
         encode_video(
-            mcap_path=input_file,
+            mcap_path=file,
             topics=topics,
-            output_path=output_file,
+            output_path=output,
             codec=codec,
             encoder_preference=encoder_pref,
             quality=quality_value,
-            watermark=args.watermark,
+            watermark=watermark,
         )
     except VideoEncoderError as e:
         console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
+        raise typer.Exit(1) from e

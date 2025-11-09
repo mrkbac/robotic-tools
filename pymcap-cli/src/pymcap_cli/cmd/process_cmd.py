@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import sys
+from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
-import shtab
+import typer
 from rich.console import Console
 
 from pymcap_cli.mcap_processor import (
@@ -17,7 +18,16 @@ from pymcap_cli.mcap_processor import (
     parse_time_arg,
 )
 
+app = typer.Typer()
 console = Console()
+
+
+class CompressionType(str, Enum):
+    """Compression algorithm choices."""
+
+    ZSTD = "zstd"
+    LZ4 = "lz4"
+    NONE = "none"
 
 
 def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
@@ -29,174 +39,40 @@ def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> 
     return seconds * 1_000_000_000
 
 
-def add_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Add the process command parser to the subparsers."""
-    parser = subparsers.add_parser(
-        "process",
-        help="Process MCAP files with unified recovery and filtering",
-        description=(
-            "Unified command for processing MCAP files. Combines recovery, filtering, "
-            "and transformation capabilities in a single operation. Can handle corrupt files "
-            "while applying topic/time filters and changing compression."
-            "\\n\\nusage:\\n  mcap process in.mcap -o out.mcap -y /camera.* --recover"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    file_arg = parser.add_argument(
-        "file",
-        nargs="+",
-        help="Path(s) to MCAP file(s) to process (or merge if multiple)",
-        type=str,
-    )
-    file_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    output_arg = parser.add_argument(
-        "-o",
-        "--output",
-        help="Output filename (required)",
-        type=str,
-        required=True,
-    )
-    output_arg.complete = shtab.FILE  # type: ignore[attr-defined]
-
-    # Recovery options
-    recovery_group = parser.add_argument_group("Recovery options")
-    recovery_group.add_argument(
-        "--recovery-mode",
-        action="store_true",
-        default=True,
-        help="Enable recovery mode (handle errors gracefully, default: enabled)",
-    )
-    recovery_group.add_argument(
-        "--no-recovery",
-        action="store_true",
-        help="Disable recovery mode (fail on any errors)",
-    )
-    recovery_group.add_argument(
-        "-a",
-        "--always-decode-chunk",
-        action="store_true",
-        help="Always decode chunks, never use fast copying",
-    )
-
-    # Topic filtering
-    topic_group = parser.add_argument_group("Topic filtering")
-    topic_group.add_argument(
-        "-y",
-        "--include-topic-regex",
-        action="append",
-        default=[],
-        help="Include messages with topic names matching this regex (can be used multiple times)",
-    )
-    topic_group.add_argument(
-        "-n",
-        "--exclude-topic-regex",
-        action="append",
-        default=[],
-        help="Exclude messages with topic names matching this regex (can be used multiple times)",
-    )
-
-    # Time filtering
-    time_group = parser.add_argument_group("Time filtering")
-    time_group.add_argument(
-        "-S",
-        "--start",
-        help="Include messages at or after this time (nanoseconds or RFC3339 date)",
-        type=str,
-        default="",
-    )
-    time_group.add_argument(
-        "-s",
-        "--start-secs",
-        help="Include messages at or after this time in seconds (ignored if --start used)",
-        type=int,
-        default=0,
-    )
-    time_group.add_argument(
-        "--start-nsecs",
-        help="(Deprecated, use --start) Include messages at or after this time in nanoseconds",
-        type=int,
-        default=0,
-    )
-    time_group.add_argument(
-        "-E",
-        "--end",
-        help="Include messages before this time (nanoseconds or RFC3339 date)",
-        type=str,
-        default="",
-    )
-    time_group.add_argument(
-        "-e",
-        "--end-secs",
-        help="Include messages before this time in seconds (ignored if --end used)",
-        type=int,
-        default=0,
-    )
-    time_group.add_argument(
-        "--end-nsecs",
-        help="(Deprecated, use --end) Include messages before this time in nanoseconds",
-        type=int,
-        default=0,
-    )
-
-    # Content filtering
-    content_group = parser.add_argument_group("Content filtering")
-    content_group.add_argument(
-        "--include-metadata",
-        action="store_true",
-        default=True,
-        help="Include metadata records in output (default: enabled)",
-    )
-    content_group.add_argument(
-        "--exclude-metadata",
-        action="store_true",
-        help="Exclude metadata records from output",
-    )
-    content_group.add_argument(
-        "--include-attachments",
-        action="store_true",
-        default=True,
-        help="Include attachment records in output (default: enabled)",
-    )
-    content_group.add_argument(
-        "--exclude-attachments",
-        action="store_true",
-        help="Exclude attachment records from output",
-    )
-
-    # Output options
-    output_group = parser.add_argument_group("Output options")
-    output_group.add_argument(
-        "--chunk-size",
-        type=int,
-        default=4 * 1024 * 1024,  # 4MB
-        help="Chunk size of output file (default: 4MB)",
-    )
-    output_group.add_argument(
-        "--compression",
-        choices=["zstd", "lz4", "none"],
-        default="zstd",
-        help="Compression algorithm for output file (default: zstd)",
-    )
-
-    return parser
-
-
-def build_processing_options(args: argparse.Namespace) -> ProcessingOptions:
+def build_processing_options(
+    include_topic_regex: list[str] | None,
+    exclude_topic_regex: list[str] | None,
+    start: str,
+    start_nsecs: int,
+    start_secs: int,
+    end: str,
+    end_nsecs: int,
+    end_secs: int,
+    include_metadata: bool,
+    exclude_metadata: bool,
+    include_attachments: bool,
+    exclude_attachments: bool,
+    compression: str,
+    chunk_size: int,
+    recovery_mode: bool,
+    no_recovery: bool,
+    always_decode_chunk: bool,
+) -> ProcessingOptions:
     """Build ProcessingOptions from command line arguments."""
+    # Handle None defaults for list parameters
+    include_topic_regex = include_topic_regex or []
+    exclude_topic_regex = exclude_topic_regex or []
+
     # Validate mutually exclusive options
-    if args.include_topic_regex and args.exclude_topic_regex:
+    if include_topic_regex and exclude_topic_regex:
         raise ValueError("Cannot use both --include-topic-regex and --exclude-topic-regex")
 
-    recovery_mode = False if args.no_recovery and args.recovery_mode else not args.no_recovery
+    recovery = False if no_recovery and recovery_mode else not no_recovery
 
     # Parse time arguments
     try:
-        start_time = parse_timestamp_args(args.start, args.start_nsecs, args.start_secs)
-        end_time = parse_timestamp_args(args.end, args.end_nsecs, args.end_secs)
+        start_time = parse_timestamp_args(start, start_nsecs, start_secs)
+        end_time = parse_timestamp_args(end, end_nsecs, end_secs)
     except ValueError as e:
         raise ValueError(f"Time parsing error: {e}") from e
 
@@ -209,48 +85,228 @@ def build_processing_options(args: argparse.Namespace) -> ProcessingOptions:
         raise ValueError("End time cannot be before start time")
 
     # Compile topic patterns
-    include_topics = compile_topic_patterns(args.include_topic_regex)
-    exclude_topics = compile_topic_patterns(args.exclude_topic_regex)
+    include_topics = compile_topic_patterns(include_topic_regex)
+    exclude_topics = compile_topic_patterns(exclude_topic_regex)
 
     # Handle content filtering
-    include_metadata = args.include_metadata and not args.exclude_metadata
-    include_attachments = args.include_attachments and not args.exclude_attachments
+    include_meta = include_metadata and not exclude_metadata
+    include_attach = include_attachments and not exclude_attachments
 
     return ProcessingOptions(
         # Recovery options
-        recovery_mode=recovery_mode,
-        always_decode_chunk=args.always_decode_chunk,
+        recovery_mode=recovery,
+        always_decode_chunk=always_decode_chunk,
         # Filter options
         include_topics=include_topics,
         exclude_topics=exclude_topics,
         start_time=start_time,
         end_time=end_time,
-        include_metadata=include_metadata,
-        include_attachments=include_attachments,
+        include_metadata=include_meta,
+        include_attachments=include_attach,
         # Output options
-        compression=args.compression,
-        chunk_size=args.chunk_size,
+        compression=compression,
+        chunk_size=chunk_size,
     )
 
 
-def handle_command(args: argparse.Namespace) -> None:
-    """Handle the process command execution."""
+@app.command()
+def process(
+    file: Annotated[
+        list[Path],
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path(s) to MCAP file(s) to process (or merge if multiple)",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            "-o",
+            "--output",
+            help="Output filename (required)",
+        ),
+    ],
+    # Recovery options
+    recovery_mode: Annotated[
+        bool,
+        typer.Option(
+            "--recovery-mode",
+            help="Enable recovery mode (handle errors gracefully, default: enabled)",
+        ),
+    ] = True,
+    no_recovery: Annotated[
+        bool,
+        typer.Option(
+            "--no-recovery",
+            help="Disable recovery mode (fail on any errors)",
+        ),
+    ] = False,
+    always_decode_chunk: Annotated[
+        bool,
+        typer.Option(
+            "-a",
+            "--always-decode-chunk",
+            help="Always decode chunks, never use fast copying",
+        ),
+    ] = False,
+    # Topic filtering
+    include_topic_regex: Annotated[
+        list[str] | None,
+        typer.Option(
+            "-y",
+            "--include-topic-regex",
+            help=(
+                "Include messages with topic names matching this regex (can be used multiple times)"
+            ),
+        ),
+    ] = None,
+    exclude_topic_regex: Annotated[
+        list[str] | None,
+        typer.Option(
+            "-n",
+            "--exclude-topic-regex",
+            help=(
+                "Exclude messages with topic names matching this regex (can be used multiple times)"
+            ),
+        ),
+    ] = None,
+    # Time filtering
+    start: Annotated[
+        str,
+        typer.Option(
+            "-S",
+            "--start",
+            help="Include messages at or after this time (nanoseconds or RFC3339 date)",
+        ),
+    ] = "",
+    start_secs: Annotated[
+        int,
+        typer.Option(
+            "-s",
+            "--start-secs",
+            help="Include messages at or after this time in seconds (ignored if --start used)",
+        ),
+    ] = 0,
+    start_nsecs: Annotated[
+        int,
+        typer.Option(
+            "--start-nsecs",
+            help="(Deprecated, use --start) Include messages at or after this time in nanoseconds",
+        ),
+    ] = 0,
+    end: Annotated[
+        str,
+        typer.Option(
+            "-E",
+            "--end",
+            help="Include messages before this time (nanoseconds or RFC3339 date)",
+        ),
+    ] = "",
+    end_secs: Annotated[
+        int,
+        typer.Option(
+            "-e",
+            "--end-secs",
+            help="Include messages before this time in seconds (ignored if --end used)",
+        ),
+    ] = 0,
+    end_nsecs: Annotated[
+        int,
+        typer.Option(
+            "--end-nsecs",
+            help="(Deprecated, use --end) Include messages before this time in nanoseconds",
+        ),
+    ] = 0,
+    # Content filtering
+    include_metadata: Annotated[
+        bool,
+        typer.Option(
+            "--include-metadata",
+            help="Include metadata records in output (default: enabled)",
+        ),
+    ] = True,
+    exclude_metadata: Annotated[
+        bool,
+        typer.Option(
+            "--exclude-metadata",
+            help="Exclude metadata records from output",
+        ),
+    ] = False,
+    include_attachments: Annotated[
+        bool,
+        typer.Option(
+            "--include-attachments",
+            help="Include attachment records in output (default: enabled)",
+        ),
+    ] = True,
+    exclude_attachments: Annotated[
+        bool,
+        typer.Option(
+            "--exclude-attachments",
+            help="Exclude attachment records from output",
+        ),
+    ] = False,
+    # Output options
+    chunk_size: Annotated[
+        int,
+        typer.Option(
+            "--chunk-size",
+            help="Chunk size of output file (default: 4MB)",
+        ),
+    ] = 4 * 1024 * 1024,  # 4MB
+    compression: Annotated[
+        CompressionType,
+        typer.Option(
+            "--compression",
+            help="Compression algorithm for output file (default: zstd)",
+        ),
+    ] = CompressionType.ZSTD,
+) -> None:
+    """Process MCAP files with unified recovery and filtering.
+
+    Unified command for processing MCAP files. Combines recovery, filtering,
+    and transformation capabilities in a single operation. Can handle corrupt files
+    while applying topic/time filters and changing compression.
+
+    Usage:
+      mcap process in.mcap -o out.mcap -y /camera.* --recovery-mode
+    """
     try:
-        options = build_processing_options(args)
+        options = build_processing_options(
+            include_topic_regex=include_topic_regex,
+            exclude_topic_regex=exclude_topic_regex,
+            start=start,
+            start_nsecs=start_nsecs,
+            start_secs=start_secs,
+            end=end,
+            end_nsecs=end_nsecs,
+            end_secs=end_secs,
+            include_metadata=include_metadata,
+            exclude_metadata=exclude_metadata,
+            include_attachments=include_attachments,
+            exclude_attachments=exclude_attachments,
+            compression=compression.value,
+            chunk_size=chunk_size,
+            recovery_mode=recovery_mode,
+            no_recovery=no_recovery,
+            always_decode_chunk=always_decode_chunk,
+        )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
 
     # Handle single or multiple input files
-    input_files = [Path(f) for f in args.file]
+    input_files = file
 
-    # Validate all input files exist
+    # Validate all input files exist (Typer should handle this, but double-check)
     for input_file in input_files:
         if not input_file.exists():
             console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
             sys.exit(1)
 
-    output_file = Path(args.output)
+    output_file = output
     file_sizes = [f.stat().st_size for f in input_files]
 
     # Create processor and run
