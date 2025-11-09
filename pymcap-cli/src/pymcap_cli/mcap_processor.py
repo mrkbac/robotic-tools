@@ -33,6 +33,10 @@ from small_mcap import (
     stream_reader,
 )
 
+from pymcap_cli.types import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_COMPRESSION,
+)
 from pymcap_cli.utils import file_progress
 
 console = Console()
@@ -80,8 +84,8 @@ class ProcessingOptions:
     include_attachments: bool = True
 
     # Output options
-    compression: str = "zstd"
-    chunk_size: int = 4 * 1024 * 1024  # 4MB
+    compression: str = DEFAULT_COMPRESSION
+    chunk_size: int = DEFAULT_CHUNK_SIZE
 
     @property
     def compression_type(self) -> CompressionType:
@@ -219,8 +223,8 @@ def build_processing_options(
     end_secs: int = 0,
     metadata_mode: MetadataMode = MetadataMode.INCLUDE,
     attachments_mode: AttachmentsMode = AttachmentsMode.INCLUDE,
-    compression: str = "zstd",
-    chunk_size: int = 4 * 1024 * 1024,
+    compression: str = DEFAULT_COMPRESSION,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
     recovery_mode: bool = True,
     always_decode_chunk: bool = False,
 ) -> ProcessingOptions:

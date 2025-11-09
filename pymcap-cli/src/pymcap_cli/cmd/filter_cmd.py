@@ -17,7 +17,14 @@ from pymcap_cli.mcap_processor import (
     confirm_output_overwrite,
     report_processing_stats,
 )
-from pymcap_cli.types import CompressionType
+from pymcap_cli.types import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_COMPRESSION,
+    ChunkSizeOption,
+    CompressionOption,
+    ForceOverwriteOption,
+    OutputPathOption,
+)
 
 console = Console()
 app = typer.Typer()
@@ -33,16 +40,7 @@ def filter_cmd(
             help="Path to the MCAP file to filter",
         ),
     ],
-    output: Annotated[
-        Path,
-        typer.Option(
-            ...,
-            "-o",
-            "--output",
-            help="Output filename",
-            rich_help_panel="Output Options",
-        ),
-    ],
+    output: OutputPathOption,
     include_topic_regex: Annotated[
         list[str] | None,
         typer.Option(
@@ -143,37 +141,9 @@ def filter_cmd(
             show_default=True,
         ),
     ] = AttachmentsMode.EXCLUDE,
-    chunk_size: Annotated[
-        int,
-        typer.Option(
-            "--chunk-size",
-            min=1,
-            help="Chunk size of output file in bytes",
-            rich_help_panel="Output Options",
-            envvar="PYMCAP_CHUNK_SIZE",
-            show_default="4MB",
-        ),
-    ] = 4 * 1024 * 1024,
-    compression: Annotated[
-        CompressionType,
-        typer.Option(
-            "--compression",
-            help="Compression algorithm for output file",
-            rich_help_panel="Output Options",
-            envvar="PYMCAP_COMPRESSION",
-            show_default=True,
-        ),
-    ] = CompressionType.ZSTD,
-    force: Annotated[
-        bool,
-        typer.Option(
-            "-f",
-            "--force",
-            help="Force overwrite of output file without confirmation",
-            rich_help_panel="Output Options",
-            show_default=True,
-        ),
-    ] = False,
+    chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
+    compression: CompressionOption = DEFAULT_COMPRESSION,
+    force: ForceOverwriteOption = False,
 ) -> None:
     """Copy filtered MCAP data to a new file.
 

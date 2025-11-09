@@ -13,7 +13,14 @@ from pymcap_cli.mcap_processor import (
     ProcessingOptions,
     confirm_output_overwrite,
 )
-from pymcap_cli.types import CompressionType
+from pymcap_cli.types import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_COMPRESSION,
+    ChunkSizeOption,
+    CompressionOption,
+    ForceOverwriteOption,
+    OutputPathOption,
+)
 
 console = Console()
 app = typer.Typer()
@@ -29,42 +36,10 @@ def compress(
             help="Path to the MCAP file to compress",
         ),
     ],
-    output: Annotated[
-        Path,
-        typer.Option(
-            ...,
-            "-o",
-            "--output",
-            help="Output filename",
-        ),
-    ],
-    chunk_size: Annotated[
-        int,
-        typer.Option(
-            "--chunk-size",
-            help="Chunk size of output file",
-            envvar="PYMCAP_CHUNK_SIZE",
-            show_default="4MB",
-        ),
-    ] = 4 * 1024 * 1024,
-    compression: Annotated[
-        CompressionType,
-        typer.Option(
-            "--compression",
-            help="Compression algorithm for output file",
-            envvar="PYMCAP_COMPRESSION",
-            show_default=True,
-        ),
-    ] = CompressionType.ZSTD,
-    force: Annotated[
-        bool,
-        typer.Option(
-            "-f",
-            "--force",
-            help="Force overwrite of output file without confirmation",
-            show_default=True,
-        ),
-    ] = False,
+    output: OutputPathOption,
+    chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
+    compression: CompressionOption = DEFAULT_COMPRESSION,
+    force: ForceOverwriteOption = False,
 ) -> None:
     """Create a compressed copy of an MCAP file.
 

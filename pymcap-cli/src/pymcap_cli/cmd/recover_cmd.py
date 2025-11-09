@@ -6,8 +6,15 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
-from pymcap_cli.types import CompressionType
+from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions, confirm_output_overwrite
+from pymcap_cli.types import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_COMPRESSION,
+    ChunkSizeOption,
+    CompressionOption,
+    ForceOverwriteOption,
+    OutputPathOption,
+)
 
 console = Console()
 app = typer.Typer()
@@ -23,38 +30,20 @@ def recover(
             help="Path to the MCAP file to recover",
         ),
     ],
-    output: Annotated[
-        Path,
-        typer.Option(
-            ...,
-            "-o",
-            "--output",
-            help="Output filename (writes to stdout if not provided)",
-        ),
-    ],
-    chunk_size: Annotated[
-        int,
-        typer.Option(
-            "--chunk-size",
-            min=1,
-            help="Chunk size of output file in bytes (default: 4MB)",
-        ),
-    ] = 4 * 1024 * 1024,
-    compression: Annotated[
-        CompressionType,
-        typer.Option(
-            "--compression",
-            help="Compression algorithm to use on output file (default: zstd)",
-        ),
-    ] = CompressionType.ZSTD,
+    output: OutputPathOption,
+    chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
+    compression: CompressionOption = DEFAULT_COMPRESSION,
     always_decode_chunk: Annotated[
         bool,
         typer.Option(
             "--always-decode-chunk",
             "-a",
             help="Always decode chunks, even if the file is not chunked",
+            rich_help_panel="Recovery Options",
+            show_default=True,
         ),
     ] = False,
+    force: ForceOverwriteOption = False,
 ) -> None:
     """Recover data from a potentially corrupt MCAP file.
 
@@ -63,6 +52,9 @@ def recover(
     usage:
       mcap recover in.mcap -o out.mcap
     """
+    # Confirm overwrite if needed
+    confirm_output_overwrite(output, force)
+
     input_file = file
     output_file = output
     file_size = input_file.stat().st_size

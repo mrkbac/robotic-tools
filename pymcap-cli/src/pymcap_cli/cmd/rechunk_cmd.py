@@ -35,7 +35,14 @@ from pymcap_cli.mcap_processor import (
     confirm_output_overwrite,
     str_to_compression_type,
 )
-from pymcap_cli.types import CompressionType
+from pymcap_cli.types import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_COMPRESSION,
+    ChunkSizeOption,
+    CompressionOption,
+    ForceOverwriteOption,
+    OutputPathOption,
+)
 from pymcap_cli.utils import file_progress
 
 console = Console()
@@ -336,16 +343,7 @@ def rechunk(
             help="Path to the MCAP file to rechunk",
         ),
     ],
-    output: Annotated[
-        Path,
-        typer.Option(
-            ...,
-            "-o",
-            "--output",
-            help="Output filename (required)",
-            rich_help_panel="Input/Output",
-        ),
-    ],
+    output: OutputPathOption,
     strategy: Annotated[
         RechunkStrategy,
         typer.Option(
@@ -374,35 +372,9 @@ def rechunk(
             rich_help_panel="Rechunking Strategy",
         ),
     ] = None,
-    chunk_size: Annotated[
-        int,
-        typer.Option(
-            "--chunk-size",
-            min=1,
-            help="Chunk size in bytes",
-            rich_help_panel="Output Options",
-            show_default="4MB",
-        ),
-    ] = 4 * 1024 * 1024,
-    compression: Annotated[
-        CompressionType,
-        typer.Option(
-            "--compression",
-            help="Compression algorithm for output file",
-            rich_help_panel="Output Options",
-            show_default=True,
-        ),
-    ] = CompressionType.ZSTD,
-    force: Annotated[
-        bool,
-        typer.Option(
-            "-f",
-            "--force",
-            help="Force overwrite of output file without confirmation",
-            rich_help_panel="Output Options",
-            show_default=True,
-        ),
-    ] = False,
+    chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
+    compression: CompressionOption = DEFAULT_COMPRESSION,
+    force: ForceOverwriteOption = False,
 ) -> None:
     """Reorganize MCAP messages into chunks based on topic patterns.
 

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TypedDict
+from pathlib import Path
+from typing import Annotated, TypedDict
+
+import typer
 
 
 class FileInfo(TypedDict):
@@ -131,3 +134,56 @@ class CompressionType(str, Enum):
     ZSTD = "zstd"
     LZ4 = "lz4"
     NONE = "none"
+
+
+# Common CLI parameter type aliases (with defaults included)
+
+# MCAP processing constants
+MIN_CHUNK_SIZE = 1024  # 1 KiB minimum chunk size
+DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB default chunk size
+DEFAULT_COMPRESSION = CompressionType.ZSTD  # Default compression algorithm
+
+ChunkSizeOption = Annotated[
+    int,
+    typer.Option(
+        "--chunk-size",
+        min=MIN_CHUNK_SIZE,
+        help="Chunk size of output file in bytes",
+        envvar="PYMCAP_CHUNK_SIZE",
+        show_default="4MB",
+        rich_help_panel="Output Options",
+    ),
+]
+
+CompressionOption = Annotated[
+    CompressionType,
+    typer.Option(
+        "--compression",
+        help="Compression algorithm for output file",
+        envvar="PYMCAP_COMPRESSION",
+        show_default=True,
+        rich_help_panel="Output Options",
+    ),
+]
+
+OutputPathOption = Annotated[
+    Path,
+    typer.Option(
+        ...,
+        "-o",
+        "--output",
+        help="Output filename",
+        rich_help_panel="Output Options",
+    ),
+]
+
+ForceOverwriteOption = Annotated[
+    bool,
+    typer.Option(
+        "-f",
+        "--force",
+        help="Force overwrite of output file without confirmation",
+        show_default=True,
+        rich_help_panel="Output Options",
+    ),
+]
