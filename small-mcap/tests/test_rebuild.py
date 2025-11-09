@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from small_mcap import get_summary, rebuild_summary
 
 # Path to conformance test data
@@ -17,10 +15,7 @@ def test_rebuild_simple_chunked_file():
     with open(test_file, "rb") as f:
         # Rebuild the summary
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
 
         # Verify we got valid results
@@ -44,10 +39,7 @@ def test_rebuild_with_indexes():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
 
         # Verify chunk indexes were rebuilt
@@ -64,10 +56,7 @@ def test_rebuild_with_attachments():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
 
         # Verify attachment was counted in statistics
@@ -81,10 +70,7 @@ def test_rebuild_with_metadata():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
 
         # Verify metadata was counted in statistics
@@ -98,10 +84,7 @@ def test_rebuild_multiple_messages():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
 
         # Verify all 10 messages were counted
@@ -122,10 +105,7 @@ def test_rebuild_channel_sizes_exact():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=True,
-            exact_sizes=True
+            f, validate_crc=False, calculate_channel_sizes=True, exact_sizes=True
         )
 
         # Verify channel sizes were calculated
@@ -136,7 +116,7 @@ def test_rebuild_channel_sizes_exact():
         assert rebuild_info.estimated_channel_sizes is False
 
         # Verify sizes are positive
-        for channel_id, size in rebuild_info.channel_sizes.items():
+        for size in rebuild_info.channel_sizes.values():
             assert size > 0
 
 
@@ -146,10 +126,7 @@ def test_rebuild_channel_sizes_estimated():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=True,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=True, exact_sizes=False
         )
 
         # With message indexes, we can estimate channel sizes
@@ -160,7 +137,7 @@ def test_rebuild_channel_sizes_estimated():
         assert rebuild_info.estimated_channel_sizes is True
 
         # If channel sizes were calculated, verify they are positive
-        for channel_id, size in rebuild_info.channel_sizes.items():
+        for size in rebuild_info.channel_sizes.values():
             assert size > 0
 
 
@@ -170,10 +147,7 @@ def test_rebuild_full_features():
 
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
 
         # Verify basic structure
@@ -204,10 +178,7 @@ def test_rebuild_matches_original_summary():
     # Rebuild the summary
     with open(test_file, "rb") as f:
         rebuild_info = rebuild_summary(
-            f,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False
+            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
         rebuilt_summary = rebuild_info.summary
 
