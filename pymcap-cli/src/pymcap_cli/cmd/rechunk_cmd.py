@@ -2,38 +2,22 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, BinaryIO
+from typing import TYPE_CHECKING, Annotated
 
 if TYPE_CHECKING:
     from re import Pattern
 
 import typer
 from rich.console import Console
-from small_mcap import (
-    Attachment,
-    Channel,
-    DataEnd,
-    Footer,
-    Header,
-    McapWriter,
-    Message,
-    Metadata,
-    Schema,
-    stream_reader,
-)
-from small_mcap import (
-    CompressionType as SmallMcapCompressionType,
-)
-from small_mcap.rebuild import rebuild_summary
-from small_mcap.writer import _ChunkBuilder
 
 from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.mcap_processor import (
+    McapProcessor,
+    ProcessingOptions,
+    RechunkStrategy,
     compile_topic_patterns,
     confirm_output_overwrite,
-    str_to_compression_type,
 )
 from pymcap_cli.types import (
     DEFAULT_CHUNK_SIZE,
@@ -43,279 +27,9 @@ from pymcap_cli.types import (
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import file_progress
 
 console = Console()
 app = typer.Typer()
-
-
-class RechunkStrategy(str, Enum):
-    """Strategy for rechunking operation."""
-
-    PATTERN = "pattern"  # Group by regex patterns
-    ALL = "all"  # Each topic in its own chunk group
-    AUTO = "auto"  # Auto-group based on size (>15% threshold)
-
-
-class MessageGroup:
-    """Manages a group of messages that will be chunked together independently."""
-
-    def __init__(
-        self,
-        writer: McapWriter,
-        chunk_size: int,
-        compression_type: SmallMcapCompressionType,
-        schemas: dict[int, Schema],
-        channels: dict[int, Channel],
-    ) -> None:
-        self.writer = writer
-        self.chunk_size = chunk_size
-        self.message_count = 0
-        self.compress_fail_counter = 0
-        # Each group has its own chunk builder for independent chunking
-        # Pass schemas/channels for auto-ensure
-        self.chunk_builder = _ChunkBuilder(
-            chunk_size=chunk_size,
-            compression=compression_type,
-            enable_crcs=writer.enable_crcs,
-            schemas=schemas,
-            channels=channels,
-        )
-
-    def add_message(self, message: Message) -> None:
-        """Add message to this group's chunk builder."""
-        # ChunkBuilder auto-ensures channel and schema
-        self.chunk_builder.add(message)
-
-        # If chunk builder returns a completed chunk, write it immediately
-        if result := self.chunk_builder.maybe_finalize():
-            chunk, message_indexes = result
-            if chunk.compression != self.chunk_builder.compression.value:
-                self.compress_fail_counter += 1
-                if self.compress_fail_counter > 2:
-                    console.print(
-                        "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
-                    )
-                    self.chunk_builder.compression = SmallMcapCompressionType.NONE
-            self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
-
-        self.message_count += 1
-
-    def flush(self) -> None:
-        """Flush any remaining messages in this group's chunk builder."""
-        result = self.chunk_builder.finalize()
-        if result is not None:
-            chunk, message_indexes = result
-            self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
-
-
-class RechunkProcessor:
-    """Process MCAP file and rechunk messages based on topic patterns."""
-
-    def __init__(
-        self,
-        mode: RechunkStrategy,
-        patterns: list[Pattern[str]],
-        chunk_size: int,
-        compression: str,
-    ) -> None:
-        self.mode = mode
-        self.patterns = patterns
-        self.chunk_size = chunk_size
-        self.compression = compression
-
-        # Track schemas and channels (shared with writer and chunk builders)
-        self.schemas: dict[int, Schema] = {}
-        self.channels: dict[int, Channel] = {}
-
-        # Map channel_id to its MessageGroup (populated dynamically)
-        self.channel_to_group: dict[int, MessageGroup] = {}
-
-        # For AUTO mode: track which channels are "large" (>15% of total)
-        self.large_channels: set[int] = set()
-
-        # Stats
-        self.messages_processed = 0
-        self.messages_written = 0
-
-    def find_matching_pattern_index(self, topic: str) -> int | None:
-        """Find first pattern that matches topic. Returns pattern index or None."""
-        for i, pattern in enumerate(self.patterns):
-            if pattern.search(topic):
-                return i
-        return None
-
-    def analyze_for_auto_grouping(self, input_stream: BinaryIO) -> None:
-        """Pre-analyze file to identify large channels (>15% of total uncompressed size)."""
-        console.print("[dim]Analyzing file for auto-grouping...[/dim]")
-
-        # Use rebuild_summary to estimate channel sizes
-        rebuild_info = rebuild_summary(
-            input_stream,
-            validate_crc=False,
-            calculate_channel_sizes=True,
-            exact_sizes=False,  # Use fast estimation
-        )
-
-        if not rebuild_info.channel_sizes:
-            console.print("[yellow]Warning: Could not determine channel sizes[/yellow]")
-            return
-
-        # Calculate 15% threshold
-        total_size = sum(rebuild_info.channel_sizes.values())
-        threshold = total_size * 0.15
-
-        # Identify large channels
-        self.large_channels = {
-            ch_id for ch_id, size in rebuild_info.channel_sizes.items() if size > threshold
-        }
-
-        if self.large_channels:
-            console.print(
-                f"[dim]Found {len(self.large_channels)} large channel(s) "
-                f"(>{threshold / 1024 / 1024:.1f}MB each)[/dim]"
-            )
-
-        # Reset stream position for main processing
-        input_stream.seek(0)
-
-    def process(
-        self,
-        input_stream: BinaryIO,
-        output_stream: BinaryIO,
-        file_size: int,
-    ) -> None:
-        """Main processing function - streaming approach."""
-        # For AUTO mode, pre-analyze to identify large channels
-        if self.mode == RechunkStrategy.AUTO:
-            self.analyze_for_auto_grouping(input_stream)
-
-        # Initialize writer and share schema/channel dicts for auto-ensure
-        compression_type = str_to_compression_type(self.compression)
-        writer = McapWriter(
-            output_stream,
-            chunk_size=self.chunk_size,
-            compression=compression_type,
-        )
-        writer.schemas = self.schemas
-        writer.channels = self.channels
-
-        try:
-            with file_progress("[bold blue]Rechunking MCAP...", console) as progress:
-                task = progress.add_task("Processing", total=file_size)
-
-                records = stream_reader(input_stream, emit_chunks=False)
-
-                for record in records:
-                    # Update progress
-                    progress.update(task, completed=input_stream.tell())
-
-                    if isinstance(record, Header):
-                        # Start writer with header info
-                        writer.start(profile=record.profile, library=record.library)
-
-                    elif isinstance(record, Schema):
-                        self.schemas[record.id] = record
-
-                    elif isinstance(record, Channel):
-                        self.channels[record.id] = record
-
-                    elif isinstance(record, Message):
-                        self._process_message(record, writer)
-
-                    elif isinstance(record, Attachment):
-                        writer.add_attachment(
-                            log_time=record.log_time,
-                            create_time=record.create_time,
-                            name=record.name,
-                            media_type=record.media_type,
-                            data=record.data,
-                        )
-
-                    elif isinstance(record, Metadata):
-                        writer.add_metadata(name=record.name, metadata=record.metadata)
-
-                    elif isinstance(record, (DataEnd, Footer)):
-                        break
-
-                # Flush all unique groups at the end
-                # Use set() to avoid flushing the same group multiple times
-                for group in set(self.channel_to_group.values()):
-                    group.flush()
-
-                # Complete progress
-                progress.update(task, completed=file_size)
-
-        finally:
-            writer.finish()
-
-    def _process_message(self, message: Message, writer: McapWriter) -> None:
-        """Process a single message - route to appropriate group based on mode."""
-        self.messages_processed += 1
-
-        # Get channel for this message
-        channel = self.channels.get(message.channel_id)
-        if not channel:
-            # Channel not yet seen - skip message
-            return
-
-        # Get or create the MessageGroup for this channel
-        if message.channel_id not in self.channel_to_group:
-            group = self._create_group_for_channel(message.channel_id, channel, writer)
-            self.channel_to_group[message.channel_id] = group
-
-        # Ensure channel is written to main file (not in chunks)
-        writer.ensure_channel_written(message.channel_id)
-
-        # Add message to its group (chunk builder auto-ensures within chunks)
-        self.channel_to_group[message.channel_id].add_message(message)
-        self.messages_written += 1
-
-    def _create_group_for_channel(
-        self, channel_id: int, channel: Channel, writer: McapWriter
-    ) -> MessageGroup:
-        """Create appropriate MessageGroup for a channel based on mode."""
-        compression_type = str_to_compression_type(self.compression)
-
-        if self.mode == RechunkStrategy.ALL:
-            # Each channel gets its own unique group
-            return MessageGroup(
-                writer, self.chunk_size, compression_type, self.schemas, self.channels
-            )
-
-        if self.mode == RechunkStrategy.AUTO:
-            # Large channels get their own group, small channels share one
-            if channel_id in self.large_channels:
-                # Create unique group for large channel
-                return MessageGroup(
-                    writer, self.chunk_size, compression_type, self.schemas, self.channels
-                )
-            # Reuse shared group for small channels (if exists)
-            # Look for any existing small-channel group
-            for ch_id, group in self.channel_to_group.items():
-                if ch_id not in self.large_channels:
-                    return group
-            # No shared group yet, create one
-            return MessageGroup(
-                writer, self.chunk_size, compression_type, self.schemas, self.channels
-            )
-
-        # RechunkStrategy.PATTERN
-        # Find which pattern matches this channel's topic
-        pattern_idx = self.find_matching_pattern_index(channel.topic)
-        group_key = pattern_idx if pattern_idx is not None else -1  # -1 for unmatched
-
-        # Check if we already have a group for this pattern
-        for ch_id, group in self.channel_to_group.items():
-            ch = self.channels.get(ch_id)
-            if ch:
-                other_pattern_idx = self.find_matching_pattern_index(ch.topic)
-                other_key = other_pattern_idx if other_pattern_idx is not None else -1
-                if other_key == group_key:
-                    return group
-
-        # No existing group for this pattern, create new one
-        return MessageGroup(writer, self.chunk_size, compression_type, self.schemas, self.channels)
 
 
 @app.command(
@@ -423,26 +137,30 @@ def rechunk(
                 "All messages will be in one group.[/yellow]"
             )
 
-    # Create processor and run
-    processor = RechunkProcessor(
-        mode=strategy,
-        patterns=patterns,
-        chunk_size=chunk_size,
+    # Build processing options with rechunking enabled
+    options = ProcessingOptions(
+        rechunk_strategy=strategy,
+        rechunk_patterns=patterns,
         compression=compression.value,
+        chunk_size=chunk_size,
+        recovery_mode=True,  # Always enable recovery mode
     )
 
+    # Create processor and run
+    processor = McapProcessor(options)
+
     with input_file.open("rb") as input_stream, output_file.open("wb") as output_stream:
-        processor.process(input_stream, output_stream, file_size)
+        stats = processor.process([input_stream], output_stream, [file_size])
 
         # Report results
         console.print("[green]✓ Rechunking completed successfully![/green]")
         console.print(
-            f"Processed {processor.messages_processed:,} messages, "
-            f"wrote {processor.messages_written:,} messages"
+            f"Processed {stats.messages_processed:,} messages, "
+            f"wrote {stats.writer_statistics.message_count:,} messages"
         )
 
         # Strategy-specific stats
-        num_unique_groups = len(set(processor.channel_to_group.values()))
+        num_unique_groups = len(processor.rechunk_groups)
         if strategy == RechunkStrategy.ALL:
             console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")
         elif strategy == RechunkStrategy.AUTO:

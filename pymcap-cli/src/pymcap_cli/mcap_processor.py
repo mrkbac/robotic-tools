@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import BinaryIO, NamedTuple
+from typing import BinaryIO
 
 import typer
 from rich.console import Console
@@ -32,6 +32,8 @@ from small_mcap import (
     get_summary,
     stream_reader,
 )
+from small_mcap.rebuild import rebuild_summary
+from small_mcap.writer import _ChunkBuilder
 
 from pymcap_cli.types import (
     DEFAULT_CHUNK_SIZE,
@@ -42,13 +44,15 @@ from pymcap_cli.utils import file_progress
 console = Console()
 
 
-class PendingChunk(NamedTuple):
-    """Chunk with its indexes and metadata for ordered processing."""
-
+@dataclass(slots=True)
+class PendingChunk:
     chunk: Chunk
     indexes: list[MessageIndex]
     stream_id: int
     timestamp: int  # message_start_time for ordering
+
+    def __lt__(self, other: "PendingChunk") -> bool:
+        return self.timestamp < other.timestamp
 
 
 def str_to_compression_type(compression: str) -> CompressionType:
@@ -61,6 +65,16 @@ def str_to_compression_type(compression: str) -> CompressionType:
     if compression_lower == "zstd":
         return CompressionType.ZSTD
     raise ValueError(f"Unknown compression type: {compression}")
+
+
+# Rechunking strategy enum (must be defined before ProcessingOptions)
+class RechunkStrategy(str, Enum):
+    """Rechunking strategy for organizing messages into chunks."""
+
+    NONE = "none"  # No rechunking - use fast-copy optimization when possible
+    PATTERN = "pattern"  # Group by regex patterns
+    ALL = "all"  # Each topic in its own chunk group
+    AUTO = "auto"  # Auto-group based on size (>15% threshold)
 
 
 @dataclass
@@ -83,6 +97,10 @@ class ProcessingOptions:
     include_metadata: bool = True
     include_attachments: bool = True
 
+    # Rechunking options
+    rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
+    rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
+
     # Output options
     compression: str = DEFAULT_COMPRESSION
     chunk_size: int = DEFAULT_CHUNK_SIZE
@@ -101,6 +119,11 @@ class ProcessingOptions:
     def has_topic_filter(self) -> bool:
         """Check if topic filtering is active."""
         return bool(self.include_topics or self.exclude_topics)
+
+    @property
+    def is_rechunking(self) -> bool:
+        """Check if rechunking is active."""
+        return self.rechunk_strategy != RechunkStrategy.NONE
 
 
 @dataclass
@@ -183,6 +206,58 @@ class AttachmentsMode(str, Enum):
 
     INCLUDE = "include"
     EXCLUDE = "exclude"
+
+
+class MessageGroup:
+    """Manages a group of messages that will be chunked together independently."""
+
+    def __init__(
+        self,
+        writer: McapWriter,
+        chunk_size: int,
+        compression_type: CompressionType,
+        schemas: dict[int, Schema],
+        channels: dict[int, Channel],
+    ) -> None:
+        self.writer = writer
+        self.chunk_size = chunk_size
+        self.message_count = 0
+        self.compress_fail_counter = 0
+        # Each group has its own chunk builder for independent chunking
+        # Pass schemas/channels for auto-ensure
+        self.chunk_builder = _ChunkBuilder(
+            chunk_size=chunk_size,
+            compression=compression_type,
+            enable_crcs=writer.enable_crcs,
+            schemas=schemas,
+            channels=channels,
+        )
+
+    def add_message(self, message: Message) -> None:
+        """Add message to this group's chunk builder."""
+        # ChunkBuilder auto-ensures channel and schema
+        self.chunk_builder.add(message)
+
+        # If chunk builder returns a completed chunk, write it immediately
+        if result := self.chunk_builder.maybe_finalize():
+            chunk, message_indexes = result
+            if chunk.compression != self.chunk_builder.compression.value:
+                self.compress_fail_counter += 1
+                if self.compress_fail_counter > 2:
+                    console.print(
+                        "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
+                    )
+                    self.chunk_builder.compression = CompressionType.NONE
+            self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
+
+        self.message_count += 1
+
+    def flush(self) -> None:
+        """Flush any remaining messages in this group's chunk builder."""
+        result = self.chunk_builder.finalize()
+        if result is not None:
+            chunk, message_indexes = result
+            self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
 
 
 # Shared helper functions for command-line interfaces
@@ -375,14 +450,18 @@ class McapProcessor:
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
 
-        # Channel topic cache for filtering
-        self.channel_topics: dict[int, str] = {}
-
-        # Cache filtering decisions per channel ID to avoid repeated regex matching
-        self.channel_filter_cache: dict[int, bool] = {}
+        # Cache filtering decisions per channel ID (set-based for efficiency)
+        self.included_channels: set[int] = set()
+        self.excluded_channels: set[int] = set()
 
         # Track which channels we've already seen to optimize metadata extraction
         self.known_channels: set[int] = set()
+
+        # Rechunking state (only used when options.is_rechunking)
+        self.channel_to_group: dict[int, MessageGroup] = {}
+        self.large_channels: set[int] = set()  # For AUTO mode
+        self.rechunk_groups: list[MessageGroup] = []  # Track unique groups
+        self.pattern_index_to_group: dict[int, MessageGroup] = {}  # For PATTERN mode cache
 
     def _compute_channel_filter_decision(self, topic: str) -> bool:
         """Compute whether a channel with given topic should be included.
@@ -411,6 +490,155 @@ class McapProcessor:
         # Use Remapper's built-in lookup
         return self.remapper.get_remapped_schema(stream_id, original_schema_id)
 
+    def _get_remapped_channel_id(self, stream_id: int, original_channel_id: int) -> int:
+        # Check if this channel was remapped
+        if self.remapper.was_channel_remapped(stream_id, original_channel_id):
+            # Use get_remapped_channel to get the remapped ID
+            remapped_channel = self.remapper.get_remapped_channel(stream_id, original_channel_id)
+            return remapped_channel.id if remapped_channel else original_channel_id
+        return original_channel_id
+
+    def _analyze_for_auto_grouping(self, input_streams: Sequence[BinaryIO]) -> None:
+        """Pre-analyze files to identify large channels (>15% of total uncompressed size)."""
+        console.print("[dim]Analyzing files for auto-grouping...[/dim]")
+
+        # Aggregate channel sizes across all files (accounting for remapped IDs)
+        # Map: remapped_channel_id -> total_size
+        channel_sizes: dict[int, int] = {}
+
+        for stream_id, input_stream in enumerate(input_streams):
+            try:
+                rebuild_info = rebuild_summary(
+                    input_stream,
+                    validate_crc=False,
+                    calculate_channel_sizes=True,
+                    exact_sizes=False,  # Use fast estimation
+                )
+
+                if rebuild_info.channel_sizes:
+                    # Map original channel IDs to remapped IDs and aggregate
+                    for original_ch_id, size in rebuild_info.channel_sizes.items():
+                        # Get remapped channel ID
+                        remapped_channel = self.remapper.get_remapped_channel(
+                            stream_id, original_ch_id
+                        )
+                        # Channel not yet remapped will keep original ID
+                        remapped_id = remapped_channel.id if remapped_channel else original_ch_id
+
+                        channel_sizes[remapped_id] = channel_sizes.get(remapped_id, 0) + size
+
+                # Seek back to start for processing
+                input_stream.seek(0)
+
+            except (McapError, OSError) as e:
+                console.print(
+                    f"[yellow]Warning: Could not analyze stream {stream_id}: {e}[/yellow]"
+                )
+                input_stream.seek(0)
+
+        if not channel_sizes:
+            console.print("[yellow]Warning: Could not determine channel sizes[/yellow]")
+            return
+
+        # Calculate 15% threshold
+        total_size = sum(channel_sizes.values())
+        threshold = total_size * 0.15
+
+        # Identify large channels (using remapped IDs)
+        self.large_channels = {ch_id for ch_id, size in channel_sizes.items() if size > threshold}
+
+        if self.large_channels:
+            console.print(
+                f"[dim]Found {len(self.large_channels)} large channel(s) "
+                f"(>{threshold / 1024 / 1024:.1f}MB each)[/dim]"
+            )
+
+    def _find_matching_pattern_index(self, topic: str) -> int | None:
+        """Find first pattern that matches topic. Returns pattern index or None."""
+        for i, pattern in enumerate(self.options.rechunk_patterns):
+            if pattern.search(topic):
+                return i
+        return None
+
+    def _get_or_create_group_for_channel(
+        self, channel_id: int, channel: Channel, writer: McapWriter
+    ) -> MessageGroup:
+        """Get or create appropriate MessageGroup for a channel based on rechunk strategy."""
+        # Check if we already have a group for this channel
+        if channel_id in self.channel_to_group:
+            return self.channel_to_group[channel_id]
+
+        # Determine which group to use based on strategy
+        if self.options.rechunk_strategy == RechunkStrategy.ALL:
+            # Each channel gets its own unique group
+            group = MessageGroup(
+                writer,
+                self.options.chunk_size,
+                self.options.compression_type,
+                self.schemas,
+                self.channels,
+            )
+            self.channel_to_group[channel_id] = group
+            self.rechunk_groups.append(group)
+            return group
+
+        if self.options.rechunk_strategy == RechunkStrategy.AUTO:
+            # Large channels get their own group, small channels share one
+            if channel_id in self.large_channels:
+                # Create unique group for large channel
+                group = MessageGroup(
+                    writer,
+                    self.options.chunk_size,
+                    self.options.compression_type,
+                    self.schemas,
+                    self.channels,
+                )
+                self.channel_to_group[channel_id] = group
+                self.rechunk_groups.append(group)
+                return group
+
+            # Look for any existing small-channel group
+            for ch_id, group in self.channel_to_group.items():
+                if ch_id not in self.large_channels:
+                    # Reuse this shared group
+                    self.channel_to_group[channel_id] = group
+                    return group
+
+            # No shared group yet, create one
+            group = MessageGroup(
+                writer,
+                self.options.chunk_size,
+                self.options.compression_type,
+                self.schemas,
+                self.channels,
+            )
+            self.channel_to_group[channel_id] = group
+            self.rechunk_groups.append(group)
+            return group
+
+        # RechunkStrategy.PATTERN
+        # Find which pattern matches this channel's topic
+        pattern_idx = self._find_matching_pattern_index(channel.topic)
+        group_key = pattern_idx if pattern_idx is not None else -1  # -1 for unmatched
+
+        if group_key in self.pattern_index_to_group:
+            group = self.pattern_index_to_group[group_key]
+            self.channel_to_group[channel_id] = group
+            return group
+
+        # No existing group for this pattern, create new one
+        group = MessageGroup(
+            writer,
+            self.options.chunk_size,
+            self.options.compression_type,
+            self.schemas,
+            self.channels,
+        )
+        self.channel_to_group[channel_id] = group
+        self.pattern_index_to_group[group_key] = group
+        self.rechunk_groups.append(group)
+        return group
+
     def process_message(
         self,
         message: Message,
@@ -424,25 +652,47 @@ class McapProcessor:
             return
 
         # Topic filtering using cached decision (avoid repeated regex matching)
-        should_include = self.channel_filter_cache.get(message.channel_id)
-        if should_include is None:
-            # Channel not yet seen - this shouldn't happen in well-formed MCAP
-            # but handle it gracefully
-            topic = self.channel_topics.get(message.channel_id, "")
-            should_include = self._compute_channel_filter_decision(topic)
-            self.channel_filter_cache[message.channel_id] = should_include
-
-        if not should_include:
+        # Fast path: check if already determined
+        if message.channel_id in self.excluded_channels:
             self.stats.filter_rejections += 1
             return
 
-        # Writer auto-ensures channel and schema are written
-        writer.add_message(
-            channel_id=message.channel_id,
-            log_time=message.log_time,
-            data=message.data,
-            publish_time=message.publish_time,
-        )
+        if message.channel_id not in self.included_channels:
+            # Channel not yet seen - compute and cache decision
+            channel = self.channels.get(message.channel_id)
+            topic = channel.topic if channel else ""
+            should_include = self._compute_channel_filter_decision(topic)
+            if should_include:
+                self.included_channels.add(message.channel_id)
+            else:
+                self.excluded_channels.add(message.channel_id)
+                self.stats.filter_rejections += 1
+                return
+
+        # Route to appropriate destination based on rechunking mode
+        if self.options.is_rechunking:
+            # Get channel for this message
+            channel = self.channels.get(message.channel_id)
+            if not channel:
+                # Channel not yet seen - skip message
+                return
+
+            # Get or create the MessageGroup for this channel
+            group = self._get_or_create_group_for_channel(message.channel_id, channel, writer)
+
+            # Ensure channel is written to main file (not in chunks)
+            writer.ensure_channel_written(message.channel_id)
+
+            # Add message to its group (chunk builder auto-ensures within chunks)
+            group.add_message(message)
+        else:
+            # Normal mode: writer auto-ensures channel and schema are written
+            writer.add_message(
+                channel_id=message.channel_id,
+                log_time=message.log_time,
+                data=message.data,
+                publish_time=message.publish_time,
+            )
 
     def _handle_channel_record(self, channel: Channel, stream_id: int) -> None:
         """Handle a channel record from the stream."""
@@ -457,8 +707,10 @@ class McapProcessor:
         if remapped_channel.id not in self.known_channels:
             # Pre-compute filtering decision for this channel
             should_include = self._compute_channel_filter_decision(remapped_channel.topic)
-            self.channel_filter_cache[remapped_channel.id] = should_include
-            self.channel_topics[remapped_channel.id] = remapped_channel.topic
+            if should_include:
+                self.included_channels.add(remapped_channel.id)
+            else:
+                self.excluded_channels.add(remapped_channel.id)
             self.known_channels.add(remapped_channel.id)
 
             # Only add channel to output if it passes the filter
@@ -467,25 +719,21 @@ class McapProcessor:
 
     def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
         """Handle a message record from the stream."""
-        original_channel_id = message.channel_id
-        message_to_process: Message = message
-        if self.remapper.was_channel_remapped(stream_id, original_channel_id):
-            # Look up the remapped channel
-            original_channel = Channel(
-                id=original_channel_id,
-                schema_id=0,
-                topic="",
-                message_encoding="",
-                metadata={},
-            )
-            remapped_channel = self.remapper.remap_channel(stream_id, original_channel)
+        # Use cached channel ID lookup (avoids creating temporary Channel objects)
+        remapped_channel_id = self._get_remapped_channel_id(stream_id, message.channel_id)
+
+        if remapped_channel_id != message.channel_id:
+            # Channel was remapped, create new message with remapped ID
             message_to_process = Message(
-                channel_id=remapped_channel.id,
+                channel_id=remapped_channel_id,
                 sequence=message.sequence,
                 log_time=message.log_time,
                 publish_time=message.publish_time,
                 data=message.data,
             )
+        else:
+            message_to_process = message
+
         self.process_message(message_to_process, writer)
 
     def _handle_attachment_record(self, attachment: Attachment, writer: McapWriter) -> None:
@@ -520,10 +768,10 @@ class McapProcessor:
                 # Yield pending chunk when we see a non-MessageIndex record
                 if not isinstance(record, MessageIndex) and last_chunk:
                     yield PendingChunk(
+                        timestamp=last_chunk.message_start_time,
                         chunk=last_chunk,
                         indexes=last_chunk_message_indexes,
                         stream_id=stream_id,
-                        timestamp=last_chunk.message_start_time,
                     )
                     last_chunk = None
                     last_chunk_message_indexes = []
@@ -563,10 +811,10 @@ class McapProcessor:
                 # If we have a pending chunk, yield it for processing
                 if last_chunk:
                     yield PendingChunk(
+                        timestamp=last_chunk.message_start_time,
                         chunk=last_chunk,
                         indexes=last_chunk_message_indexes,
                         stream_id=stream_id,
-                        timestamp=last_chunk.message_start_time,
                     )
                     last_chunk = None
             else:
@@ -575,10 +823,10 @@ class McapProcessor:
         # Yield the final pending chunk if any
         if last_chunk:
             yield PendingChunk(
+                timestamp=last_chunk.message_start_time,
                 chunk=last_chunk,
                 indexes=last_chunk_message_indexes,
                 stream_id=stream_id,
-                timestamp=last_chunk.message_start_time,
             )
 
     def process(
@@ -646,8 +894,10 @@ class McapProcessor:
                             should_include = self._compute_channel_filter_decision(
                                 remapped_channel.topic
                             )
-                            self.channel_filter_cache[remapped_channel.id] = should_include
-                            self.channel_topics[remapped_channel.id] = remapped_channel.topic
+                            if should_include:
+                                self.included_channels.add(remapped_channel.id)
+                            else:
+                                self.excluded_channels.add(remapped_channel.id)
                             self.known_channels.add(remapped_channel.id)
 
                             # Only add channel to output if it passes the filter
@@ -656,6 +906,10 @@ class McapProcessor:
 
                 # Seek back to start for processing
                 input_stream.seek(0)
+
+            # For AUTO rechunking mode, pre-analyze files to identify large channels
+            if self.options.rechunk_strategy == RechunkStrategy.AUTO:
+                self._analyze_for_auto_grouping(input_streams)
 
             total_size = sum(file_sizes)
             with file_progress("[bold blue]Processing MCAP...", console) as progress:
@@ -668,8 +922,8 @@ class McapProcessor:
                 ]
 
                 # Process chunks in timestamp order using heapq.merge
-                # This maintains global ordering while allowing fast-copy optimization
-                for pending_chunk in heapq.merge(*chunk_generators, key=lambda x: x.timestamp):
+                # PendingChunk is ordered by timestamp, so no key function needed
+                for pending_chunk in heapq.merge(*chunk_generators):
                     self._process_chunk_smart(
                         pending_chunk.chunk,
                         pending_chunk.indexes,
@@ -681,6 +935,11 @@ class McapProcessor:
                 progress.update(task, completed=total_size)
 
         finally:
+            # Flush all rechunk groups before finishing
+            if self.options.is_rechunking:
+                for group in self.rechunk_groups:
+                    group.flush()
+
             writer.finish()
 
         # Save writer statistics (single source of truth for output counts)
@@ -711,8 +970,10 @@ class McapProcessor:
 
             remapped_channel_ids.add(remapped_id)
 
-            # Check if this remapped ID is in known_channels
-            if remapped_id not in self.known_channels:
+        # Bulk set operation: check if any IDs are unknown (more efficient than individual checks)
+        if not needs_metadata_extraction:
+            unknown_channels = remapped_channel_ids - self.known_channels
+            if unknown_channels:
                 needs_metadata_extraction = True
 
         return remapped_channel_ids, needs_metadata_extraction
@@ -733,6 +994,10 @@ class McapProcessor:
             or chunk.message_start_time >= self.options.end_time
         ):
             return (True, False)
+
+        # Force decode if rechunking is active (must reorganize messages)
+        if self.options.is_rechunking:
+            return (False, True)
 
         # Force decode if requested
         if self.options.always_decode_chunk:
@@ -765,11 +1030,14 @@ class McapProcessor:
             has_exclude = False
 
             for idx in indexes:
-                should_include = self.channel_filter_cache.get(idx.channel_id)
-                if should_include is None:
+                # Check if channel filter decision is cached
+                if (
+                    idx.channel_id not in self.included_channels
+                    and idx.channel_id not in self.excluded_channels
+                ):
                     # Unknown channel - must decode to discover it
                     return (False, True)
-                if should_include:
+                if idx.channel_id in self.included_channels:
                     has_include = True
                 else:
                     has_exclude = True
@@ -809,9 +1077,8 @@ class McapProcessor:
                 # Ensure all channels (and their schemas) are written before fast-copying chunk
                 # Only write channels that pass the filter
                 for channel_id in remapped_channel_ids:
-                    # Check if channel should be included (default to True if not in cache)
-                    should_include = self.channel_filter_cache.get(channel_id, True)
-                    if should_include:
+                    # Check if channel should be included
+                    if channel_id not in self.excluded_channels:
                         writer.ensure_channel_written(channel_id)
 
                 # Fast-copy the chunk with its indexes
@@ -853,8 +1120,10 @@ class McapProcessor:
                         should_include = self._compute_channel_filter_decision(
                             remapped_channel.topic
                         )
-                        self.channel_filter_cache[remapped_channel.id] = should_include
-                        self.channel_topics[remapped_channel.id] = remapped_channel.topic
+                        if should_include:
+                            self.included_channels.add(remapped_channel.id)
+                        else:
+                            self.excluded_channels.add(remapped_channel.id)
                         self.known_channels.add(remapped_channel.id)
 
                         # Only add channel to output if it passes the filter
@@ -863,23 +1132,17 @@ class McapProcessor:
                 elif isinstance(chunk_record, Message):
                     if not writer:
                         continue
-                    # Remap message channel ID if needed
-                    original_channel_id = chunk_record.channel_id
-                    message_to_write = chunk_record
-                    if self.remapper.was_channel_remapped(stream_id, original_channel_id):
-                        # Look up the remapped channel
-                        original_channel = Channel(
-                            id=original_channel_id,
-                            schema_id=0,
-                            topic="",
-                            message_encoding="",
-                            metadata={},
-                        )
-                        remapped_channel = self.remapper.remap_channel(stream_id, original_channel)
+                    # Remap message channel ID if needed (using cache to avoid temporary objects)
+                    remapped_channel_id = self._get_remapped_channel_id(
+                        stream_id, chunk_record.channel_id
+                    )
+                    if remapped_channel_id != chunk_record.channel_id:
                         message_to_write = replace(
                             chunk_record,
-                            channel_id=remapped_channel.id,
+                            channel_id=remapped_channel_id,
                         )
+                    else:
+                        message_to_write = chunk_record
                     self.process_message(message_to_write, writer)
 
         except McapError as e:
