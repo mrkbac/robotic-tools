@@ -1,16 +1,10 @@
 """Autocompletion utilities for pymcap-cli commands."""
 
-from __future__ import annotations
-
+from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import typer
 from small_mcap import get_summary
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-    import typer
 
 
 def complete_all_topics(ctx: typer.Context, incomplete: str) -> list[str]:
@@ -55,7 +49,7 @@ def complete_all_topics(ctx: typer.Context, incomplete: str) -> list[str]:
         return []
 
 
-def compleat_topic_by_schema(
+def complete_topic_by_schema(
     ctx: typer.Context, incomplete: str, *, schemas: Iterable[str]
 ) -> list[str]:
     """Autocomplete function for topics in the MCAP file filtered by schema names.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -34,7 +35,15 @@ def _read_mcap_info(file_path: Path) -> RebuildInfo:
 
 @list_app.command()
 def channels(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file",
+        ),
+    ],
 ) -> None:
     """List channels in an MCAP file."""
     info = _read_mcap_info(file)
@@ -67,7 +76,15 @@ def channels(
 
 @list_app.command()
 def chunks(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file",
+        ),
+    ],
 ) -> None:
     """List chunks in an MCAP file."""
     info = _read_mcap_info(file)
@@ -125,7 +142,15 @@ def chunks(
 
 @list_app.command()
 def schemas(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file",
+        ),
+    ],
 ) -> None:
     """List schemas in an MCAP file."""
     info = _read_mcap_info(file)
@@ -169,7 +194,15 @@ def schemas(
 
 @list_app.command()
 def attachments(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file",
+        ),
+    ],
 ) -> None:
     """List attachments in an MCAP file."""
     info = _read_mcap_info(file)
@@ -212,7 +245,15 @@ def attachments(
 
 @list_app.command()
 def metadata(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to the MCAP file"),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file",
+        ),
+    ],
 ) -> None:
     """List metadata records in an MCAP file."""
     info = _read_mcap_info(file)

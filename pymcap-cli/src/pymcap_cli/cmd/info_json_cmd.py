@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from small_mcap import ChunkIndex, InvalidMagicError, RebuildInfo
@@ -499,29 +499,37 @@ class ChunkStats:
 
 @app.command(name="info-json")
 def info_json(
-    file: Path = typer.Argument(
-        ...,
-        exists=True,
-        dir_okay=False,
-        help="Path to the MCAP file to analyze",
-    ),
-    rebuild: bool = typer.Option(
-        False,
-        "--rebuild",
-        "-r",
-        help="Rebuild the MCAP file from scratch",
-    ),
-    exact_sizes: bool = typer.Option(
-        False,
-        "--exact-sizes",
-        "-e",
-        help="Use exact sizes for message data (may be slower, requires --rebuild)",
-    ),
-    debug: bool = typer.Option(
-        False,
-        "--debug",
-        help="Enable debug mode",
-    ),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file to analyze",
+        ),
+    ],
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild",
+            "-r",
+            help="Rebuild the MCAP file from scratch",
+        ),
+    ] = False,
+    exact_sizes: Annotated[
+        bool,
+        typer.Option(
+            "--exact-sizes",
+            "-e",
+            help="Use exact sizes for message data (may be slower, requires --rebuild)",
+        ),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help="Enable debug mode",
+        ),
+    ] = False,
 ) -> None:
     """Output MCAP file statistics as JSON with all available data."""
     file_size = file.stat().st_size

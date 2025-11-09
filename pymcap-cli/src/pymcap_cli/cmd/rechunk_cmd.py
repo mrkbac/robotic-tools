@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Annotated, BinaryIO
 
 if TYPE_CHECKING:
     from re import Pattern
@@ -314,48 +314,67 @@ class RechunkProcessor:
 
 @app.command()
 def rechunk(
-    file: Path = typer.Argument(
-        ...,
-        exists=True,
-        dir_okay=False,
-        help="Path to the MCAP file to rechunk",
-    ),
-    output: Path = typer.Option(
-        ...,
-        "-o",
-        "--output",
-        help="Output filename (required)",
-    ),
-    pattern: list[str] = typer.Option(
-        [],
-        "-p",
-        "--pattern",
-        help="Regex pattern for topic grouping (can be used multiple times). "
-        "Topics matching the first pattern go into chunk group 1, "
-        "second pattern → group 2, etc. Unmatched topics → separate group.",
-        autocompletion=complete_all_topics,
-    ),
-    all_topics: bool = typer.Option(
-        False,
-        "--all",
-        help="If set, all messages are placed into their own chunk",
-    ),
-    auto: bool = typer.Option(
-        False,
-        "--auto",
-        help="If set, automatically create chunk groups. "
-        "Topics taking up more than 15% of the uncompressed total size get their own chunk.",
-    ),
-    chunk_size: int = typer.Option(
-        4 * 1024 * 1024,
-        "--chunk-size",
-        help="Chunk size in bytes (default: 4MB)",
-    ),
-    compression: CompressionChoice = typer.Option(
-        CompressionChoice.ZSTD,
-        "--compression",
-        help="Compression algorithm for output file (default: zstd)",
-    ),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file to rechunk",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            ...,
+            "-o",
+            "--output",
+            help="Output filename (required)",
+        ),
+    ],
+    pattern: Annotated[
+        list[str] | None,
+        typer.Option(
+            "-p",
+            "--pattern",
+            help=(
+                "Regex pattern for topic grouping (can be used multiple times). "
+                "Topics matching the first pattern go into chunk group 1, "
+                "second pattern → group 2, etc. Unmatched topics → separate group."
+            ),
+            autocompletion=complete_all_topics,
+        ),
+    ] = None,
+    all_topics: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="If set, all messages are placed into their own chunk",
+        ),
+    ] = False,
+    auto: Annotated[
+        bool,
+        typer.Option(
+            "--auto",
+            help=(
+                "If set, automatically create chunk groups. "
+                "Topics taking up more than 15% of the uncompressed total size get their own chunk."
+            ),
+        ),
+    ] = False,
+    chunk_size: Annotated[
+        int,
+        typer.Option(
+            "--chunk-size",
+            help="Chunk size in bytes (default: 4MB)",
+        ),
+    ] = 4 * 1024 * 1024,
+    compression: Annotated[
+        CompressionChoice,
+        typer.Option(
+            "--compression",
+            help="Compression algorithm for output file (default: zstd)",
+        ),
+    ] = CompressionChoice.ZSTD,
 ) -> None:
     """Reorganize MCAP messages into chunks based on topic patterns.
 
@@ -397,7 +416,7 @@ def rechunk(
     else:
         mode = RechunkMode.PATTERN
         try:
-            patterns = compile_topic_patterns(pattern)
+            patterns = compile_topic_patterns(pattern or [])
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)

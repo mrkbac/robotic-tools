@@ -19,6 +19,7 @@ app = typer.Typer(
     name="pymcap-cli",
     help="CLI tool for slicing and dicing MCAP files.",
     no_args_is_help=True,
+    rich_markup_mode="rich",
 )
 
 

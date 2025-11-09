@@ -6,7 +6,7 @@ import io
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -291,48 +291,62 @@ def _display_channels_table(
 
 @app.command()
 def info(
-    file: Path = typer.Argument(
-        ...,
-        exists=True,
-        dir_okay=False,
-        help="Path to the MCAP file to analyze",
-    ),
-    rebuild: bool = typer.Option(
-        False,
-        "--rebuild",
-        "-r",
-        help="Rebuild the MCAP file from scratch",
-    ),
-    exact_sizes: bool = typer.Option(
-        False,
-        "--exact-sizes",
-        "-e",
-        help="Use exact sizes for message data (may be slower, requires --rebuild)",
-    ),
-    debug: bool = typer.Option(
-        False,
-        "--debug",
-        help="Enable debug mode",
-    ),
-    sort: SortChoice = typer.Option(
-        SortChoice.TOPIC,
-        "--sort",
-        "-s",
-        help="Sort channels by field",
-    ),
-    reverse: bool = typer.Option(
-        False,
-        "--reverse",
-        help="Reverse sort order (descending)",
-    ),
-    index_duration: bool = typer.Option(
-        False,
-        "--index-duration",
-        help=(
-            "Calculate Hz per channel based on each channel's first/last "
-            "message times rather than global MCAP duration"
+    file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file to analyze",
         ),
-    ),
+    ],
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild",
+            "-r",
+            help="Rebuild the MCAP file from scratch",
+        ),
+    ] = False,
+    exact_sizes: Annotated[
+        bool,
+        typer.Option(
+            "--exact-sizes",
+            "-e",
+            help="Use exact sizes for message data (may be slower, requires --rebuild)",
+        ),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help="Enable debug mode",
+        ),
+    ] = False,
+    sort: Annotated[
+        SortChoice,
+        typer.Option(
+            "--sort",
+            "-s",
+            help="Sort channels by field",
+        ),
+    ] = SortChoice.TOPIC,
+    reverse: Annotated[
+        bool,
+        typer.Option(
+            "--reverse",
+            help="Reverse sort order (descending)",
+        ),
+    ] = False,
+    index_duration: Annotated[
+        bool,
+        typer.Option(
+            "--index-duration",
+            help=(
+                "Calculate Hz per channel based on each channel's first/last "
+                "message times rather than global MCAP duration"
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Report statistics about an MCAP file.
 

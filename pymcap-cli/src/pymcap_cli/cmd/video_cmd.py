@@ -12,9 +12,8 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Literal, cast
 
 import typer
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -35,7 +34,7 @@ from rich.progress import (
 from rich.text import Text
 from small_mcap import get_summary, include_topics, read_message_decoded
 
-from pymcap_cli.autocompletion import compleat_topic_by_schema
+from pymcap_cli.autocompletion import complete_topic_by_schema
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -48,6 +47,11 @@ app = typer.Typer()
 COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
 RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
 IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
+
+
+def complete_image_topics(ctx: typer.Context, incomplete: str) -> list[str]:
+    """Autocomplete function for image topics."""
+    return complete_topic_by_schema(ctx, incomplete, schemas=IMAGE_SCHEMAS)
 
 
 @dataclass(slots=True)
@@ -816,53 +820,70 @@ def encode_video(
 
 @app.command()
 def video(
-    file: Path = typer.Argument(
-        ...,
-        exists=True,
-        dir_okay=False,
-        help="Path to the MCAP file",
-    ),
-    topics: list[str] = typer.Option(
-        ...,
-        "--topic",
-        "-t",
-        help="Image topic to convert (repeat for multiple topics)",
-        autocompletion=partial(compleat_topic_by_schema, schemas=IMAGE_SCHEMAS),
-    ),
-    output: Path = typer.Option(
-        ...,
-        "--output",
-        "-o",
-        help="Output video file path (e.g., output.mp4)",
-    ),
-    codec: VideoCodec = typer.Option(
-        VideoCodec.H264,
-        "--codec",
-        case_sensitive=False,
-        help="Video codec to use",
-    ),
-    quality: QualityPreset = typer.Option(
-        QualityPreset.MEDIUM,
-        "--quality",
-        help="Quality preset",
-    ),
-    crf: int | None = typer.Option(
-        None,
-        "--crf",
-        min=0,
-        max=51,
-        help="Manual CRF/quality value (lower = better quality, overrides --quality)",
-    ),
-    encoder: EncoderBackend = typer.Option(
-        EncoderBackend.AUTO,
-        "--encoder",
-        help="Encoder backend",
-    ),
-    watermark: bool = typer.Option(
-        False,
-        "--watermark",
-        help="Enable per-topic watermarks showing topic names",
-    ),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file",
+        ),
+    ],
+    topics: Annotated[
+        list[str],
+        typer.Option(
+            "--topic",
+            "-t",
+            help="Image topic to convert (repeat for multiple topics)",
+            autocompletion=complete_image_topics,
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            ...,
+            "--output",
+            "-o",
+            help="Output video file path (e.g., output.mp4)",
+        ),
+    ],
+    codec: Annotated[
+        VideoCodec,
+        typer.Option(
+            "--codec",
+            case_sensitive=False,
+            help="Video codec to use",
+        ),
+    ] = VideoCodec.H264,
+    quality: Annotated[
+        QualityPreset,
+        typer.Option(
+            "--quality",
+            help="Quality preset",
+        ),
+    ] = QualityPreset.MEDIUM,
+    crf: Annotated[
+        int | None,
+        typer.Option(
+            "--crf",
+            min=0,
+            max=51,
+            help="Manual CRF/quality value (lower = better quality, overrides --quality)",
+        ),
+    ] = None,
+    encoder: Annotated[
+        EncoderBackend,
+        typer.Option(
+            "--encoder",
+            help="Encoder backend",
+        ),
+    ] = EncoderBackend.AUTO,
+    watermark: Annotated[
+        bool,
+        typer.Option(
+            "--watermark",
+            help="Enable per-topic watermarks showing topic names",
+        ),
+    ] = False,
 ) -> None:
     """Generate video from image topics in MCAP files.
 

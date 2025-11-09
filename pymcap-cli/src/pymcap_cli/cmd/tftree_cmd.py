@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -204,10 +205,22 @@ def _build_tf_table(transforms: dict[tuple[str, str], TransformData]) -> Table |
 
 @app.command()
 def tftree(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to MCAP file"),
-    static_only: bool = typer.Option(
-        False, "--static-only", help="Show only static transforms (/tf_static)"
-    ),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to MCAP file",
+        ),
+    ],
+    static_only: Annotated[
+        bool,
+        typer.Option(
+            "--static-only",
+            help="Show only static transforms (/tf_static)",
+        ),
+    ] = False,
 ) -> None:
     """Display TF transform tree from MCAP file."""
     transforms: dict[tuple[str, str], TransformData] = {}

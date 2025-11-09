@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -18,12 +19,24 @@ app = typer.Typer()
 
 @app.command()
 def du(
-    file: Path = typer.Argument(
-        ..., exists=True, dir_okay=False, help="Path to the MCAP file to analyze"
-    ),
-    exact_sizes: bool = typer.Option(
-        False, "--exact-sizes", "-e", help="Use exact sizes for message data (may be slower)"
-    ),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            ...,
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file to analyze",
+        ),
+    ],
+    exact_sizes: Annotated[
+        bool,
+        typer.Option(
+            "--exact-sizes",
+            "-e",
+            help="Use exact sizes for message data (may be slower)",
+            show_default=True,
+        ),
+    ] = False,
 ) -> None:
     """Report space usage within an MCAP file.
 

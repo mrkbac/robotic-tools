@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -24,34 +25,45 @@ app = typer.Typer()
 
 @app.command()
 def recover(
-    file: Path = typer.Argument(
-        ...,
-        exists=True,
-        dir_okay=False,
-        help="Path to the MCAP file to recover",
-    ),
-    output: Path = typer.Option(
-        ...,
-        "--output",
-        "-o",
-        help="Output filename (writes to stdout if not provided)",
-    ),
-    chunk_size: int = typer.Option(
-        4 * 1024 * 1024,
-        "--chunk-size",
-        help="Chunk size of output file (default: 4MB)",
-    ),
-    compression: CompressionType = typer.Option(
-        CompressionType.zstd,
-        "--compression",
-        help="Compression algorithm to use on output file (default: zstd)",
-    ),
-    always_decode_chunk: bool = typer.Option(
-        False,
-        "--always-decode-chunk",
-        "-a",
-        help="Always decode chunks, even if the file is not chunked",
-    ),
+    file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="Path to the MCAP file to recover",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(
+            ...,
+            "-o",
+            "--output",
+            help="Output filename (writes to stdout if not provided)",
+        ),
+    ],
+    chunk_size: Annotated[
+        int,
+        typer.Option(
+            "--chunk-size",
+            help="Chunk size of output file (default: 4MB)",
+        ),
+    ] = 4 * 1024 * 1024,
+    compression: Annotated[
+        CompressionType,
+        typer.Option(
+            "--compression",
+            help="Compression algorithm to use on output file (default: zstd)",
+        ),
+    ] = CompressionType.zstd,
+    always_decode_chunk: Annotated[
+        bool,
+        typer.Option(
+            "--always-decode-chunk",
+            "-a",
+            help="Always decode chunks, even if the file is not chunked",
+        ),
+    ] = False,
 ) -> None:
     """Recover data from a potentially corrupt MCAP file.
 
