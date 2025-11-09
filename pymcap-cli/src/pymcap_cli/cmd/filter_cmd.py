@@ -186,6 +186,16 @@ def filter_cmd(
             show_default=True,
         ),
     ] = CompressionType.ZSTD,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--force",
+            help="Force overwrite of output file without confirmation",
+            rich_help_panel="Output Options",
+            show_default=True,
+        ),
+    ] = False,
 ) -> None:
     """Copy filtered MCAP data to a new file.
 
@@ -239,6 +249,13 @@ def filter_cmd(
         raise typer.Exit(1)
 
     file_size = file.stat().st_size
+
+    # Confirm overwrite if output file exists
+    if output.exists() and not force:
+        typer.confirm(
+            f"Output file '{output}' already exists. Overwrite?",
+            abort=True,
+        )
 
     # Create processor and run
     processor = McapProcessor(processing_options)

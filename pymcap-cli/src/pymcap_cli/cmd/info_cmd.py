@@ -289,7 +289,22 @@ def _display_channels_table(
     )
 
 
-@app.command()
+@app.command(
+    epilog="""
+Examples:
+  # Basic file info
+  pymcap-cli info recording.mcap
+
+  # Rebuild summary with exact message sizes
+  pymcap-cli info recording.mcap --rebuild --exact-sizes
+
+  # Sort channels by message count (descending)
+  pymcap-cli info recording.mcap --sort msgs --reverse
+
+  # Calculate per-channel Hz using individual durations
+  pymcap-cli info recording.mcap --index-duration
+"""
+)
 def info(
     file: Annotated[
         Path,
@@ -304,7 +319,12 @@ def info(
         typer.Option(
             "--rebuild",
             "-r",
-            help="Rebuild the MCAP file from scratch",
+            help=(
+                "Rebuild file metadata by scanning all records "
+                "(use for corrupt or summary-less files)"
+            ),
+            rich_help_panel="Processing Options",
+            show_default=True,
         ),
     ] = False,
     exact_sizes: Annotated[
@@ -312,14 +332,20 @@ def info(
         typer.Option(
             "--exact-sizes",
             "-e",
-            help="Use exact sizes for message data (may be slower, requires --rebuild)",
+            help=(
+                "Calculate exact message sizes by decompressing chunks (slower, requires --rebuild)"
+            ),
+            rich_help_panel="Processing Options",
+            show_default=True,
         ),
     ] = False,
     debug: Annotated[
         bool,
         typer.Option(
             "--debug",
-            help="Enable debug mode",
+            help="Enable debug mode with additional diagnostic output",
+            rich_help_panel="Processing Options",
+            show_default=True,
         ),
     ] = False,
     sort: Annotated[
@@ -327,7 +353,9 @@ def info(
         typer.Option(
             "--sort",
             "-s",
-            help="Sort channels by field",
+            help="Sort channels by field (topic, id, msgs, size, hz, bps, b_per_msg, schema)",
+            rich_help_panel="Display Options",
+            show_default=True,
         ),
     ] = SortChoice.TOPIC,
     reverse: Annotated[
@@ -335,6 +363,8 @@ def info(
         typer.Option(
             "--reverse",
             help="Reverse sort order (descending)",
+            rich_help_panel="Display Options",
+            show_default=True,
         ),
     ] = False,
     index_duration: Annotated[
@@ -345,6 +375,8 @@ def info(
                 "Calculate Hz per channel based on each channel's first/last "
                 "message times rather than global MCAP duration"
             ),
+            rich_help_panel="Display Options",
+            show_default=True,
         ),
     ] = False,
 ) -> None:

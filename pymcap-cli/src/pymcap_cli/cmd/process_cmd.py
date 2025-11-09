@@ -128,7 +128,22 @@ def build_processing_options(
     )
 
 
-@app.command()
+@app.command(
+    epilog="""
+Examples:
+  # Recover corrupted file with compression change
+  pymcap-cli process corrupt.mcap -o fixed.mcap --compression lz4
+
+  # Filter by topic and time in one pass
+  pymcap-cli process in.mcap -o out.mcap -y '/camera.*' --start-secs 10
+
+  # Merge multiple files
+  pymcap-cli process file1.mcap file2.mcap file3.mcap -o merged.mcap
+
+  # Process with metadata excluded
+  pymcap-cli process in.mcap -o out.mcap --metadata exclude
+"""
+)
 def process(
     file: Annotated[
         list[Path],
@@ -145,6 +160,7 @@ def process(
             "-o",
             "--output",
             help="Output filename (required)",
+            rich_help_panel="Output Options",
         ),
     ],
     # Recovery options
@@ -153,6 +169,8 @@ def process(
         typer.Option(
             "--recovery",
             help="Recovery mode: enabled (handle errors gracefully) or disabled (fail on errors)",
+            rich_help_panel="Recovery Options",
+            show_default=True,
         ),
     ] = RecoveryMode.ENABLED,
     always_decode_chunk: Annotated[
@@ -161,6 +179,8 @@ def process(
             "-a",
             "--always-decode-chunk",
             help="Always decode chunks, never use fast copying",
+            rich_help_panel="Recovery Options",
+            show_default=True,
         ),
     ] = False,
     # Topic filtering
@@ -173,6 +193,7 @@ def process(
                 "Include messages with topic names matching this regex (can be used multiple times)"
             ),
             autocompletion=complete_all_topics,
+            rich_help_panel="Topic Filtering",
         ),
     ] = None,
     exclude_topic_regex: Annotated[
@@ -184,6 +205,7 @@ def process(
                 "Exclude messages with topic names matching this regex (can be used multiple times)"
             ),
             autocompletion=complete_all_topics,
+            rich_help_panel="Topic Filtering",
         ),
     ] = None,
     # Time filtering
@@ -193,6 +215,8 @@ def process(
             "-S",
             "--start",
             help="Include messages at or after this time (nanoseconds or RFC3339 date)",
+            rich_help_panel="Time Filtering",
+            show_default="beginning of recording",
         ),
     ] = "",
     start_secs: Annotated[
@@ -201,6 +225,7 @@ def process(
             "-s",
             "--start-secs",
             help="Include messages at or after this time in seconds (ignored if --start used)",
+            rich_help_panel="Time Filtering",
         ),
     ] = 0,
     start_nsecs: Annotated[
@@ -220,6 +245,8 @@ def process(
             "-E",
             "--end",
             help="Include messages before this time (nanoseconds or RFC3339 date)",
+            rich_help_panel="Time Filtering",
+            show_default="end of recording",
         ),
     ] = "",
     end_secs: Annotated[
@@ -228,6 +255,7 @@ def process(
             "-e",
             "--end-secs",
             help="Include messages before this time in seconds (ignored if --end used)",
+            rich_help_panel="Time Filtering",
         ),
     ] = 0,
     end_nsecs: Annotated[
@@ -246,6 +274,8 @@ def process(
         typer.Option(
             "--metadata",
             help="Metadata handling: include or exclude metadata records",
+            rich_help_panel="Content Filtering",
+            show_default=True,
         ),
     ] = MetadataMode.INCLUDE,
     attachments_mode: Annotated[
@@ -253,6 +283,8 @@ def process(
         typer.Option(
             "--attachments",
             help="Attachments handling: include or exclude attachment records",
+            rich_help_panel="Content Filtering",
+            show_default=True,
         ),
     ] = AttachmentsMode.INCLUDE,
     # Output options
@@ -261,16 +293,30 @@ def process(
         typer.Option(
             "--chunk-size",
             min=1,
-            help="Chunk size of output file in bytes (default: 4MB)",
+            help="Chunk size of output file in bytes",
+            rich_help_panel="Output Options",
+            show_default="4MB",
         ),
     ] = 4 * 1024 * 1024,  # 4MB
     compression: Annotated[
         CompressionType,
         typer.Option(
             "--compression",
-            help="Compression algorithm for output file (default: zstd)",
+            help="Compression algorithm for output file",
+            rich_help_panel="Output Options",
+            show_default=True,
         ),
     ] = CompressionType.ZSTD,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--force",
+            help="Force overwrite of output file without confirmation",
+            rich_help_panel="Output Options",
+            show_default=True,
+        ),
+    ] = False,
 ) -> None:
     """Process MCAP files with unified recovery and filtering.
 
@@ -313,6 +359,13 @@ def process(
 
     output_file = output
     file_sizes = [f.stat().st_size for f in input_files]
+
+    # Confirm overwrite if output file exists
+    if output_file.exists() and not force:
+        typer.confirm(
+            f"Output file '{output_file}' already exists. Overwrite?",
+            abort=True,
+        )
 
     # Create processor and run
     processor = McapProcessor(options)

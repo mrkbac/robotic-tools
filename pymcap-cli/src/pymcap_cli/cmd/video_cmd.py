@@ -824,7 +824,22 @@ def _validate_topics(topics: list[str]) -> list[str]:
     return topics
 
 
-@app.command()
+@app.command(
+    epilog="""
+Examples:
+  # Basic video generation from single topic
+  pymcap-cli video data.mcap -t /camera/front -o output.mp4
+
+  # Multi-topic grid with watermarks
+  pymcap-cli video data.mcap -t /cam/front -t /cam/left -t /cam/right --watermark -o grid.mp4
+
+  # High quality H.265 encoding
+  pymcap-cli video data.mcap -t /camera --codec h265 --quality high -o hq.mp4
+
+  # Custom CRF for fine-tuned quality
+  pymcap-cli video data.mcap -t /camera --crf 18 -o custom_quality.mp4
+"""
+)
 def video(
     file: Annotated[
         Path,
@@ -844,6 +859,7 @@ def video(
             callback=_validate_topics,
             help="Image topic to convert (repeat for multiple topics)",
             autocompletion=complete_image_topics,
+            rich_help_panel="Input Options",
         ),
     ],
     output: Annotated[
@@ -853,6 +869,7 @@ def video(
             "--output",
             "-o",
             help="Output video file path (e.g., output.mp4)",
+            rich_help_panel="Output Options",
         ),
     ],
     codec: Annotated[
@@ -861,13 +878,17 @@ def video(
             "--codec",
             case_sensitive=False,
             help="Video codec to use",
+            rich_help_panel="Encoding Options",
+            show_default=True,
         ),
     ] = VideoCodec.H264,
     quality: Annotated[
         QualityPreset,
         typer.Option(
             "--quality",
-            help="Quality preset",
+            help="Quality preset (ignored if --crf specified)",
+            rich_help_panel="Encoding Options",
+            show_default=True,
         ),
     ] = QualityPreset.MEDIUM,
     crf: Annotated[
@@ -876,14 +897,17 @@ def video(
             "--crf",
             min=0,
             max=51,
-            help="Manual CRF/quality value (lower = better quality, overrides --quality)",
+            help="Manual CRF/quality value (lower = better quality, OVERRIDES --quality)",
+            rich_help_panel="Encoding Options",
         ),
     ] = None,
     encoder: Annotated[
         EncoderBackend,
         typer.Option(
             "--encoder",
-            help="Encoder backend",
+            help="Encoder backend (auto, software, or hardware acceleration)",
+            rich_help_panel="Encoding Options",
+            show_default=True,
         ),
     ] = EncoderBackend.AUTO,
     watermark: Annotated[
@@ -891,6 +915,18 @@ def video(
         typer.Option(
             "--watermark",
             help="Add topic name overlay in top-left corner of each video stream",
+            rich_help_panel="Display Options",
+            show_default=True,
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--force",
+            help="Force overwrite of output file without confirmation",
+            rich_help_panel="Output Options",
+            show_default=True,
         ),
     ] = False,
 ) -> None:
@@ -902,6 +938,13 @@ def video(
     if not output.parent.exists():
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
         raise typer.Exit(1)
+
+    # Confirm overwrite if output file exists
+    if output.exists() and not force:
+        typer.confirm(
+            f"Output file '{output}' already exists. Overwrite?",
+            abort=True,
+        )
 
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError(

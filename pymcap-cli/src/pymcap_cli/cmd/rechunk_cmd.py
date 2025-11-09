@@ -307,7 +307,22 @@ class RechunkProcessor:
         return MessageGroup(writer, self.chunk_size, compression_type, self.schemas, self.channels)
 
 
-@app.command()
+@app.command(
+    epilog="""
+Examples:
+  # Pattern-based grouping
+  pymcap-cli rechunk in.mcap --strategy pattern -p '/camera.*' -p '/lidar.*' -o out.mcap
+
+  # Auto-grouping by size (topics >15% get own chunk)
+  pymcap-cli rechunk in.mcap --strategy auto -o out.mcap
+
+  # Each topic in separate chunk
+  pymcap-cli rechunk in.mcap --strategy all -o out.mcap
+
+  # Custom chunk size with pattern strategy
+  pymcap-cli rechunk in.mcap --strategy pattern -p '/high_freq.*' --chunk-size 8388608 -o out.mcap
+"""
+)
 def rechunk(
     file: Annotated[
         Path,
@@ -324,6 +339,7 @@ def rechunk(
             "-o",
             "--output",
             help="Output filename (required)",
+            rich_help_panel="Input/Output",
         ),
     ],
     strategy: Annotated[
@@ -335,6 +351,8 @@ def rechunk(
                 "Rechunking strategy: pattern (group by regex), "
                 "all (each topic separate), or auto (size-based grouping)"
             ),
+            rich_help_panel="Rechunking Strategy",
+            show_default=True,
         ),
     ],
     pattern: Annotated[
@@ -349,6 +367,7 @@ def rechunk(
                 "second pattern → group 2, etc. Unmatched topics → separate group."
             ),
             autocompletion=complete_all_topics,
+            rich_help_panel="Rechunking Strategy",
         ),
     ] = None,
     chunk_size: Annotated[
@@ -356,16 +375,30 @@ def rechunk(
         typer.Option(
             "--chunk-size",
             min=1,
-            help="Chunk size in bytes (default: 4MB)",
+            help="Chunk size in bytes",
+            rich_help_panel="Output Options",
+            show_default="4MB",
         ),
     ] = 4 * 1024 * 1024,
     compression: Annotated[
         CompressionType,
         typer.Option(
             "--compression",
-            help="Compression algorithm for output file (default: zstd)",
+            help="Compression algorithm for output file",
+            rich_help_panel="Output Options",
+            show_default=True,
         ),
     ] = CompressionType.ZSTD,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--force",
+            help="Force overwrite of output file without confirmation",
+            rich_help_panel="Output Options",
+            show_default=True,
+        ),
+    ] = False,
 ) -> None:
     """Reorganize MCAP messages into chunks based on topic patterns.
 
@@ -392,6 +425,13 @@ def rechunk(
 
     output_file = Path(output)
     file_size = input_file.stat().st_size
+
+    # Confirm overwrite if output file exists
+    if output_file.exists() and not force:
+        typer.confirm(
+            f"Output file '{output_file}' already exists. Overwrite?",
+            abort=True,
+        )
 
     # Compile patterns if using PATTERN strategy
     patterns: list[Pattern[str]] = []
