@@ -16,3 +16,4 @@ data/
 *.mp4
 *.webm
 *.mkv
+coverage.xml
