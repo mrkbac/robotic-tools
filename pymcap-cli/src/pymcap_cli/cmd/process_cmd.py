@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.mcap_processor import (
     McapProcessor,
     ProcessingOptions,
@@ -160,6 +161,7 @@ def process(
             help=(
                 "Include messages with topic names matching this regex (can be used multiple times)"
             ),
+            autocompletion=complete_all_topics,
         ),
     ] = None,
     exclude_topic_regex: Annotated[
@@ -170,6 +172,7 @@ def process(
             help=(
                 "Exclude messages with topic names matching this regex (can be used multiple times)"
             ),
+            autocompletion=complete_all_topics,
         ),
     ] = None,
     # Time filtering

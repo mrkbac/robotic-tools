@@ -27,6 +27,7 @@ from small_mcap import (
 from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
+from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.mcap_processor import compile_topic_patterns, str_to_compression_type
 from pymcap_cli.utils import file_progress
 
@@ -332,6 +333,7 @@ def rechunk(
         help="Regex pattern for topic grouping (can be used multiple times). "
         "Topics matching the first pattern go into chunk group 1, "
         "second pattern → group 2, etc. Unmatched topics → separate group.",
+        autocompletion=complete_all_topics,
     ),
     all_topics: bool = typer.Option(
         False,
