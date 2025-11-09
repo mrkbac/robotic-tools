@@ -29,7 +29,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should only include messages from camera topics
         assert stats.writer_statistics.message_count > 0
@@ -53,7 +53,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should exclude debug topic (3 topics * 50 messages)
         assert stats.writer_statistics.message_count >= 150
@@ -76,7 +76,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should include 3 topics * 50 messages
         assert stats.writer_statistics.message_count >= 150
@@ -100,7 +100,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should include only messages within time range
         assert stats.writer_statistics.message_count < 200
@@ -124,7 +124,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should include only camera messages within time range
         assert stats.writer_statistics.message_count < 100  # Less than all camera messages
@@ -145,10 +145,10 @@ class TestFilter:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should not write metadata
-        assert stats.metadata_written == 0
+        assert stats.writer_statistics.metadata_count == 0
 
     def test_filter_exclude_attachments(self, simple_mcap: Path, output_file: Path):
         """Test filtering with attachments excluded."""
@@ -164,10 +164,10 @@ class TestFilter:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should not write attachments
-        assert stats.attachments_written == 0
+        assert stats.writer_statistics.attachment_count == 0
 
     def test_filter_all_topics_filtered_out(self, multi_topic_mcap: Path, output_file: Path):
         """Test filtering that excludes all topics."""
@@ -186,7 +186,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should write no messages
         assert stats.writer_statistics.message_count >= 0
@@ -209,7 +209,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should only include one topic
         assert stats.writer_statistics.message_count >= 50
@@ -237,7 +237,7 @@ class TestFilter:
                 multi_topic_mcap.open("rb") as input_stream,
                 output_file.open("wb") as output_stream,
             ):
-                stats = processor.process(input_stream, output_stream, file_size)
+                stats = processor.process([input_stream], output_stream, [file_size])
 
             assert stats.writer_statistics.message_count >= 100
             assert output_file.exists()
@@ -258,7 +258,7 @@ class TestFilter:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify all statistics are reasonable
         assert stats.messages_processed == 200

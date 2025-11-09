@@ -22,7 +22,7 @@ class TestRecover:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify recovery succeeded
         assert stats.writer_statistics.message_count > 0
@@ -43,7 +43,7 @@ class TestRecover:
         file_size = truncated_mcap.stat().st_size
 
         with truncated_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should recover some messages even from corrupt file
         assert stats.writer_statistics.message_count > 0
@@ -63,7 +63,7 @@ class TestRecover:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should decode all chunks
         assert stats.chunks_decoded > 0
@@ -83,7 +83,7 @@ class TestRecover:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should recover messages from all topics
         # 4 topics * 50 messages = 200 total
@@ -108,7 +108,7 @@ class TestRecover:
             file_size = simple_mcap.stat().st_size
 
             with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-                stats = processor.process(input_stream, output_stream, file_size)
+                stats = processor.process([input_stream], output_stream, [file_size])
 
             assert stats.writer_statistics.message_count > 0
             assert output_file.exists()
@@ -129,7 +129,7 @@ class TestRecover:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         assert stats.writer_statistics.message_count > 0
         # Metadata and attachments counts depend on fixture
@@ -148,7 +148,7 @@ class TestRecover:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should use fast chunk copying when possible
         assert stats.chunks_processed > 0
@@ -180,7 +180,7 @@ class TestRecover:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         assert stats.writer_statistics.message_count > 0
         assert output_file.exists()

@@ -260,14 +260,16 @@ class McapProcessor:
             if remapped_schema_id != 0:
                 remapped_channel = replace(remapped_channel, schema_id=remapped_schema_id)
 
-        if remapped_channel.id not in self.channels:
-            self.channels[remapped_channel.id] = remapped_channel
+        if remapped_channel.id not in self.known_channels:
+            # Pre-compute filtering decision for this channel
+            should_include = self._compute_channel_filter_decision(remapped_channel.topic)
+            self.channel_filter_cache[remapped_channel.id] = should_include
             self.channel_topics[remapped_channel.id] = remapped_channel.topic
             self.known_channels.add(remapped_channel.id)
-            # Pre-compute filtering decision for this channel
-            self.channel_filter_cache[remapped_channel.id] = self._compute_channel_filter_decision(
-                remapped_channel.topic
-            )
+
+            # Only add channel to output if it passes the filter
+            if should_include:
+                self.channels[remapped_channel.id] = remapped_channel
 
     def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
         """Handle a message record from the stream."""
@@ -417,7 +419,14 @@ class McapProcessor:
             # Pre-load schemas and channels from all files' summaries
             # This ensures we have all metadata before processing any chunks
             for stream_id, input_stream in enumerate(input_streams):
-                if summary := get_summary(input_stream):
+                try:
+                    summary = get_summary(input_stream)
+                except McapError:
+                    # In recovery mode, if we can't get summary (e.g., truncated file),
+                    # continue without it - we'll discover schemas/channels during chunk processing
+                    summary = None
+
+                if summary:
                     # Remap and store all schemas
                     for schema in summary.schemas.values():
                         remapped_schema = self.remapper.remap_schema(stream_id, schema)
@@ -438,14 +447,18 @@ class McapProcessor:
                                     remapped_channel, schema_id=remapped_schema_id
                                 )
 
-                        if remapped_channel.id not in self.channels:
-                            self.channels[remapped_channel.id] = remapped_channel
+                        if remapped_channel.id not in self.known_channels:
+                            # Pre-compute filtering decision
+                            should_include = self._compute_channel_filter_decision(
+                                remapped_channel.topic
+                            )
+                            self.channel_filter_cache[remapped_channel.id] = should_include
                             self.channel_topics[remapped_channel.id] = remapped_channel.topic
                             self.known_channels.add(remapped_channel.id)
-                            # Pre-compute filtering decision
-                            self.channel_filter_cache[remapped_channel.id] = (
-                                self._compute_channel_filter_decision(remapped_channel.topic)
-                            )
+
+                            # Only add channel to output if it passes the filter
+                            if should_include:
+                                self.channels[remapped_channel.id] = remapped_channel
 
                 # Seek back to start for processing
                 input_stream.seek(0)
@@ -595,18 +608,21 @@ class McapProcessor:
             )
 
             if needs_metadata_extraction:
-                # Extract schemas/channels metadata without writing messages
-                self._process_chunk_fallback(chunk, None, stream_id)
-                # Re-build the remapped channel IDs after extraction
-                remapped_channel_ids, _ = self._get_remapped_channel_ids(indexes, stream_id)
+                # Need to decode chunk to discover schemas/channels
+                # Decode and write messages instead of metadata extraction + fast-copy
+                self._process_chunk_fallback(chunk, writer, stream_id)
+            else:
+                # Ensure all channels (and their schemas) are written before fast-copying chunk
+                # Only write channels that pass the filter
+                for channel_id in remapped_channel_ids:
+                    # Check if channel should be included (default to True if not in cache)
+                    should_include = self.channel_filter_cache.get(channel_id, True)
+                    if should_include:
+                        writer.ensure_channel_written(channel_id)
 
-            # Ensure all channels (and their schemas) are written before fast-copying chunk
-            for channel_id in remapped_channel_ids:
-                writer.ensure_channel_written(channel_id)
-
-            # Fast-copy the chunk with its indexes
-            writer.add_chunk_with_indexes(chunk, indexes)
-            self.stats.chunks_copied += 1
+                # Fast-copy the chunk with its indexes
+                writer.add_chunk_with_indexes(chunk, indexes)
+                self.stats.chunks_copied += 1
 
     def _process_chunk_fallback(
         self, chunk: Chunk, writer: McapWriter | None, stream_id: int
@@ -638,14 +654,18 @@ class McapProcessor:
                                 remapped_channel, schema_id=remapped_schema_id
                             )
 
-                    if remapped_channel.id not in self.channels:
-                        self.channels[remapped_channel.id] = remapped_channel
+                    if remapped_channel.id not in self.known_channels:
+                        # Pre-compute filtering decision for this channel
+                        should_include = self._compute_channel_filter_decision(
+                            remapped_channel.topic
+                        )
+                        self.channel_filter_cache[remapped_channel.id] = should_include
                         self.channel_topics[remapped_channel.id] = remapped_channel.topic
                         self.known_channels.add(remapped_channel.id)
-                        # Pre-compute filtering decision for this channel
-                        self.channel_filter_cache[remapped_channel.id] = (
-                            self._compute_channel_filter_decision(remapped_channel.topic)
-                        )
+
+                        # Only add channel to output if it passes the filter
+                        if should_include:
+                            self.channels[remapped_channel.id] = remapped_channel
                 elif isinstance(chunk_record, Message):
                     if not writer:
                         continue

@@ -20,11 +20,12 @@ class TestVideoCommand:
 
         encode_video(
             mcap_path=image_compressed_mcap,
-            topic="/camera/image_compressed",
+            topics=["/camera/image_compressed"],
             output_path=output_file,
             codec=VideoCodec.H264,
             encoder_preference="software",
             quality=23,
+            watermark=False,
         )
 
         # Verify video was created
@@ -41,11 +42,12 @@ class TestVideoCommand:
 
         encode_video(
             mcap_path=image_rgb_mcap,
-            topic="/camera/image_raw",
+            topics=["/camera/image_raw"],
             output_path=output_file,
             codec=VideoCodec.H264,
             encoder_preference="software",
             quality=23,
+            watermark=False,
         )
 
         # Verify video was created
@@ -62,11 +64,12 @@ class TestVideoCommand:
 
         encode_video(
             mcap_path=image_small_mcap,
-            topic="/camera/image_compressed",
+            topics=["/camera/image_compressed"],
             output_path=output_file,
             codec=VideoCodec.H264,
             encoder_preference="software",
             quality=23,
+            watermark=False,
         )
 
         # Verify video was created
@@ -84,11 +87,12 @@ class TestVideoCommand:
         with pytest.raises(VideoEncoderError, match="not found or is not an image topic"):
             encode_video(
                 mcap_path=image_compressed_mcap,
-                topic="/nonexistent/topic",
+                topics=["/nonexistent/topic"],
                 output_path=output_file,
                 codec=VideoCodec.H264,
                 encoder_preference="software",
                 quality=23,
+                watermark=False,
             )
 
     def test_video_unsupported_schema(self, simple_mcap: Path, tmp_path: Path):
@@ -102,9 +106,54 @@ class TestVideoCommand:
         with pytest.raises(VideoEncoderError, match="not found or is not an image topic"):
             encode_video(
                 mcap_path=simple_mcap,
-                topic="/test",
+                topics=["/test"],
                 output_path=output_file,
                 codec=VideoCodec.H264,
                 encoder_preference="software",
                 quality=23,
+                watermark=False,
             )
+
+    def test_video_with_watermark(self, image_compressed_mcap: Path, tmp_path: Path):
+        """Test creating video with watermark enabled (default)."""
+        # Skip if ffmpeg not available
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            pytest.skip("ffmpeg not available")
+
+        output_file = tmp_path / "watermark_output.mp4"
+
+        encode_video(
+            mcap_path=image_compressed_mcap,
+            topics=["/camera/image_compressed"],
+            output_path=output_file,
+            codec=VideoCodec.H264,
+            encoder_preference="software",
+            quality=23,
+            watermark=True,
+        )
+
+        # Verify video was created
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+
+    def test_video_without_watermark(self, image_compressed_mcap: Path, tmp_path: Path):
+        """Test creating video with watermark disabled."""
+        # Skip if ffmpeg not available
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            pytest.skip("ffmpeg not available")
+
+        output_file = tmp_path / "no_watermark_output.mp4"
+
+        encode_video(
+            mcap_path=image_compressed_mcap,
+            topics=["/camera/image_compressed"],
+            output_path=output_file,
+            codec=VideoCodec.H264,
+            encoder_preference="software",
+            quality=23,
+            watermark=False,
+        )
+
+        # Verify video was created
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0

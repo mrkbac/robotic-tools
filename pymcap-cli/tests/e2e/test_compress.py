@@ -22,7 +22,7 @@ class TestCompress:
         file_size = uncompressed_mcap.stat().st_size
 
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify compression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -43,7 +43,7 @@ class TestCompress:
         file_size = uncompressed_mcap.stat().st_size
 
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify compression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -64,7 +64,7 @@ class TestCompress:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify decompression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -85,7 +85,7 @@ class TestCompress:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify recompression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -104,7 +104,7 @@ class TestCompress:
         file_size = lz4_mcap.stat().st_size
 
         with lz4_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Verify recompression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -135,7 +135,7 @@ class TestCompress:
         file_size = uncompressed_mcap.stat().st_size
 
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
@@ -153,7 +153,7 @@ class TestCompress:
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should preserve all messages
         assert stats.writer_statistics.message_count > 0
@@ -175,7 +175,7 @@ class TestCompress:
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # All content should be preserved
         assert stats.writer_statistics.message_count > 0
@@ -196,7 +196,7 @@ class TestCompress:
         file_size = large_1mb_mcap.stat().st_size
 
         with large_1mb_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process(input_stream, output_stream, file_size)
+            stats = processor.process([input_stream], output_stream, [file_size])
 
         # Should process all messages
         assert stats.writer_statistics.message_count > 0
@@ -224,7 +224,7 @@ class TestCompress:
                 uncompressed_mcap.open("rb") as input_stream,
                 output_file.open("wb") as output_stream,
             ):
-                stats = processor.process(input_stream, output_stream, uncompressed_size)
+                stats = processor.process([input_stream], output_stream, [uncompressed_size])
 
             compressed_size = output_file.stat().st_size
             ratios[compression] = compressed_size / uncompressed_size

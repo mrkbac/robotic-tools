@@ -26,7 +26,7 @@ def test_benchmark_recover_nuscenes_pymcap(benchmark, nuscenes_mcap: Path, tmp_p
         file_size = nuscenes_mcap.stat().st_size
 
         with nuscenes_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            processor.process(input_stream, output_stream, file_size)
+            processor.process([input_stream], output_stream, [file_size])
 
         # Clean up for next iteration
         if output_file.exists():
@@ -79,7 +79,7 @@ def test_benchmark_filter_nuscenes_pymcap(benchmark, nuscenes_mcap: Path, tmp_pa
         file_size = nuscenes_mcap.stat().st_size
 
         with nuscenes_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            processor.process(input_stream, output_stream, file_size)
+            processor.process([input_stream], output_stream, [file_size])
 
         # Clean up for next iteration
         if output_file.exists():

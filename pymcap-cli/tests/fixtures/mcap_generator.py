@@ -65,11 +65,31 @@ def create_multi_topic_mcap(
 
 def create_corrupt_mcap(corruption_type: str = "truncated") -> bytes:
     """Create a corrupt MCAP file for testing recovery."""
-    # First create a valid file
-    data = create_simple_mcap(num_messages=100)
+    # Create a file with multiple chunks to test recovery
+    # Use large messages and small chunk size to ensure chunking happens
+    output = io.BytesIO()
+    writer = McapWriter(output, chunk_size=8192, compression=CompressionType.ZSTD)  # 8KB chunks
+    writer.start()
+
+    writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+    writer.add_channel(channel_id=1, topic="/test", message_encoding="json", schema_id=1)
+
+    # Create messages with larger data to exceed chunk size
+    # Each message ~1KB, so we'll get multiple chunks with 100 messages
+    large_data = b"x" * 1000
+    for i in range(100):
+        writer.add_message(
+            channel_id=1,
+            log_time=i * 1_000_000,
+            data=f'{{"i": {i}, "data": "{large_data.decode()}"}}'.encode(),
+            publish_time=i * 1_000_000,
+        )
+
+    writer.finish()
+    data = output.getvalue()
 
     if corruption_type == "truncated":
-        # Truncate the file (remove footer)
+        # Truncate the file to cut off some chunks and the footer
         return data[: len(data) // 2]
     if corruption_type == "bad_crc":
         # Corrupt a byte in the middle
