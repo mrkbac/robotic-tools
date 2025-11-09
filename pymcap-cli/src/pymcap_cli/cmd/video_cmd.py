@@ -811,6 +811,46 @@ def encode_video(
     console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
 
 
+def complete_image_topics(ctx: typer.Context, incomplete: str) -> list[str]:
+    if not ctx.args or len(ctx.args) < 1:
+        return []
+
+    already_selected = ctx.params.get("topics", []) or []
+
+    try:
+        file_path = Path(ctx.args[0])
+    except (IndexError, TypeError):
+        return []
+
+    if not file_path.exists():
+        return []
+
+    try:
+        # Read MCAP summary to get topics
+        with file_path.open("rb") as f:
+            summary = get_summary(f)
+
+        if summary is None:
+            return []
+
+        # Filter for image schemas
+        image_schema_ids = {
+            schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
+        }
+
+        return [
+            channel.topic
+            for channel in summary.channels.values()
+            if channel.schema_id in image_schema_ids
+            and channel.topic.startswith(incomplete)
+            and channel.topic not in already_selected
+        ]
+
+    except Exception:  # noqa: BLE001
+        # Silently fail on errors during autocompletion
+        return []
+
+
 @app.command()
 def video(
     file: Path = typer.Argument(
@@ -824,6 +864,7 @@ def video(
         "--topic",
         "-t",
         help="Image topic to convert (repeat for multiple topics)",
+        autocompletion=complete_image_topics,
     ),
     output: Path = typer.Option(
         ...,
