@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import sys
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
@@ -13,10 +12,12 @@ from rich.console import Console
 
 from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.mcap_processor import (
+    AttachmentsMode,
     McapProcessor,
-    ProcessingOptions,
-    compile_topic_patterns,
-    parse_time_arg,
+    MetadataMode,
+    build_processing_options,
+    confirm_output_overwrite,
+    report_processing_stats,
 )
 
 app = typer.Typer()
@@ -36,96 +37,6 @@ class RecoveryMode(str, Enum):
 
     ENABLED = "enabled"
     DISABLED = "disabled"
-
-
-class MetadataMode(str, Enum):
-    """Metadata inclusion mode."""
-
-    INCLUDE = "include"
-    EXCLUDE = "exclude"
-
-
-class AttachmentsMode(str, Enum):
-    """Attachments inclusion mode."""
-
-    INCLUDE = "include"
-    EXCLUDE = "exclude"
-
-
-def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
-    """Parse timestamp with precedence: date_or_nanos > nanoseconds > seconds."""
-    if date_or_nanos:
-        return parse_time_arg(date_or_nanos)
-    if nanoseconds != 0:
-        return nanoseconds
-    return seconds * 1_000_000_000
-
-
-def build_processing_options(
-    include_topic_regex: list[str] | None,
-    exclude_topic_regex: list[str] | None,
-    start: str,
-    start_nsecs: int,
-    start_secs: int,
-    end: str,
-    end_nsecs: int,
-    end_secs: int,
-    metadata_mode: MetadataMode,
-    attachments_mode: AttachmentsMode,
-    compression: str,
-    chunk_size: int,
-    recovery_mode: RecoveryMode,
-    always_decode_chunk: bool,
-) -> ProcessingOptions:
-    """Build ProcessingOptions from command line arguments."""
-    # Handle None defaults for list parameters
-    include_topic_regex = include_topic_regex or []
-    exclude_topic_regex = exclude_topic_regex or []
-
-    # Validate mutually exclusive options
-    if include_topic_regex and exclude_topic_regex:
-        raise ValueError("Cannot use both --include-topic-regex and --exclude-topic-regex")
-
-    recovery = recovery_mode == RecoveryMode.ENABLED
-
-    # Parse time arguments
-    try:
-        start_time = parse_timestamp_args(start, start_nsecs, start_secs)
-        end_time = parse_timestamp_args(end, end_nsecs, end_secs)
-    except ValueError as e:
-        raise ValueError(f"Time parsing error: {e}") from e
-
-    # Default end time to max if not specified
-    if end_time == 0:
-        end_time = 2**63 - 1
-
-    # Validate time range
-    if end_time < start_time:
-        raise ValueError("End time cannot be before start time")
-
-    # Compile topic patterns
-    include_topics = compile_topic_patterns(include_topic_regex)
-    exclude_topics = compile_topic_patterns(exclude_topic_regex)
-
-    # Handle content filtering
-    include_meta = metadata_mode == MetadataMode.INCLUDE
-    include_attach = attachments_mode == AttachmentsMode.INCLUDE
-
-    return ProcessingOptions(
-        # Recovery options
-        recovery_mode=recovery,
-        always_decode_chunk=always_decode_chunk,
-        # Filter options
-        include_topics=include_topics,
-        exclude_topics=exclude_topics,
-        start_time=start_time,
-        end_time=end_time,
-        include_metadata=include_meta,
-        include_attachments=include_attach,
-        # Output options
-        compression=compression,
-        chunk_size=chunk_size,
-    )
 
 
 @app.command(
@@ -327,6 +238,10 @@ def process(
     Usage:
       mcap process in.mcap -o out.mcap -y /camera.* --recovery-mode
     """
+    # Confirm overwrite if needed (file existence validated by Typer)
+    confirm_output_overwrite(output, force)
+
+    # Build processing options
     try:
         options = build_processing_options(
             include_topic_regex=include_topic_regex,
@@ -341,31 +256,15 @@ def process(
             attachments_mode=attachments_mode,
             compression=compression.value,
             chunk_size=chunk_size,
-            recovery_mode=recovery_mode,
+            recovery_mode=recovery_mode == RecoveryMode.ENABLED,
             always_decode_chunk=always_decode_chunk,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
+        raise typer.Exit(1) from None
 
-    # Handle single or multiple input files
     input_files = file
-
-    # Validate all input files exist (Typer should handle this, but double-check)
-    for input_file in input_files:
-        if not input_file.exists():
-            console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
-            sys.exit(1)
-
-    output_file = output
     file_sizes = [f.stat().st_size for f in input_files]
-
-    # Confirm overwrite if output file exists
-    if output_file.exists() and not force:
-        typer.confirm(
-            f"Output file '{output_file}' already exists. Overwrite?",
-            abort=True,
-        )
 
     # Create processor and run
     processor = McapProcessor(options)
@@ -373,51 +272,14 @@ def process(
     # Use ExitStack to manage multiple file handles
     with contextlib.ExitStack() as stack:
         input_streams = [stack.enter_context(f.open("rb")) for f in input_files]
-        output_stream = stack.enter_context(output_file.open("wb"))
+        output_stream = stack.enter_context(output.open("wb"))
 
-        stats = processor.process(input_streams, output_stream, file_sizes)
+        try:
+            stats = processor.process(input_streams, output_stream, file_sizes)
 
-        # Report results
-        if len(input_files) > 1:
-            console.print(f"[green]✓ Merged {len(input_files)} files successfully![/green]")
-        else:
-            console.print("[green]✓ Processing completed successfully![/green]")
+            # Report results
+            report_processing_stats(stats, console, len(input_files), "process")
 
-        # Basic stats
-        console.print(
-            f"Processed {stats.messages_processed:,} messages, "
-            f"wrote {stats.writer_statistics.message_count:,} messages"
-        )
-
-        # Content stats
-        if stats.attachments_processed > 0 and stats.writer_statistics:
-            console.print(
-                f"Processed {stats.attachments_processed} attachments, "
-                f"wrote {stats.writer_statistics.attachment_count}"
-            )
-        if stats.metadata_processed > 0 and stats.writer_statistics:
-            console.print(
-                f"Processed {stats.metadata_processed} metadata records, "
-                f"wrote {stats.writer_statistics.metadata_count}"
-            )
-
-        # Schema/channel stats
-        console.print(
-            f"Wrote {stats.writer_statistics.schema_count} schemas and "
-            f"{stats.writer_statistics.channel_count} channels"
-        )
-
-        # Performance stats
-        if stats.chunks_processed > 0:
-            console.print(
-                f"Processed {stats.chunks_processed} chunks "
-                f"({stats.chunks_copied} fast copied, {stats.chunks_decoded} decoded)"
-            )
-
-        # Error stats
-        if stats.errors_encountered > 0:
-            console.print(f"[yellow]Encountered {stats.errors_encountered} errors[/yellow]")
-        if stats.validation_errors > 0:
-            console.print(f"[yellow]Found {stats.validation_errors} validation errors[/yellow]")
-        if stats.filter_rejections > 0:
-            console.print(f"Filtered out {stats.filter_rejections} records")
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]Error during processing: {e}[/red]")
+            raise typer.Exit(1) from None

@@ -5,9 +5,12 @@ import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
 from re import Pattern
 from typing import BinaryIO, NamedTuple
 
+import typer
 from rich.console import Console
 from small_mcap import (
     Attachment,
@@ -161,6 +164,193 @@ def compile_topic_patterns(patterns: list[str]) -> list[Pattern[str]]:
             raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
 
     return compiled
+
+
+# Shared enums for command-line interfaces
+class MetadataMode(str, Enum):
+    """Metadata inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
+class AttachmentsMode(str, Enum):
+    """Attachments inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
+# Shared helper functions for command-line interfaces
+def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
+    """Parse timestamp with precedence: date_or_nanos > nanoseconds > seconds."""
+    if date_or_nanos:
+        return parse_time_arg(date_or_nanos)
+    if nanoseconds != 0:
+        return nanoseconds
+    return seconds * 1_000_000_000
+
+
+def confirm_output_overwrite(output: Path, force: bool) -> None:
+    """Confirm overwrite if output exists and force=False.
+
+    Args:
+        output: Output file path
+        force: If True, skip confirmation
+
+    Raises:
+        typer.Abort: If user declines to overwrite
+    """
+    if output.exists() and not force:
+        typer.confirm(
+            f"Output file '{output}' already exists. Overwrite?",
+            abort=True,
+        )
+
+
+def build_processing_options(
+    include_topic_regex: list[str] | None = None,
+    exclude_topic_regex: list[str] | None = None,
+    start: str = "",
+    start_nsecs: int = 0,
+    start_secs: int = 0,
+    end: str = "",
+    end_nsecs: int = 0,
+    end_secs: int = 0,
+    metadata_mode: MetadataMode = MetadataMode.INCLUDE,
+    attachments_mode: AttachmentsMode = AttachmentsMode.INCLUDE,
+    compression: str = "zstd",
+    chunk_size: int = 4 * 1024 * 1024,
+    recovery_mode: bool = True,
+    always_decode_chunk: bool = False,
+) -> ProcessingOptions:
+    """Build ProcessingOptions from common command-line arguments.
+
+    Args:
+        include_topic_regex: List of regex patterns for topics to include
+        exclude_topic_regex: List of regex patterns for topics to exclude
+        start: Start time (nanoseconds or RFC3339 date)
+        start_nsecs: Start time in nanoseconds (deprecated)
+        start_secs: Start time in seconds
+        end: End time (nanoseconds or RFC3339 date)
+        end_nsecs: End time in nanoseconds (deprecated)
+        end_secs: End time in seconds
+        metadata_mode: Whether to include or exclude metadata
+        attachments_mode: Whether to include or exclude attachments
+        compression: Compression algorithm (zstd/lz4/none)
+        chunk_size: Chunk size in bytes
+        recovery_mode: Enable recovery mode for error handling
+        always_decode_chunk: Force chunk decoding (disable fast copying)
+
+    Returns:
+        ProcessingOptions configured from the arguments
+
+    Raises:
+        ValueError: If arguments are invalid
+    """
+    # Handle None defaults for list parameters
+    include_topic_regex = include_topic_regex or []
+    exclude_topic_regex = exclude_topic_regex or []
+
+    # Validate mutually exclusive options
+    if include_topic_regex and exclude_topic_regex:
+        raise ValueError("Cannot use both include and exclude topic filters")
+
+    # Parse time arguments
+    try:
+        start_time = parse_timestamp_args(start, start_nsecs, start_secs)
+        end_time = parse_timestamp_args(end, end_nsecs, end_secs)
+    except ValueError as e:
+        raise ValueError(f"Time parsing error: {e}") from e
+
+    # Default end time to max if not specified
+    if end_time == 0:
+        end_time = 2**63 - 1
+
+    # Validate time range
+    if end_time < start_time:
+        raise ValueError("End time cannot be before start time")
+
+    # Compile topic patterns
+    include_topics = compile_topic_patterns(include_topic_regex)
+    exclude_topics = compile_topic_patterns(exclude_topic_regex)
+
+    return ProcessingOptions(
+        recovery_mode=recovery_mode,
+        always_decode_chunk=always_decode_chunk,
+        include_topics=include_topics,
+        exclude_topics=exclude_topics,
+        start_time=start_time,
+        end_time=end_time,
+        include_metadata=metadata_mode == MetadataMode.INCLUDE,
+        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+        compression=compression,
+        chunk_size=chunk_size,
+    )
+
+
+def report_processing_stats(
+    stats: ProcessingStats,
+    console_out: Console,
+    num_files: int = 1,
+    command_context: str = "process",
+) -> None:
+    """Report processing statistics with appropriate messaging.
+
+    Args:
+        stats: Processing statistics to report
+        console_out: Rich console for output
+        num_files: Number of input files processed
+        command_context: Context string (merge/filter/process) for success message
+    """
+    # Success message
+    if command_context == "merge" and num_files > 1:
+        console_out.print(f"[green]✓ Successfully merged {num_files} files![/green]")
+    elif command_context == "filter":
+        console_out.print("[green]✓ Filter completed successfully![/green]")
+    elif num_files > 1:
+        console_out.print(f"[green]✓ Merged {num_files} files successfully![/green]")
+    else:
+        console_out.print("[green]✓ Processing completed successfully![/green]")
+
+    # Basic stats
+    console_out.print(
+        f"Processed {stats.messages_processed:,} messages, "
+        f"wrote {stats.writer_statistics.message_count:,} messages"
+    )
+
+    # Content stats
+    if stats.attachments_processed > 0 and stats.writer_statistics:
+        console_out.print(
+            f"Processed {stats.attachments_processed} attachments, "
+            f"wrote {stats.writer_statistics.attachment_count}"
+        )
+    if stats.metadata_processed > 0 and stats.writer_statistics:
+        console_out.print(
+            f"Processed {stats.metadata_processed} metadata records, "
+            f"wrote {stats.writer_statistics.metadata_count}"
+        )
+
+    # Schema/channel stats
+    console_out.print(
+        f"Wrote {stats.writer_statistics.schema_count} schemas and "
+        f"{stats.writer_statistics.channel_count} channels"
+    )
+
+    # Performance stats
+    if stats.chunks_processed > 0:
+        console_out.print(
+            f"Processed {stats.chunks_processed} chunks "
+            f"({stats.chunks_copied} fast copied, {stats.chunks_decoded} decoded)"
+        )
+
+    # Error stats
+    if stats.errors_encountered > 0:
+        console_out.print(f"[yellow]Encountered {stats.errors_encountered} errors[/yellow]")
+    if stats.validation_errors > 0:
+        console_out.print(f"[yellow]Found {stats.validation_errors} validation errors[/yellow]")
+    if stats.filter_rejections > 0:
+        console_out.print(f"Filtered out {stats.filter_rejections} records")
 
 
 class McapProcessor:

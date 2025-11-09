@@ -9,6 +9,7 @@ from pymcap_cli.cmd import (
     info_cmd,
     info_json_cmd,
     list_cmd,
+    merge_cmd,
     process_cmd,
     rechunk_cmd,
     recover_cmd,
@@ -34,6 +35,7 @@ app.command(name="rechunk")(rechunk_cmd.rechunk)
 app.command(name="tftree")(tftree_cmd.tftree)
 app.command(name="video")(video_cmd.video)
 app.command(name="filter")(filter_cmd.filter_cmd)
+app.command(name="merge")(merge_cmd.merge)
 app.command(name="compress")(compress_cmd.compress)
 
 # Command groups (list has 5 subcommands)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
@@ -11,38 +10,17 @@ from rich.console import Console
 
 from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.mcap_processor import (
+    AttachmentsMode,
     McapProcessor,
-    ProcessingOptions,
-    compile_topic_patterns,
-    parse_time_arg,
+    MetadataMode,
+    build_processing_options,
+    confirm_output_overwrite,
+    report_processing_stats,
 )
 from pymcap_cli.types import CompressionType
 
 console = Console()
 app = typer.Typer()
-
-
-class MetadataMode(str, Enum):
-    """Metadata inclusion mode."""
-
-    INCLUDE = "include"
-    EXCLUDE = "exclude"
-
-
-class AttachmentsMode(str, Enum):
-    """Attachments inclusion mode."""
-
-    INCLUDE = "include"
-    EXCLUDE = "exclude"
-
-
-def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
-    """Parse timestamp with precedence: date_or_nanos > nanoseconds > seconds."""
-    if date_or_nanos:
-        return parse_time_arg(date_or_nanos)
-    if nanoseconds != 0:
-        return nanoseconds
-    return seconds * 1_000_000_000
 
 
 @app.command(name="filter")
@@ -206,56 +184,30 @@ def filter_cmd(
     Usage:
       mcap filter in.mcap -o out.mcap -y /diagnostics -y /tf -y /camera_.*
     """
-    include_topic_regex = include_topic_regex or []
-    exclude_topic_regex = exclude_topic_regex or []
+    # Confirm overwrite if needed (file existence validated by Typer)
+    confirm_output_overwrite(output, force)
 
-    # Validate mutually exclusive topic filters
-    if include_topic_regex and exclude_topic_regex:
-        raise ValueError("Cannot use both --include-topic-regex and --exclude-topic-regex")
-
-    # Parse time arguments
+    # Build processing options
     try:
-        start_time = parse_timestamp_args(start, start_nsecs, start_secs)
-        end_time = parse_timestamp_args(end, end_nsecs, end_secs)
+        processing_options = build_processing_options(
+            include_topic_regex=include_topic_regex,
+            exclude_topic_regex=exclude_topic_regex,
+            start=start,
+            start_nsecs=start_nsecs,
+            start_secs=start_secs,
+            end=end,
+            end_nsecs=end_nsecs,
+            end_secs=end_secs,
+            metadata_mode=metadata_mode,
+            attachments_mode=attachments_mode,
+            compression=compression.value,
+            chunk_size=chunk_size,
+        )
     except ValueError as e:
-        raise ValueError(f"Time parsing error: {e}") from e
-
-    # Default end time to max if not specified
-    if end_time == 0:
-        end_time = 2**63 - 1
-
-    # Validate time range
-    if end_time < start_time:
-        raise ValueError("End time cannot be before start time")
-
-    processing_options = ProcessingOptions(
-        # Enable recovery mode for robust filtering
-        recovery_mode=True,
-        always_decode_chunk=False,
-        # Filter options
-        include_topics=compile_topic_patterns(include_topic_regex),
-        exclude_topics=compile_topic_patterns(exclude_topic_regex),
-        start_time=start_time,
-        end_time=end_time,
-        include_metadata=metadata_mode == MetadataMode.INCLUDE,
-        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
-        # Output options
-        compression=compression.value,
-        chunk_size=chunk_size,
-    )
-
-    if not file.exists():
-        console.print(f"[red]Error: Input file '{file}' does not exist[/red]")
-        raise typer.Exit(1)
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
 
     file_size = file.stat().st_size
-
-    # Confirm overwrite if output file exists
-    if output.exists() and not force:
-        typer.confirm(
-            f"Output file '{output}' already exists. Overwrite?",
-            abort=True,
-        )
 
     # Create processor and run
     processor = McapProcessor(processing_options)
@@ -264,26 +216,9 @@ def filter_cmd(
         try:
             stats = processor.process([input_stream], output_stream, [file_size])
 
-            # Report results in filter-style format
-            console.print("[green]✓ Filter completed successfully![/green]")
-            console.print(
-                f"Processed {stats.messages_processed:,} messages, "
-                f"wrote {stats.writer_statistics.message_count:,} messages"
-            )
-            if stats.writer_statistics.attachment_count > 0:
-                console.print(f"Wrote {stats.writer_statistics.attachment_count} attachments")
-            if stats.writer_statistics.metadata_count > 0:
-                console.print(f"Wrote {stats.writer_statistics.metadata_count} metadata records")
-            console.print(
-                f"Wrote {stats.writer_statistics.schema_count} schemas and "
-                f"{stats.writer_statistics.channel_count} channels"
-            )
-            if stats.chunks_processed > 0:
-                console.print(
-                    f"Processed {stats.chunks_processed} chunks "
-                    f"({stats.chunks_copied} fast copied, {stats.chunks_decoded} decoded)"
-                )
+            # Report results
+            report_processing_stats(stats, console, 1, "filter")
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during filtering: {e}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None

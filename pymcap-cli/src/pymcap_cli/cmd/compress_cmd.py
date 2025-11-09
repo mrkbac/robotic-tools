@@ -8,7 +8,11 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
+from pymcap_cli.mcap_processor import (
+    McapProcessor,
+    ProcessingOptions,
+    confirm_output_overwrite,
+)
 from pymcap_cli.types import CompressionType
 
 console = Console()
@@ -52,6 +56,15 @@ def compress(
             show_default=True,
         ),
     ] = CompressionType.ZSTD,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--force",
+            help="Force overwrite of output file without confirmation",
+            show_default=True,
+        ),
+    ] = False,
 ) -> None:
     """Create a compressed copy of an MCAP file.
 
@@ -60,6 +73,9 @@ def compress(
     Usage:
       mcap compress in.mcap -o out.mcap
     """
+    # Confirm overwrite if needed (file existence validated by Typer)
+    confirm_output_overwrite(output, force)
+
     # Convert compress args to unified processing options (include everything)
     processing_options = ProcessingOptions(
         # Recovery mode with all content included
@@ -76,10 +92,6 @@ def compress(
         compression=compression.value,
         chunk_size=chunk_size,
     )
-
-    if not file.exists():
-        console.print(f"[red]Error: Input file '{file}' does not exist[/red]")
-        raise typer.Exit(1)
 
     file_size = file.stat().st_size
 

@@ -30,7 +30,11 @@ from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
 from pymcap_cli.autocompletion import complete_all_topics
-from pymcap_cli.mcap_processor import compile_topic_patterns, str_to_compression_type
+from pymcap_cli.mcap_processor import (
+    compile_topic_patterns,
+    confirm_output_overwrite,
+    str_to_compression_type,
+)
 from pymcap_cli.types import CompressionType
 from pymcap_cli.utils import file_progress
 
@@ -419,19 +423,12 @@ def rechunk(
         raise typer.Exit(1)
 
     input_file = Path(file)
-    if not input_file.exists():
-        console.print(f"[red]Error: Input file '{input_file}' does not exist[/red]")
-        raise typer.Exit(1)
-
     output_file = Path(output)
-    file_size = input_file.stat().st_size
 
-    # Confirm overwrite if output file exists
-    if output_file.exists() and not force:
-        typer.confirm(
-            f"Output file '{output_file}' already exists. Overwrite?",
-            abort=True,
-        )
+    # Confirm overwrite if needed (file existence validated by Typer)
+    confirm_output_overwrite(output_file, force)
+
+    file_size = input_file.stat().st_size
 
     # Compile patterns if using PATTERN strategy
     patterns: list[Pattern[str]] = []

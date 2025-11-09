@@ -35,6 +35,7 @@ from rich.text import Text
 from small_mcap import get_summary, include_topics, read_message_decoded
 
 from pymcap_cli.autocompletion import complete_topic_by_schema
+from pymcap_cli.mcap_processor import confirm_output_overwrite
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -939,12 +940,8 @@ def video(
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
         raise typer.Exit(1)
 
-    # Confirm overwrite if output file exists
-    if output.exists() and not force:
-        typer.confirm(
-            f"Output file '{output}' already exists. Overwrite?",
-            abort=True,
-        )
+    # Confirm overwrite if needed
+    confirm_output_overwrite(output, force)
 
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError(
