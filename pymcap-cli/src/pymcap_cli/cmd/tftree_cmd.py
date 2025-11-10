@@ -14,7 +14,6 @@ from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
-from rich.text import Text
 from small_mcap import read_message_decoded
 from small_mcap.reader import include_topics
 
@@ -155,7 +154,9 @@ def _build_table_rows(
 
         # Recursively add children
         rows.extend(
-            _build_table_rows(child_frame_id, transforms, transform_counts, tree_dict, visited, child_prefix)
+            _build_table_rows(
+                child_frame_id, transforms, transform_counts, tree_dict, visited, child_prefix
+            )
         )
 
     return rows
