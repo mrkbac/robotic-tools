@@ -104,23 +104,25 @@ def _quaternion_to_euler(x: float, y: float, z: float, w: float) -> tuple[float,
 def _build_table_rows(
     frame_id: str,
     transforms: dict[tuple[str, str], TransformData],
+    transform_counts: dict[tuple[str, str], int],
     tree_dict: dict[str, list[str]],
     visited: set[str],
     prefix: str = "",
-) -> list[tuple[str, str, float, float, float, float, float, float, str]]:
+) -> list[tuple[str, int, str, float, float, float, float, float, float]]:
     """Recursively build table rows with tree structure prefixes.
 
     Args:
         frame_id: Current frame to process
         transforms: Dictionary of all transforms
+        transform_counts: Dictionary of update counts per transform
         tree_dict: Dictionary mapping parents to children
         visited: Set of already visited frames (to prevent cycles)
         prefix: Current line prefix for tree structure
 
     Returns:
-        List of tuples: (frame_with_prefix, timestamp, tx, ty, tz, roll, pitch, yaw, color)
+        List of tuples: (frame_with_prefix, count, timestamp, tx, ty, tz, roll, pitch, yaw)
     """
-    rows: list[tuple[str, str, float, float, float, float, float, float, str]] = []
+    rows: list[tuple[str, int, str, float, float, float, float, float, float]] = []
 
     if frame_id in visited:
         return rows
@@ -129,7 +131,8 @@ def _build_table_rows(
     children = sorted(tree_dict.get(frame_id, []))
 
     for i, child_frame_id in enumerate(children):
-        transform = transforms.get((frame_id, child_frame_id))
+        key = (frame_id, child_frame_id)
+        transform = transforms.get(key)
         if not transform:
             continue
 
@@ -137,25 +140,31 @@ def _build_table_rows(
         connector = "└── " if is_last_child else "├── "
 
         # Format row data
-        color = "green" if transform.is_static else "yellow"
-        frame_with_prefix = f"{prefix}{connector}{child_frame_id}"
+        color = "green" if transform.is_static else "red"
+        frame_with_prefix = f"{prefix}{connector}[{color}]{child_frame_id}[/]"
+        count = transform_counts[key]
         timestamp = _format_timestamp(transform.timestamp_ns)
         tx, ty, tz = transform.translation
         qx, qy, qz, qw = transform.rotation
         roll, pitch, yaw = _quaternion_to_euler(qx, qy, qz, qw)
 
-        rows.append((frame_with_prefix, timestamp, tx, ty, tz, roll, pitch, yaw, color))
+        rows.append((frame_with_prefix, count, timestamp, tx, ty, tz, roll, pitch, yaw))
 
         # Build prefix for children
         child_prefix = prefix + ("    " if is_last_child else "│   ")
 
         # Recursively add children
-        rows.extend(_build_table_rows(child_frame_id, transforms, tree_dict, visited, child_prefix))
+        rows.extend(
+            _build_table_rows(child_frame_id, transforms, transform_counts, tree_dict, visited, child_prefix)
+        )
 
     return rows
 
 
-def _build_tf_table(transforms: dict[tuple[str, str], TransformData]) -> Table | None:
+def _build_tf_table(
+    transforms: dict[tuple[str, str], TransformData],
+    transform_counts: dict[tuple[str, str], int],
+) -> Table | None:
     if not transforms:
         return None
 
@@ -168,10 +177,12 @@ def _build_tf_table(transforms: dict[tuple[str, str], TransformData]) -> Table |
     # Create Rich table
     total = len(transforms)
     static = sum(1 for t in transforms.values() if t.is_static)
-    title = f"TF Tree (Total: {total} | Static: {static} | Dynamic: {total - static})"
+    title = f"TF Tree Total: {total} | Static: {static} | Dynamic: {total - static}"
+    title += " [red]RED[/red]=Dynamic [green]GREEN[/green]=Static"
 
     table = Table(show_header=True, box=None, padding=(0, 1), title=title)
     table.add_column("Frame", style="bold", no_wrap=True)
+    table.add_column("Count", style="yellow", justify="right")
     table.add_column("Timestamp", style="dim", no_wrap=True)
     table.add_column("tx", style="cyan", justify="right")
     table.add_column("ty", style="cyan", justify="right")
@@ -184,20 +195,31 @@ def _build_tf_table(transforms: dict[tuple[str, str], TransformData]) -> Table |
     visited: set[str] = set()
     for root_frame in root_frames:
         # Add root frame row
-        table.add_row(root_frame, "", "", "", "", "", "", "")
+        table.add_row(f"[bold]{root_frame}[/]", "", "", "", "", "", "", "", "", "")
 
         # Add child rows
-        rows = _build_table_rows(root_frame, transforms, tree_dict, visited, "")
-        for frame_with_prefix, timestamp, tx, ty, tz, roll, pitch, yaw, color in rows:
+        rows = _build_table_rows(root_frame, transforms, transform_counts, tree_dict, visited, "")
+        for (
+            frame_with_prefix,
+            count,
+            timestamp,
+            tx,
+            ty,
+            tz,
+            roll,
+            pitch,
+            yaw,
+        ) in rows:
             table.add_row(
-                Text(frame_with_prefix, style=f"bold {color}"),
+                frame_with_prefix,
+                f"{count:<4}",
                 timestamp,
-                f"{tx:.3f}",
-                f"{ty:.3f}",
-                f"{tz:.3f}",
-                f"{roll:.1f}",
-                f"{pitch:.1f}",
-                f"{yaw:.1f}",
+                f"{tx:7.3f}",
+                f"{ty:7.3f}",
+                f"{tz:7.3f}",
+                f"{roll:4.1f}",
+                f"{pitch:4.1f}",
+                f"{yaw:4.1f}",
             )
 
     return table
@@ -221,26 +243,45 @@ def tftree(
             help="Show only static transforms (/tf_static)",
         ),
     ] = False,
+    change_only: Annotated[
+        bool,
+        typer.Option(
+            "--change-only",
+            help="Update display only when tree structure changes (new frames added)",
+        ),
+    ] = False,
 ) -> None:
     """Display TF transform tree from MCAP file."""
     transforms: dict[tuple[str, str], TransformData] = {}
+    transform_counts: dict[tuple[str, str], int] = defaultdict(int)
+    seen_frame_pairs: set[tuple[str, str]] = set()
 
     topics = ["/tf_static"]
     if not static_only:
         topics.append("/tf")
 
     try:
-        with file.open("rb") as f, Live(auto_refresh=False, console=console) as live:
+        with file.open("rb") as f, Live(console=console) as live:
             for msg in read_message_decoded(
                 f,
                 should_include=include_topics(topics),
                 decoder_factories=[DecoderFactory()],
             ):
+                tree_changed = False
                 for transform_stamped in msg.decoded_message.transforms:
                     trans = transform_stamped.transform.translation
                     rot = transform_stamped.transform.rotation
 
                     key = (transform_stamped.header.frame_id, transform_stamped.child_frame_id)
+
+                    # Check if this is a new frame pair
+                    if key not in seen_frame_pairs:
+                        seen_frame_pairs.add(key)
+                        tree_changed = True
+
+                    # Track update count
+                    transform_counts[key] += 1
+
                     transforms[key] = TransformData(
                         frame_id=transform_stamped.header.frame_id,
                         child_frame_id=transform_stamped.child_frame_id,
@@ -250,17 +291,17 @@ def tftree(
                         timestamp_ns=msg.message.log_time,
                     )
 
-                # Update display
-                table = _build_tf_table(transforms)
-                if table:
-                    live.update(table)
-                    live.refresh()
+                # Update display: always update if change_only is disabled,
+                # or only when tree structure changes if change_only is enabled
+                if not change_only or tree_changed:
+                    table = _build_tf_table(transforms, transform_counts)
+                    if table:
+                        live.update(table)
 
             # Final update
-            table = _build_tf_table(transforms)
+            table = _build_tf_table(transforms, transform_counts)
             if table:
                 live.update(table)
-                live.refresh()
 
         # Post-processing validation: check for multiple parents
         multiple_parents = _detect_multiple_parents(transforms)
