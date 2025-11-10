@@ -496,7 +496,7 @@ class WebSocketBridgeClient:
                             logger.warning(f"Received unknown message type: {type(raw)}")
 
             except websockets.ConnectionClosed:
-                logger.warning("WebSocket connection closed, will reconnect...")
+                logger.exception("WebSocket connection closed, will reconnect...")
                 self._websocket = None
                 self._connection_event.clear()  # Clear event when disconnected
                 await self._set_connection_status(ConnectionStatus.RECONNECTING)

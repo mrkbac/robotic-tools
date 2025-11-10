@@ -93,23 +93,14 @@ class DashboardRenderer:
         """Create the header panel with global stats."""
         uptime = _format_duration(self.metrics.get_uptime())
         total_clients = len(self.metrics.clients)
-        total_channels = len(self.metrics.channels)
-        total_msg_rate = _format_rate(self.metrics.get_total_message_rate())
-        total_bandwidth = _format_bandwidth(self.metrics.get_total_bandwidth())
 
         header_text = Text()
         header_text.append("Foxglove WebSocket Proxy Dashboard", style="bold cyan")
         header_text.append("\n\n")
         header_text.append("Uptime: ", style="bold")
         header_text.append(uptime)
-        header_text.append("  |  Clients: ", style="bold")
+        header_text.append("  |  Connected Clients: ", style="bold")
         header_text.append(str(total_clients), style="green" if total_clients > 0 else "dim")
-        header_text.append("  |  Channels: ", style="bold")
-        header_text.append(str(total_channels), style="cyan")
-        header_text.append("  |  Total Rate: ", style="bold")
-        header_text.append(f"{total_msg_rate} msg/s")
-        header_text.append("  |  Total Bandwidth: ", style="bold")
-        header_text.append(total_bandwidth)
 
         return Panel(header_text, border_style="blue")
 
@@ -178,90 +169,16 @@ class DashboardRenderer:
 
         return table
 
-    def _create_channels_table(self) -> Table:
-        """Create the channels/topics table."""
-        table = Table(
-            title="Topics / Channels",
-            title_style="bold magenta",
-            show_header=True,
-            header_style="bold",
-            show_lines=False,
-            expand=False,
-        )
-
-        table.add_column("Topic", style="cyan", no_wrap=False, max_width=40)
-        table.add_column("Schema", style="blue", no_wrap=True, max_width=30)
-        table.add_column("Msg/s", justify="right", style="yellow", width=8)
-        table.add_column("Bandwidth", justify="right", style="yellow", width=12)
-        table.add_column("Total Msgs", justify="right", style="white", width=12)
-        table.add_column("Subs", justify="center", style="cyan", width=6)
-        table.add_column("Drops", justify="center", style="red", width=8)
-        table.add_column("Transform", justify="center", style="magenta", width=12)
-
-        # Sort channels by topic name
-        sorted_channels = sorted(
-            self.metrics.channels.values(),
-            key=lambda c: c.topic,
-        )
-
-        for channel in sorted_channels:
-            msg_rate = _format_rate(channel.get_send_rate())
-            bandwidth = _format_bandwidth(channel.get_bandwidth())
-
-            # Transform status
-            if channel.is_transformed:
-                transform_ratio = (
-                    f"{channel.transform_successes}/{channel.transform_failures}"
-                    if channel.transform_failures > 0
-                    else f"✓ {channel.transform_successes}"
-                )
-                transform_style = "green" if channel.transform_failures == 0 else "yellow"
-            else:
-                transform_ratio = "-"
-                transform_style = "dim"
-
-            # Drops in red if > 0
-            drops_str = str(channel.messages_dropped) if channel.messages_dropped > 0 else "-"
-            drops_style = "red bold" if channel.messages_dropped > 0 else "dim"
-
-            table.add_row(
-                channel.topic,
-                channel.schema_name,
-                msg_rate,
-                bandwidth,
-                str(channel.messages_sent),
-                str(channel.subscriber_count),
-                Text(drops_str, style=drops_style),
-                Text(transform_ratio, style=transform_style),
-            )
-
-        if not sorted_channels:
-            table.add_row(
-                Text("No channels advertised", style="dim italic"),
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-            )
-
-        return table
-
     def _create_layout(self) -> Panel:
         """Create the full dashboard layout."""
         header = self._create_header_panel()
         clients_table = self._create_clients_table()
-        channels_table = self._create_channels_table()
 
         # Group everything together
         layout = Group(
             header,
             "",  # Spacer
             clients_table,
-            "",  # Spacer
-            channels_table,
         )
 
         return Panel(layout, border_style="bright_blue", padding=(1, 2))

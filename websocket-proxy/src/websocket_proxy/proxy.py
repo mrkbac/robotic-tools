@@ -379,15 +379,6 @@ class ProxyBridge:
         # Store DOWNSTREAM channel
         self.advertised_channels[downstream_channel["id"]] = downstream_channel
 
-        # Track channel metrics
-        is_transformed = downstream_channel["id"] in self.transformed_to_upstream
-        self.metrics.add_channel(
-            downstream_channel["id"],
-            downstream_channel["topic"],
-            downstream_channel["schemaName"],
-            is_transformed=is_transformed,
-        )
-
         # Convert ChannelInfo to Channel object and advertise to all downstream clients
         channel_obj = Channel(
             id=downstream_channel["id"],
@@ -435,9 +426,6 @@ class ProxyBridge:
         self.channel_throttle_hz.pop(upstream_channel_id, None)
         self.channel_last_sent_time.pop(upstream_channel_id, None)
 
-        # Remove channel from metrics
-        self.metrics.remove_channel(downstream_channel_id)
-
         # Unadvertise from downstream clients
         if downstream_channel:
             await self.downstream_server.unadvertise([downstream_channel_id])
@@ -457,14 +445,6 @@ class ProxyBridge:
         """
         channel_id = channel["id"]
 
-        # Map to downstream channel ID (transformed or original)
-        downstream_channel_id = self.transformed_channels.get(channel_id, channel_id)
-
-        # Track received message from upstream (using downstream channel ID for metrics)
-        channel_metrics = self.metrics.get_channel(downstream_channel_id)
-        if channel_metrics:
-            channel_metrics.record_received_message()
-
         # Apply throttling before performing any transformations or forwarding
         throttle_hz = self.channel_throttle_hz.get(channel_id, self.default_throttle_hz)
 
@@ -479,9 +459,6 @@ class ProxyBridge:
                     channel_id,
                     min_interval,
                 )
-                # Track dropped message
-                if channel_metrics:
-                    channel_metrics.record_dropped_message()
                 return
 
             self.channel_last_sent_time[channel_id] = now
@@ -500,36 +477,16 @@ class ProxyBridge:
                         output_schema = transformer.get_output_schema()
                         output_payload = self._encode_message(output_schema, transformed_msg)
 
-                        # Track successful transformation
-                        transformed_channel_metrics = self.metrics.get_channel(
-                            transformed_channel_id
-                        )
-                        if transformed_channel_metrics:
-                            transformed_channel_metrics.record_transform_success()
-
                         # Send to all subscribed clients
                         await self._send_to_subscribed_clients(
                             transformed_channel_id,
                             timestamp,
                             output_payload,
                         )
-                else:
-                    # Transform returned None (failed)
-                    transformed_channel_metrics = self.metrics.get_channel(transformed_channel_id)
-                    if transformed_channel_metrics:
-                        transformed_channel_metrics.record_transform_failure()
             except TransformError as e:
                 logger.warning(f"Transform failed: {e}")
-                # Track transformation failure
-                transformed_channel_metrics = self.metrics.get_channel(transformed_channel_id)
-                if transformed_channel_metrics:
-                    transformed_channel_metrics.record_transform_failure()
             except Exception:
                 logger.exception("Unexpected error during transformation")
-                # Track transformation failure
-                transformed_channel_metrics = self.metrics.get_channel(transformed_channel_id)
-                if transformed_channel_metrics:
-                    transformed_channel_metrics.record_transform_failure()
         else:
             # No transformer - forward as-is
             await self._send_to_subscribed_clients(channel_id, timestamp, payload)
@@ -575,11 +532,6 @@ class ProxyBridge:
                         client_metrics = self.metrics.get_client(client_id)
                         if client_metrics:
                             client_metrics.record_error()
-
-        # Track channel metrics (messages sent to all subscribers)
-        channel_metrics = self.metrics.get_channel(channel_id)
-        if channel_metrics and subscriber_count > 0:
-            channel_metrics.record_sent_message(len(payload), subscriber_count)
 
     async def handle_client_subscribe(
         self,
@@ -635,11 +587,6 @@ class ProxyBridge:
             if channel_info:
                 client_metrics.subscribed_topics.add(channel_info["topic"])
 
-        # Update channel metrics (subscriber list)
-        channel_metrics = self.metrics.get_channel(channel_id)
-        if channel_metrics:
-            channel_metrics.subscriber_ids.add(client_id)
-
         channel_info = self.upstream_channels.get(upstream_channel_id)
         is_transformed = channel_id in self.transformed_to_upstream
         logger.info(
@@ -675,11 +622,6 @@ class ProxyBridge:
                     channel_info = self.advertised_channels.get(sub_channel_id)
                     if channel_info:
                         client_metrics.subscribed_topics.add(channel_info["topic"])
-
-            # Update channel metrics (remove subscriber)
-            channel_metrics = self.metrics.get_channel(channel_id)
-            if channel_metrics:
-                channel_metrics.subscriber_ids.discard(client_id)
 
             # Check if this is a transformed channel
             upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
