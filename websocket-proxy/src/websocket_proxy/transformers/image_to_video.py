@@ -2,6 +2,7 @@
 
 import logging
 import platform
+import shutil
 import subprocess
 from io import BytesIO
 from typing import Any
@@ -12,6 +13,26 @@ from portable_ffmpeg import get_ffmpeg
 from . import Transformer, TransformError
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ffmpeg_path() -> tuple[str, str | None]:
+    """Get ffmpeg and ffprobe paths, preferring system installation.
+
+    Returns:
+        Tuple of (ffmpeg_path, ffprobe_path). ffprobe_path may be None.
+    """
+    # First check if ffmpeg is in PATH
+    system_ffmpeg = shutil.which("ffmpeg")
+    system_ffprobe = shutil.which("ffprobe")
+
+    if system_ffmpeg and system_ffprobe:
+        logger.info("Using system-installed ffmpeg")
+        return system_ffmpeg, system_ffprobe
+
+    # Fall back to portable-ffmpeg
+    logger.info("System ffmpeg not found, downloading portable version")
+    ffmpeg, ffprobe = get_ffmpeg()
+    return str(ffmpeg), str(ffprobe)
 
 
 class ImageToVideoTransformer(Transformer):
@@ -98,7 +119,7 @@ class ImageToVideoTransformer(Transformer):
         Returns:
             True if the encoder is available
         """
-        ffmpeg, _ = get_ffmpeg()
+        ffmpeg, _ = _get_ffmpeg_path()
         try:
             result = subprocess.run(  # noqa: S603
                 [ffmpeg, "-hide_banner", "-encoders"],
@@ -233,7 +254,7 @@ class ImageToVideoTransformer(Transformer):
         # Build ffmpeg command
         # Input: JPEG from stdin
         # Output: H.264 Annex B format to stdout
-        ffmpeg_path, _ = get_ffmpeg()
+        ffmpeg_path, _ = _get_ffmpeg_path()
         cmd: list[str] = [
             str(ffmpeg_path),
             "-hide_banner",
