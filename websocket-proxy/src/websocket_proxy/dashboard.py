@@ -115,15 +115,16 @@ class DashboardRenderer:
             expand=False,
         )
 
-        table.add_column("ID", style="cyan", no_wrap=True, width=15)
+        table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Remote Address", style="blue", no_wrap=True)
-        table.add_column("Connected", style="green", no_wrap=True, width=12)
-        table.add_column("Msg/s", justify="right", style="yellow", width=8)
-        table.add_column("Bandwidth", justify="right", style="yellow", width=12)
-        table.add_column("Total Msgs", justify="right", style="white", width=12)
-        table.add_column("Subs", justify="center", style="cyan", width=6)
-        table.add_column("Errors", justify="center", style="red", width=8)
-        table.add_column("Last Msg", style="dim", no_wrap=True, width=12)
+        table.add_column("Connected", style="green", no_wrap=True)
+        table.add_column("Msg/s", justify="right", style="yellow")
+        table.add_column("Bandwidth", justify="right", style="yellow")
+        table.add_column("Msgs", justify="right", style="white")
+        table.add_column("Bytes", justify="right", style="yellow")
+        table.add_column("Subs", justify="center", style="cyan")
+        table.add_column("Errors", justify="center", style="red")
+        table.add_column("Last Msg", style="dim", no_wrap=True)
 
         # Sort clients by connection time (oldest first)
         sorted_clients = sorted(
@@ -136,6 +137,7 @@ class DashboardRenderer:
             duration = _format_duration(client.connected_duration)
             msg_rate = _format_rate(client.get_message_rate())
             bandwidth = _format_bandwidth(client.get_bandwidth())
+            bytes_send = _format_bytes(client.bytes_sent)
             last_msg = _format_timestamp(client.last_message_at)
 
             # Style errors in red if > 0
@@ -149,6 +151,7 @@ class DashboardRenderer:
                 msg_rate,
                 bandwidth,
                 str(client.messages_sent),
+                bytes_send,
                 str(client.subscription_count),
                 Text(errors_str, style=errors_style),
                 last_msg,
@@ -157,6 +160,7 @@ class DashboardRenderer:
         if not sorted_clients:
             table.add_row(
                 Text("No clients connected", style="dim italic"),
+                "",
                 "",
                 "",
                 "",

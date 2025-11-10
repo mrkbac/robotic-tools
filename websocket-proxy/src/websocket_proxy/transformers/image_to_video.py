@@ -19,7 +19,6 @@ def _get_ffmpeg_path() -> tuple[str, str]:
     system_ffprobe = shutil.which("ffprobe")
 
     if system_ffmpeg and system_ffprobe:
-        logger.info("Using system-installed ffmpeg")
         return system_ffmpeg, system_ffprobe
 
     # Fall back to portable-ffmpeg
