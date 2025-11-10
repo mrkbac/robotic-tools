@@ -10,7 +10,6 @@ dependencies = [
     "websockets>=15.0.1",
     "typing-extensions>=4.12.2",
     "portable-ffmpeg>=0.1.0",
-    "pillow>=12.0.0",
     "mcap-ros2-support-fast",
     "websocket-bridge",
     "rich>=14.2.0",

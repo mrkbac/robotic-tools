@@ -1,13 +1,11 @@
-"""Transform JPEG CompressedImage to H.264 CompressedVideo using ffmpeg."""
+"""Transform CompressedImage to H.264 CompressedVideo using ffmpeg."""
 
 import logging
 import platform
 import shutil
 import subprocess
-from io import BytesIO
 from typing import Any
 
-from PIL import Image
 from portable_ffmpeg import get_ffmpeg
 
 from . import Transformer, TransformError
@@ -15,12 +13,7 @@ from . import Transformer, TransformError
 logger = logging.getLogger(__name__)
 
 
-def _get_ffmpeg_path() -> tuple[str, str | None]:
-    """Get ffmpeg and ffprobe paths, preferring system installation.
-
-    Returns:
-        Tuple of (ffmpeg_path, ffprobe_path). ffprobe_path may be None.
-    """
+def _get_ffmpeg_path() -> tuple[str, str]:
     # First check if ffmpeg is in PATH
     system_ffmpeg = shutil.which("ffmpeg")
     system_ffprobe = shutil.which("ffprobe")
@@ -32,11 +25,69 @@ def _get_ffmpeg_path() -> tuple[str, str | None]:
     # Fall back to portable-ffmpeg
     logger.info("System ffmpeg not found, downloading portable version")
     ffmpeg, ffprobe = get_ffmpeg()
+
     return str(ffmpeg), str(ffprobe)
 
 
+def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
+    """Get image dimensions from compressed image data using ffprobe.
+
+    Works with any image format supported by ffmpeg (JPEG, PNG, WebP, etc.).
+
+    Args:
+        image_data: Compressed image bytes
+
+    Returns:
+        Tuple of (width, height)
+
+    Raises:
+        TransformError: If dimensions cannot be determined
+    """
+    _ffmpeg_path, ffprobe_path = _get_ffmpeg_path()
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+                "-",
+            ],
+            input=image_data,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TransformError("ffprobe timed out while reading image") from e
+    except FileNotFoundError as e:
+        raise TransformError("ffprobe not found") from e
+    except Exception as e:
+        raise TransformError(f"Failed to run ffprobe: {e}") from e
+    else:
+        if result.returncode != 0:
+            error_msg = result.stderr.decode("utf-8", errors="ignore")
+            raise TransformError(f"ffprobe failed to read image: {error_msg}")
+
+        try:
+            width_str, height_str = result.stdout.decode().strip().split("x")
+            return int(width_str), int(height_str)
+        except (ValueError, AttributeError) as e:
+            raise TransformError(f"Failed to parse image dimensions: {e}") from e
+
+
 class ImageToVideoTransformer(Transformer):
-    """Transform sensor_msgs/CompressedImage (JPEG) to foxglove_msgs/CompressedVideo (H.264)."""
+    """Transform sensor_msgs/CompressedImage to foxglove_msgs/CompressedVideo (H.264).
+
+    Supports multiple image formats including JPEG, PNG, WebP, and any other format
+    supported by ffmpeg.
+    """
 
     def __init__(
         self,
@@ -190,16 +241,9 @@ class ImageToVideoTransformer(Transformer):
         if not message.data:
             raise TransformError(f"Empty image data, {message}")
 
-        # Verify it's JPEG (for now we only support JPEG)
-        if message.format and "jpeg" not in message.format.lower():
-            raise TransformError(f"Unsupported format: {message.format}")
         try:
-            # Get image dimensions using PIL (faster than ffprobe)
-            try:
-                img = Image.open(BytesIO(message.data))
-                width, height = img.size
-            except Exception as e:
-                raise TransformError(f"Failed to read image: {e}") from e
+            # Get image dimensions using ffprobe (format-agnostic)
+            width, height = _get_image_dimensions(message.data)
 
             # Calculate target dimensions (may downscale if too large)
             target_width, target_height = self._calculate_downscale_dimensions(width, height)
@@ -207,7 +251,7 @@ class ImageToVideoTransformer(Transformer):
             if (target_width, target_height) != (width, height):
                 logger.debug(f"Downscaling from {width}x{height} to {target_width}x{target_height}")
 
-            # Encode JPEG to H.264
+            # Encode image to H.264
             h264_data = self._encode_to_h264(
                 message.data, width, height, target_width, target_height
             )
@@ -230,16 +274,16 @@ class ImageToVideoTransformer(Transformer):
 
     def _encode_to_h264(
         self,
-        jpeg_data: bytes,
+        image_data: bytes,
         width: int,
         height: int,
         target_width: int,
         target_height: int,
     ) -> bytes:
-        """Encode JPEG data to H.264 video frame.
+        """Encode compressed image data to H.264 video frame.
 
         Args:
-            jpeg_data: JPEG image bytes
+            image_data: Compressed image bytes (JPEG, PNG, WebP, etc.)
             width: Original image width
             height: Original image height
             target_width: Target width after scaling
@@ -252,7 +296,7 @@ class ImageToVideoTransformer(Transformer):
             TransformError: If encoding fails
         """
         # Build ffmpeg command
-        # Input: JPEG from stdin
+        # Input: Compressed image from stdin (format auto-detected by ffmpeg)
         # Output: H.264 Annex B format to stdout
         ffmpeg_path, _ = _get_ffmpeg_path()
         cmd: list[str] = [
@@ -262,7 +306,7 @@ class ImageToVideoTransformer(Transformer):
             "error",
             # Input
             "-i",
-            "pipe:0",  # Read JPEG from stdin
+            "pipe:0",  # Read compressed image from stdin
         ]
 
         # Add scaling filter if dimensions changed
@@ -350,7 +394,7 @@ class ImageToVideoTransformer(Transformer):
             # Run ffmpeg
             result = subprocess.run(  # noqa: S603
                 cmd,
-                input=jpeg_data,
+                input=image_data,
                 capture_output=True,
                 timeout=30,  # 30 second timeout
                 check=False,

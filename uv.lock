@@ -1948,7 +1948,6 @@ dependencies = [
     { name = "mcap-ros2-support-fast" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "pillow" },
     { name = "pointcloud2" },
     { name = "portable-ffmpeg" },
     { name = "rich" },
@@ -1966,7 +1965,6 @@ example = [
 requires-dist = [
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "numpy", specifier = ">=2.0.0" },
-    { name = "pillow", specifier = ">=12.0.0" },
     { name = "pointcloud2", specifier = ">=0.2.3" },
     { name = "portable-ffmpeg", specifier = ">=0.1.0" },
     { name = "rich", specifier = ">=14.2.0" },
