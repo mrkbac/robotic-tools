@@ -56,7 +56,8 @@ def create_pointcloud2_xyz(num_points: int) -> dict:
         PointCloud2 message dict
     """
     # Create XYZ points
-    points = np.random.randn(num_points, 3).astype(np.float32)
+    rng = np.random.default_rng()
+    points = rng.standard_normal((num_points, 3)).astype(np.float32)
 
     # Create PointField definitions for XYZ
     fields = [
@@ -222,7 +223,7 @@ def test_pointcloud2_large():
     ros_writer.start()
 
     # Use 4071 points like in the bug report
-    msg, original_points = create_pointcloud2_xyz(4071)
+    msg, _original_points = create_pointcloud2_xyz(4071)
 
     ros_writer.add_message_object(
         topic="/points",
@@ -276,8 +277,8 @@ def test_pointfield_padding():
             {
                 "name": "test",
                 "offset": 123,  # Specific value to detect misalignment
-                "datatype": 7,   # uint8
-                "count": 456,    # Should be aligned after 3 bytes of padding
+                "datatype": 7,  # uint8
+                "count": 456,  # Should be aligned after 3 bytes of padding
             }
         ],
         "is_bigendian": False,
@@ -306,7 +307,9 @@ def test_pointfield_padding():
     assert len(decoded.fields) == 1
     assert decoded.fields[0].name == "test"
     assert decoded.fields[0].offset == 123, f"offset should be 123, got {decoded.fields[0].offset}"
-    assert decoded.fields[0].datatype == 7, f"datatype should be 7, got {decoded.fields[0].datatype}"
+    assert decoded.fields[0].datatype == 7, (
+        f"datatype should be 7, got {decoded.fields[0].datatype}"
+    )
     assert decoded.fields[0].count == 456, f"count should be 456, got {decoded.fields[0].count}"
 
 

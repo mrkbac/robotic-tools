@@ -1,20 +1,18 @@
 import argparse
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
 
+from rich.console import Console
+from rich.logging import RichHandler
+
+from websocket_proxy.dashboard import DashboardRenderer
 from websocket_proxy.proxy import ProxyBridge
 from websocket_proxy.transformers import TransformerRegistry
 from websocket_proxy.transformers.image_to_video import ImageToVideoTransformer
 from websocket_proxy.transformers.pointcloud_voxel import PointCloudVoxelTransformer
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 
 logger = logging.getLogger(__name__)
 
@@ -94,17 +92,28 @@ def parse_args() -> argparse.Namespace:
         help="Keep NaN points when voxelizing point clouds (default: drop NaNs)",
     )
 
+    parser.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="Disable the live dashboard display",
+    )
+    parser.add_argument(
+        "--dashboard-refresh-rate",
+        type=float,
+        default=1.0,
+        help="Dashboard refresh rate in seconds (default: 1.0)",
+    )
+
     parser.set_defaults(image_use_hardware=True, pointcloud_skip_nans=True)
     return parser.parse_args()
 
 
 async def main_async(args: argparse.Namespace) -> None:
     """Async main function."""
-    # Set logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Create shared console for dashboard and logging
+    console = Console()
 
-    # Create transformer registry and register transformers
+    # Create transformer registry and register transformers (BEFORE configuring logging)
     registry = TransformerRegistry()
 
     # Register image to video transformer
@@ -123,10 +132,6 @@ async def main_async(args: argparse.Namespace) -> None:
     )
     registry.register(pointcloud_transformer)
 
-    logger.info("Registered transformers:")
-    for transformer in registry.get_all_transformers():
-        logger.info(f"  {transformer.get_input_schema()} -> {transformer.get_output_schema()}")
-
     # Create proxy bridge with transformers
     bridge = ProxyBridge(
         upstream_url=args.source_ws,
@@ -135,6 +140,33 @@ async def main_async(args: argparse.Namespace) -> None:
         transformer_registry=registry,
         default_throttle_hz=args.throttle_hz,
     )
+
+    # Create dashboard if enabled (with shared console for logging integration)
+    dashboard = None
+    if not args.no_dashboard:
+        dashboard = DashboardRenderer(
+            bridge, refresh_rate=args.dashboard_refresh_rate, console=console
+        )
+        # Start dashboard BEFORE configuring logging
+        dashboard.start_sync()
+
+    # NOW configure logging with Rich handler (after dashboard is started)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[
+            RichHandler(
+                console=console,
+                rich_tracebacks=True,
+                tracebacks_show_locals=args.verbose,
+            )
+        ],
+    )
+
+    logger.info("Registered transformers:")
+    for transformer in registry.get_all_transformers():
+        logger.info(f"  {transformer.get_input_schema()} -> {transformer.get_output_schema()}")
 
     # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
@@ -147,7 +179,23 @@ async def main_async(args: argparse.Namespace) -> None:
         loop.add_signal_handler(sig, signal_handler)
 
     try:
-        await bridge.start()
+        if dashboard:
+            # Dashboard already started above (before logging config)
+            # Just create a background task for dashboard updates
+            dashboard_task = asyncio.create_task(dashboard.run_updates())
+
+            try:
+                # Start proxy (this will block until stop() is called)
+                await bridge.start()
+            finally:
+                # Cancel dashboard updates
+                dashboard_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await dashboard_task
+                await dashboard.stop()
+        else:
+            # No dashboard - just start proxy
+            await bridge.start()
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
     except Exception:
@@ -155,6 +203,8 @@ async def main_async(args: argparse.Namespace) -> None:
         sys.exit(1)
     finally:
         await bridge.stop()
+        if dashboard:
+            await dashboard.stop()
 
 
 def main() -> None:

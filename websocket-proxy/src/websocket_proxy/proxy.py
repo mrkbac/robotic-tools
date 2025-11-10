@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from typing import TYPE_CHECKING, Any
 
 from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
@@ -15,6 +16,7 @@ from websocket_bridge import (
 )
 from websocket_bridge.server import Channel
 
+from .metrics import MetricsCollector
 from .schemas import get_schema
 from .transformers import TransformerRegistry, TransformError
 
@@ -24,6 +26,40 @@ if TYPE_CHECKING:
     from websocket_bridge.ws_types import ChannelInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _get_network_interfaces(port: int) -> list[str]:
+    """Get all accessible network interface addresses for the given port.
+
+    Args:
+        port: The port number to display
+
+    Returns:
+        List of connection URLs (e.g., ws://192.168.1.100:8766)
+    """
+    addresses = []
+
+    # Always add localhost
+    addresses.append(f"ws://localhost:{port}")
+
+    try:
+        # Get all network interface addresses
+        hostname = socket.gethostname()
+        all_ips = socket.getaddrinfo(hostname, None, socket.AF_INET)
+
+        # Extract unique IPv4 addresses
+        seen_ips: set[str] = {"127.0.0.1"}
+        for addr_info in all_ips:
+            ip = str(addr_info[4][0])
+            if ip not in seen_ips:
+                addresses.append(f"ws://{ip}:{port}")
+                seen_ips.add(ip)
+    except OSError:
+        # If we can't get network interfaces, just show 0.0.0.0
+        # This can happen due to network configuration issues
+        pass
+
+    return addresses
 
 
 class MessageCodecCache:
@@ -66,7 +102,11 @@ class MessageCodecCache:
 class _ProxyUpstreamClient(WebSocketBridgeClient):
     """Minimal wrapper for upstream client to register callbacks."""
 
-    def __init__(self, url: str, proxy: ProxyBridge) -> None:
+    def __init__(
+        self,
+        url: str,
+        proxy: ProxyBridge,
+    ) -> None:
         super().__init__(url=url)
         self.proxy = proxy
 
@@ -138,6 +178,7 @@ class ProxyBridge:
         )
 
         # Register callbacks for downstream server
+        self.downstream_server.on_connect(self._on_client_connected)
         self.downstream_server.on_subscribe(self._on_client_subscribe)
         self.downstream_server.on_unsubscribe(self._on_client_unsubscribe)
         self.downstream_server.on_disconnect(self._on_client_disconnected)
@@ -172,8 +213,39 @@ class ProxyBridge:
         # Message encoder/decoder cache (generated from schema)
         self.codec_cache = MessageCodecCache()
 
+        # Metrics collector
+        self.metrics = MetricsCollector()
+
         # Shutdown event to keep start() alive until stop() is called
         self._shutdown_event = asyncio.Event()
+
+    def _get_client_id(self, websocket: ServerConnection) -> str:
+        """Generate a unique client ID from websocket connection."""
+        return f"client_{id(websocket)}"
+
+    def _get_remote_address(self, websocket: ServerConnection) -> str:
+        """Get remote address from websocket connection."""
+        try:
+            remote = websocket.remote_address
+            if isinstance(remote, tuple):
+                return f"{remote[0]}:{remote[1]}"
+            return str(remote)
+        except (OSError, AttributeError):
+            # OSError: connection issues; AttributeError: remote_address not available
+            return "unknown"
+
+    async def _on_client_connected(self, state: ConnectionState) -> None:
+        """Handle client connection (callback for downstream server).
+
+        Args:
+            state: Client connection state
+        """
+        client_id = self._get_client_id(state.websocket)
+        remote_address = self._get_remote_address(state.websocket)
+
+        # Add client to metrics
+        self.metrics.add_client(client_id, remote_address)
+        logger.info(f"Client connected: {client_id} from {remote_address}")
 
     async def _on_client_subscribe(
         self,
@@ -211,13 +283,19 @@ class ProxyBridge:
         Args:
             state: Client connection state
         """
+        client_id = self._get_client_id(state.websocket)
+        self.metrics.remove_client(client_id)
         await self.handle_client_disconnected(state.websocket)
 
     async def start(self) -> None:
         """Start the proxy bridge and run until stop() is called."""
-        logger.info(
-            f"Starting Foxglove proxy bridge: {self.upstream_url} -> ws://{self.listen_host}:{self.listen_port}"
-        )
+        # Get all network interface addresses
+        interfaces = _get_network_interfaces(self.listen_port)
+
+        logger.info(f"Starting Foxglove proxy bridge: {self.upstream_url} -> downstream clients")
+        logger.info("Connect using any of these addresses:")
+        for addr in interfaces:
+            logger.info(f"  {addr}")
 
         # Start both upstream client and downstream server
         await asyncio.gather(
@@ -252,7 +330,7 @@ class ProxyBridge:
 
         # Track the upstream channel for transformation lookup
         self.upstream_channels[channel_id] = channel
-        logger.info(
+        logger.debug(
             f"Upstream channel advertised: {channel['topic']} "
             f"(id={channel_id}, schema={schema_name})"
         )
@@ -289,17 +367,26 @@ class ProxyBridge:
             self.transformed_channels[channel_id] = transformed_id
             self.transformed_to_upstream[transformed_id] = channel_id
 
-            logger.info(
+            logger.debug(
                 f"Created transformed channel: {schema_name} -> {output_schema} "
                 f"(upstream_id={channel_id}, downstream_id={transformed_id})"
             )
         else:
             # No transformer - forward original channel
             downstream_channel = channel
-            logger.info(f"Forwarding original channel: {schema_name} (id={channel_id})")
+            logger.debug(f"Forwarding original channel: {schema_name} (id={channel_id})")
 
         # Store DOWNSTREAM channel
         self.advertised_channels[downstream_channel["id"]] = downstream_channel
+
+        # Track channel metrics
+        is_transformed = downstream_channel["id"] in self.transformed_to_upstream
+        self.metrics.add_channel(
+            downstream_channel["id"],
+            downstream_channel["topic"],
+            downstream_channel["schemaName"],
+            is_transformed=is_transformed,
+        )
 
         # Convert ChannelInfo to Channel object and advertise to all downstream clients
         channel_obj = Channel(
@@ -348,6 +435,9 @@ class ProxyBridge:
         self.channel_throttle_hz.pop(upstream_channel_id, None)
         self.channel_last_sent_time.pop(upstream_channel_id, None)
 
+        # Remove channel from metrics
+        self.metrics.remove_channel(downstream_channel_id)
+
         # Unadvertise from downstream clients
         if downstream_channel:
             await self.downstream_server.unadvertise([downstream_channel_id])
@@ -367,8 +457,17 @@ class ProxyBridge:
         """
         channel_id = channel["id"]
 
+        # Map to downstream channel ID (transformed or original)
+        downstream_channel_id = self.transformed_channels.get(channel_id, channel_id)
+
+        # Track received message from upstream (using downstream channel ID for metrics)
+        channel_metrics = self.metrics.get_channel(downstream_channel_id)
+        if channel_metrics:
+            channel_metrics.record_received_message()
+
         # Apply throttling before performing any transformations or forwarding
         throttle_hz = self.channel_throttle_hz.get(channel_id, self.default_throttle_hz)
+
         if throttle_hz is not None and throttle_hz > 0:
             now = asyncio.get_running_loop().time()
             min_interval = 1.0 / throttle_hz if throttle_hz > 0 else 0.0
@@ -380,6 +479,9 @@ class ProxyBridge:
                     channel_id,
                     min_interval,
                 )
+                # Track dropped message
+                if channel_metrics:
+                    channel_metrics.record_dropped_message()
                 return
 
             self.channel_last_sent_time[channel_id] = now
@@ -398,16 +500,36 @@ class ProxyBridge:
                         output_schema = transformer.get_output_schema()
                         output_payload = self._encode_message(output_schema, transformed_msg)
 
+                        # Track successful transformation
+                        transformed_channel_metrics = self.metrics.get_channel(
+                            transformed_channel_id
+                        )
+                        if transformed_channel_metrics:
+                            transformed_channel_metrics.record_transform_success()
+
                         # Send to all subscribed clients
                         await self._send_to_subscribed_clients(
                             transformed_channel_id,
                             timestamp,
                             output_payload,
                         )
+                else:
+                    # Transform returned None (failed)
+                    transformed_channel_metrics = self.metrics.get_channel(transformed_channel_id)
+                    if transformed_channel_metrics:
+                        transformed_channel_metrics.record_transform_failure()
             except TransformError as e:
                 logger.warning(f"Transform failed: {e}")
+                # Track transformation failure
+                transformed_channel_metrics = self.metrics.get_channel(transformed_channel_id)
+                if transformed_channel_metrics:
+                    transformed_channel_metrics.record_transform_failure()
             except Exception:
                 logger.exception("Unexpected error during transformation")
+                # Track transformation failure
+                transformed_channel_metrics = self.metrics.get_channel(transformed_channel_id)
+                if transformed_channel_metrics:
+                    transformed_channel_metrics.record_transform_failure()
         else:
             # No transformer - forward as-is
             await self._send_to_subscribed_clients(channel_id, timestamp, payload)
@@ -426,16 +548,38 @@ class ProxyBridge:
             payload: Message payload
         """
         # Find all clients subscribed to this channel
-        for websocket, subs in self.client_subscriptions.items():
+        # Create a snapshot to avoid "dictionary changed size during iteration" errors
+        subscriber_count = 0
+        for websocket, subs in list(self.client_subscriptions.items()):
             for client_sub_id, (subscribed_channel_id, _) in subs.items():
                 if subscribed_channel_id == channel_id:
                     # Send message to this client
-                    await self.downstream_server.send_message_to_subscription(
-                        websocket,
-                        client_sub_id,
-                        payload,
-                        timestamp_ns=timestamp,
-                    )
+                    try:
+                        await self.downstream_server.send_message_to_subscription(
+                            websocket,
+                            client_sub_id,
+                            payload,
+                            timestamp_ns=timestamp,
+                        )
+                        subscriber_count += 1
+
+                        # Track message sent to client
+                        client_id = self._get_client_id(websocket)
+                        client_metrics = self.metrics.get_client(client_id)
+                        if client_metrics:
+                            client_metrics.record_message(len(payload))
+                    except Exception:
+                        logger.exception("Failed to send message to client")
+                        # Track error
+                        client_id = self._get_client_id(websocket)
+                        client_metrics = self.metrics.get_client(client_id)
+                        if client_metrics:
+                            client_metrics.record_error()
+
+        # Track channel metrics (messages sent to all subscribers)
+        channel_metrics = self.metrics.get_channel(channel_id)
+        if channel_metrics and subscriber_count > 0:
+            channel_metrics.record_sent_message(len(payload), subscriber_count)
 
     async def handle_client_subscribe(
         self,
@@ -482,6 +626,20 @@ class ProxyBridge:
         # Track client subscription
         self.client_subscriptions[websocket][subscription_id] = (channel_id, upstream_sub_id)
 
+        # Update client metrics (subscription count and topics)
+        client_id = self._get_client_id(websocket)
+        client_metrics = self.metrics.get_client(client_id)
+        if client_metrics:
+            client_metrics.subscription_count = len(self.client_subscriptions[websocket])
+            channel_info = self.advertised_channels.get(channel_id)
+            if channel_info:
+                client_metrics.subscribed_topics.add(channel_info["topic"])
+
+        # Update channel metrics (subscriber list)
+        channel_metrics = self.metrics.get_channel(channel_id)
+        if channel_metrics:
+            channel_metrics.subscriber_ids.add(client_id)
+
         channel_info = self.upstream_channels.get(upstream_channel_id)
         is_transformed = channel_id in self.transformed_to_upstream
         logger.info(
@@ -505,6 +663,23 @@ class ProxyBridge:
 
         if subscription_info is not None:
             channel_id, upstream_sub_id = subscription_info  # noqa: RUF059
+
+            # Update client metrics
+            client_id = self._get_client_id(websocket)
+            client_metrics = self.metrics.get_client(client_id)
+            if client_metrics:
+                client_metrics.subscription_count = len(client_subs)
+                # Recalculate subscribed topics
+                client_metrics.subscribed_topics.clear()
+                for sub_channel_id, _ in client_subs.values():
+                    channel_info = self.advertised_channels.get(sub_channel_id)
+                    if channel_info:
+                        client_metrics.subscribed_topics.add(channel_info["topic"])
+
+            # Update channel metrics (remove subscriber)
+            channel_metrics = self.metrics.get_channel(channel_id)
+            if channel_metrics:
+                channel_metrics.subscriber_ids.discard(client_id)
 
             # Check if this is a transformed channel
             upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
@@ -567,6 +742,14 @@ class ProxyBridge:
 
             # Transform the message
             return transformer.transform(input_msg)
+        except TransformError as e:
+            # TransformError is expected for invalid input frames
+            # Log at debug level to avoid spam
+            if "Invalid input frame data" in str(e):
+                logger.debug(f"Skipping invalid frame: {e}")
+            else:
+                logger.warning(f"Transform failed: {e}")
+            return None
         except Exception:
             logger.exception("Message transformation failed")
             return None
