@@ -22,7 +22,6 @@ def _get_ffmpeg_path() -> tuple[str, str]:
         return system_ffmpeg, system_ffprobe
 
     # Fall back to portable-ffmpeg
-    logger.info("System ffmpeg not found, downloading portable version")
     ffmpeg, ffprobe = get_ffmpeg()
 
     return str(ffmpeg), str(ffprobe)
