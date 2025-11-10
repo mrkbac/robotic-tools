@@ -99,43 +99,6 @@ class MessageCodecCache:
         return self._encoders[schema_name]
 
 
-class _ProxyUpstreamClient(WebSocketBridgeClient):
-    """Minimal wrapper for upstream client to register callbacks."""
-
-    def __init__(
-        self,
-        url: str,
-        proxy: ProxyBridge,
-    ) -> None:
-        super().__init__(url=url)
-        self.proxy = proxy
-
-        # Register callbacks using the new callback registration pattern
-        self.on_server_info(self._on_server_info_callback)
-        self.on_advertised_channel(self._on_advertised_channel_callback)
-        self.on_channel_unadvertised(self._on_channel_unadvertised_callback)
-        self.on_message(self._on_message_callback)
-
-    def _on_server_info_callback(
-        self,
-        name: str,
-        capabilities: list[str],  # noqa: ARG002
-        session_id: str | None,  # noqa: ARG002
-    ) -> None:
-        logger.info(f"Received upstream server info: {name}")
-
-    async def _on_advertised_channel_callback(self, channel: ChannelInfo) -> None:
-        await self.proxy.handle_upstream_advertise(channel)
-
-    async def _on_channel_unadvertised_callback(self, channel: ChannelInfo) -> None:
-        await self.proxy.handle_upstream_unadvertise(channel)
-
-    async def _on_message_callback(
-        self, channel: ChannelInfo, timestamp: int, payload: bytes
-    ) -> None:
-        await self.proxy.handle_upstream_message(channel, timestamp, payload)
-
-
 class ProxyBridge:
     """Foxglove WebSocket proxy bridge that forwards messages between upstream and downstream."""
 
@@ -147,6 +110,7 @@ class ProxyBridge:
         transformer_registry: TransformerRegistry | None = None,
         default_throttle_hz: float | None = 1.0,
         topic_throttle_overrides: dict[str, float | None] | None = None,
+        max_message_size: int | None = None,
     ) -> None:
         """Initialize the proxy bridge.
 
@@ -158,6 +122,7 @@ class ProxyBridge:
             default_throttle_hz: Default throttle rate in Hz for all topics
                 (None disables throttling)
             topic_throttle_overrides: Optional per-topic throttle overrides in Hz
+            max_message_size: Maximum allowed websocket frame size in bytes (None disables limit)
         """
         self.upstream_url = upstream_url
         self.listen_host = listen_host
@@ -167,7 +132,16 @@ class ProxyBridge:
         self.topic_throttle_overrides = dict(topic_throttle_overrides or {})
 
         # Create upstream client and downstream server
-        self.upstream_client = _ProxyUpstreamClient(url=upstream_url, proxy=self)
+        self.upstream_client = WebSocketBridgeClient(
+            url=upstream_url,
+            max_message_size=max_message_size,
+        )
+        self.upstream_client.on_advertised_channel(self.handle_upstream_advertise)
+        self.upstream_client.on_channel_unadvertised(self.handle_upstream_unadvertise)
+        self.upstream_client.on_message(self.handle_upstream_message)
+        self.upstream_client.on_disconnect(self.handle_upstream_disconnected)
+        self.upstream_client.on_connect(self.handle_upstream_reconnected)
+
         self.downstream_server = WebSocketBridgeServer(
             host=listen_host,
             port=listen_port,
@@ -175,6 +149,7 @@ class ProxyBridge:
             capabilities=[],
             metadata={"proxy": "true"},
             supported_encodings=["cdr"],
+            max_message_size=max_message_size,
         )
 
         # Register callbacks for downstream server
@@ -660,6 +635,68 @@ class ProxyBridge:
             await self.handle_client_unsubscribe(websocket, subscription_id)
 
         logger.info("Client cleanup complete")
+
+    async def handle_upstream_disconnected(self) -> None:
+        """Handle upstream connection loss.
+
+        Clears all upstream subscription state since subscription IDs
+        are no longer valid on the disconnected connection.
+        """
+        logger.warning(
+            "Upstream connection lost, clearing %d stale subscription(s)",
+            len(self.upstream_subscriptions),
+        )
+        # Clear all upstream subscriptions - they're no longer valid
+        self.upstream_subscriptions.clear()
+
+    async def handle_upstream_reconnected(self) -> None:
+        """Handle upstream reconnection.
+
+        Restores all active subscriptions after reconnection by:
+        1. Collecting all unique channels that downstream clients are subscribed to
+        2. Creating new upstream subscriptions for each channel
+        3. Restoring proper reference counts
+        """
+        # Collect all unique channels that clients are subscribed to
+        # Map: upstream_channel_id -> ref_count
+        channel_ref_counts: dict[int, int] = {}
+
+        for client_subs in self.client_subscriptions.values():
+            for channel_id, _ in client_subs.values():
+                # Get the upstream channel ID (handle transformed channels)
+                upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
+                channel_ref_counts[upstream_channel_id] = (
+                    channel_ref_counts.get(upstream_channel_id, 0) + 1
+                )
+
+        if not channel_ref_counts:
+            logger.info("Upstream reconnected, no subscriptions to restore")
+            return
+
+        logger.info(
+            "Upstream reconnected, restoring %d subscription(s)",
+            len(channel_ref_counts),
+        )
+
+        # Re-subscribe to all channels
+        for upstream_channel_id, ref_count in channel_ref_counts.items():
+            upstream_sub_id = self.next_upstream_sub_id
+            self.next_upstream_sub_id += 1
+
+            try:
+                await self.upstream_client.subscribe_to_channel(
+                    upstream_sub_id, upstream_channel_id
+                )
+                self.upstream_subscriptions[upstream_channel_id] = (upstream_sub_id, ref_count)
+
+                channel_info = self.upstream_channels.get(upstream_channel_id)
+                topic_name = channel_info.get("topic", "?") if channel_info else "?"
+                logger.info(
+                    f"Restored subscription to {topic_name} "
+                    f"(channel={upstream_channel_id}, sub_id={upstream_sub_id}, refs={ref_count})"
+                )
+            except Exception:
+                logger.exception(f"Failed to restore subscription to channel {upstream_channel_id}")
 
     def _transform_message_dict(
         self, channel: ChannelInfo, payload: bytes

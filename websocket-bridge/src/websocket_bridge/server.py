@@ -89,6 +89,7 @@ class WebSocketBridgeServer:
         capabilities: Iterable[str] = (),
         metadata: dict[str, str] | None = None,
         supported_encodings: Iterable[str] | None = None,
+        max_message_size: int | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -97,6 +98,7 @@ class WebSocketBridgeServer:
         self._capabilities = list(capabilities)
         self._metadata = dict(metadata or {})
         self._supported_encodings = list(supported_encodings or [])
+        self._max_message_size = max_message_size
 
         self._channels: dict[int, Channel] = {}
         self._connections: dict[ServerConnection, ConnectionState] = {}
@@ -122,6 +124,7 @@ class WebSocketBridgeServer:
             self._host,
             self._port,
             subprotocols=[Subprotocol(self._subprotocol)],
+            max_size=self._max_message_size,
         )
 
     async def stop(self) -> None:

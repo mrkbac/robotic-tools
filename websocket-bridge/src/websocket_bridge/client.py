@@ -56,6 +56,7 @@ class WebSocketBridgeClient:
         min_retry_delay: float = 1.0,
         max_retry_delay: float = 30.0,
         backoff_factor: float = 2.0,
+        max_message_size: int | None = None,
     ) -> None:
         self._url = url
         self._subprotocol = subprotocol
@@ -64,6 +65,7 @@ class WebSocketBridgeClient:
         self._min_retry_delay = min_retry_delay
         self._max_retry_delay = max_retry_delay
         self._backoff_factor = backoff_factor
+        self._max_message_size = max_message_size
 
         self._websocket: ClientConnection | None = None
         self._receiver_task: asyncio.Task[None] | None = None
@@ -252,6 +254,7 @@ class WebSocketBridgeClient:
         self._websocket = await websockets.connect(
             self._url,
             subprotocols=[Subprotocol("foxglove.websocket.v1"), Subprotocol("foxglove.sdk.v1")],
+            max_size=self._max_message_size,
         )
         logger.info(f"Connected to {self._url}")
 

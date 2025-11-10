@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Topic throttle rate in Hz (default: 1.0; set to 0 to disable)",
     )
+    parser.add_argument(
+        "--max-message-size",
+        type=int,
+        default=0,
+        help="Maximum websocket message size in bytes (<=0 disables limit, default: unlimited)",
+    )
 
     parser.add_argument(
         "--image-codec",
@@ -139,6 +145,7 @@ async def main_async(args: argparse.Namespace) -> None:
         listen_port=args.port,
         transformer_registry=registry,
         default_throttle_hz=args.throttle_hz,
+        max_message_size=args.max_message_size if args.max_message_size > 0 else None,
     )
 
     # Create dashboard if enabled (with shared console for logging integration)
