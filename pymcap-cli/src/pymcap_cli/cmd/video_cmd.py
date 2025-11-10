@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Literal, cast
@@ -32,7 +33,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.text import Text
-from small_mcap import get_summary, include_topics, read_message_decoded
+from small_mcap import include_topics, read_message_decoded
+from small_mcap.rebuild import RebuildInfo, rebuild_summary
 
 from pymcap_cli.autocompletion import complete_topic_by_schema
 from pymcap_cli.mcap_processor import confirm_output_overwrite
@@ -63,6 +65,8 @@ class TopicStreamSpec:
     height: int
     fps: float
     message_count: int
+    first_timestamp: int  # Nanoseconds since epoch
+    last_timestamp: int  # Nanoseconds since epoch
 
 
 class ImageType(Enum):
@@ -78,16 +82,12 @@ class VideoCodec(Enum):
 
 
 class QualityPreset(str, Enum):
-    """Quality preset for video encoding."""
-
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
 class EncoderBackend(str, Enum):
-    """Encoder backend selection."""
-
     AUTO = "auto"
     SOFTWARE = "software"
     VIDEOTOOLBOX = "videotoolbox"
@@ -105,7 +105,6 @@ class VideoEncoderError(Exception):
     """Exception raised when video encoding fails."""
 
 
-# Codec to software encoder mapping
 CODEC_SOFTWARE_ENCODERS = {
     VideoCodec.H264: "libx264",
     VideoCodec.H265: "libx265",
@@ -127,23 +126,12 @@ HARDWARE_ENCODERS = {
     },
 }
 
-# Quality presets (CRF values)
 QUALITY_PRESETS = {
     VideoCodec.H264: {"high": 18, "medium": 23, "low": 28},
     VideoCodec.H265: {"high": 20, "medium": 25, "low": 30},
     VideoCodec.VP9: {"high": 30, "medium": 35, "low": 40},
     VideoCodec.AV1: {"high": 25, "medium": 30, "low": 35},
 }
-
-
-def _determine_layout(topic_count: int) -> tuple[int, int]:
-    if topic_count <= 1:
-        return (1, 1)
-    if topic_count == 2:
-        return (1, 2)
-    rows = math.ceil(math.sqrt(topic_count))
-    cols = math.ceil(topic_count / rows)
-    return (rows, cols)
 
 
 def _build_filter_complex(
@@ -155,12 +143,19 @@ def _build_filter_complex(
 ) -> str:
     cols = layout[1]
 
+    def build_drawtext(text: str, height: int) -> str:
+        escaped = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
+        font_size = max(12, int(height * 0.025))
+        return (
+            f"drawtext=text='{escaped}':x=10:y=10:fontsize={font_size}:"
+            f"fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5"
+        )
+
     # Single topic case
     if stream_count == 1:
         filter_str = f"[0:v]scale={target_width}:{target_height}"
         if topic_names:
-            drawtext = _build_drawtext_filter(topic_names[0], target_height)
-            filter_str += f",{drawtext}"
+            filter_str += f",{build_drawtext(topic_names[0], target_height)}"
         filter_str += "[out]"
         return filter_str
 
@@ -169,8 +164,7 @@ def _build_filter_complex(
     for idx in range(stream_count):
         filter_chain = f"[{idx}:v]scale={target_width}:{target_height}"
         if topic_names and idx < len(topic_names):
-            drawtext = _build_drawtext_filter(topic_names[idx], target_height)
-            filter_chain += f",{drawtext}"
+            filter_chain += f",{build_drawtext(topic_names[idx], target_height)}"
         filter_chain += f"[s{idx}]"
         filters.append(filter_chain)
 
@@ -187,18 +181,76 @@ def _build_filter_complex(
     return ";".join(filters)
 
 
-def _collect_topic_stream_spec(mcap_path: Path, topic: str) -> TopicStreamSpec:
-    message_type, message_count = _scan_mcap(mcap_path, topic)
+def _extract_topic_metadata_from_rebuild(
+    rebuild_info: RebuildInfo, topic: str
+) -> tuple[int, ImageType, int, int, int]:
+    """Extract topic metadata from rebuild info without decompressing chunks."""
+    summary = rebuild_info.summary
+
+    # Find all image schemas and their channels
+    image_schema_ids: set[int] = {
+        schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
+    }
+    compressed_schema_ids: set[int] = {
+        schema.id for schema in summary.schemas.values() if schema.name in COMPRESSED_SCHEMAS
+    }
+
+    image_channels = [
+        channel for channel in summary.channels.values() if channel.schema_id in image_schema_ids
+    ]
+    image_topics = {channel.topic for channel in image_channels}
+
+    if topic not in image_topics:
+        available = "\n".join(f"  - {t}" for t in sorted(image_topics))
+        raise VideoEncoderError(
+            f"Topic '{topic}' not found or is not an image topic.\n\n"
+            f"Available image topics:\n{available}"
+        )
+
+    channel = next(channel for channel in image_channels if channel.topic == topic)
+    channel_id = channel.id
+    message_type = (
+        ImageType.COMPRESSED if channel.schema_id in compressed_schema_ids else ImageType.RAW
+    )
+
+    # Extract timestamps and message count from MessageIndex records
+    first_timestamp: int | None = None
+    last_timestamp: int | None = None
+    message_count = 0
+
+    if rebuild_info.chunk_information:
+        for message_indexes in rebuild_info.chunk_information.values():
+            for msg_idx in message_indexes:
+                if msg_idx.channel_id == channel_id:
+                    for timestamp, _offset in msg_idx.records:
+                        message_count += 1
+                        if first_timestamp is None or timestamp < first_timestamp:
+                            first_timestamp = timestamp
+                        if last_timestamp is None or timestamp > last_timestamp:
+                            last_timestamp = timestamp
 
     if message_count == 0:
         raise VideoEncoderError(f"No messages found for topic: {topic}")
 
+    if first_timestamp is None or last_timestamp is None:
+        raise VideoEncoderError(f"Failed to get timestamps for topic: {topic}")
+
+    return channel_id, message_type, message_count, first_timestamp, last_timestamp
+
+
+def _collect_topic_stream_spec(
+    mcap_path: Path, topic: str, rebuild_info: RebuildInfo
+) -> TopicStreamSpec:
+    """Collect topic stream specifications with minimal file reads."""
+    # Extract metadata from rebuild info (no file I/O, no decompression)
+    _channel_id, message_type, message_count, first_timestamp, last_timestamp = (
+        _extract_topic_metadata_from_rebuild(rebuild_info, topic)
+    )
+
+    # Sample only first ~10 messages to get dimensions
     decoder_factory = DecoderFactory()
     width: int | None = None
     height: int | None = None
-    first_timestamp: int | None = None
-    last_timestamp: int | None = None
-    fps: float | None = None
     frames_sampled = 0
     max_samples = min(10, message_count)
 
@@ -208,12 +260,6 @@ def _collect_topic_stream_spec(mcap_path: Path, topic: str) -> TopicStreamSpec:
             should_include=include_topics(topic),
             decoder_factories=[decoder_factory],
         ):
-            # Track timestamps for FPS calculation
-            if first_timestamp is None:
-                first_timestamp = msg.message.log_time
-            last_timestamp = msg.message.log_time
-            frames_sampled += 1
-
             # Get dimensions from first frame
             if width is None or height is None:
                 if message_type == ImageType.COMPRESSED:
@@ -224,22 +270,18 @@ def _collect_topic_stream_spec(mcap_path: Path, topic: str) -> TopicStreamSpec:
                     width = img_width
                     height = img_height
 
-            # Stop after sampling enough frames and getting dimensions
+            frames_sampled += 1
+            # Stop early once we have dimensions
             if width is not None and height is not None and frames_sampled >= max_samples:
                 break
 
     if width is None or height is None:
         raise VideoEncoderError(f"Failed to determine dimensions for topic: {topic}")
 
-    # Calculate FPS from sampled frames
-    if (
-        first_timestamp is not None
-        and last_timestamp is not None
-        and frames_sampled > 1
-        and last_timestamp > first_timestamp
-    ):
+    # Calculate FPS from full timestamp range and message count (more accurate than sampling)
+    if message_count > 1 and last_timestamp > first_timestamp:
         duration_s = (last_timestamp - first_timestamp) / 1e9
-        fps = (frames_sampled - 1) / duration_s
+        fps = (message_count - 1) / duration_s
     else:
         fps = 1.0
 
@@ -250,6 +292,8 @@ def _collect_topic_stream_spec(mcap_path: Path, topic: str) -> TopicStreamSpec:
         height=height,
         fps=fps,
         message_count=message_count,
+        first_timestamp=first_timestamp,
+        last_timestamp=last_timestamp,
     )
 
 
@@ -264,15 +308,25 @@ def _start_multi_topic_ffmpeg(
     target_width: int,
     target_height: int,
     target_fps: float,
-) -> tuple[subprocess.Popen[bytes], list[BinaryIO]]:
+    enable_subtitles: bool,
+    mcap_path: Path,
+    topics: list[str],
+    global_start_time: int,
+    global_end_time: int,
+) -> tuple[subprocess.Popen[bytes], list[BinaryIO], BinaryIO | None]:
     cmd: list[str] = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     read_fds: list[int] = []
     write_fds: list[int] = []
+
+    # All worker threads emit frames at the target FPS (duplicating or padding as needed),
+    # so declare the same rate for every ffmpeg input to keep timestamps aligned.
+    effective_input_fps = target_fps if target_fps > 0 else None
 
     for spec in topic_specs:
         read_fd, write_fd = os.pipe()
         read_fds.append(read_fd)
         write_fds.append(write_fd)
+        input_fps = effective_input_fps or spec.fps
 
         if spec.message_type == ImageType.COMPRESSED:
             cmd.extend(
@@ -280,7 +334,7 @@ def _start_multi_topic_ffmpeg(
                     "-f",
                     "image2pipe",
                     "-framerate",
-                    f"{spec.fps:.6f}",
+                    f"{input_fps:.6f}",
                     "-i",
                     f"pipe:{read_fd}",
                 ]
@@ -295,11 +349,22 @@ def _start_multi_topic_ffmpeg(
                     "-video_size",
                     f"{spec.width}x{spec.height}",
                     "-framerate",
-                    f"{spec.fps:.6f}",
+                    f"{input_fps:.6f}",
                     "-i",
                     f"pipe:{read_fd}",
                 ]
             )
+
+    # Create subtitle pipe if enabled
+    subtitle_read_fd: int | None = None
+    subtitle_write_fd: int | None = None
+    if enable_subtitles:
+        subtitle_read_fd, subtitle_write_fd = os.pipe()
+        read_fds.append(subtitle_read_fd)
+        write_fds.append(subtitle_write_fd)
+
+        # Add subtitle input
+        cmd.extend(["-f", "srt", "-i", f"pipe:{subtitle_read_fd}"])
 
     # Build filter complex with per-topic watermarks if enabled
     topic_names = [spec.topic for spec in topic_specs] if enable_watermarks else None
@@ -308,11 +373,33 @@ def _start_multi_topic_ffmpeg(
     )
 
     cmd.extend(["-filter_complex", filter_str, "-map", "[out]"])
+
+    # Add subtitle mapping if enabled
+    if enable_subtitles:
+        # Map the subtitle input stream (it's the last input after all video inputs)
+        subtitle_input_index = len(topic_specs)
+        cmd.extend(["-map", f"{subtitle_input_index}:s"])
+
     cmd.extend(["-c:v", encoder])
     cmd.extend(_get_encoder_quality_params(codec, encoder, quality))
     if target_fps > 0:
         cmd.extend(["-r", f"{target_fps:.6f}"])
-    cmd.extend(["-pix_fmt", "yuv420p", str(output_path)])
+    cmd.extend(["-pix_fmt", "yuv420p"])
+
+    # Add subtitle codec and metadata if enabled
+    if enable_subtitles:
+        cmd.extend(["-c:s", "mov_text"])
+        cmd.extend(["-metadata:s:s:0", "language=eng"])
+        cmd.extend(["-metadata:s:s:0", "title=Recording Timestamps"])
+
+    # Add MCAP metadata
+    cmd.extend(["-metadata", f"title=MCAP Recording: {mcap_path.name}"])
+    cmd.extend(["-metadata", f"comment=Topics: {', '.join(topics)}"])
+    start_iso = _ns_to_iso8601(global_start_time)
+    end_iso = _ns_to_iso8601(global_end_time)
+    cmd.extend(["-metadata", f"description=Recording: {start_iso} to {end_iso}"])
+
+    cmd.append(str(output_path))
 
     try:
         process = subprocess.Popen(  # noqa: S603
@@ -334,8 +421,16 @@ def _start_multi_topic_ffmpeg(
     for fd in read_fds:
         os.close(fd)
 
-    writers = [cast("BinaryIO", os.fdopen(fd, "wb", buffering=0)) for fd in write_fds]
-    return process, writers
+    # Separate subtitle writer from video writers
+    subtitle_writer: BinaryIO | None = None
+    video_write_fds = write_fds.copy()
+
+    if enable_subtitles and subtitle_write_fd is not None:
+        video_write_fds.remove(subtitle_write_fd)
+        subtitle_writer = cast("BinaryIO", os.fdopen(subtitle_write_fd, "wb", buffering=0))
+
+    writers = [cast("BinaryIO", os.fdopen(fd, "wb", buffering=0)) for fd in video_write_fds]
+    return process, writers, subtitle_writer
 
 
 def _stream_topic_worker(
@@ -344,26 +439,103 @@ def _stream_topic_worker(
     writer: BinaryIO,
     error_bucket: list[tuple[str, Exception]],
     error_lock: threading.Lock,
+    global_start_time: int,
+    expected_frame_count: int,
+    global_duration_ns: int,
     progress: Progress | None = None,
     task_id: TaskID | None = None,
 ) -> None:
+    """Stream frames for a topic with timestamp-aligned frame generation."""
     decoder_factory = DecoderFactory()
     try:
-        with mcap_path.open("rb") as handle:
-            for msg in read_message_decoded(
+        # Generate black frame (cached for reuse)
+        if spec.message_type == ImageType.COMPRESSED:
+            black_frame = _create_black_compressed_frame(spec.width, spec.height)
+        else:
+            black_frame = _create_black_raw_frame(spec.width, spec.height)
+
+        # Open MCAP file and create streaming iterator
+        handle = mcap_path.open("rb")
+        message_iterator = iter(
+            read_message_decoded(
                 handle,
                 should_include=include_topics(spec.topic),
                 decoder_factories=[decoder_factory],
-            ):
-                if spec.message_type == ImageType.COMPRESSED:
-                    frame_data = _process_compressed_image(msg.decoded_message)
-                else:
-                    frame_data, _, _ = _process_raw_image(msg.decoded_message)
-                writer.write(frame_data)
+            )
+        )
 
-                # Update progress if available
-                if progress is not None and task_id is not None:
-                    progress.update(task_id, advance=1)
+        # Helper function to process a message into frame data
+        def process_message(msg: Any) -> tuple[int, bytes]:
+            timestamp = msg.message.log_time
+            if spec.message_type == ImageType.COMPRESSED:
+                frame_data = _process_compressed_image(msg.decoded_message)
+            else:
+                frame_data, _, _ = _process_raw_image(msg.decoded_message)
+            return (timestamp, frame_data)
+
+        # Prime the sliding window with first two messages
+        current_msg: tuple[int, bytes] | None = None
+        next_msg: tuple[int, bytes] | None = None
+
+        try:
+            msg = next(message_iterator)
+            current_msg = process_message(msg)
+            msg = next(message_iterator)
+            next_msg = process_message(msg)
+        except StopIteration:
+            # 0 or 1 messages - current_msg and/or next_msg remain None
+            pass
+
+        last_valid_frame: bytes | None = None
+
+        # Pre-calculate duration as timedelta for cleaner arithmetic
+        duration_td = _ns_to_timedelta(global_duration_ns)
+
+        # Generate exactly expected_frame_count frames with precise timing
+        for frame_idx in range(expected_frame_count):
+            # Calculate precise frame time for this frame
+            # Distribute frames evenly across the duration
+            if expected_frame_count == 1:
+                current_time = global_start_time
+            else:
+                # Use timedelta for precise fractional time calculation
+                frame_offset_td = (duration_td * frame_idx) / (expected_frame_count - 1)
+                current_time = global_start_time + _timedelta_to_ns(frame_offset_td)
+
+            # Advance iterator while next message should be consumed
+            while next_msg is not None and next_msg[0] <= current_time:
+                current_msg = next_msg
+                try:
+                    msg = next(message_iterator)
+                    next_msg = process_message(msg)
+                except StopIteration:
+                    next_msg = None
+
+            # Determine which frame to write
+            if current_time < spec.first_timestamp:
+                # Before first message: black frame
+                frame_to_write = black_frame
+            elif current_time > spec.last_timestamp:
+                # After last message: black frame
+                frame_to_write = black_frame
+            else:
+                # Use current message if it's at or before current_time
+                if current_msg is not None and current_msg[0] <= current_time:
+                    last_valid_frame = current_msg[1]
+
+                # Use the last valid frame (handles gaps by duplicating)
+                frame_to_write = last_valid_frame if last_valid_frame is not None else black_frame
+
+            # Write the frame
+            writer.write(frame_to_write)
+
+            # Update progress
+            if progress is not None and task_id is not None:
+                progress.update(task_id, advance=1)
+
+        # Close MCAP file handle
+        handle.close()
+
     except Exception as exc:  # noqa: BLE001
         with error_lock:
             error_bucket.append((spec.topic, exc))
@@ -372,9 +544,50 @@ def _stream_topic_worker(
             writer.close()
 
 
-# VideoToolbox bitrate calculation constants
-# Formula: bitrate = BASE_BITRATE * 2^(-(crf - CRF_REFERENCE) / CRF_SCALE)
-VIDEOTOOLBOX_BASE_BITRATE = 20  # Mbps at CRF 18
+def _subtitle_writer_worker(
+    writer: BinaryIO,
+    global_start_time: int,
+    global_duration_ns: int,
+    subtitle_interval: float,
+    error_bucket: list[tuple[str, Exception]],
+    error_lock: threading.Lock,
+) -> None:
+    """Generate and stream SRT subtitles during video encoding."""
+    try:
+        # Calculate subtitle cues based on interval
+        cue_index = 1
+        duration_td = _ns_to_timedelta(global_duration_ns)
+        interval_td = timedelta(seconds=subtitle_interval)
+        current_td = timedelta(0)
+
+        while current_td < duration_td:
+            # Calculate end time for this cue
+            end_td = min(current_td + interval_td, duration_td)
+
+            # Calculate actual timestamp for this subtitle
+            timestamp_ns = global_start_time + _timedelta_to_ns(current_td)
+
+            # Convert to seconds for SRT formatting
+            current_time_s = current_td.total_seconds()
+            end_time_s = end_td.total_seconds()
+
+            # Format and write SRT cue
+            srt_cue = _format_srt_cue(cue_index, current_time_s, end_time_s, timestamp_ns)
+            writer.write(srt_cue)
+
+            # Move to next cue
+            cue_index += 1
+            current_td = end_td
+
+    except Exception as exc:  # noqa: BLE001
+        with error_lock:
+            error_bucket.append(("subtitles", exc))
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+
+
+VIDEOTOOLBOX_BASE_BITRATE = 20
 VIDEOTOOLBOX_CRF_REFERENCE = 10
 VIDEOTOOLBOX_CRF_SCALE = 5
 
@@ -391,14 +604,7 @@ class FPSColumn(ProgressColumn):
 
 
 def _test_encoder(encoder_name: str) -> bool:
-    """Test if an ffmpeg encoder is available.
-
-    Args:
-        encoder_name: Name of the encoder to test (e.g., "h264_videotoolbox")
-
-    Returns:
-        True if encoder is available, False otherwise
-    """
+    """Test if an ffmpeg encoder is available."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],  # noqa: S607
@@ -416,18 +622,7 @@ def _test_encoder(encoder_name: str) -> bool:
 def _detect_encoder(
     codec: VideoCodec, encoder_preference: Literal["auto", "software"] | HardwareBackend
 ) -> str:
-    """Detect the best available encoder for the given codec.
-
-    Args:
-        codec: Video codec
-        encoder_preference: User preference (auto, software, or HardwareBackend enum)
-
-    Returns:
-        Name of the encoder to use
-
-    Raises:
-        VideoEncoderError: If no suitable encoder is found
-    """
+    """Detect the best available encoder for the given codec."""
     # If user explicitly requested software, use it
     if encoder_preference == "software":
         encoder = CODEC_SOFTWARE_ENCODERS.get(codec)
@@ -440,11 +635,10 @@ def _detect_encoder(
         hw_encoders = HARDWARE_ENCODERS.get(codec, {})
         encoder = hw_encoders.get(encoder_preference)
         if not encoder:
-            msg = (
-                f"Hardware encoder '{encoder_preference.value}' "
-                f"not available for codec: {codec.value}"
+            raise VideoEncoderError(
+                f"Hardware encoder '{encoder_preference.value}' not available "
+                f"for codec: {codec.value}"
             )
-            raise VideoEncoderError(msg)
         if not _test_encoder(encoder):
             raise VideoEncoderError(
                 f"Hardware encoder '{encoder}' not available on this system. Try --encoder software"
@@ -487,16 +681,7 @@ def _get_encoder_quality_params(
     encoder: str,
     quality: int,
 ) -> list[str]:
-    """Get encoder-specific quality parameters.
-
-    Args:
-        codec: Video codec
-        encoder: Encoder name (e.g., "h264_videotoolbox", "libx264")
-        quality: Quality value (CRF value: lower = better quality)
-
-    Returns:
-        List of ffmpeg arguments for quality settings
-    """
+    """Get encoder-specific quality parameters."""
     params: list[str] = []
 
     # Detect encoder type by name
@@ -527,59 +712,76 @@ def _get_encoder_quality_params(
     return params
 
 
-def _scan_mcap(mcap_path: Path, topic: str) -> tuple[ImageType, int]:
-    with mcap_path.open("rb") as f:
-        summary = get_summary(f)
+def _ns_to_iso8601(timestamp_ns: int) -> str:
+    """Convert nanosecond timestamp to ISO 8601 datetime string."""
+    dt = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-    if summary is None:
-        raise VideoEncoderError("MCAP file has no summary, try rebuilding it")
 
-    # Find all image schemas and their channels
-    image_schema_ids: set[int] = {
-        schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
-    }
-    compressed_schema_ids: set[int] = {
-        schema.id for schema in summary.schemas.values() if schema.name in COMPRESSED_SCHEMAS
-    }
+def _ns_to_timedelta(timestamp_ns: int) -> timedelta:
+    """Convert nanoseconds to timedelta."""
+    return timedelta(microseconds=timestamp_ns / 1000)
 
-    image_channels = [
-        channel for channel in summary.channels.values() if channel.schema_id in image_schema_ids
-    ]
-    image_topics = {channel.topic for channel in image_channels}
 
-    if topic not in image_topics:
-        available = "\n".join(f"  - {t}" for t in sorted(image_topics))
-        msg = (
-            f"Topic '{topic}' not found or is not an image topic.\n\n"
-            f"Available image topics:\n{available}"
-        )
-        raise VideoEncoderError(msg)
+def _timedelta_to_ns(td: timedelta) -> int:
+    return int(td.total_seconds() * 1e9)
 
-    channel = next(channel for channel in image_channels if channel.topic == topic)
-    message_type = (
-        ImageType.COMPRESSED if channel.schema_id in compressed_schema_ids else ImageType.RAW
+
+def _format_srt_cue(index: int, start_s: float, end_s: float, timestamp_ns: int) -> bytes:
+    """Format a single SRT subtitle cue with ISO 8601 timestamp."""
+    # Convert start_s to SRT time format
+    td_start = timedelta(seconds=start_s)
+    ts_start = int(td_start.total_seconds())
+    start_str = (
+        f"{ts_start // 3600:02d}:{(ts_start % 3600) // 60:02d}:"
+        f"{ts_start % 60:02d},{td_start.microseconds // 1000:03d}"
     )
 
-    if not summary.statistics:
-        raise VideoEncoderError("MCAP file has no statistics, try rebuilding it")
+    # Convert end_s to SRT time format
+    td_end = timedelta(seconds=end_s)
+    ts_end = int(td_end.total_seconds())
+    end_str = (
+        f"{ts_end // 3600:02d}:{(ts_end % 3600) // 60:02d}:"
+        f"{ts_end % 60:02d},{td_end.microseconds // 1000:03d}"
+    )
 
-    message_count = summary.statistics.channel_message_counts.get(channel.id, 0)
+    timestamp_str = _ns_to_iso8601(timestamp_ns)
+    return f"{index}\n{start_str} --> {end_str}\n{timestamp_str}\n\n".encode()
 
-    return message_type, message_count
+
+def _create_black_compressed_frame(width: int, height: int) -> bytes:
+    """Create a black JPEG frame using ffmpeg."""
+    try:
+        result = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "ffmpeg",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={width}x{height}:d=1",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2",
+                "-",
+            ],
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+    except Exception as e:
+        raise VideoEncoderError(f"Failed to create black frame: {e}") from e
+    else:
+        return result.stdout
+
+
+def _create_black_raw_frame(width: int, height: int) -> bytes:
+    """Create a black RGB24 frame (all zeros)."""
+    return bytes(width * height * 3)
 
 
 def _process_compressed_image(message: Any) -> bytes:
-    """Extract compressed image data from CompressedImage message.
-
-    Args:
-        message: Decoded CompressedImage message
-
-    Returns:
-        Compressed image bytes (JPEG, PNG, etc.)
-
-    Raises:
-        VideoEncoderError: If data is invalid
-    """
+    """Extract compressed image data from CompressedImage message."""
     if not hasattr(message, "data") or not message.data:
         raise VideoEncoderError("CompressedImage has no data")
 
@@ -587,17 +789,7 @@ def _process_compressed_image(message: Any) -> bytes:
 
 
 def _process_raw_image(message: Any) -> tuple[bytes, int, int]:
-    """Convert raw Image message to RGB24 bytes.
-
-    Args:
-        message: Decoded Image message
-
-    Returns:
-        Tuple of (rgb24_bytes, width, height)
-
-    Raises:
-        VideoEncoderError: If conversion fails
-    """
+    """Convert raw Image message to RGB24 bytes."""
     if not hasattr(message, "data") or not message.data:
         raise VideoEncoderError("Image has no data")
     if not hasattr(message, "width") or not hasattr(message, "height"):
@@ -635,17 +827,7 @@ def _process_raw_image(message: Any) -> tuple[bytes, int, int]:
 
 
 def _get_compressed_dimensions(compressed_data: bytes) -> tuple[int, int]:
-    """Get image dimensions from compressed image data using ffprobe.
-
-    Args:
-        compressed_data: Compressed image bytes
-
-    Returns:
-        Tuple of (width, height)
-
-    Raises:
-        VideoEncoderError: If dimensions cannot be determined
-    """
+    """Get image dimensions from compressed image data using ffprobe."""
     try:
         result = subprocess.run(
             [  # noqa: S607
@@ -671,22 +853,6 @@ def _get_compressed_dimensions(compressed_data: bytes) -> tuple[int, int]:
         raise VideoEncoderError(f"Failed to get image dimensions: {e}") from e
 
 
-def _build_drawtext_filter(watermark_text: str, frame_height: int) -> str:
-    escaped_text = (
-        watermark_text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "'\\\\\\''")
-    )
-    font_size = max(12, int(frame_height * 0.025))
-    return (
-        f"drawtext=text='{escaped_text}':"
-        f"x=10:y=10:"
-        f"fontsize={font_size}:"
-        f"fontcolor=white:"
-        f"box=1:"
-        f"boxcolor=black@0.5:"
-        f"boxborderw=5"
-    )
-
-
 def encode_video(
     mcap_path: Path,
     topics: list[str],
@@ -695,21 +861,10 @@ def encode_video(
     encoder_preference: Literal["auto", "software"] | HardwareBackend,
     quality: int,
     watermark: bool,
+    enable_subtitles: bool = True,
+    subtitle_interval: float = 1.0,
 ) -> None:
-    """Encode image topics from MCAP to video.
-
-    Args:
-        mcap_path: Path to input MCAP file
-        topics: List of topic names to extract images from (1+ topics)
-        output_path: Path to output video file
-        codec: Video codec
-        encoder_preference: Encoder backend preference ("auto", "software", or HardwareBackend)
-        quality: Quality value (CRF or equivalent)
-        watermark: Whether to add per-topic watermarks showing topic names
-
-    Raises:
-        VideoEncoderError: If encoding fails
-    """
+    """Encode image topics from MCAP to video."""
     console.print(f"[cyan]Reading MCAP file:[/cyan] {mcap_path}")
     console.print(f"[cyan]Topics:[/cyan] {', '.join(topics)}")
     console.print(f"[cyan]Output:[/cyan] {output_path}")
@@ -718,18 +873,49 @@ def encode_video(
     encoder = _detect_encoder(codec, encoder_preference)
     console.print(f"[cyan]Encoder:[/cyan] {encoder}")
 
-    layout = _determine_layout(len(topics))
+    # Determine grid layout
+    topic_count = len(topics)
+    if topic_count <= 1:
+        layout = (1, 1)
+    elif topic_count == 2:
+        layout = (1, 2)
+    else:
+        rows = math.ceil(math.sqrt(topic_count))
+        cols = math.ceil(topic_count / rows)
+        layout = (rows, cols)
     console.print(f"[green]✓[/green] Layout: {layout[0]} row(s) x {layout[1]} column(s)")
+
+    # Read MCAP summary once to get all metadata
+    console.print("\n[yellow]Reading MCAP summary...[/yellow]")
+    with mcap_path.open("rb") as handle:
+        rebuild_info = rebuild_summary(
+            handle,
+            validate_crc=False,
+            calculate_channel_sizes=False,
+            exact_sizes=False,
+        )
+    console.print("[green]✓[/green] Summary loaded")
 
     console.print("\n[yellow]Collecting topic metadata...[/yellow]")
     topic_specs: list[TopicStreamSpec] = []
     for topic in topics:
-        spec = _collect_topic_stream_spec(mcap_path, topic)
+        spec = _collect_topic_stream_spec(mcap_path, topic, rebuild_info)
         topic_specs.append(spec)
         console.print(
             f"[green]✓[/green] {topic}: {spec.width}x{spec.height} @ {spec.fps:.2f} fps"
-            f" ({spec.message_count:,} frames)"
+            f" ({spec.message_count:,} messages)"
         )
+
+    # Calculate global time range across all topics
+    global_start_time = min(spec.first_timestamp for spec in topic_specs)
+    global_end_time = max(spec.last_timestamp for spec in topic_specs)
+    global_duration_ns = global_end_time - global_start_time
+    global_duration_s = global_duration_ns / 1e9
+
+    console.print(
+        f"[green]✓[/green] Recording duration: {global_duration_s:.3f}s "
+        f"({global_start_time} to {global_end_time})"
+    )
 
     target_width = max(2, min(spec.width for spec in topic_specs))
     target_height = max(2, min(spec.height for spec in topic_specs))
@@ -737,12 +923,21 @@ def encode_video(
     target_height -= target_height % 2
     target_fps = max((spec.fps for spec in topic_specs), default=1.0)
 
+    # Calculate exact frame count for ±1 frame precision
+    # Use round() to get nearest integer number of frames
+    expected_frame_count = round(global_duration_s * target_fps)
+
+    # Ensure at least 1 frame
+    expected_frame_count = max(expected_frame_count, 1)
+
     console.print(
         f"\n[yellow]Encoding video at {target_width}x{target_height}"
         f" @ {target_fps:.2f} fps...[/yellow]"
     )
+    if enable_subtitles:
+        console.print("[yellow]Embedding timestamp subtitles...[/yellow]")
 
-    ffmpeg_process, writers = _start_multi_topic_ffmpeg(
+    ffmpeg_process, writers, subtitle_writer = _start_multi_topic_ffmpeg(
         topic_specs=topic_specs,
         layout=layout,
         output_path=output_path,
@@ -753,11 +948,34 @@ def encode_video(
         target_width=target_width,
         target_height=target_height,
         target_fps=target_fps,
+        enable_subtitles=enable_subtitles,
+        mcap_path=mcap_path,
+        topics=topics,
+        global_start_time=global_start_time,
+        global_end_time=global_end_time,
     )
 
     error_lock = threading.Lock()
     errors: list[tuple[str, Exception]] = []
     threads: list[threading.Thread] = []
+
+    # Start subtitle writer thread if enabled
+    if enable_subtitles and subtitle_writer is not None:
+        subtitle_thread = threading.Thread(
+            target=_subtitle_writer_worker,
+            name="pymcap-subtitles",
+            args=(
+                subtitle_writer,
+                global_start_time,
+                global_duration_ns,
+                subtitle_interval,
+                errors,
+                error_lock,
+            ),
+            daemon=True,
+        )
+        subtitle_thread.start()
+        threads.append(subtitle_thread)
 
     # Create progress bar
     with Progress(
@@ -776,7 +994,7 @@ def encode_video(
         for spec in topic_specs:
             task_id = progress.add_task(
                 f"Encoding {spec.topic}",
-                total=spec.message_count,
+                total=expected_frame_count,
             )
             task_ids.append(task_id)
 
@@ -785,7 +1003,18 @@ def encode_video(
             thread = threading.Thread(
                 target=_stream_topic_worker,
                 name=f"pymcap-{spec.topic}",
-                args=(spec, mcap_path, writer, errors, error_lock, progress, task_id),
+                args=(
+                    spec,
+                    mcap_path,
+                    writer,
+                    errors,
+                    error_lock,
+                    global_start_time,
+                    expected_frame_count,
+                    global_duration_ns,
+                    progress,
+                    task_id,
+                ),
                 daemon=True,
             )
             thread.start()
@@ -828,17 +1057,9 @@ def _validate_topics(topics: list[str]) -> list[str]:
 @app.command(
     epilog="""
 Examples:
-  # Basic video generation from single topic
   pymcap-cli video data.mcap -t /camera/front -o output.mp4
-
-  # Multi-topic grid with watermarks
-  pymcap-cli video data.mcap -t /cam/front -t /cam/left -t /cam/right --watermark -o grid.mp4
-
-  # High quality H.265 encoding
+  pymcap-cli video data.mcap -t /cam/front -t /cam/back --watermark -o grid.mp4
   pymcap-cli video data.mcap -t /camera --codec h265 --quality high -o hq.mp4
-
-  # Custom CRF for fine-tuned quality
-  pymcap-cli video data.mcap -t /camera --crf 18 -o custom_quality.mp4
 """
 )
 def video(
@@ -930,6 +1151,25 @@ def video(
             show_default=True,
         ),
     ] = False,
+    subtitles: Annotated[
+        bool,
+        typer.Option(
+            "--subtitles/--no-subtitles",
+            help="Embed timestamp subtitles (ISO 8601 format)",
+            rich_help_panel="Metadata Options",
+            show_default=True,
+        ),
+    ] = True,
+    subtitle_interval: Annotated[
+        float,
+        typer.Option(
+            "--subtitle-interval",
+            help="Subtitle update interval in seconds",
+            min=0.1,
+            rich_help_panel="Metadata Options",
+            show_default=True,
+        ),
+    ] = 1.0,
 ) -> None:
     """Generate video from image topics in MCAP files.
 
@@ -945,10 +1185,8 @@ def video(
 
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError(
-            "ffmpeg or ffprobe not found. Please install ffmpeg:\n"
-            "  macOS:   brew install ffmpeg\n"
-            "  Ubuntu:  sudo apt install ffmpeg\n"
-            "  Windows: Download from https://ffmpeg.org/"
+            "ffmpeg or ffprobe not found. Install: brew install ffmpeg (macOS) "
+            "or sudo apt install ffmpeg (Ubuntu)"
         )
 
     # Convert encoder preference to the appropriate type
@@ -971,6 +1209,8 @@ def video(
             encoder_preference=encoder_pref,
             quality=quality_value,
             watermark=watermark,
+            enable_subtitles=subtitles,
+            subtitle_interval=subtitle_interval,
         )
     except VideoEncoderError as e:
         console.print(f"[red]Error:[/red] {e}")
