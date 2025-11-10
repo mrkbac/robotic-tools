@@ -188,9 +188,7 @@ class EncoderGeneratorFactory:
         self, field_path: FieldPath, targets: list[tuple[str, TypeId]]
     ) -> None:
         """Generate code for a group of primitive fields."""
-        struct_format = "".join(
-            TYPE_INFO[field_type] for _, field_type in targets if field_type != TypeId.PADDING
-        )
+        struct_format = "".join(TYPE_INFO[field_type] for _, field_type in targets)
         struct_size = struct.calcsize(f"<{struct_format}")
         pattern = f"<{struct_format}"
 
