@@ -141,8 +141,10 @@ class DistributionBar(JupyterMixin):
         if self.width is not None:
             # Fixed width
             return Measurement(self.width, self.width)
-        # Flexible: min_width to max available
-        return Measurement(self.min_width, options.max_width)
+        # Flexible: cap max width based on actual bucket count and a reasonable maximum
+        # No point displaying wider than the number of buckets, and cap at 80 chars
+        max_useful_width = min(len(self.counts), 80, options.max_width)
+        return Measurement(self.min_width, max_useful_width)
 
 
 def _display_message_distribution(data: McapInfoOutput) -> None:

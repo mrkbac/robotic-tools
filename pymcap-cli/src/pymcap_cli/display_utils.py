@@ -196,6 +196,7 @@ def display_channels_table(
             and has_distribution_data
             and bool(columns & ChannelTableColumn.DISTRIBUTION)
         )
+        show_schema = terminal_width >= 160 and bool(columns & ChannelTableColumn.SCHEMA)
     else:
         # Always show requested columns
         show_size = bool(columns & ChannelTableColumn.SIZE)
@@ -205,6 +206,7 @@ def display_channels_table(
         show_distribution = (
             bool(columns & ChannelTableColumn.DISTRIBUTION) and has_distribution_data
         )
+        show_schema = bool(columns & ChannelTableColumn.SCHEMA)
 
     # Calculate total size for percentage column
     total_size = (
@@ -219,7 +221,7 @@ def display_channels_table(
         channels_table.add_column("ID", style="bold blue", no_wrap=True, justify="right")
     if columns & ChannelTableColumn.TOPIC:
         channels_table.add_column("Topic", overflow="fold")
-    if columns & ChannelTableColumn.SCHEMA:
+    if show_schema:
         channels_table.add_column("Schema", style="blue")
     if columns & ChannelTableColumn.MSGS:
         channels_table.add_column("Msgs", justify="right", style="green")
@@ -251,7 +253,7 @@ def display_channels_table(
             row.append(str(channel["id"]))
         if columns & ChannelTableColumn.TOPIC:
             row.append(colored_topic)
-        if columns & ChannelTableColumn.SCHEMA:
+        if show_schema:
             row.append(format_schema_with_link(channel["schema_name"]))
         if columns & ChannelTableColumn.MSGS:
             row.append(f"{channel['message_count']:,}")
