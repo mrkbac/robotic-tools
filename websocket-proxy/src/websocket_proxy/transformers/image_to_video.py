@@ -7,7 +7,7 @@ import logging
 import platform
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import av
 import av.error
@@ -18,26 +18,6 @@ if TYPE_CHECKING:
 from . import Transformer, TransformError
 
 logger = logging.getLogger(__name__)
-# Extended from av/video/__init__.pyi to include all encoders used in this module
-_VideoCodecName = Literal[
-    "gif",
-    "h264",
-    "hevc",
-    "libvpx",
-    "libx264",
-    "libx265",
-    "libvpx-vp9",
-    "libaom-av1",
-    "h264_videotoolbox",
-    "hevc_videotoolbox",
-    "h264_nvenc",
-    "hevc_nvenc",
-    "h264_vaapi",
-    "hevc_vaapi",
-    "mpeg4",
-    "png",
-    "qtrle",
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +26,7 @@ class _EncoderConfig:
 
     width: int
     height: int
-    codec_name: _VideoCodecName
+    codec_name: str
 
 
 class _PyAVEncoder:
@@ -161,7 +141,7 @@ class ImageToVideoTransformer(Transformer):
         self.gop_size = max(1, gop_size)
         self.target_fps = target_fps
 
-        self.encoder_name: _VideoCodecName = self._detect_encoder()
+        self.encoder_name = self._detect_encoder()
         logger.info("Using encoder: %s", self.encoder_name)
 
         self._stream_config: _EncoderConfig | None = None
@@ -319,20 +299,18 @@ class ImageToVideoTransformer(Transformer):
     # Encoder detection logic
     # ------------------------------------------------------------------
 
-    def _detect_encoder(self) -> _VideoCodecName:
+    def _detect_encoder(self) -> str:
         if self.codec in {"h264", "h265"} and self.use_hardware:
             system = platform.system()
             if system == "Darwin":
-                preferred: _VideoCodecName = (
-                    "h264_videotoolbox" if self.codec == "h264" else "hevc_videotoolbox"
-                )
+                preferred = "h264_videotoolbox" if self.codec == "h264" else "hevc_videotoolbox"
                 if self._test_encoder(preferred):
                     return preferred
             elif system == "Linux":
-                preferred_hw: list[_VideoCodecName] = (
-                    ["h264_nvenc", "h264_vaapi"]
+                preferred_hw = (
+                    ["h264_nvenc", "h264_v4l2m2m", "h264_vaapi"]
                     if self.codec == "h264"
-                    else ["hevc_nvenc", "hevc_vaapi"]
+                    else ["hevc_nvenc", "hevc_v4l2m2m", "hevc_vaapi"]
                 )
                 for encoder in preferred_hw:
                     if self._test_encoder(encoder):
@@ -340,8 +318,8 @@ class ImageToVideoTransformer(Transformer):
 
         return self._get_software_encoder()
 
-    def _get_software_encoder(self) -> _VideoCodecName:
-        codec_map: dict[str, _VideoCodecName] = {
+    def _get_software_encoder(self) -> str:
+        codec_map: dict[str, str] = {
             "h264": "libx264",
             "h265": "libx265",
             "vp9": "libvpx-vp9",
@@ -354,7 +332,7 @@ class ImageToVideoTransformer(Transformer):
             )
         return encoder
 
-    def _test_encoder(self, encoder: _VideoCodecName) -> bool:
+    def _test_encoder(self, encoder: str) -> bool:
         try:
             av.CodecContext.create(encoder, "w")
         except (av.error.FFmpegError, ValueError):
