@@ -14,8 +14,26 @@ from pymcap_cli.cmd import (
     rechunk_cmd,
     recover_cmd,
     tftree_cmd,
-    video_cmd,
 )
+
+try:
+    from pymcap_cli.cmd.video_cmd import video  # type: ignore[unused-ignore]
+except ImportError:
+
+    def video() -> None:  # type: ignore[misc]
+        """Video command is unavailable because the 'av' and/or 'numpy' are not installed.
+
+        To enable video functionality, please install pymcap-cli with the 'video' extra:
+
+            pip install pymcap-cli[video]
+        """
+        typer.echo(
+            "[red]Error:\n[/]"
+            "Video command is unavailable because the 'av' and/or 'numpy' are not installed.\n"
+            "To enable video functionality, please install pymcap-cli with the 'video' extra:\n\n"
+            "    pip install pymcap-cli[video]\n",
+        )
+
 
 app = typer.Typer(
     name="pymcap-cli",
@@ -33,7 +51,7 @@ app.command(name="du")(du_cmd.du)
 app.command(name="process")(process_cmd.process)
 app.command(name="rechunk")(rechunk_cmd.rechunk)
 app.command(name="tftree")(tftree_cmd.tftree)
-app.command(name="video")(video_cmd.video)
+app.command(name="video")(video)
 app.command(name="filter")(filter_cmd.filter_cmd)
 app.command(name="merge")(merge_cmd.merge)
 app.command(name="compress")(compress_cmd.compress)

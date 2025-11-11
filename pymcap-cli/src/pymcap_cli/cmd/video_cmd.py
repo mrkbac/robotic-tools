@@ -1,4 +1,4 @@
-"""Video encoding command for pymcap-cli using PyAV with grid view."""
+"""Video encoding command for pymcap-cli using av with grid view."""
 
 from __future__ import annotations
 
@@ -10,11 +10,13 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from fractions import Fraction
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Annotated, Any
 
+import av
+import av.error
 import numpy as np
 import typer
+from av import VideoFrame
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.progress import (
@@ -34,13 +36,11 @@ from pymcap_cli.autocompletion import complete_topic_by_schema
 from pymcap_cli.mcap_processor import confirm_output_overwrite
 
 if TYPE_CHECKING:
-    from av import VideoFrame
     from av.container import InputContainer
 
 console = Console()
 app = typer.Typer()
 
-_PYAV_MODULE: ModuleType | None = None
 
 COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
 RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
@@ -87,21 +87,6 @@ class ImageType(Enum):
 
 class VideoEncoderError(Exception):
     """Raised when encoding fails."""
-
-
-def _require_pyav() -> ModuleType:
-    """Lazily import PyAV so non-video commands keep working without extras."""
-    global _PYAV_MODULE  # noqa: PLW0603
-    if _PYAV_MODULE is not None:
-        return _PYAV_MODULE
-    try:
-        import av as av_module  # noqa: PLC0415
-    except ImportError as exc:  # pragma: no cover - guidance for users
-        raise VideoEncoderError(
-            "PyAV is required for video encoding. Install with: uv sync --group video"
-        ) from exc
-    _PYAV_MODULE = av_module
-    return av_module
 
 
 @dataclass(slots=True)
@@ -215,7 +200,6 @@ class TopicFrameStream:
 def _message_to_array(
     message: Any, message_type: ImageType, target_width: int, target_height: int
 ) -> np.ndarray:
-    pyav = _require_pyav()
     if message_type is ImageType.COMPRESSED:
         compressed = _process_compressed_image(message)
         frame = _decode_compressed_frame(compressed)
@@ -223,7 +207,7 @@ def _message_to_array(
         return frame.to_ndarray(format="rgb24")
 
     rgb_array = _raw_image_to_array(message)
-    frame = pyav.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+    frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
     frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
     return frame.to_ndarray(format="rgb24")
 
@@ -235,17 +219,17 @@ def _process_compressed_image(message: Any) -> bytes:
 
 
 def _decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
-    pyav = _require_pyav()
     try:
-        container: InputContainer = pyav.open(  # type: ignore[assignment]
+        container: InputContainer = av.open(  # type: ignore[assignment]
             io.BytesIO(compressed_data), format="image2"
         )
         for frame in container.decode(video=0):
             container.close()
             return frame
-        raise VideoEncoderError("Decoder produced no frames")
     except Exception as exc:  # pragma: no cover - depends on data
         raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
+
+    raise VideoEncoderError("Decoder produced no frames")
 
 
 def _raw_image_to_array(message: Any) -> np.ndarray:
@@ -401,10 +385,9 @@ def _detect_encoder(codec: VideoCodec, encoder_backend: EncoderBackend) -> str:
 
 
 def _test_encoder(encoder_name: str) -> bool:
-    pyav = _require_pyav()
     try:
-        pyav.CodecContext.create(encoder_name, "w")
-    except (pyav.error.FFmpegError, ValueError):
+        av.CodecContext.create(encoder_name, "w")
+    except (av.error.FFmpegError, ValueError):
         return False
     else:
         return True
@@ -453,7 +436,6 @@ def encode_video(
     encoder_backend: EncoderBackend,
     quality: int,
 ) -> None:
-    pyav = _require_pyav()
     console.print(f"[cyan]Reading MCAP file:[/cyan] {mcap_path}")
     console.print(f"[cyan]Topics:[/cyan] {', '.join(topics)}")
     console.print(f"[cyan]Output:[/cyan] {output_path}")
@@ -499,8 +481,8 @@ def encode_video(
 
     # MP4-specific configuration
     try:
-        container = pyav.open(str(output_path), "w", format=None, options={"movflags": "faststart"})
-    except (pyav.error.FFmpegError, ValueError) as exc:
+        container = av.open(str(output_path), "w", format=None, options={"movflags": "faststart"})
+    except (av.error.FFmpegError, ValueError) as exc:
         raise VideoEncoderError(
             f"Failed to open output file '{output_path}': {exc}\n"
             f"Ensure the file path is writable and the format is supported."
@@ -510,7 +492,7 @@ def encode_video(
 
     try:
         stream_raw = container.add_stream(codec_name=encoder_name, rate=fps_int)
-    except (pyav.error.FFmpegError, ValueError) as exc:
+    except (av.error.FFmpegError, ValueError) as exc:
         container.close()
         raise VideoEncoderError(
             f"Failed to create video stream with encoder '{encoder_name}': {exc}\n"
@@ -574,14 +556,14 @@ def encode_video(
                     grid_frame = _compose_grid(
                         tiles, (rows, cols), (target_tile_height, target_tile_width)
                     )
-                    frame = pyav.VideoFrame.from_ndarray(grid_frame, format="rgb24")
+                    frame = av.VideoFrame.from_ndarray(grid_frame, format="rgb24")
                     frame = frame.reformat(format="yuv420p")
                     frame.pts = frame_idx
                     packets = stream.encode(frame)  # type: ignore[union-attr,arg-type]
                     for packet in packets:
                         container.mux(packet)
                     progress.update(task_id, advance=1)
-                except (pyav.error.FFmpegError, ValueError) as exc:
+                except (av.error.FFmpegError, ValueError) as exc:
                     container.close()
                     for fs in frame_streams:
                         fs.close()
@@ -598,7 +580,7 @@ def encode_video(
         try:
             for packet in stream.encode(None):  # type: ignore[union-attr]
                 container.mux(packet)
-        except (pyav.error.FFmpegError, ValueError) as exc:
+        except (av.error.FFmpegError, ValueError) as exc:
             container.close()
             for fs in frame_streams:
                 fs.close()
