@@ -407,6 +407,7 @@ def info(
                 info_data = read_info(f_buffered)
             except InvalidMagicError:
                 console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
+                f_raw.seek(0)  # Reset to start
                 info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
 
     if debug_wrapper:
