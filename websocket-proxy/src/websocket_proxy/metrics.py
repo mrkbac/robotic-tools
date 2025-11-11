@@ -86,6 +86,13 @@ class MetricsCollector:
         self.clients: dict[str, ClientMetrics] = {}
         self._start_time = datetime.now(timezone.utc)
 
+        # Upstream metrics
+        self.upstream_connected: bool = False
+        self.upstream_topic_count: int = 0
+        self.upstream_messages_received: int = 0
+        self.upstream_messages_throttled: int = 0
+        self.transformed_channel_count: int = 0
+
     def add_client(
         self, client_id: str, remote_address: str, user_agent: str | None = None
     ) -> ClientMetrics:

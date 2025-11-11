@@ -310,6 +310,9 @@ class ProxyBridge:
             f"(id={channel_id}, schema={schema_name})"
         )
 
+        # Update metrics
+        self.metrics.upstream_topic_count = len(self.upstream_channels)
+
         # Initialize throttling for this channel
         throttle_hz = self.topic_throttle_overrides.get(channel["topic"], self.default_throttle_hz)
         self.channel_throttle_hz[channel_id] = throttle_hz
@@ -341,6 +344,9 @@ class ProxyBridge:
             # Track the transformation mapping
             self.transformed_channels[channel_id] = transformed_id
             self.transformed_to_upstream[transformed_id] = channel_id
+
+            # Update metrics
+            self.metrics.transformed_channel_count = len(self.transformed_channels)
 
             logger.debug(
                 f"Created transformed channel: {schema_name} -> {output_schema} "
@@ -401,6 +407,10 @@ class ProxyBridge:
         self.channel_throttle_hz.pop(upstream_channel_id, None)
         self.channel_last_sent_time.pop(upstream_channel_id, None)
 
+        # Update metrics
+        self.metrics.upstream_topic_count = len(self.upstream_channels)
+        self.metrics.transformed_channel_count = len(self.transformed_channels)
+
         # Unadvertise from downstream clients
         if downstream_channel:
             await self.downstream_server.unadvertise([downstream_channel_id])
@@ -420,6 +430,9 @@ class ProxyBridge:
         """
         channel_id = channel["id"]
 
+        # Track received message
+        self.metrics.upstream_messages_received += 1
+
         # Apply throttling before performing any transformations or forwarding
         throttle_hz = self.channel_throttle_hz.get(channel_id, self.default_throttle_hz)
 
@@ -434,6 +447,8 @@ class ProxyBridge:
                     channel_id,
                     min_interval,
                 )
+                # Track throttled message
+                self.metrics.upstream_messages_throttled += 1
                 return
 
             self.channel_last_sent_time[channel_id] = now
@@ -649,6 +664,9 @@ class ProxyBridge:
         # Clear all upstream subscriptions - they're no longer valid
         self.upstream_subscriptions.clear()
 
+        # Update metrics
+        self.metrics.upstream_connected = False
+
     async def handle_upstream_reconnected(self) -> None:
         """Handle upstream reconnection.
 
@@ -657,6 +675,9 @@ class ProxyBridge:
         2. Creating new upstream subscriptions for each channel
         3. Restoring proper reference counts
         """
+        # Update metrics
+        self.metrics.upstream_connected = True
+
         # Collect all unique channels that clients are subscribed to
         # Map: upstream_channel_id -> ref_count
         channel_ref_counts: dict[int, int] = {}

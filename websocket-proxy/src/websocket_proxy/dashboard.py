@@ -102,6 +102,28 @@ class DashboardRenderer:
         header_text.append("  |  Connected Clients: ", style="bold")
         header_text.append(str(total_clients), style="green" if total_clients > 0 else "dim")
 
+        # Add upstream metrics
+        header_text.append("\n\n")
+        header_text.append("Upstream Status: ", style="bold")
+        if self.metrics.upstream_connected:
+            header_text.append("● Connected", style="green bold")
+        else:
+            header_text.append("● Disconnected", style="red bold")
+
+        header_text.append("  |  Topics: ", style="bold")
+        header_text.append(str(self.metrics.upstream_topic_count), style="cyan")
+
+        header_text.append("  |  Transformed: ", style="bold")
+        header_text.append(str(self.metrics.transformed_channel_count), style="magenta")
+
+        header_text.append("\n")
+        header_text.append("Messages Received: ", style="bold")
+        header_text.append(str(self.metrics.upstream_messages_received), style="green")
+
+        header_text.append("  |  Throttled: ", style="bold")
+        throttled_style = "red" if self.metrics.upstream_messages_throttled > 0 else "dim"
+        header_text.append(str(self.metrics.upstream_messages_throttled), style=throttled_style)
+
         return Panel(header_text, border_style="blue")
 
     def _create_clients_table(self) -> Table:
