@@ -483,7 +483,7 @@ class ProxyBridge:
         # Create a snapshot to avoid "dictionary changed size during iteration" errors
         subscriber_count = 0
         for websocket, subs in list(self.client_subscriptions.items()):
-            for client_sub_id, (subscribed_channel_id, _) in subs.items():
+            for client_sub_id, (subscribed_channel_id, _) in list(subs.items()):
                 if subscribed_channel_id == channel_id:
                     # Send message to this client
                     try:
