@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import BinaryIO
+from typing import IO, BinaryIO
 
 import typer
 from rich.console import Console
@@ -39,7 +39,7 @@ from pymcap_cli.types import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
 )
-from pymcap_cli.utils import file_progress
+from pymcap_cli.utils import ProgressTrackingIO, file_progress
 
 console = Console()
 
@@ -498,7 +498,7 @@ class McapProcessor:
             return remapped_channel.id if remapped_channel else original_channel_id
         return original_channel_id
 
-    def _analyze_for_auto_grouping(self, input_streams: Sequence[BinaryIO]) -> None:
+    def _analyze_for_auto_grouping(self, input_streams: Sequence[IO[bytes]]) -> None:
         """Pre-analyze files to identify large channels (>15% of total uncompressed size)."""
         console.print("[dim]Analyzing files for auto-grouping...[/dim]")
 
@@ -751,7 +751,7 @@ class McapProcessor:
             )
 
     def _generate_chunks_from_stream(
-        self, input_stream: BinaryIO, stream_id: int, writer: McapWriter
+        self, input_stream: IO[bytes], stream_id: int, writer: McapWriter
     ) -> Iterator[PendingChunk]:
         """Generate chunks from a single stream in file order.
 
@@ -831,7 +831,7 @@ class McapProcessor:
 
     def process(
         self,
-        input_streams: Sequence[BinaryIO],
+        input_streams: Sequence[IO[bytes]],
         output_stream: BinaryIO,
         file_sizes: Sequence[int],
     ) -> ProcessingStats:
@@ -915,10 +915,16 @@ class McapProcessor:
             with file_progress("[bold blue]Processing MCAP...", console) as progress:
                 task = progress.add_task("Processing", total=total_size)
 
-                # Create chunk generators for each stream
+                # Wrap streams to track progress incrementally
+                wrapped_streams = [
+                    ProgressTrackingIO(input_stream, task, progress, input_stream.tell())
+                    for input_stream in input_streams
+                ]
+
+                # Create chunk generators for each wrapped stream
                 chunk_generators = [
-                    self._generate_chunks_from_stream(input_stream, stream_id, writer)
-                    for stream_id, input_stream in enumerate(input_streams)
+                    self._generate_chunks_from_stream(wrapped_stream, stream_id, writer)
+                    for stream_id, wrapped_stream in enumerate(wrapped_streams)
                 ]
 
                 # Process chunks in timestamp order using heapq.merge

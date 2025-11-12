@@ -1,5 +1,5 @@
 import io
-from typing import IO, Any, BinaryIO
+from typing import IO, Any
 
 from rich.console import Console
 from rich.progress import (
@@ -38,11 +38,12 @@ def file_progress(title: str, console: Console | None = None) -> Progress:
     )
 
 
-class ProgressTrackingIO(io.RawIOBase):
+class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
     """Read-only IO[bytes] wrapper that updates progress bar as data is read.
 
     Wraps a binary stream and automatically updates a Rich progress bar
-    based on the current file position. Useful for long-running read operations.
+    using incremental progress tracking. Works correctly for both single-stream
+    and multi-stream scenarios (e.g., merging multiple files).
 
     This class implements the IO[bytes] protocol methods for reading and seeking.
     Write operations are not supported and will raise NotImplementedError.
@@ -55,45 +56,59 @@ class ProgressTrackingIO(io.RawIOBase):
         >>> with file_progress("Reading MCAP...", console) as progress:
         ...     task = progress.add_task("Processing", total=file_size)
         ...     with Path("data.mcap").open("rb") as f:
-        ...         wrapped = ProgressTrackingIO(f, task, progress)
+        ...         wrapped = ProgressTrackingIO(f, task, progress, f.tell())
         ...         while chunk := wrapped.read(8192):
         ...             process_chunk(chunk)  # Progress bar updates automatically
 
-        Integration with stream processing functions:
+        Multi-stream usage (e.g., merging files):
 
-        >>> def process_stream(stream: IO[bytes]) -> None:
-        ...     # This function works with any IO[bytes], including ProgressTrackingIO
-        ...     data = stream.read()
-        ...     return parse_data(data)
-        >>>
-        >>> with file_progress("Processing...", console) as progress:
-        ...     task = progress.add_task("Reading", total=file_size)
-        ...     wrapped = ProgressTrackingIO(file_handle, task, progress)
-        ...     result = process_stream(wrapped)
+        >>> total_size = sum(file_sizes)
+        >>> with file_progress("Merging files...", console) as progress:
+        ...     task = progress.add_task("Processing", total=total_size)
+        ...     wrapped_streams = [
+        ...         ProgressTrackingIO(stream, task, progress, stream.tell())
+        ...         for stream in input_streams
+        ...     ]
+        ...     # Process streams in any order - progress advances smoothly
+        ...     for stream in wrapped_streams:
+        ...         data = stream.read(8192)
     """
 
-    def __init__(self, stream: IO[bytes], progress_task: TaskID, progress_obj: Progress) -> None:
+    def __init__(
+        self,
+        stream: IO[bytes],
+        progress_task: TaskID,
+        progress_obj: Progress,
+        initial_offset: int = 0,
+    ) -> None:
         """Initialize the progress-tracking wrapper.
 
         Args:
             stream: The underlying binary stream to wrap
             progress_task: The Rich progress task ID to update
             progress_obj: The Rich Progress instance
+            initial_offset: Current position in stream (use stream.tell() for multi-stream)
         """
         self._stream = stream
         self._progress_task = progress_task
         self._progress = progress_obj
+        self._last_position = initial_offset
 
     def read(self, size: int = -1) -> bytes:
-        """Read bytes and update progress."""
+        """Read bytes and advance progress by delta."""
         data = self._stream.read(size)
-        self._progress.update(self._progress_task, completed=self._stream.tell())
+        delta = len(data)
+        if delta > 0:
+            self._progress.advance(self._progress_task, delta)
+            self._last_position += delta
         return data
 
     def readinto(self, b: Any) -> int | None:
-        """Read bytes into buffer and update progress."""
+        """Read bytes into buffer and advance progress by delta."""
         result: int | None = self._stream.readinto(b)  # type: ignore[attr-defined]
-        self._progress.update(self._progress_task, completed=self._stream.tell())
+        if result is not None and result > 0:
+            self._progress.advance(self._progress_task, result)
+            self._last_position += result
         return result
 
     def readable(self) -> bool:
@@ -101,14 +116,17 @@ class ProgressTrackingIO(io.RawIOBase):
         return True
 
     def seek(self, offset: int, whence: int = 0) -> int:
-        """Seek to position and update progress."""
+        """Seek and advance progress by delta."""
         result = self._stream.seek(offset, whence)
-        self._progress.update(self._progress_task, completed=result)
+        delta = result - self._last_position
+        if delta > 0:
+            self._progress.advance(self._progress_task, delta)
+            self._last_position = result
         return result
 
     def tell(self) -> int:
         """Return current position."""
-        return self._stream.tell()
+        return self._last_position
 
     def seekable(self) -> bool:
         """Return whether the stream is seekable."""
@@ -142,7 +160,7 @@ class ProgressTrackingIO(io.RawIOBase):
 
 
 def rebuild_info(
-    f: BinaryIO, file_size: int, *, exact_sizes: bool = False, console: Console | None = None
+    f: IO[bytes], file_size: int, *, exact_sizes: bool = False, console: Console | None = None
 ) -> RebuildInfo:
     """Rebuild MCAP summary with progress bar.
 
@@ -160,10 +178,10 @@ def rebuild_info(
         task = progress.add_task("Processing", total=file_size)
 
         # Wrap stream to track progress
-        wrapped_stream = ProgressTrackingIO(f, task, progress)
+        wrapped_stream = ProgressTrackingIO(f, task, progress, f.tell())
 
         result = rebuild_summary(
-            wrapped_stream,  # type: ignore[arg-type]
+            wrapped_stream,
             validate_crc=False,
             calculate_channel_sizes=True,
             exact_sizes=exact_sizes,
@@ -175,7 +193,7 @@ def rebuild_info(
     return result
 
 
-def read_info(f: BinaryIO) -> RebuildInfo:
+def read_info(f: IO[bytes]) -> RebuildInfo:
     """Read existing MCAP summary from file.
 
     Args:
