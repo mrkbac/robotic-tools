@@ -29,14 +29,13 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-from small_mcap import include_topics, read_message_decoded
-from small_mcap.rebuild import rebuild_summary
+from small_mcap import get_summary, include_topics, read_message_decoded
 
 from pymcap_cli.autocompletion import complete_topic_by_schema
 from pymcap_cli.mcap_processor import confirm_output_overwrite
 
 if TYPE_CHECKING:
-    from av.container import InputContainer
+    from av.container import InputContainer, OutputContainer
 
 console = Console()
 app = typer.Typer()
@@ -89,26 +88,15 @@ class VideoEncoderError(Exception):
     """Raised when encoding fails."""
 
 
-@dataclass(slots=True)
-class TopicStreamSpec:
+@dataclass
+class TopicInfo:
+    """Discovered metadata for a topic."""
+
     topic: str
+    schema_name: str
     message_type: ImageType
     width: int
     height: int
-    fps: float
-    message_count: int
-    first_timestamp: int
-    last_timestamp: int
-
-
-@dataclass(frozen=True)
-class EncoderConfig:
-    codec_name: str
-    width: int
-    height: int
-    fps: float
-    quality: int
-    is_hardware: bool
 
 
 SOFTWARE_ENCODERS = {
@@ -132,74 +120,17 @@ HARDWARE_ENCODERS = {
 }
 
 QUALITY_PRESETS = {
-    VideoCodec.H264: {"high": 18, "medium": 23, "low": 28},
-    VideoCodec.H265: {"high": 20, "medium": 25, "low": 30},
-    VideoCodec.VP9: {"high": 30, "medium": 35, "low": 40},
-    VideoCodec.AV1: {"high": 25, "medium": 30, "low": 35},
+    VideoCodec.H264: {"high": 32, "medium": 35, "low": 40},
+    VideoCodec.H265: {"high": 32, "medium": 35, "low": 40},
+    VideoCodec.VP9: {"high": 42, "medium": 45, "low": 50},
+    VideoCodec.AV1: {"high": 37, "medium": 40, "low": 45},
 }
 
 
-class TopicFrameStream:
-    """Stream frames for a topic, duplicating last frame to fill gaps."""
-
-    def __init__(
-        self, spec: TopicStreamSpec, mcap_path: Path, tile_width: int, tile_height: int
-    ) -> None:
-        self.spec = spec
-        self.tile_width = tile_width
-        self.tile_height = tile_height
-        self.decoder_factory = DecoderFactory()
-        self.handle = mcap_path.open("rb")
-        self.iterator = iter(
-            read_message_decoded(
-                self.handle,
-                should_include=include_topics(spec.topic),
-                decoder_factories=[self.decoder_factory],
-            )
-        )
-        self.black_frame = np.zeros((tile_height, tile_width, 3), dtype=np.uint8)
-        self.current_frame: tuple[int, np.ndarray] | None = None
-        self.closed = False
-        self.next_frame: tuple[int, np.ndarray] | None = self._read_next()
-        self.last_valid_frame: np.ndarray | None = None
-
-    def _read_next(self) -> tuple[int, np.ndarray] | None:
-        if self.closed:
-            return None
-        for msg in self.iterator:
-            timestamp = msg.message.log_time
-            frame_array = _message_to_array(
-                msg.decoded_message,
-                self.spec.message_type,
-                self.tile_width,
-                self.tile_height,
-            )
-            return (timestamp, frame_array)
-        self.close()
-        return None
-
-    def frame_at(self, timestamp_ns: int) -> np.ndarray:
-        if timestamp_ns < self.spec.first_timestamp or timestamp_ns > self.spec.last_timestamp:
-            return self.black_frame
-
-        while self.next_frame is not None and self.next_frame[0] <= timestamp_ns:
-            self.current_frame = self.next_frame
-            self.next_frame = self._read_next()
-
-        if self.current_frame is not None and self.current_frame[0] <= timestamp_ns:
-            self.last_valid_frame = self.current_frame[1]
-
-        return self.last_valid_frame if self.last_valid_frame is not None else self.black_frame
-
-    def close(self) -> None:
-        if not self.closed:
-            self.handle.close()
-            self.closed = True
-
-
-def _message_to_array(
+def _decode_and_resize_image(
     message: Any, message_type: ImageType, target_width: int, target_height: int
 ) -> np.ndarray:
+    """Decode a ROS image message and resize to target dimensions."""
     if message_type is ImageType.COMPRESSED:
         compressed = _process_compressed_image(message)
         frame = _decode_compressed_frame(compressed)
@@ -256,90 +187,53 @@ def _raw_image_to_array(message: Any) -> np.ndarray:
     raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
 
 
-def _extract_topic_metadata_from_rebuild(
-    rebuild_info: Any, topic: str
-) -> tuple[int, ImageType, int, int, int]:
-    summary = rebuild_info.summary
-    image_schema_ids = {
-        schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
-    }
-    compressed_schema_ids = {
-        schema.id for schema in summary.schemas.values() if schema.name in COMPRESSED_SCHEMAS
-    }
-    image_channels = [
-        channel for channel in summary.channels.values() if channel.schema_id in image_schema_ids
-    ]
-    image_topics = {channel.topic for channel in image_channels}
-    if topic not in image_topics:
-        available = "\n".join(f"  - {t}" for t in sorted(image_topics))
-        raise VideoEncoderError(
-            f"Topic '{topic}' not found or is not an image topic.\n\n"
-            f"Available image topics:\n{available}"
-        )
-    channel = next(channel for channel in image_channels if channel.topic == topic)
-    channel_id = channel.id
-    message_type = (
-        ImageType.COMPRESSED if channel.schema_id in compressed_schema_ids else ImageType.RAW
-    )
-    first_timestamp: int | None = None
-    last_timestamp: int | None = None
-    message_count = 0
-    if rebuild_info.chunk_information:
-        for message_indexes in rebuild_info.chunk_information.values():
-            for msg_idx in message_indexes:
-                if msg_idx.channel_id == channel_id:
-                    for timestamp, _offset in msg_idx.records:
-                        message_count += 1
-                        if first_timestamp is None or timestamp < first_timestamp:
-                            first_timestamp = timestamp
-                        if last_timestamp is None or timestamp > last_timestamp:
-                            last_timestamp = timestamp
-    if message_count == 0 or first_timestamp is None or last_timestamp is None:
-        raise VideoEncoderError(f"No messages found for topic: {topic}")
-    return channel_id, message_type, message_count, first_timestamp, last_timestamp
+def _get_available_image_topics(mcap_path: Path) -> list[str]:
+    """Get list of available image topics from MCAP summary."""
+    try:
+        with mcap_path.open("rb") as handle:
+            summary = get_summary(handle)
+            if summary is None:
+                return []
+
+            # Find all schemas that are image types
+            image_schema_ids = {
+                schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
+            }
+
+            # Find all channels with image schemas
+            image_topics = [
+                channel.topic
+                for channel in summary.channels.values()
+                if channel.schema_id in image_schema_ids
+            ]
+            return sorted(image_topics)
+    except (OSError, ValueError, KeyError):
+        # Failed to read summary or parse it
+        return []
 
 
-def _collect_topic_stream_spec(mcap_path: Path, topic: str, rebuild_info: Any) -> TopicStreamSpec:
-    _channel_id, message_type, message_count, first_timestamp, last_timestamp = (
-        _extract_topic_metadata_from_rebuild(rebuild_info, topic)
-    )
-    decoder_factory = DecoderFactory()
-    width: int | None = None
-    height: int | None = None
-    samples = 0
-    max_samples = min(10, message_count)
-    with mcap_path.open("rb") as handle:
-        for msg in read_message_decoded(
-            handle,
-            should_include=include_topics(topic),
-            decoder_factories=[decoder_factory],
-        ):
-            if message_type is ImageType.COMPRESSED:
-                frame = _decode_compressed_frame(_process_compressed_image(msg.decoded_message))
-                width = frame.width
-                height = frame.height
-            else:
-                rgb = _raw_image_to_array(msg.decoded_message)
-                height, width = rgb.shape[:2]
-            samples += 1
-            if width is not None and height is not None and samples >= max_samples:
-                break
-    if width is None or height is None:
-        raise VideoEncoderError(f"Failed to determine dimensions for topic: {topic}")
-    if message_count > 1 and last_timestamp > first_timestamp:
-        duration_s = (last_timestamp - first_timestamp) / 1e9
-        fps = (message_count - 1) / duration_s
+def _discover_topic_info(message: Any, topic: str) -> TopicInfo:
+    """Discover topic metadata from first message."""
+    schema_name = message.schema.name if message.schema else ""
+
+    if schema_name in COMPRESSED_SCHEMAS:
+        message_type = ImageType.COMPRESSED
+        frame = _decode_compressed_frame(_process_compressed_image(message.decoded_message))
+        width = frame.width
+        height = frame.height
+    elif schema_name in RAW_SCHEMAS:
+        message_type = ImageType.RAW
+        rgb = _raw_image_to_array(message.decoded_message)
+        height, width = rgb.shape[:2]
     else:
-        fps = 1.0
-    return TopicStreamSpec(
+        raise VideoEncoderError(f"Topic '{topic}' is not an image topic (schema: {schema_name})")
+
+    return TopicInfo(
         topic=topic,
+        schema_name=schema_name,
         message_type=message_type,
         width=width,
         height=height,
-        fps=fps,
-        message_count=message_count,
-        first_timestamp=first_timestamp,
-        last_timestamp=last_timestamp,
     )
 
 
@@ -393,23 +287,16 @@ def _test_encoder(encoder_name: str) -> bool:
         return True
 
 
-def _get_encoder_options(codec: VideoCodec, encoder_name: str, quality: int) -> dict[str, str]:
+def _get_encoder_options(codec: VideoCodec, encoder_name: str) -> dict[str, str]:
     options: dict[str, str] = {}
-    if "videotoolbox" in encoder_name:
-        options["q:v"] = str(max(0, min(100, 100 - quality * 2)))
-    elif "nvenc" in encoder_name:
+    # All encoders now use bitrate mode, so don't set CRF/CQ/QP
+    # Just set encoder-specific presets if needed
+    if "nvenc" in encoder_name:
         options["preset"] = "p4"
-        options["cq"] = str(quality)
-    elif "vaapi" in encoder_name:
-        options["qp"] = str(quality)
-    elif codec in (VideoCodec.H264, VideoCodec.H265):
+    elif (
+        codec in (VideoCodec.H264, VideoCodec.H265) and "libx264" in encoder_name
+    ) or "libx265" in encoder_name:
         options["preset"] = "medium"
-        options["crf"] = str(quality)
-    elif codec == VideoCodec.VP9:
-        options["crf"] = str(quality)
-        options["b:v"] = "0"
-    elif codec == VideoCodec.AV1:
-        options["crf"] = str(quality)
     return options
 
 
@@ -436,24 +323,62 @@ def encode_video(
     encoder_backend: EncoderBackend,
     quality: int,
 ) -> None:
+    """Encode video from MCAP file using single-pass streaming."""
+    # Check schema and channels, validate topics, get statistics
+    available_image_topics: list[str] = []
+    total_message_count: int | None = None
+
+    with mcap_path.open("rb") as f:
+        if summary := get_summary(f):
+            # Find all schemas that are image types
+            image_schema_ids = {
+                schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
+            }
+
+            # Find all channels with image schemas
+            requested_topic_channels = {
+                channel.topic: channel.id
+                for channel in summary.channels.values()
+                if channel.schema_id in image_schema_ids and channel.topic in topics
+            }
+            available_image_topics = sorted(
+                [
+                    channel.topic
+                    for channel in summary.channels.values()
+                    if channel.schema_id in image_schema_ids
+                ]
+            )
+
+            # Validate all requested topics exist
+            missing_topics = set(topics) - set(requested_topic_channels.keys())
+            if missing_topics:
+                available_str = "\n".join(f"  - {t}" for t in available_image_topics)
+                raise VideoEncoderError(
+                    "Topic(s) not found or not image topics:"
+                    + ", ".join(sorted(missing_topics))
+                    + "\n\n"
+                    f"Available image topics:\n{available_str}"
+                )
+
+            # Calculate total message count from statistics if available
+            if summary.statistics and summary.statistics.channel_message_counts:
+                total_message_count = sum(
+                    count
+                    for channel_id, count in summary.statistics.channel_message_counts.items()
+                    if channel_id in requested_topic_channels.values()
+                )
+
     console.print(f"[cyan]Reading MCAP file:[/cyan] {mcap_path}")
     console.print(f"[cyan]Topics:[/cyan] {', '.join(topics)}")
+    if total_message_count is not None:
+        console.print(f"[cyan]Total messages:[/cyan] {total_message_count:,}")
     console.print(f"[cyan]Output:[/cyan] {output_path}")
     console.print(f"[cyan]Codec:[/cyan] {codec.value}")
 
     encoder_name = _detect_encoder(codec, encoder_backend)
     console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
 
-    with mcap_path.open("rb") as handle:
-        rebuild_info = rebuild_summary(
-            handle,
-            validate_crc=False,
-            calculate_channel_sizes=False,
-            exact_sizes=False,
-        )
-
-    topic_specs = [_collect_topic_stream_spec(mcap_path, topic, rebuild_info) for topic in topics]
-
+    # Compute grid layout
     rows, cols = (1, 1)
     if len(topics) == 2:
         rows, cols = (1, 2)
@@ -462,143 +387,223 @@ def encode_video(
         cols = math.ceil(len(topics) / rows)
     console.print(f"[green]✓[/green] Layout: {rows} row(s) x {cols} column(s)")
 
-    target_tile_width = max(2, min(spec.width for spec in topic_specs))
-    target_tile_height = max(2, min(spec.height for spec in topic_specs))
-    target_tile_width -= target_tile_width % 2
-    target_tile_height -= target_tile_height % 2
+    decoder_factory = DecoderFactory()
 
-    global_start = min(spec.first_timestamp for spec in topic_specs)
-    global_end = max(spec.last_timestamp for spec in topic_specs)
-    global_duration_ns = max(global_end - global_start, 1)
-    target_fps = max((spec.fps for spec in topic_specs), default=0.0, key=lambda x: x)
-    target_fps = max(target_fps, 1.0)
-    expected_frames = max(1, round((global_duration_ns / 1e9) * target_fps))
+    # State for streaming
+    topic_infos: dict[str, TopicInfo] = {}  # Discovered metadata per topic
+    last_frames: dict[str, np.ndarray] = {}  # Cache of last decoded frame per topic
+    container: OutputContainer | None = None
+    stream: Any = None
+    frame_idx = 0
+    first_timestamp_ns: int | None = None  # First message timestamp for PTS calculation
+    last_pts: int = -1  # Track last PTS to ensure monotonic increase
+    target_tile_width: int | None = None
+    target_tile_height: int | None = None
+    grid_width: int | None = None
+    grid_height: int | None = None
 
-    grid_width = target_tile_width * cols
-    grid_height = target_tile_height * rows
-    grid_width -= grid_width % 2
-    grid_height -= grid_height % 2
-
-    # MP4-specific configuration
-    try:
-        container = av.open(str(output_path), "w", format=None, options={"movflags": "faststart"})
-    except (av.error.FFmpegError, ValueError) as exc:
-        raise VideoEncoderError(
-            f"Failed to open output file '{output_path}': {exc}\n"
-            f"Ensure the file path is writable and the format is supported."
-        ) from exc
-
-    fps_int = max(1, round(target_fps))
+    console.print("\n[yellow]Processing messages...[/yellow]")
 
     try:
-        stream_raw = container.add_stream(codec_name=encoder_name, rate=fps_int)
-    except (av.error.FFmpegError, ValueError) as exc:
-        container.close()
-        raise VideoEncoderError(
-            f"Failed to create video stream with encoder '{encoder_name}': {exc}\n"
-            f"This encoder may not be available on your system. Try --encoder software."
-        ) from exc
+        with (
+            Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress,
+            mcap_path.open("rb") as handle,
+        ):
+            task_id = progress.add_task("Encoding frames", total=total_message_count)
 
-    # Type-narrow the stream to VideoStream for mypy
-    stream = stream_raw
+            for msg in read_message_decoded(
+                handle,
+                should_include=include_topics(topics),
+                decoder_factories=[decoder_factory],
+            ):
+                topic = msg.channel.topic
 
-    stream.width = grid_width  # type: ignore[union-attr]
-    stream.height = grid_height  # type: ignore[union-attr]
-    stream.pix_fmt = "yuv420p"  # type: ignore[union-attr]
-    stream.time_base = Fraction(1, fps_int)
-    stream.codec_context.framerate = Fraction(fps_int, 1)  # type: ignore[attr-defined]
-    stream.codec_context.gop_size = max(1, fps_int * 2)  # type: ignore[attr-defined]
-
-    # Get encoder options and ensure B-frames are disabled for MP4 compatibility
-    options = _get_encoder_options(codec, encoder_name, quality)
-    if "libx264" in encoder_name or "libx265" in encoder_name:
-        options["bf"] = "0"
-        options["g"] = str(max(1, fps_int * 2))
-    elif "videotoolbox" in encoder_name or "nvenc" in encoder_name or "vaapi" in encoder_name:
-        # Hardware encoders: ensure B-frames are disabled
-        if "videotoolbox" in encoder_name:
-            options["bf"] = "0"
-
-    stream.codec_context.options = options
-    console.print(f"[cyan]Encoder options:[/cyan] {options}")
-
-    frame_streams = [
-        TopicFrameStream(spec, mcap_path, target_tile_width, target_tile_height)
-        for spec in topic_specs
-    ]
-
-    console.print(
-        f"\n[yellow]Encoding {expected_frames:,} frames at {grid_width}x{grid_height} "
-        f"@ {target_fps:.2f} fps...[/yellow]"
-    )
-
-    if expected_frames == 1:
-        timestamps = [global_start]
-    else:
-        step = Fraction(global_duration_ns, expected_frames - 1)
-        timestamps = [global_start + int(step * idx) for idx in range(expected_frames)]
-
-    try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            console=console,
-        ) as progress:
-            task_id = progress.add_task("Encoding", total=expected_frames)
-            for frame_idx, timestamp_ns in enumerate(timestamps):
-                try:
-                    tiles = [stream.frame_at(timestamp_ns) for stream in frame_streams]
-                    grid_frame = _compose_grid(
-                        tiles, (rows, cols), (target_tile_height, target_tile_width)
+                # Discover topic info on first message
+                if topic not in topic_infos:
+                    topic_infos[topic] = _discover_topic_info(msg, topic)
+                    console.print(
+                        f"[green]✓[/green] Discovered {topic}: "
+                        f"{topic_infos[topic].width}x{topic_infos[topic].height} "
+                        f"({topic_infos[topic].message_type.name})"
                     )
+
+                    # Initialize encoder once we have all topics
+                    if len(topic_infos) == len(topics) and container is None:
+                        # Compute tile dimensions
+                        target_tile_width = max(2, min(info.width for info in topic_infos.values()))
+                        target_tile_height = max(
+                            2, min(info.height for info in topic_infos.values())
+                        )
+                        target_tile_width -= target_tile_width % 2
+                        target_tile_height -= target_tile_height % 2
+
+                        grid_width = target_tile_width * cols
+                        grid_height = target_tile_height * rows
+                        grid_width -= grid_width % 2
+                        grid_height -= grid_height % 2
+
+                        console.print(
+                            f"[green]✓[/green] Grid: {grid_width}x{grid_height} "
+                            f"(tiles: {target_tile_width}x{target_tile_height})"
+                        )
+
+                        # Initialize black frames for all topics
+                        for t in topics:
+                            last_frames[t] = np.zeros(
+                                (target_tile_height, target_tile_width, 3), dtype=np.uint8
+                            )
+
+                        # Create output container and stream
+                        container = av.open(
+                            str(output_path),
+                            "w",
+                            format=None,
+                            options={"movflags": "faststart"},
+                        )
+
+                        try:
+                            stream = container.add_stream(codec_name=encoder_name)
+                        except (av.error.FFmpegError, ValueError) as exc:
+                            container.close()
+                            raise VideoEncoderError(
+                                f"Failed to create video stream with encoder '{encoder_name}':"
+                                "This encoder may not be available on your system."
+                                "Try --encoder software."
+                            ) from exc
+
+                        stream.width = grid_width
+                        stream.height = grid_height
+                        stream.pix_fmt = "yuv420p"
+                        # Use microsecond time_base (standard for video, more compatible)
+                        stream.time_base = Fraction(1, 1_000_000)
+                        stream.codec_context.time_base = Fraction(1, 1_000_000)
+                        # Set a nominal framerate (actual timing from PTS)
+                        stream.codec_context.framerate = Fraction(30, 1)
+                        stream.codec_context.gop_size = 60  # 2 seconds at 30fps
+
+                        # Set encoder options
+                        options = _get_encoder_options(codec, encoder_name)
+
+                        # Set bitrate (simplified, no input bitrate calculation)
+                        if quality <= 20:  # high quality
+                            target_bitrate = 10_000_000  # 10 Mbps
+                        elif quality <= 25:  # medium quality
+                            target_bitrate = 5_000_000  # 5 Mbps
+                        else:  # low quality
+                            target_bitrate = 2_000_000  # 2 Mbps
+
+                        stream.codec_context.bit_rate = target_bitrate
+
+                        if (
+                            "libx264" in encoder_name
+                            or "libx265" in encoder_name
+                            or "videotoolbox" in encoder_name
+                        ):
+                            options["bf"] = "0"
+
+                        stream.codec_context.options = options
+                        console.print(f"[cyan]Encoder options:[/cyan] {options}")
+
+                # Get message timestamp
+                message_timestamp_ns = msg.message.log_time
+
+                # Skip messages until encoder is ready
+                if container is None or stream is None:
+                    continue
+
+                # Set first timestamp on first encoded frame
+                if first_timestamp_ns is None:
+                    first_timestamp_ns = message_timestamp_ns
+
+                # Decode and cache this frame
+                assert target_tile_width is not None
+                assert target_tile_height is not None
+                last_frames[topic] = _decode_and_resize_image(
+                    msg.decoded_message,
+                    topic_infos[topic].message_type,
+                    target_tile_width,
+                    target_tile_height,
+                )
+
+                # Compose grid from current cached frames
+                tiles = [last_frames[t] for t in topics]
+                grid_frame = _compose_grid(
+                    tiles, (rows, cols), (target_tile_height, target_tile_width)
+                )
+
+                # Encode frame with actual timestamp
+                try:
                     frame = av.VideoFrame.from_ndarray(grid_frame, format="rgb24")
                     frame = frame.reformat(format="yuv420p")
-                    frame.pts = frame_idx
-                    packets = stream.encode(frame)  # type: ignore[union-attr,arg-type]
+                    # Set PTS in microseconds (matching stream.time_base = 1/1_000_000)
+                    current_pts = (message_timestamp_ns - first_timestamp_ns) // 1000
+                    # Ensure monotonic increase (required by MP4/H.264)
+                    if current_pts <= last_pts:
+                        current_pts = last_pts + 1
+                    frame.pts = current_pts
+                    last_pts = current_pts
+                    packets = stream.encode(frame)
                     for packet in packets:
                         container.mux(packet)
+                    frame_idx += 1
                     progress.update(task_id, advance=1)
                 except (av.error.FFmpegError, ValueError) as exc:
-                    container.close()
-                    for fs in frame_streams:
-                        fs.close()
+                    if container:
+                        container.close()
                     raise VideoEncoderError(
-                        f"Encoding failed at frame {frame_idx + 1}/{expected_frames}: {exc}\n"
+                        f"Encoding failed at frame {frame_idx}: {exc}\n"
                         f"Encoder: {encoder_name}, Resolution: {grid_width}x{grid_height}, "
                         f"Codec: {codec.value}\n"
-                        f"This may indicate an incompatibility between the encoder and "
-                        f"MP4 format.\n"
                         f"Try using --encoder software or a different codec."
                     ) from exc
 
+        # Check if we encoded any frames
+        if container is None or frame_idx == 0:
+            if container:
+                container.close()
+            missing = set(topics) - set(topic_infos.keys())
+            if missing:
+                # Show available topics if we can
+                available_str = ""
+                if available_image_topics:
+                    available_str = "\n\nAvailable image topics:\n" + "\n".join(
+                        f"  - {t}" for t in available_image_topics
+                    )
+                raise VideoEncoderError(
+                    f"No messages found for topics: {', '.join(sorted(missing))}\n"
+                    f"These topics exist in the file but had no messages.{available_str}"
+                )
+            raise VideoEncoderError(
+                "No frames were encoded. Check that topics contain valid image messages."
+            )
+
         # Flush encoder
         try:
-            for packet in stream.encode(None):  # type: ignore[union-attr]
+            for packet in stream.encode(None):
                 container.mux(packet)
         except (av.error.FFmpegError, ValueError) as exc:
             container.close()
-            for fs in frame_streams:
-                fs.close()
             raise VideoEncoderError(
                 f"Failed to flush encoder: {exc}\nThe video file may be incomplete or corrupted."
             ) from exc
 
         container.close()
-    except Exception:
-        # Cleanup on any error
-        for fs in frame_streams:
-            fs.close()
-        raise
 
-    for fs in frame_streams:
-        fs.close()
+    finally:
+        if container:
+            container.close()
 
     console.print(f"\n[green bold]✓ Video created:[/green bold] {output_path}")
+    console.print(f"[cyan]Total frames:[/cyan] {frame_idx:,}")
 
 
 @app.command(
@@ -690,6 +695,7 @@ def video(
         raise typer.Exit(1)
     confirm_output_overwrite(output, force)
     quality_value = crf if crf is not None else QUALITY_PRESETS[codec][quality.value]
+
     try:
         encode_video(
             mcap_path=file,
