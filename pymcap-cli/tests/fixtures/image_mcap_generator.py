@@ -1,9 +1,9 @@
 """Generate test MCAP files with image messages for video encoding tests."""
 
 import io
-import struct
 from pathlib import Path
 
+from mcap_ros2_support_fast import ROS2EncoderFactory
 from PIL import Image
 from small_mcap import CompressionType, McapWriter
 
@@ -41,19 +41,6 @@ string frame_id
 MSG: builtin_interfaces/Time
 int32 sec
 uint32 nanosec"""
-
-
-def encode_string(s: str) -> bytes:
-    """Encode a string for ROS2 CDR serialization."""
-    encoded = s.encode("utf-8")
-    length = len(encoded)
-    return struct.pack("<I", length) + encoded + b"\x00" * ((4 - (length % 4)) % 4)
-
-
-def encode_uint8_array(data: bytes) -> bytes:
-    """Encode a uint8 array for ROS2 CDR serialization."""
-    length = len(data)
-    return struct.pack("<I", length) + data
 
 
 def create_simple_rgb_frame(width: int, height: int, frame_idx: int) -> bytes:
@@ -103,95 +90,6 @@ def create_jpeg_frame(width: int, height: int, frame_idx: int) -> bytes:
         return b"\xff\xd8\xff\xe0" + b"\x00" * 10  # JPEG SOI + JFIF marker
 
 
-def encode_ros2_image(
-    width: int,
-    height: int,
-    encoding: str,
-    data: bytes,
-    sec: int,
-    nanosec: int,
-    frame_id: str = "camera",
-) -> bytes:
-    """Encode a sensor_msgs/msg/Image message in CDR format.
-
-    Args:
-        width: Image width
-        height: Image height
-        encoding: Image encoding (e.g., "rgb8", "bgr8", "mono8")
-        data: Raw image data
-        sec: Timestamp seconds
-        nanosec: Timestamp nanoseconds
-        frame_id: Frame ID
-
-    Returns:
-        CDR serialized message
-    """
-    output = io.BytesIO()
-
-    # CDR encapsulation header
-    output.write(b"\x00\x01\x00\x00")  # Little-endian CDR
-
-    # Header: stamp (Time) + frame_id (string)
-    output.write(struct.pack("<iI", sec, nanosec))
-    output.write(encode_string(frame_id))
-
-    # height, width (uint32)
-    output.write(struct.pack("<II", height, width))
-
-    # encoding (string)
-    output.write(encode_string(encoding))
-
-    # is_bigendian (uint8) + 3 bytes padding
-    output.write(struct.pack("<B", 0))
-    output.write(b"\x00\x00\x00")
-
-    # step (uint32)
-    step = width * 3 if encoding == "rgb8" else width
-    output.write(struct.pack("<I", step))
-
-    # data (uint8[])
-    output.write(encode_uint8_array(data))
-
-    return output.getvalue()
-
-
-def encode_ros2_compressed_image(
-    format_str: str,
-    data: bytes,
-    sec: int,
-    nanosec: int,
-    frame_id: str = "camera",
-) -> bytes:
-    """Encode a sensor_msgs/msg/CompressedImage message in CDR format.
-
-    Args:
-        format_str: Image format (e.g., "jpeg", "png")
-        data: Compressed image data
-        sec: Timestamp seconds
-        nanosec: Timestamp nanoseconds
-        frame_id: Frame ID
-
-    Returns:
-        CDR serialized message
-    """
-    output = io.BytesIO()
-
-    # CDR encapsulation header
-    output.write(b"\x00\x01\x00\x00")  # Little-endian CDR
-
-    # Header: stamp (Time) + frame_id (string)
-    output.write(struct.pack("<iI", sec, nanosec))
-    output.write(encode_string(frame_id))
-
-    # format (string)
-    output.write(encode_string(format_str))
-
-    # data (uint8[])
-    output.write(encode_uint8_array(data))
-
-    return output.getvalue()
-
-
 def create_image_mcap(
     num_frames: int = 30,
     width: int = 320,
@@ -214,7 +112,9 @@ def create_image_mcap(
         MCAP file bytes
     """
     output = io.BytesIO()
-    writer = McapWriter(output, chunk_size=1024 * 1024, compression=compression)
+    writer = McapWriter(
+        output, chunk_size=1024 * 1024, compression=compression, encoder_factory=ROS2EncoderFactory()
+    )
     writer.start()
 
     if message_type == "Image":
@@ -225,9 +125,6 @@ def create_image_mcap(
         schema_name = "sensor_msgs/msg/CompressedImage"
         schema_data = SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode()
         topic = "/camera/image_compressed"
-
-    writer.add_schema(schema_id=1, name=schema_name, encoding="ros2msg", data=schema_data)
-    writer.add_channel(channel_id=1, topic=topic, message_encoding="cdr", schema_id=1)
 
     # Generate frames at 30 FPS
     fps = 30
@@ -241,29 +138,39 @@ def create_image_mcap(
         if message_type == "Image":
             # Generate raw RGB frame
             rgb_data = create_simple_rgb_frame(width, height, i)
-            message_data = encode_ros2_image(
-                width=width,
-                height=height,
-                encoding=encoding,
-                data=rgb_data,
-                sec=sec,
-                nanosec=nanosec,
-            )
+            step = width * 3 if encoding == "rgb8" else width
+            message_obj = {
+                "header": {
+                    "stamp": {"sec": sec, "nanosec": nanosec},
+                    "frame_id": "camera",
+                },
+                "height": height,
+                "width": width,
+                "encoding": encoding,
+                "is_bigendian": False,
+                "step": step,
+                "data": rgb_data,
+            }
         else:  # CompressedImage
             # Generate JPEG frame
             jpeg_data = create_jpeg_frame(width, height, i)
-            message_data = encode_ros2_compressed_image(
-                format_str="jpeg",
-                data=jpeg_data,
-                sec=sec,
-                nanosec=nanosec,
-            )
+            message_obj = {
+                "header": {
+                    "stamp": {"sec": sec, "nanosec": nanosec},
+                    "frame_id": "camera",
+                },
+                "format": "jpeg",
+                "data": jpeg_data,
+            }
 
-        writer.add_message(
-            channel_id=1,
+        writer.add_message_object(
+            topic=topic,
+            schema_name=schema_name,
+            schema_data=schema_data,
+            message_obj=message_obj,
             log_time=log_time,
-            data=message_data,
             publish_time=log_time,
+            sequence=i,
         )
 
     writer.finish()
