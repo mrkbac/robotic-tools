@@ -120,10 +120,10 @@ HARDWARE_ENCODERS = {
 }
 
 QUALITY_PRESETS = {
-    VideoCodec.H264: {"high": 32, "medium": 35, "low": 40},
-    VideoCodec.H265: {"high": 32, "medium": 35, "low": 40},
-    VideoCodec.VP9: {"high": 42, "medium": 45, "low": 50},
-    VideoCodec.AV1: {"high": 37, "medium": 40, "low": 45},
+    VideoCodec.H264: {QualityPreset.HIGH: 32, QualityPreset.MEDIUM: 35, QualityPreset.LOW: 40},
+    VideoCodec.H265: {QualityPreset.HIGH: 32, QualityPreset.MEDIUM: 35, QualityPreset.LOW: 40},
+    VideoCodec.VP9: {QualityPreset.HIGH: 42, QualityPreset.MEDIUM: 45, QualityPreset.LOW: 50},
+    VideoCodec.AV1: {QualityPreset.HIGH: 37, QualityPreset.MEDIUM: 40, QualityPreset.LOW: 45},
 }
 
 
@@ -185,31 +185,6 @@ def _raw_image_to_array(message: Any) -> np.ndarray:
         mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
         return np.repeat(mono_array[:, :, None], 3, axis=2)
     raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
-
-
-def _get_available_image_topics(mcap_path: Path) -> list[str]:
-    """Get list of available image topics from MCAP summary."""
-    try:
-        with mcap_path.open("rb") as handle:
-            summary = get_summary(handle)
-            if summary is None:
-                return []
-
-            # Find all schemas that are image types
-            image_schema_ids = {
-                schema.id for schema in summary.schemas.values() if schema.name in IMAGE_SCHEMAS
-            }
-
-            # Find all channels with image schemas
-            image_topics = [
-                channel.topic
-                for channel in summary.channels.values()
-                if channel.schema_id in image_schema_ids
-            ]
-            return sorted(image_topics)
-    except (OSError, ValueError, KeyError):
-        # Failed to read summary or parse it
-        return []
 
 
 def _discover_topic_info(message: Any, topic: str) -> TopicInfo:
@@ -694,7 +669,7 @@ def video(
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
         raise typer.Exit(1)
     confirm_output_overwrite(output, force)
-    quality_value = crf if crf is not None else QUALITY_PRESETS[codec][quality.value]
+    quality_value = crf if crf is not None else QUALITY_PRESETS[codec][quality]
 
     try:
         encode_video(
