@@ -93,22 +93,30 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
         self._progress_task = progress_task
         self._progress = progress_obj
         self._last_position = initial_offset
+        self._max_position = initial_offset  # Track high water mark
+
+    def _update_progress(self) -> None:
+        """Update progress bar based on current position."""
+        if self._last_position > self._max_position:
+            delta = self._last_position - self._max_position
+            self._progress.advance(self._progress_task, delta)
+            self._max_position = self._last_position
 
     def read(self, size: int = -1) -> bytes:
         """Read bytes and advance progress by delta."""
         data = self._stream.read(size)
         delta = len(data)
         if delta > 0:
-            self._progress.advance(self._progress_task, delta)
             self._last_position += delta
+            self._update_progress()
         return data
 
     def readinto(self, b: Any) -> int | None:
         """Read bytes into buffer and advance progress by delta."""
         result: int | None = self._stream.readinto(b)  # type: ignore[attr-defined]
         if result is not None and result > 0:
-            self._progress.advance(self._progress_task, result)
             self._last_position += result
+            self._update_progress()
         return result
 
     def readable(self) -> bool:
@@ -118,10 +126,8 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
     def seek(self, offset: int, whence: int = 0) -> int:
         """Seek and advance progress by delta."""
         result = self._stream.seek(offset, whence)
-        delta = result - self._last_position
-        if delta > 0:
-            self._progress.advance(self._progress_task, delta)
-            self._last_position = result
+        self._last_position = result
+        self._update_progress()
         return result
 
     def tell(self) -> int:
