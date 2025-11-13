@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import io
 import json
 from collections import defaultdict
@@ -530,6 +532,13 @@ def info_json(
             help="Enable debug mode",
         ),
     ] = False,
+    compress: Annotated[
+        bool,
+        typer.Option(
+            "--compress",
+            help="Compressed output using gzip and outputs it as base64",
+        ),
+    ] = False,
 ) -> None:
     """Output MCAP file statistics as JSON with all available data."""
     file_size = file.stat().st_size
@@ -561,4 +570,12 @@ def info_json(
     output = info_to_dict(info, str(file), file_size)
 
     # Output JSON
-    print(json.dumps(output, indent=2))  # noqa: T201
+    output_json = json.dumps(output)
+
+    if compress:
+        compressed_output = gzip.compress(output_json.encode("utf-8"))
+
+        output_b64 = base64.b64encode(compressed_output).decode("utf-8")
+        print(output_b64)  # noqa: T201
+    else:
+        print(output_json)  # noqa: T201
