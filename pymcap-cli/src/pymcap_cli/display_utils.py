@@ -12,7 +12,7 @@ from pymcap_cli.utils import bytes_to_human
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from pymcap_cli.types import McapInfoOutput
+    from pymcap_cli.types import ChannelInfo, McapInfoOutput
 
 
 class ChannelTableColumn(enum.IntFlag):
@@ -124,6 +124,7 @@ def display_channels_table(
     columns: ChannelTableColumn | None = None,
     responsive: bool = True,
     index_duration: bool = False,
+    use_median: bool = False,
     distribution_bar_class: type | None = None,
 ) -> None:
     """Display a channels table with configurable columns and sorting.
@@ -136,6 +137,7 @@ def display_channels_table(
         columns: IntFlag of columns to display. If None, defaults to all columns.
         responsive: Enable responsive column hiding based on terminal width
         index_duration: Use per-channel Hz calculation instead of global duration
+        use_median: Display median rates instead of mean rates
         distribution_bar_class: Class to use for distribution bars (must have compatible interface)
     """
 
@@ -154,13 +156,25 @@ def display_channels_table(
         )
 
     # Dictionary of sort key functions
+    def hz_sort_key(c: ChannelInfo) -> float:
+        if use_median and (hz_median := c.get("hz_median")) is not None:
+            return hz_median
+        if index_duration and (hz_channel := c.get("hz_channel")) is not None:
+            return hz_channel
+        return c["hz"]
+
+    def bps_sort_key(c: ChannelInfo) -> float:
+        if use_median and (bps_median := c.get("bytes_per_second_median")) is not None:
+            return bps_median
+        return c.get("bytes_per_second") or 0
+
     sort_keys = {
         "topic": lambda c: c["topic"],
         "id": lambda c: c["id"],
         "msgs": lambda c: c["message_count"],
         "size": lambda c: c.get("size_bytes") or 0,
-        "hz": lambda c: (c["hz_channel"] if index_duration and c["hz_channel"] else c["hz"]),
-        "bps": lambda c: c.get("bytes_per_second") or 0,
+        "hz": hz_sort_key,
+        "bps": bps_sort_key,
         "b_per_msg": lambda c: c.get("bytes_per_message") or 0,
         "schema": lambda c: c.get("schema_name") or "",
         "percent": lambda c: c.get("size_bytes") or 0,  # Same as size for sorting purposes
@@ -240,7 +254,13 @@ def display_channels_table(
 
     # Populate rows
     for channel in sorted(data["channels"], key=get_sort_key, reverse=reverse):
-        hz = channel["hz_channel"] if index_duration and channel["hz_channel"] else channel["hz"]
+        # Determine Hz value to display
+        if use_median and channel.get("hz_median") is not None:
+            hz = channel["hz_median"]
+        elif index_duration and channel["hz_channel"] is not None:
+            hz = channel["hz_channel"]
+        else:
+            hz = channel["hz"]
 
         # Apply color based on schema
         topic_color = schema_to_color(channel["schema_name"])
@@ -267,8 +287,14 @@ def display_channels_table(
             percentage = (size / total_size * 100) if total_size > 0 else 0
             row.append(f"{percentage:.2f}%")
         if show_bps:
-            bps = channel["bytes_per_second"] if channel["bytes_per_second"] is not None else 0
-            row.append(bytes_to_human(int(bps)))
+            # Use median bytes per second if available and requested
+            if use_median and channel.get("bytes_per_second_median") is not None:
+                bps = channel["bytes_per_second_median"]
+            elif channel["bytes_per_second"] is not None:
+                bps = channel["bytes_per_second"]
+            else:
+                bps = 0
+            row.append(bytes_to_human(int(bps) if bps is not None else 0))
         if show_b_per_msg:
             b_per_msg = (
                 channel["bytes_per_message"] if channel["bytes_per_message"] is not None else 0

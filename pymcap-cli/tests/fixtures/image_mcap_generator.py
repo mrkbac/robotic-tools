@@ -113,7 +113,10 @@ def create_image_mcap(
     """
     output = io.BytesIO()
     writer = McapWriter(
-        output, chunk_size=1024 * 1024, compression=compression, encoder_factory=ROS2EncoderFactory()
+        output,
+        chunk_size=1024 * 1024,
+        compression=compression,
+        encoder_factory=ROS2EncoderFactory(),
     )
     writer.start()
 

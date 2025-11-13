@@ -106,6 +106,108 @@ def _calculate_channel_durations(info: RebuildInfo) -> dict[int, int]:
     }
 
 
+def _calculate_channel_intervals(info: RebuildInfo) -> dict[int, list[int]]:
+    """Calculate per-channel message intervals from message indexes.
+
+    Returns a dict mapping channel_id -> list of intervals (ns) between consecutive messages.
+    Uses message index information from rebuild. Intervals are calculated as
+    delta between consecutive message timestamps.
+    """
+    if not info.chunk_information:
+        return {}
+
+    # Collect all timestamps per channel
+    channel_timestamps: dict[int, list[int]] = defaultdict(list)
+
+    for chunk_info_list in info.chunk_information.values():
+        for chunk_info in chunk_info_list:
+            if not chunk_info.records:
+                continue
+
+            timestamps = [record[0] for record in chunk_info.records]
+            channel_timestamps[chunk_info.channel_id].extend(timestamps)
+
+    # Calculate intervals between consecutive messages
+    channel_intervals: dict[int, list[int]] = {}
+    for channel_id, timestamps in channel_timestamps.items():
+        if len(timestamps) < 2:
+            # Need at least 2 messages to calculate intervals
+            continue
+
+        # Sort timestamps to ensure correct ordering
+        sorted_timestamps = sorted(timestamps)
+
+        # Calculate deltas between consecutive messages
+        intervals = [
+            int(sorted_timestamps[i + 1] - sorted_timestamps[i])
+            for i in range(len(sorted_timestamps) - 1)
+        ]
+
+        # Filter out zero or negative intervals (can happen with concurrent publishers)
+        intervals = [interval for interval in intervals if interval > 0]
+
+        if intervals:
+            channel_intervals[channel_id] = intervals
+
+    return channel_intervals
+
+
+def _calculate_median_rates(
+    channel_intervals: dict[int, list[int]],
+    channel_sizes: dict[int, int] | None,
+    message_counts: dict[int, int],
+) -> dict[int, dict[str, float]]:
+    """Calculate median-based rate statistics from message intervals.
+
+    Args:
+        channel_intervals: Dict mapping channel_id -> list of intervals (ns)
+        channel_sizes: Optional dict mapping channel_id -> total bytes
+        message_counts: Dict mapping channel_id -> message count
+
+    Returns:
+        Dict mapping channel_id -> dict with median rate statistics:
+            - hz_median: Median Hz (messages per second)
+            - bps_median: Median bytes per second (if size data available)
+            - msgs_per_sec_median: Same as hz_median (for consistency)
+    """
+    median_rates: dict[int, dict[str, float]] = {}
+
+    for channel_id, intervals in channel_intervals.items():
+        if not intervals:
+            continue
+
+        # Convert each interval to Hz
+        hz_values = [1_000_000_000 / interval for interval in intervals]
+
+        # Calculate median Hz
+        sorted_hz = sorted(hz_values)
+        median_hz = sorted_hz[len(sorted_hz) // 2]
+
+        # Start building the result
+        result: dict[str, float] = {
+            "hz_median": median_hz,
+            "msgs_per_sec_median": median_hz,  # Same value
+        }
+
+        # Calculate median bytes per second if size data is available
+        if channel_sizes and channel_id in channel_sizes:
+            channel_size = channel_sizes[channel_id]
+            message_count = message_counts.get(channel_id, 0)
+
+            if message_count > 0:
+                # Median bytes/sec = median Hz * average bytes per message
+                avg_bytes_per_msg = channel_size / message_count
+                result["bps_median"] = median_hz * avg_bytes_per_msg
+            else:
+                result["bps_median"] = 0.0
+        else:
+            result["bps_median"] = None  # type: ignore[assignment]
+
+        median_rates[channel_id] = result
+
+    return median_rates
+
+
 def _calculate_optimal_bucket_count(duration_ns: int) -> int:
     """Calculate optimal bucket count to produce round time durations.
 
@@ -314,6 +416,15 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     if info.chunk_information:
         channel_durations = _calculate_channel_durations(info)
 
+    # Calculate per-channel intervals and median rates (always, when available)
+    channel_intervals: dict[int, list[int]] = {}
+    median_rates: dict[int, dict[str, float]] = {}
+    if info.chunk_information:
+        channel_intervals = _calculate_channel_intervals(info)
+        median_rates = _calculate_median_rates(
+            channel_intervals, info.channel_sizes, statistics.channel_message_counts
+        )
+
     # Calculate message distribution
     message_distribution = _calculate_message_distribution(
         info, statistics.message_start_time, statistics.message_end_time
@@ -353,7 +464,6 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
                 "max_concurrent": max_concurrent,
                 "max_concurrent_bytes": overlap_size,
             },
-            "indexes": [],
         },
         "channels": [],
         "schemas": [],
@@ -366,19 +476,6 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
             chunk_stats
         )
 
-    # Add chunk indexes
-    for chunk_index in summary.chunk_indexes:
-        output["chunks"]["indexes"].append(
-            {
-                "compression": chunk_index.compression,
-                "compressed_size": chunk_index.compressed_size,
-                "uncompressed_size": chunk_index.uncompressed_size,
-                "message_start_time": chunk_index.message_start_time,
-                "message_end_time": chunk_index.message_end_time,
-                "chunk_start_offset": chunk_index.chunk_start_offset,
-            }
-        )
-
     # Add channel information
     for channel in summary.channels.values():
         channel_id = channel.id
@@ -387,6 +484,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
         channel_size = info.channel_sizes.get(channel_id) if info.channel_sizes else None
         ch_duration_ns = channel_durations.get(channel_id)
         ch_distribution = per_channel_distributions.get(channel_id, [])
+        ch_median_rates = median_rates.get(channel_id)
 
         output["channels"].append(
             _build_channel_dict(
@@ -397,6 +495,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
                 channel_duration_ns=ch_duration_ns,
                 global_duration_ns=duration_ns,
                 message_distribution=ch_distribution,
+                median_rates=ch_median_rates,
             )
         )
 
@@ -444,6 +543,7 @@ def _build_channel_dict(
     channel_duration_ns: int | None,
     global_duration_ns: int,
     message_distribution: list[int],
+    median_rates: dict[str, float] | None = None,
 ) -> ChannelInfo:
     """Build channel information dict for JSON output with calculated metrics."""
     # Calculate Hz metrics
@@ -463,6 +563,11 @@ def _build_channel_dict(
         if message_count > 0:
             b_per_msg = channel_size / message_count
 
+    # Extract median rates
+    hz_median = median_rates.get("hz_median") if median_rates else None
+    bps_median = median_rates.get("bps_median") if median_rates else None
+    msgs_per_sec_median = median_rates.get("msgs_per_sec_median") if median_rates else None
+
     return {
         "id": channel.id,
         "topic": channel.topic,
@@ -473,8 +578,11 @@ def _build_channel_dict(
         "duration_ns": channel_duration_ns,
         "hz": hz_global,
         "hz_channel": hz_channel,
+        "hz_median": hz_median,
         "bytes_per_second": bps,
+        "bytes_per_second_median": bps_median,
         "bytes_per_message": b_per_msg,
+        "messages_per_second_median": msgs_per_sec_median,
         "message_distribution": message_distribution,
     }
 

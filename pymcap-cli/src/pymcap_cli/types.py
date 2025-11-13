@@ -57,17 +57,6 @@ class CompressionStats(TypedDict):
     duration_stats: Stats
 
 
-class ChunkIndexInfo(TypedDict):
-    """Information about a chunk index."""
-
-    compression: str
-    compressed_size: int
-    uncompressed_size: int
-    message_start_time: int
-    message_end_time: int
-    chunk_start_offset: int
-
-
 class ChunkOverlaps(TypedDict):
     """Chunk overlap information."""
 
@@ -80,7 +69,6 @@ class ChunksInfo(TypedDict):
 
     by_compression: dict[str, CompressionStats]
     overlaps: ChunkOverlaps
-    indexes: list[ChunkIndexInfo]
 
 
 class ChannelInfo(TypedDict):
@@ -95,8 +83,11 @@ class ChannelInfo(TypedDict):
     duration_ns: int | None
     hz: float
     hz_channel: float | None
+    hz_median: float | None
     bytes_per_second: float | None
+    bytes_per_second_median: float | None
     bytes_per_message: float | None
+    messages_per_second_median: float | None
     message_distribution: list[int]
 
 

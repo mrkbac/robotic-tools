@@ -267,6 +267,7 @@ def _display_channels_table(
     sort_key: str,
     reverse: bool,
     index_duration: bool,
+    use_median: bool,
 ) -> None:
     """Display channels table with sorting support."""
     display_channels_table(
@@ -287,6 +288,7 @@ def _display_channels_table(
         ),
         responsive=True,
         index_duration=index_duration,
+        use_median=use_median,
         distribution_bar_class=DistributionBar,
     )
 
@@ -381,6 +383,18 @@ def info(
             show_default=True,
         ),
     ] = False,
+    median: Annotated[
+        bool,
+        typer.Option(
+            "--median",
+            help=(
+                "Display median rates (Hz, bytes/s) instead of mean rates. "
+                "Requires --rebuild to calculate message intervals."
+            ),
+            rich_help_panel="Display Options",
+            show_default=True,
+        ),
+    ] = False,
 ) -> None:
     """Report statistics about an MCAP file.
 
@@ -435,8 +449,18 @@ def info(
         )
         console.print()
 
+    # Warn if --median is enabled but no median data available
+    has_median_data = any(ch["hz_median"] is not None for ch in data["channels"])
+    if median and not has_median_data:
+        console.print(
+            "[yellow]Warning:[/yellow] --median requires message interval data. "
+            "Use [cyan]--rebuild[/cyan] to calculate median rates. "
+            "Falling back to mean rates."
+        )
+        console.print()
+
     # Display all sections
     _display_file_info_and_summary(data)
     _display_message_distribution(data)
     _display_compression_table(data, info_data.chunk_information is not None)
-    _display_channels_table(data, sort.value, reverse, index_duration)
+    _display_channels_table(data, sort.value, reverse, index_duration, median)
