@@ -9,7 +9,7 @@ from mcap_ros2._dynamic import EncoderFunction, serialize_dynamic
 from mcap_ros2.decoder import DecoderFactory
 from mcap_ros2_support_fast.decoder import DecoderFactory as DecoderFactoryFast
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory as ROS2EncoderFactoryFast
-from small_mcap import DecodedMessageTuple, McapWriter, read_message_decoded
+from small_mcap import DecodedMessage, McapWriter, read_message_decoded
 
 
 class ROS2EncoderFactory:
@@ -70,7 +70,7 @@ def _read_and_write(
     )
 
     # First pass: read messages and collect data
-    messages_data: list[DecodedMessageTuple] = []
+    messages_data: list[DecodedMessage] = []
     with mcap_file.open("rb") as f:
         messages_data.extend(
             itertools.islice(read_message_decoded(f, decoder_factories=[decoder_factory]), msgs)

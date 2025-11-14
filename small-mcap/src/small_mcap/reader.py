@@ -6,7 +6,8 @@ import sys
 import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from typing import IO, TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, cast, overload
+from functools import cached_property
+from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 if TYPE_CHECKING:
     from lz4.frame import decompress as lz4_decompress  # type: ignore[import-untyped]
@@ -766,11 +767,16 @@ class DecoderFactoryProtocol(Protocol):
     ) -> Callable[[bytes], Any] | None: ...
 
 
-class DecodedMessageTuple(NamedTuple):
+@dataclass(frozen=True)
+class DecodedMessage:
     schema: Schema | None
     channel: Channel
     message: Message
-    decoded_message: Any
+    decoder_function: Callable[[Schema | None, Channel, Message], Any]
+
+    @cached_property
+    def decoded_message(self) -> Any:
+        return self.decoder_function(self.schema, self.channel, self.message)
 
 
 def read_message_decoded(
@@ -779,7 +785,7 @@ def read_message_decoded(
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
-) -> Iterable[DecodedMessageTuple]:
+) -> Iterable[DecodedMessage]:
     decoders: dict[int, Callable[[bytes], Any]] = {}
 
     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
@@ -801,6 +807,4 @@ def read_message_decoded(
     for schema, channel, message in read_message(
         stream, should_include, start_time_ns, end_time_ns
     ):
-        yield DecodedMessageTuple(
-            schema, channel, message, decoded_message(schema, channel, message)
-        )
+        yield DecodedMessage(schema, channel, message, decoded_message)

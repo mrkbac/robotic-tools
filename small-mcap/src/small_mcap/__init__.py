@@ -8,7 +8,7 @@ a container format designed for storing timestamped multimodal data.
 # Reader classes and functions
 from small_mcap.reader import (
     CRCValidationError,
-    DecodedMessageTuple,
+    DecodedMessage,
     DecoderFactoryProtocol,
     EndOfFileError,
     InvalidMagicError,
@@ -75,7 +75,7 @@ __all__ = [
     "ChunkIndex",
     "CompressionType",
     "DataEnd",
-    "DecodedMessageTuple",
+    "DecodedMessage",
     "DecoderFactoryProtocol",
     "EncoderFactoryProtocol",
     "EndOfFileError",
