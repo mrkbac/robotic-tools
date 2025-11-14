@@ -6,7 +6,7 @@ import sys
 import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from typing import IO, TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, overload
+from typing import IO, TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, cast, overload
 
 if TYPE_CHECKING:
     from lz4.frame import decompress as lz4_decompress  # type: ignore[import-untyped]
@@ -131,9 +131,7 @@ class LazyChunk:
     data_len: int  # Length of the compressed data
 
     @classmethod
-    def read_from_stream(
-        cls, stream: IO[bytes] | io.BufferedIOBase, record_start: int
-    ) -> "LazyChunk":
+    def read_from_stream(cls, stream: IO[bytes], record_start: int) -> "LazyChunk":
         """Read chunk metadata from stream without loading the compressed data."""
         data = stream.read(8 + 8 + 8 + 4 + 4)
         message_start_time, message_end_time, uncompressed_size, uncompressed_crc, str_len = (
@@ -152,7 +150,7 @@ class LazyChunk:
             data_len,
         )
 
-    def to_chunk(self, stream: IO[bytes] | io.BufferedIOBase) -> Chunk:
+    def to_chunk(self, stream: IO[bytes]) -> Chunk:
         """Convert to a full Chunk by reading from the stream."""
         current_pos = stream.tell()
         stream.seek(self.record_start)
@@ -223,7 +221,7 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapReco
 
 @overload
 def stream_reader(
-    stream: IO[bytes] | io.BufferedIOBase,
+    stream: IO[bytes],
     *,
     skip_magic: bool = False,
     validate_crc: bool = False,
@@ -234,7 +232,7 @@ def stream_reader(
 
 @overload
 def stream_reader(
-    stream: IO[bytes] | io.BufferedIOBase,
+    stream: IO[bytes],
     *,
     skip_magic: bool = False,
     validate_crc: bool = False,
@@ -245,7 +243,7 @@ def stream_reader(
 
 @overload
 def stream_reader(
-    stream: IO[bytes] | io.BufferedIOBase,
+    stream: IO[bytes],
     *,
     skip_magic: bool = False,
     validate_crc: bool = False,
@@ -255,7 +253,7 @@ def stream_reader(
 
 
 def stream_reader(
-    stream: IO[bytes] | io.BufferedIOBase,
+    stream: IO[bytes],
     *,
     skip_magic: bool = False,
     validate_crc: bool = False,
@@ -366,7 +364,7 @@ def _read_summary_from_iterable(stream_reader: Iterable[McapRecord | LazyChunk])
     return summary
 
 
-def get_summary(stream: IO[bytes] | io.BufferedIOBase) -> Summary | None:
+def get_summary(stream: IO[bytes]) -> Summary | None:
     """Get the start and end indexes of each chunk in the stream."""
     if not stream.seekable():
         return None
@@ -433,7 +431,7 @@ def _read_inner(
 
 
 def _read_message_seeking(
-    stream: IO[bytes] | io.BufferedIOBase,
+    stream: IO[bytes],
     should_include: _ShouldIncludeType,
     start_time_ns: int,
     end_time_ns: int,
@@ -454,9 +452,7 @@ def _read_message_seeking(
         if not should_include(channel, summary.schemas.get(channel.schema_id))
     }
 
-    def _lazy_yield(
-        stream: IO[bytes] | io.BufferedIOBase, index: ChunkIndex
-    ) -> Iterable[McapRecord | ChunkIndex]:
+    def _lazy_yield(stream: IO[bytes], index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
         # Emit the chunk index to prevent early loading and decompression of chunk
         yield index
         # late check for mcap with empty channel summary if this chunks is excluded entirely
@@ -508,7 +504,7 @@ def _read_message_seeking(
 
 
 def _read_message_non_seeking(
-    stream: IO[bytes] | io.BufferedIOBase,
+    stream: IO[bytes],
     should_include: _ShouldIncludeType,
     start_time_ns: int,
     end_time_ns: int,
@@ -703,13 +699,30 @@ def include_topics(topics: str | Iterable[str]) -> Callable[[Channel, Schema | N
 
 
 def read_message(
-    stream: IO[bytes] | io.BufferedIOBase | Iterable[IO[bytes] | _ReaderReturnType],
+    stream: IO[bytes] | Iterable[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
     validate_crc: bool = False,
 ) -> _ReaderReturnType:
-    if isinstance(stream, list):
+    if isinstance(stream, io.IOBase):
+        if stream.seekable():
+            return _read_message_seeking(
+                stream,
+                should_include,
+                start_time_ns,
+                end_time_ns,
+                validate_crc,
+            )
+        return _read_message_non_seeking(
+            stream,
+            should_include,
+            start_time_ns,
+            end_time_ns,
+            validate_crc,
+        )
+
+    if isinstance(stream, Iterable):
         remapper = Remapper()
 
         def remap_schema_channel(
@@ -729,34 +742,15 @@ def read_message(
             *[
                 remap_schema_channel(
                     read_message(s, should_include, start_time_ns, end_time_ns, validate_crc)
-                    if isinstance(s, IO)
-                    else s,
+                    if isinstance(s, io.IOBase)
+                    else cast("_ReaderReturnType", s),
                     stream_id=i,
                 )
                 for i, s in enumerate(stream)
             ],
             key=lambda x: x[2].log_time,
         )
-
-    # if not buffer io bufferedreader
-    if not isinstance(stream, io.BufferedIOBase):
-        stream = io.BufferedReader(stream)  # type: ignore[type-var]
-
-    if stream.seekable():
-        return _read_message_seeking(
-            stream,
-            should_include,
-            start_time_ns,
-            end_time_ns,
-            validate_crc,
-        )
-    return _read_message_non_seeking(
-        stream,
-        should_include,
-        start_time_ns,
-        end_time_ns,
-        validate_crc,
-    )
+    return None
 
 
 class _SchemaProtocol(Protocol):
@@ -780,7 +774,7 @@ class DecodedMessageTuple(NamedTuple):
 
 
 def read_message_decoded(
-    stream: IO[bytes] | io.BufferedIOBase | Iterable[IO[bytes] | _ReaderReturnType],
+    stream: IO[bytes] | Iterable[IO[bytes] | _ReaderReturnType],
     should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
