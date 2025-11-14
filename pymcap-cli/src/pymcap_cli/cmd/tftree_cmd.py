@@ -6,7 +6,6 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -16,6 +15,8 @@ from rich.live import Live
 from rich.table import Table
 from small_mcap import read_message_decoded
 from small_mcap.reader import include_topics
+
+from pymcap_cli.input_handler import open_input
 
 console = Console()
 app = typer.Typer()
@@ -229,12 +230,9 @@ def _build_tf_table(
 @app.command()
 def tftree(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to MCAP file",
+            help="Path to MCAP file (local file or HTTP/HTTPS URL)",
         ),
     ],
     static_only: Annotated[
@@ -262,7 +260,7 @@ def tftree(
         topics.append("/tf")
 
     try:
-        with file.open("rb") as f, Live(console=console) as live:
+        with open_input(file) as (f, _file_size), Live(console=console) as live:
             for msg in read_message_decoded(
                 f,
                 should_include=include_topics(topics),

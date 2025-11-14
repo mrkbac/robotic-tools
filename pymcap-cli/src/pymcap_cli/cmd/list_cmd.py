@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import io
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -10,6 +8,7 @@ from rich.console import Console
 from rich.table import Table
 from small_mcap import InvalidMagicError, RebuildInfo
 
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
 console = Console()
@@ -18,17 +17,15 @@ console = Console()
 list_app = typer.Typer(name="list", help="List records in an MCAP file")
 
 
-def _read_mcap_info(file_path: Path) -> RebuildInfo:
+def _read_mcap_info(file_path: str) -> RebuildInfo:
     """Read MCAP file info, with automatic rebuild on invalid magic."""
-    file_size = file_path.stat().st_size
-
-    with file_path.open("rb", buffering=0) as f_raw:
-        f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
+    with open_input(file_path) as (f_raw, file_size):
         try:
-            info = read_info(f_buffered)
+            info = read_info(f_raw)
         except InvalidMagicError:
             console.print("[yellow]Invalid MCAP magic, rebuilding info...[/yellow]")
-            info = rebuild_info(f_buffered, file_size)
+            f_raw.seek(0)  # Reset buffer to start
+            info = rebuild_info(f_raw, file_size)
 
     return info
 
@@ -36,12 +33,9 @@ def _read_mcap_info(file_path: Path) -> RebuildInfo:
 @list_app.command()
 def channels(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file",
+            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
         ),
     ],
 ) -> None:
@@ -77,12 +71,9 @@ def channels(
 @list_app.command()
 def chunks(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file",
+            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
         ),
     ],
 ) -> None:
@@ -143,12 +134,9 @@ def chunks(
 @list_app.command()
 def schemas(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file",
+            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
         ),
     ],
 ) -> None:
@@ -195,12 +183,9 @@ def schemas(
 @list_app.command()
 def attachments(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file",
+            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
         ),
     ],
 ) -> None:
@@ -246,12 +231,9 @@ def attachments(
 @list_app.command()
 def metadata(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file",
+            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
         ),
     ],
 ) -> None:

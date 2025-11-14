@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     McapProcessor,
     ProcessingOptions,
@@ -29,11 +29,9 @@ app = typer.Typer()
 @app.command()
 def compress(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to compress",
+            help="Path to the MCAP file to compress (local file or HTTP/HTTPS URL)",
         ),
     ],
     output: OutputPathOption,
@@ -67,16 +65,13 @@ def compress(
         compression=compression.value,
         chunk_size=chunk_size,
     )
-
-    file_size = file.stat().st_size
-
     console.print(f"[blue]Compressing '{file}' to '{output}'[/blue]")
 
     processor = McapProcessor(processing_options)
 
-    with file.open("rb") as input_stream, output.open("wb") as output_stream:
+    with open_input(file) as (f, file_size), output.open("wb") as output_stream:
         try:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            stats = processor.process([f], output_stream, [file_size])
 
             console.print("[green]✓ Compression completed successfully![/green]")
             console.print(

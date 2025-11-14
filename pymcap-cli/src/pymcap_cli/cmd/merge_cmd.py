@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     AttachmentsMode,
     McapProcessor,
@@ -33,12 +33,11 @@ app = typer.Typer()
 @app.command(name="merge")
 def merge(
     files: Annotated[
-        list[Path],
+        list[str],
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Paths to MCAP files to merge (2 or more files required)",
+            help=(
+                "Paths to MCAP files to merge (local files or HTTP/HTTPS URLs, 2 or more required)"
+            ),
         ),
     ],
     output: OutputPathOption,
@@ -88,15 +87,19 @@ def merge(
         compression=compression.value,
         chunk_size=chunk_size,
     )
-
-    file_sizes = [f.stat().st_size for f in files]
-
     # Create processor and run
     processor = McapProcessor(processing_options)
 
     # Use ExitStack to manage multiple file handles
     with contextlib.ExitStack() as stack:
-        input_streams = [stack.enter_context(f.open("rb")) for f in files]
+        input_streams = []
+        file_sizes = []
+
+        for f in files:
+            stream, size = stack.enter_context(open_input(f))
+            input_streams.append(stream)
+            file_sizes.append(size)
+
         output_stream = stack.enter_context(output.open("wb"))
 
         try:

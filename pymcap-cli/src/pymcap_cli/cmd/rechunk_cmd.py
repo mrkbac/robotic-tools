@@ -12,6 +12,7 @@ import typer
 from rich.console import Console
 
 from pymcap_cli.autocompletion import complete_all_topics
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     McapProcessor,
     ProcessingOptions,
@@ -50,11 +51,9 @@ Examples:
 )
 def rechunk(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to rechunk",
+            help="Path to the MCAP file to rechunk (local file or HTTP/HTTPS URL)",
         ),
     ],
     output: OutputPathOption,
@@ -108,13 +107,10 @@ def rechunk(
         )
         raise typer.Exit(1)
 
-    input_file = Path(file)
     output_file = Path(output)
 
     # Confirm overwrite if needed (file existence validated by Typer)
     confirm_output_overwrite(output_file, force)
-
-    file_size = input_file.stat().st_size
 
     # Compile patterns if using PATTERN strategy
     patterns: list[Pattern[str]] = []
@@ -149,7 +145,7 @@ def rechunk(
     # Create processor and run
     processor = McapProcessor(options)
 
-    with input_file.open("rb") as input_stream, output_file.open("wb") as output_stream:
+    with open_input(file) as (input_stream, file_size), output_file.open("wb") as output_stream:
         stats = processor.process([input_stream], output_stream, [file_size])
 
         # Report results

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -10,6 +9,7 @@ from rich.console import Console
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import rebuild_info
 
 console = Console()
@@ -20,12 +20,9 @@ app = typer.Typer()
 @app.command()
 def du(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to analyze",
+            help="Path to the MCAP file to analyze (local file or HTTP/HTTPS URL)",
         ),
     ],
     exact_sizes: Annotated[
@@ -45,8 +42,7 @@ def du(
 
     Note: This command will scan and uncompress the entire file.
     """
-    file_size = file.stat().st_size
-    with file.open("rb") as f:
+    with open_input(file) as (f, file_size):
         # Use rebuild_info to get channel sizes (du always rebuilds)
         info = rebuild_info(f, file_size, exact_sizes=exact_sizes)
 

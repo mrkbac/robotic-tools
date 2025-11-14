@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import base64
 import gzip
-import io
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
 from small_mcap import ChunkIndex, InvalidMagicError, RebuildInfo
 
-from pymcap_cli.debug_wrapper import DebugStreamWrapper
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import read_info, rebuild_info
 
 if TYPE_CHECKING:
@@ -610,11 +608,9 @@ class ChunkStats:
 @app.command(name="info-json")
 def info_json(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to analyze",
+            help="Path to the MCAP file to analyze (local file or HTTP/HTTPS URL)",
         ),
     ],
     rebuild: Annotated[
@@ -649,16 +645,7 @@ def info_json(
     ] = False,
 ) -> None:
     """Output MCAP file statistics as JSON with all available data."""
-    file_size = file.stat().st_size
-
-    debug_wrapper = None
-    with file.open("rb", buffering=0) as f_raw:
-        if debug:
-            debug_wrapper = DebugStreamWrapper(f_raw)
-            f_buffered: io.BufferedReader = io.BufferedReader(debug_wrapper, buffer_size=1024)
-        else:
-            f_buffered = io.BufferedReader(f_raw, buffer_size=1024)
-
+    with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
         if rebuild:
             info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
         else:
@@ -670,9 +657,6 @@ def info_json(
                     info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
                 else:
                     raise
-
-    if debug_wrapper:
-        debug_wrapper.print_stats(file_size)
 
     # Transform info to JSON-serializable dict
     output = info_to_dict(info, str(file), file_size)

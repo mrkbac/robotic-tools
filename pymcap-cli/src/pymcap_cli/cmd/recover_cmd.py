@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions, confirm_output_overwrite
 from pymcap_cli.types import (
     DEFAULT_CHUNK_SIZE,
@@ -23,11 +23,9 @@ app = typer.Typer()
 @app.command()
 def recover(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to recover",
+            help="Path to the MCAP file to recover (local file or HTTP/HTTPS URL)",
         ),
     ],
     output: OutputPathOption,
@@ -55,10 +53,6 @@ def recover(
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
-    input_file = file
-    output_file = output
-    file_size = input_file.stat().st_size
-
     # Convert recover options to unified processing options
     processing_options = ProcessingOptions(
         # Recovery mode enabled with all content included
@@ -79,9 +73,9 @@ def recover(
     # Create processor and run
     processor = McapProcessor(processing_options)
 
-    with input_file.open("rb") as input_stream, output_file.open("wb") as output_stream:
+    with open_input(file) as (f, file_size), output.open("wb") as output_stream:
         try:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            stats = processor.process([f], output_stream, [file_size])
 
             # Report results in recovery-style format
             console.print("[green]✓ Recovery completed successfully![/green]")

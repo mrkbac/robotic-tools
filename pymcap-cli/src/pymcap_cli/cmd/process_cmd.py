@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import contextlib
 from enum import Enum
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 
 from pymcap_cli.autocompletion import complete_all_topics
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     AttachmentsMode,
     McapProcessor,
@@ -57,12 +57,12 @@ Examples:
 )
 def process(
     file: Annotated[
-        list[Path],
+        list[str],
         typer.Argument(
-            ...,
-            exists=True,
-            dir_okay=False,
-            help="Path(s) to MCAP file(s) to process (or merge if multiple)",
+            help=(
+                "Path(s) to MCAP file(s) to process "
+                "(local files or HTTP/HTTPS URLs, or merge if multiple)"
+            ),
         ),
     ],
     output: OutputPathOption,
@@ -230,14 +230,20 @@ def process(
         raise typer.Exit(1) from None
 
     input_files = file
-    file_sizes = [f.stat().st_size for f in input_files]
 
     # Create processor and run
     processor = McapProcessor(options)
 
     # Use ExitStack to manage multiple file handles
     with contextlib.ExitStack() as stack:
-        input_streams = [stack.enter_context(f.open("rb")) for f in input_files]
+        input_streams = []
+        file_sizes = []
+
+        for f in input_files:
+            stream, size = stack.enter_context(open_input(f))
+            input_streams.append(stream)
+            file_sizes.append(size)
+
         output_stream = stack.enter_context(output.open("wb"))
 
         try:

@@ -1,11 +1,10 @@
 import io
-from typing import cast
 
 
-class DebugStreamWrapper:
+class DebugStreamWrapper(io.RawIOBase):
     """Wrapper for file streams that tracks I/O statistics."""
 
-    def __init__(self, stream: io.BufferedIOBase | io.RawIOBase) -> None:
+    def __init__(self, stream: io.RawIOBase) -> None:
         self.stream = stream
         self.read_calls = 0
         self.read_into_calls = 0
@@ -20,12 +19,10 @@ class DebugStreamWrapper:
         return data
 
     def seek(self, offset: int, whence: int = 0) -> int:
-        # print(f"SEEK {self.stream.tell()} {offset} {whence}")
         self.seek_calls += 1
         return self.stream.seek(offset, whence)
 
     def tell(self) -> int:
-        # print(f"TELL {self.stream.tell()}")
         self.tell_calls += 1
         return self.stream.tell()
 
@@ -38,14 +35,14 @@ class DebugStreamWrapper:
     def writable(self) -> bool:
         return self.stream.writable()
 
-    def readinto(self, b: memoryview) -> int | None:
+    def readinto(self, b) -> int | None:  # type: ignore[no-untyped-def]  # noqa: ANN001
         self.read_into_calls += 1
-        n = cast("int | None", self.stream.readinto(b))
+        n = self.stream.readinto(b)
         if n is not None:
             self.read_bytes += n
         return n
 
-    def truncate(self, size: int) -> int:
+    def truncate(self, size: int | None = None) -> int:
         return self.stream.truncate(size)
 
     def flush(self) -> None:

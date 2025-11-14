@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 
 from pymcap_cli.autocompletion import complete_all_topics
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     AttachmentsMode,
     McapProcessor,
@@ -33,11 +33,9 @@ app = typer.Typer()
 @app.command(name="filter")
 def filter_cmd(
     file: Annotated[
-        Path,
+        str,
         typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="Path to the MCAP file to filter",
+            help="Path to the MCAP file to filter (local file or HTTP/HTTPS URL)",
         ),
     ],
     output: OutputPathOption,
@@ -177,14 +175,12 @@ def filter_cmd(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
 
-    file_size = file.stat().st_size
-
     # Create processor and run
     processor = McapProcessor(processing_options)
 
-    with file.open("rb") as input_stream, output.open("wb") as output_stream:
+    with open_input(file) as (f, file_size), output.open("wb") as output_stream:
         try:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            stats = processor.process([f], output_stream, [file_size])
 
             # Report results
             report_processing_stats(stats, console, 1, "filter")
