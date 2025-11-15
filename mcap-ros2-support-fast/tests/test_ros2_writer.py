@@ -17,13 +17,18 @@ def test_write_messages() -> None:
     ros_writer.start()
     schema_name = "test_msgs/TestData"
     schema_data = b"string a\nint32 b"
+
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, schema_name, "ros2msg", schema_data)
+    ros_writer.add_channel(channel_id, "/test", "cdr", schema_id)
+
     for i in range(10):
-        ros_writer.add_message_object(
-            topic="/test",
-            schema_name=schema_name,
-            schema_data=schema_data,
-            message_obj={"a": f"string message {i}", "b": i},
+        ros_writer.add_message_encode(
+            channel_id=channel_id,
             log_time=i,
+            data={"a": f"string message {i}", "b": i},
             publish_time=i,
             sequence=i,
         )
@@ -46,13 +51,18 @@ def test_write_std_msgs_empty_messages() -> None:
     ros_writer.start()
     schema_name = "std_msgs/msg/Empty"
     schema_data = b""
+
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, schema_name, "ros2msg", schema_data)
+    ros_writer.add_channel(channel_id, "/test", "cdr", schema_id)
+
     for i in range(10):
-        ros_writer.add_message_object(
-            topic="/test",
-            schema_name=schema_name,
-            schema_data=schema_data,
-            message_obj={},
+        ros_writer.add_message_encode(
+            channel_id=channel_id,
             log_time=i,
+            data={},
             publish_time=i,
             sequence=i,
         )
@@ -74,14 +84,18 @@ def test_write_uint8_array_with_py_array() -> None:
     schema_name = "test_msgs/ByteArray"
     schema_data = b"uint8[] data"
 
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, schema_name, "ros2msg", schema_data)
+    ros_writer.add_channel(channel_id, "/image", "cdr", schema_id)
+
     for i in range(10):
         byte_array = array("B", [i] * 5)
-        ros_writer.add_message_object(
-            topic="/image",
-            schema_name=schema_name,
-            schema_data=schema_data,
-            message_obj={"data": byte_array},
+        ros_writer.add_message_encode(
+            channel_id=channel_id,
             log_time=i,
+            data={"data": byte_array},
             publish_time=i,
             sequence=i,
         )

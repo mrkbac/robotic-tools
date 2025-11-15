@@ -81,19 +81,40 @@ def _read_and_write(
         writer = McapWriter(temp_file, encoder_factory=encoder_factory)
         writer.start()
 
+        # Track schema and channel IDs
+        schema_ids: dict[str, int] = {}
+        channel_ids: dict[str, int] = {}
+        next_schema_id = 1
+        next_channel_id = 1
+
         for msg_data in messages_data:
-            schema, channel, message, decoded = msg_data
-            assert schema is not None
+            assert msg_data.schema is not None
+
+            # Register schema if needed
+            if msg_data.schema.name not in schema_ids:
+                schema_id = next_schema_id
+                next_schema_id += 1
+                writer.add_schema(schema_id, msg_data.schema.name, msg_data.schema.encoding, msg_data.schema.data)
+                schema_ids[msg_data.schema.name] = schema_id
+            else:
+                schema_id = schema_ids[msg_data.schema.name]
+
+            # Register channel if needed
+            if msg_data.channel.topic not in channel_ids:
+                channel_id = next_channel_id
+                next_channel_id += 1
+                writer.add_channel(channel_id, msg_data.channel.topic, msg_data.channel.message_encoding, schema_id, msg_data.channel.metadata)
+                channel_ids[msg_data.channel.topic] = channel_id
+            else:
+                channel_id = channel_ids[msg_data.channel.topic]
 
             # Write the message
-            writer.add_message_object(
-                topic=channel.topic,
-                schema_name=schema.name,
-                schema_data=schema.data,
-                message_obj=decoded,
-                log_time=message.log_time,
-                publish_time=message.publish_time,
-                sequence=message.sequence,
+            writer.add_message_encode(
+                channel_id=channel_id,
+                log_time=msg_data.message.log_time,
+                data=msg_data.decoded_message,
+                publish_time=msg_data.message.publish_time,
+                sequence=msg_data.message.sequence,
             )
 
         writer.finish()

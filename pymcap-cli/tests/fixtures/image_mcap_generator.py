@@ -129,6 +129,12 @@ def create_image_mcap(
         schema_data = SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode()
         topic = "/camera/image_compressed"
 
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    writer.add_schema(schema_id, schema_name, "ros2msg", schema_data)
+    writer.add_channel(channel_id, topic, "cdr", schema_id)
+
     # Generate frames at 30 FPS
     fps = 30
     time_step_ns = int(1e9 / fps)
@@ -166,12 +172,10 @@ def create_image_mcap(
                 "data": jpeg_data,
             }
 
-        writer.add_message_object(
-            topic=topic,
-            schema_name=schema_name,
-            schema_data=schema_data,
-            message_obj=message_obj,
+        writer.add_message_encode(
+            channel_id=channel_id,
             log_time=log_time,
+            data=message_obj,
             publish_time=log_time,
             sequence=i,
         )

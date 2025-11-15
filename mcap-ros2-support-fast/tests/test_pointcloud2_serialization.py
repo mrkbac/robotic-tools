@@ -115,15 +115,19 @@ def test_pointcloud2_basic_roundtrip():
     ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
     ros_writer.start()
 
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
+
     # Create a simple point cloud with 100 points
     msg, original_points = create_pointcloud2_xyz(100)
 
-    ros_writer.add_message_object(
-        topic="/points",
-        schema_name="sensor_msgs/msg/PointCloud2",
-        schema_data=POINTCLOUD2_SCHEMA.encode(),
-        message_obj=msg,
+    ros_writer.add_message_encode(
+        channel_id=channel_id,
         log_time=0,
+        data=msg,
         publish_time=0,
         sequence=0,
     )
@@ -191,14 +195,18 @@ def test_pointcloud2_empty():
     ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
     ros_writer.start()
 
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
+
     msg, _ = create_pointcloud2_xyz(0)
 
-    ros_writer.add_message_object(
-        topic="/points",
-        schema_name="sensor_msgs/msg/PointCloud2",
-        schema_data=POINTCLOUD2_SCHEMA.encode(),
-        message_obj=msg,
+    ros_writer.add_message_encode(
+        channel_id=channel_id,
         log_time=0,
+        data=msg,
         publish_time=0,
         sequence=0,
     )
@@ -222,15 +230,19 @@ def test_pointcloud2_large():
     ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
     ros_writer.start()
 
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
+
     # Use 4071 points like in the bug report
     msg, _original_points = create_pointcloud2_xyz(4071)
 
-    ros_writer.add_message_object(
-        topic="/points",
-        schema_name="sensor_msgs/msg/PointCloud2",
-        schema_data=POINTCLOUD2_SCHEMA.encode(),
-        message_obj=msg,
+    ros_writer.add_message_encode(
+        channel_id=channel_id,
         log_time=0,
+        data=msg,
         publish_time=0,
         sequence=0,
     )
@@ -288,12 +300,16 @@ def test_pointfield_padding():
         "is_dense": False,
     }
 
-    ros_writer.add_message_object(
-        topic="/points",
-        schema_name="sensor_msgs/msg/PointCloud2",
-        schema_data=POINTCLOUD2_SCHEMA.encode(),
-        message_obj=msg,
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
+
+    ros_writer.add_message_encode(
+        channel_id=channel_id,
         log_time=0,
+        data=msg,
         publish_time=0,
         sequence=0,
     )
@@ -320,14 +336,18 @@ def test_pointcloud2_various_sizes(num_points):
     ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
     ros_writer.start()
 
+    # Register schema and channel
+    schema_id = 1
+    channel_id = 1
+    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
+
     msg, _ = create_pointcloud2_xyz(num_points)
 
-    ros_writer.add_message_object(
-        topic="/points",
-        schema_name="sensor_msgs/msg/PointCloud2",
-        schema_data=POINTCLOUD2_SCHEMA.encode(),
-        message_obj=msg,
+    ros_writer.add_message_encode(
+        channel_id=channel_id,
         log_time=0,
+        data=msg,
         publish_time=0,
         sequence=0,
     )

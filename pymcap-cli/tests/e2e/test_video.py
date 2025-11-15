@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pymcap_cli.cmd.video_cmd import VideoCodec, VideoEncoderError, encode_video
+from pymcap_cli.cmd.video_cmd import EncoderBackend, VideoCodec, VideoEncoderError, encode_video
 
 
 @pytest.mark.e2e
@@ -20,13 +20,12 @@ class TestVideoCommand:
         output_file = tmp_path / "compressed_output.mp4"
 
         encode_video(
-            mcap_path=image_compressed_mcap,
+            mcap_path=str(image_compressed_mcap),
             topics=["/camera/image_compressed"],
             output_path=output_file,
             codec=VideoCodec.H264,
-            encoder_preference="software",
+            encoder_backend=EncoderBackend.SOFTWARE,
             quality=23,
-            watermark=False,
         )
 
         # Verify video was created
@@ -42,13 +41,12 @@ class TestVideoCommand:
         output_file = tmp_path / "raw_output.mp4"
 
         encode_video(
-            mcap_path=image_rgb_mcap,
+            mcap_path=str(image_rgb_mcap),
             topics=["/camera/image_raw"],
             output_path=output_file,
             codec=VideoCodec.H264,
-            encoder_preference="software",
+            encoder_backend=EncoderBackend.SOFTWARE,
             quality=23,
-            watermark=False,
         )
 
         # Verify video was created
@@ -64,13 +62,12 @@ class TestVideoCommand:
         output_file = tmp_path / "small_output.mp4"
 
         encode_video(
-            mcap_path=image_small_mcap,
+            mcap_path=str(image_small_mcap),
             topics=["/camera/image_compressed"],
             output_path=output_file,
             codec=VideoCodec.H264,
-            encoder_preference="software",
+            encoder_backend=EncoderBackend.SOFTWARE,
             quality=23,
-            watermark=False,
         )
 
         # Verify video was created
@@ -85,15 +82,14 @@ class TestVideoCommand:
 
         output_file = tmp_path / "output.mp4"
 
-        with pytest.raises(VideoEncoderError, match="not found or is not an image topic"):
+        with pytest.raises(VideoEncoderError, match="not found or not image topics"):
             encode_video(
-                mcap_path=image_compressed_mcap,
+                mcap_path=str(image_compressed_mcap),
                 topics=["/nonexistent/topic"],
                 output_path=output_file,
                 codec=VideoCodec.H264,
-                encoder_preference="software",
+                encoder_backend=EncoderBackend.SOFTWARE,
                 quality=23,
-                watermark=False,
             )
 
     def test_video_unsupported_schema(self, simple_mcap: Path, tmp_path: Path):
@@ -104,15 +100,14 @@ class TestVideoCommand:
 
         output_file = tmp_path / "output.mp4"
 
-        with pytest.raises(VideoEncoderError, match="not found or is not an image topic"):
+        with pytest.raises(VideoEncoderError, match="not found or not image topics"):
             encode_video(
-                mcap_path=simple_mcap,
+                mcap_path=str(simple_mcap),
                 topics=["/test"],
                 output_path=output_file,
                 codec=VideoCodec.H264,
-                encoder_preference="software",
+                encoder_backend=EncoderBackend.SOFTWARE,
                 quality=23,
-                watermark=False,
             )
 
     def test_video_with_watermark(self, image_compressed_mcap: Path, tmp_path: Path):
@@ -124,13 +119,12 @@ class TestVideoCommand:
         output_file = tmp_path / "watermark_output.mp4"
 
         encode_video(
-            mcap_path=image_compressed_mcap,
+            mcap_path=str(image_compressed_mcap),
             topics=["/camera/image_compressed"],
             output_path=output_file,
             codec=VideoCodec.H264,
-            encoder_preference="software",
+            encoder_backend=EncoderBackend.SOFTWARE,
             quality=23,
-            watermark=True,
         )
 
         # Verify video was created
@@ -146,13 +140,12 @@ class TestVideoCommand:
         output_file = tmp_path / "no_watermark_output.mp4"
 
         encode_video(
-            mcap_path=image_compressed_mcap,
+            mcap_path=str(image_compressed_mcap),
             topics=["/camera/image_compressed"],
             output_path=output_file,
             codec=VideoCodec.H264,
-            encoder_preference="software",
+            encoder_backend=EncoderBackend.SOFTWARE,
             quality=23,
-            watermark=False,
         )
 
         # Verify video was created

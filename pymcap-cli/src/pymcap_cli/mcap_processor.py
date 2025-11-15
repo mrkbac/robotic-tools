@@ -248,7 +248,7 @@ class MessageGroup:
                         "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
                     )
                     self.chunk_builder.compression = CompressionType.NONE
-            self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
+            self.writer.add_chunk(chunk, message_indexes)
 
         self.message_count += 1
 
@@ -257,7 +257,7 @@ class MessageGroup:
         result = self.chunk_builder.finalize()
         if result is not None:
             chunk, message_indexes = result
-            self.writer.add_chunk_with_indexes(chunk, list(message_indexes.values()))
+            self.writer.add_chunk(chunk, message_indexes)
 
 
 # Shared helper functions for command-line interfaces
@@ -463,6 +463,10 @@ class McapProcessor:
         self.rechunk_groups: list[MessageGroup] = []  # Track unique groups
         self.pattern_index_to_group: dict[int, MessageGroup] = {}  # For PATTERN mode cache
 
+        # Track which schemas/channels we've written to the main file (not in chunks)
+        self.written_schemas: set[int] = set()
+        self.written_channels: set[int] = set()
+
     def _compute_channel_filter_decision(self, topic: str) -> bool:
         """Compute whether a channel with given topic should be included.
 
@@ -473,6 +477,28 @@ class McapProcessor:
         if self.options.exclude_topics:
             return not any(p.search(topic) for p in self.options.exclude_topics)
         return True
+
+    def _ensure_channel_written(self, channel_id: int, writer: McapWriter) -> None:
+        """Ensure channel and its schema are written to the main file (not in chunks)."""
+        if channel_id in self.written_channels:
+            return
+
+        channel = self.channels.get(channel_id)
+        if not channel:
+            return
+
+        # Write schema first if needed
+        if channel.schema_id != 0 and channel.schema_id not in self.written_schemas:
+            schema = self.schemas.get(channel.schema_id)
+            if schema:
+                writer.add_schema(schema.id, schema.name, schema.encoding, schema.data)
+                self.written_schemas.add(schema.id)
+
+        # Write channel
+        writer.add_channel(
+            channel.id, channel.topic, channel.message_encoding, channel.schema_id, channel.metadata
+        )
+        self.written_channels.add(channel_id)
 
     def _get_remapped_schema_id(self, stream_id: int, original_schema_id: int) -> int:
         """Get the remapped schema ID for an original schema ID.
@@ -681,12 +707,13 @@ class McapProcessor:
             group = self._get_or_create_group_for_channel(message.channel_id, channel, writer)
 
             # Ensure channel is written to main file (not in chunks)
-            writer.ensure_channel_written(message.channel_id)
+            self._ensure_channel_written(message.channel_id, writer)
 
             # Add message to its group (chunk builder auto-ensures within chunks)
             group.add_message(message)
         else:
-            # Normal mode: writer auto-ensures channel and schema are written
+            # Normal mode: ensure channel is written before writing message
+            self._ensure_channel_written(message.channel_id, writer)
             writer.add_message(
                 channel_id=message.channel_id,
                 log_time=message.log_time,
@@ -1085,10 +1112,10 @@ class McapProcessor:
                 for channel_id in remapped_channel_ids:
                     # Check if channel should be included
                     if channel_id not in self.excluded_channels:
-                        writer.ensure_channel_written(channel_id)
+                        self._ensure_channel_written(channel_id, writer)
 
                 # Fast-copy the chunk with its indexes
-                writer.add_chunk_with_indexes(chunk, indexes)
+                writer.add_chunk(chunk, {idx.channel_id: idx for idx in indexes})
                 self.stats.chunks_copied += 1
 
     def _process_chunk_fallback(

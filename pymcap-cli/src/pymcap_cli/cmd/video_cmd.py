@@ -656,6 +656,7 @@ def video(
         ),
     ] = False,
 ) -> None:
+    """Encode video from image topics in an MCAP file."""
     if not output.parent.exists():
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
         raise typer.Exit(1)

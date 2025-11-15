@@ -17,6 +17,7 @@ from small_mcap.records import (
     DataEnd,
     Footer,
     Header,
+    McapRecord,
     Message,
     MessageIndex,
     Metadata,
@@ -101,52 +102,11 @@ class _CRCWriter:
         self._f.close()
 
 
-def _compress_chunk_data(
-    data: bytes, compression: CompressionType, min_ratio: float = 0.05
-) -> tuple[bytes, str]:
-    """
-    Compress chunk data and return (compressed_data, compression_type_used).
-
-    Falls back to uncompressed if compression doesn't save at least min_ratio (default 5%).
-
-    :param data: Uncompressed chunk data
-    :param compression: Desired compression type
-    :param min_ratio: Minimum compression ratio to use compression (default 0.05 = 5%)
-    :return: Tuple of (compressed_data, compression_type_string)
-    """
-    if compression == CompressionType.NONE:
-        return data, ""
-
-    # Try compression
-    if compression == CompressionType.ZSTD:
-        if zstandard is None:
-            raise ImportError("zstandard module not available")
-        cctx = zstandard.ZstdCompressor()
-        compressed = cctx.compress(data)
-    elif compression == CompressionType.LZ4:
-        if lz4_compress is None:
-            raise ImportError("lz4 module not available")
-        compressed = lz4_compress(data)
-    else:
-        raise ValueError(f"Unsupported compression type: {compression}")
-
-    # Check if compression is beneficial
-    original_size = len(data)
-    compressed_size = len(compressed)
-    savings_ratio = (original_size - compressed_size) / original_size
-
-    if savings_ratio < min_ratio:
-        # Compression not beneficial, use uncompressed
-        return data, ""
-
-    return compressed, compression.value
-
-
 def _write_summary_section(
     buffer: io.BytesIO,
     offsets: list[SummaryOffset],
     opcode: Opcode,
-    items: list[Any],
+    items: list[McapRecord],
     summary_start: int,
 ) -> None:
     """Write a group of records to summary and add corresponding offset."""
@@ -207,6 +167,394 @@ def _calculate_summary_crc(
         summary_offset_start,
     )
     return zlib.crc32(footer_fields, summary_crc)
+
+
+class McapWriterRaw:
+    def __init__(
+        self,
+        output: BinaryIO,
+        index_types: IndexType = IndexType.ALL,
+        repeat_channels: bool = True,
+        repeat_schemas: bool = True,
+        use_statistics: bool = True,
+        use_summary_offsets: bool = True,
+        enable_crcs: bool = True,
+        enable_data_crcs: bool = False,
+    ) -> None:
+        # Configuration
+        self.output = output
+        self.index_types = index_types
+        self.repeat_channels = repeat_channels
+        self.repeat_schemas = repeat_schemas
+        self.use_statistics = use_statistics
+        self.use_summary_offsets = use_summary_offsets
+        self.enable_crcs = enable_crcs
+        self.enable_data_crcs = enable_data_crcs
+
+        # Writer state
+        self._started = False
+        self._finished = False
+
+        # Schemas and channels
+        self.schemas: dict[int, Schema] = {}
+        self.channels: dict[int, Channel] = {}
+
+        # Track which schemas/channels have been written to main file (not in chunks)
+        self._main_written_schemas: set[int] = set()
+        self._main_written_channels: set[int] = set()
+
+        # Indexes
+        self.chunk_indices: list[ChunkIndex] = []
+        self.attachment_indexes: list[AttachmentIndex] = []
+        self.metadata_indexes: list[MetadataIndex] = []
+
+        # Encoder factory caching (for automatic schema/channel registration)
+        self._schema_ids_by_name: dict[str, int] = {}
+        self._channel_ids_by_topic: dict[str, int] = {}
+        self._next_schema_id = 1
+        self._next_channel_id = 1
+
+        # Statistics tracking
+        self.statistics = Statistics(
+            attachment_count=0,
+            channel_count=0,
+            channel_message_counts=defaultdict(int),
+            chunk_count=0,
+            message_count=0,
+            metadata_count=0,
+            message_start_time=0,
+            message_end_time=0,
+            schema_count=0,
+        )
+
+        # I/O components
+        self.crc_writer = _CRCWriter(output, enable_crcs)
+
+    def start(self, profile: str = "", library: str = "pymcap-cli 0.1.0") -> None:
+        """Start writing the MCAP file."""
+        if self._started:
+            raise RuntimeError("Writer already started")
+
+        # Write header
+        self.crc_writer.write(MAGIC)
+        header_data = Header(profile=profile, library=library).write_record()
+        self.crc_writer.write(header_data)
+
+        self._started = True
+
+    def add_schema(self, schema_id: int, name: str, encoding: str, data: bytes) -> None:
+        """Add a schema to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        schema = Schema(id=schema_id, name=name, encoding=encoding, data=data)
+        self.schemas[schema.id] = schema
+
+        self._write_record(schema)
+
+    def add_channel(
+        self,
+        channel_id: int,
+        topic: str,
+        message_encoding: str,
+        schema_id: int,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        """Add a channel to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Validate schema_id exists if non-zero
+        if schema_id != 0 and schema_id not in self.schemas:
+            raise ValueError(
+                f"Schema ID {schema_id} does not exist. "
+                f"Add the schema using add_schema() before adding this channel."
+            )
+
+        channel = Channel(
+            id=channel_id,
+            schema_id=schema_id,
+            topic=topic,
+            message_encoding=message_encoding,
+            metadata=metadata or {},
+        )
+        self.channels[channel.id] = channel
+
+        self._write_record(channel)
+
+    def add_message(
+        self,
+        channel_id: int,
+        log_time: int,
+        data: bytes,
+        publish_time: int,
+        sequence: int = 0,
+    ) -> None:
+        """Add a message to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Validate channel_id exists
+        if channel_id not in self.channels:
+            raise ValueError(
+                f"Channel ID {channel_id} does not exist. "
+                f"Add the channel using add_channel() before adding messages to it."
+            )
+
+        message = Message(
+            channel_id=channel_id,
+            sequence=sequence,
+            log_time=log_time,
+            publish_time=publish_time,
+            data=data,
+        )
+
+        self._write_record(message)
+
+    def add_attachment(
+        self,
+        log_time: int,
+        create_time: int,
+        name: str,
+        media_type: str,
+        data: bytes,
+    ) -> None:
+        """Add an attachment to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        attachment = Attachment(
+            log_time=log_time,
+            create_time=create_time,
+            name=name,
+            media_type=media_type,
+            data=data,
+        )
+        offset = self.crc_writer.tell()
+        data = attachment.write_record()
+        self.crc_writer.write(data)
+
+        self.attachment_indexes.append(
+            AttachmentIndex(
+                offset=offset,
+                length=len(data),
+                log_time=log_time,
+                create_time=create_time,
+                data_size=len(attachment.data),
+                name=name,
+                media_type=media_type,
+            )
+        )
+
+        self.statistics.attachment_count += 1
+
+    def add_metadata(self, name: str, metadata: dict[str, str]) -> None:
+        """Add a metadata record to the file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        record = Metadata(name=name, metadata=metadata)
+
+        offset = self.crc_writer.tell()
+        data = record.write_record()
+        self.crc_writer.write(data)
+
+        self.metadata_indexes.append(MetadataIndex(offset=offset, length=len(data), name=name))
+
+        self.statistics.metadata_count += 1
+
+    def add_chunk(self, chunk: Chunk, message_indices: dict[int, MessageIndex]) -> None:
+        """Write a chunk and its indexes to output."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Update statistics for messages in chunk
+        if self.statistics.message_count == 0:
+            self.statistics.message_start_time = chunk.message_start_time
+        else:
+            self.statistics.message_start_time = min(
+                chunk.message_start_time, self.statistics.message_start_time
+            )
+        self.statistics.message_end_time = max(
+            chunk.message_end_time, self.statistics.message_end_time
+        )
+
+        for idx in message_indices.values():
+            self.statistics.channel_message_counts[idx.channel_id] += len(idx.records)
+            self.statistics.message_count += len(idx.records)
+
+        self.statistics.chunk_count += 1
+
+        # Write chunk
+        chunk_start_offset = self.crc_writer.tell()
+        chunk_data = chunk.write_record()
+        self.crc_writer.write(chunk_data)
+
+        # Write message indexes
+        message_index_start_offset = self.crc_writer.tell()
+        message_index_offsets: dict[int, int] = {}
+        index_buffer = io.BytesIO()
+
+        if self.index_types & IndexType.MESSAGE:
+            for idx in message_indices.values():
+                message_index_offsets[idx.channel_id] = (
+                    message_index_start_offset + index_buffer.tell()
+                )
+                index_buffer.write(idx.write_record())
+
+        index_data = index_buffer.getvalue()
+        self.crc_writer.write(index_data)
+
+        # Store chunk index
+        self.chunk_indices.append(
+            ChunkIndex(
+                message_start_time=chunk.message_start_time,
+                message_end_time=chunk.message_end_time,
+                chunk_start_offset=chunk_start_offset,
+                chunk_length=len(chunk_data),
+                message_index_offsets=message_index_offsets,
+                message_index_length=len(index_data),
+                compression=chunk.compression,
+                compressed_size=len(chunk.data),
+                uncompressed_size=chunk.uncompressed_size,
+            )
+        )
+
+    def finish(self) -> None:
+        """Finish writing the MCAP file."""
+        if not self._started:
+            raise RuntimeError("Writer not started. Call start() first.")
+        if self._finished:
+            return
+
+        # Write DataEnd record
+        data_end = DataEnd(data_section_crc=self.crc_writer.crc).write_record()
+        self.crc_writer.enable_crc = False  # No need to include DataEnd in CRC
+        self.crc_writer.write(data_end)
+
+        # Build and write summary section
+        summary_start = self.crc_writer.tell()
+        summary_data, summary_offsets = self._build_summary(summary_start)
+        summary_crc = _calculate_summary_crc(
+            summary_data, summary_start, summary_offsets, self.use_summary_offsets, self.enable_crcs
+        )
+        self.crc_writer.write(summary_data)
+
+        # Write footer
+        summary_offset_start = _calculate_summary_offset_start(
+            summary_start, summary_data, summary_offsets, self.use_summary_offsets
+        )
+        footer = Footer(
+            summary_start=0 if len(summary_data) == 0 else summary_start,
+            summary_offset_start=summary_offset_start,
+            summary_crc=summary_crc,
+        )
+        self.crc_writer.write(footer.write_record())
+
+        # Write closing magic
+        self.crc_writer.write(MAGIC)
+
+        self._finished = True
+
+    def _write_record(self, record: McapRecord) -> None:
+        """Write a record to the output, either directly or via chunk builder."""
+        self.crc_writer.write(record.write_record())
+
+    def _build_summary(self, summary_start: int) -> tuple[bytes, list[SummaryOffset]]:
+        """Build summary section and return (summary_data, summary_offsets)."""
+        summary_buffer = io.BytesIO()
+        summary_offsets: list[SummaryOffset] = []
+
+        self.statistics.schema_count = len(self.schemas)
+        self.statistics.channel_count = len(self.channels)
+
+        # Define sections to write (opcode, items, should_write)
+        sections = [
+            (Opcode.SCHEMA, list(self.schemas.values()), self.repeat_schemas),
+            (Opcode.CHANNEL, list(self.channels.values()), self.repeat_channels),
+            (Opcode.STATISTICS, [self.statistics], self.use_statistics),
+            (Opcode.CHUNK_INDEX, self.chunk_indices, bool(self.index_types & IndexType.CHUNK)),
+            (
+                Opcode.ATTACHMENT_INDEX,
+                self.attachment_indexes,
+                bool(self.index_types & IndexType.ATTACHMENT),
+            ),
+            (
+                Opcode.METADATA_INDEX,
+                self.metadata_indexes,
+                bool(self.index_types & IndexType.METADATA),
+            ),
+        ]
+
+        # Write all sections using data-driven approach
+        for opcode, items, should_write in sections:
+            if should_write and items:
+                _write_summary_section(
+                    summary_buffer, summary_offsets, opcode, items, summary_start
+                )
+
+        # Write summary offsets at the end
+        if self.use_summary_offsets:
+            for offset in summary_offsets:
+                summary_buffer.write(offset.write_record())
+
+        return summary_buffer.getvalue(), summary_offsets
+
+
+# Chunked writer
+
+
+def _compress_chunk_data(
+    data: bytes, compression: CompressionType, min_ratio: float = 0.05
+) -> tuple[bytes, str]:
+    """
+    Compress chunk data and return (compressed_data, compression_type_used).
+
+    Falls back to uncompressed if compression doesn't save at least min_ratio (default 5%).
+
+    :param data: Uncompressed chunk data
+    :param compression: Desired compression type
+    :param min_ratio: Minimum compression ratio to use compression (default 0.05 = 5%)
+    :return: Tuple of (compressed_data, compression_type_string)
+    """
+    if compression == CompressionType.NONE:
+        return data, ""
+
+    # Try compression
+    if compression == CompressionType.ZSTD:
+        if zstandard is None:
+            raise ImportError("zstandard module not available")
+        cctx = zstandard.ZstdCompressor()
+        compressed = cctx.compress(data)
+    elif compression == CompressionType.LZ4:
+        if lz4_compress is None:
+            raise ImportError("lz4 module not available")
+        compressed = lz4_compress(data)
+    else:
+        raise ValueError(f"Unsupported compression type: {compression}")
+
+    # Check if compression is beneficial
+    original_size = len(data)
+    compressed_size = len(compressed)
+    savings_ratio = (original_size - compressed_size) / original_size
+
+    if savings_ratio < min_ratio:
+        # Compression not beneficial, use uncompressed
+        return data, ""
+
+    return compressed, compression.value
 
 
 class _ChunkBuilder:
@@ -290,6 +638,8 @@ class _ChunkBuilder:
             )
 
             self.num_messages += 1
+        else:
+            raise TypeError(f"Unsupported record type: {type(record).__name__}")
         self.buffer_data[self.buffer_pos : self.buffer_pos + record_len] = record_data
         self.buffer_pos += record_len
 
@@ -330,220 +680,73 @@ class EncoderFactoryProtocol(Protocol):
     def encoder_for(self, schema: Schema | None) -> Callable[[Any], bytes] | None: ...
 
 
-class McapWriter:
-    """
-    MCAP file writer with simple imperative API.
-    Handles chunking, compression, indexing, and CRC generation.
-    """
-
+class McapWriter(McapWriterRaw):
     def __init__(
         self,
         output: BinaryIO,
-        chunk_size: int = 1024 * 1024,
-        compression: CompressionType = CompressionType.ZSTD,
         index_types: IndexType = IndexType.ALL,
         repeat_channels: bool = True,
         repeat_schemas: bool = True,
-        use_chunking: bool = True,
         use_statistics: bool = True,
         use_summary_offsets: bool = True,
         enable_crcs: bool = True,
         enable_data_crcs: bool = False,
+        use_chunking: bool = True,
+        chunk_size: int = 1024 * 1024,
+        compression: CompressionType = CompressionType.ZSTD,
         encoder_factory: EncoderFactoryProtocol | None = None,
     ) -> None:
-        # Validate compression type
-        if not isinstance(compression, CompressionType):
-            raise TypeError(
-                f"compression must be a CompressionType enum, got {type(compression).__name__}. "
-                f"Valid values: CompressionType.NONE, CompressionType.LZ4, CompressionType.ZSTD"
-            )
-
-        # Check if required compression libraries are available
-        if compression == CompressionType.LZ4 and lz4_compress is None:
-            raise ValueError(
-                "LZ4 compression requested but lz4 module is not installed. "
-                "Install it with: pip install lz4"
-            )
-
-        if compression == CompressionType.ZSTD and zstandard is None:
-            raise ValueError(
-                "ZSTD compression requested but zstandard module is not installed. "
-                "Install it with: pip install zstandard"
-            )
-
-        # Configuration
-        self.output = output
+        super().__init__(
+            output=output,
+            index_types=index_types,
+            repeat_channels=repeat_channels,
+            repeat_schemas=repeat_schemas,
+            use_statistics=use_statistics,
+            use_summary_offsets=use_summary_offsets,
+            enable_crcs=enable_crcs,
+            enable_data_crcs=enable_data_crcs,
+        )
+        self.use_chunking = use_chunking
         self.chunk_size = chunk_size
         self.compression = compression
-        self.index_types = index_types
-        self.repeat_channels = repeat_channels
-        self.repeat_schemas = repeat_schemas
-        self.use_chunking = use_chunking
-        self.use_statistics = use_statistics
-        self.use_summary_offsets = use_summary_offsets
-        self.enable_crcs = enable_crcs
-        self.enable_data_crcs = enable_data_crcs
         self.encoder_factory = encoder_factory
-
-        # Writer state
-        self._started = False
-        self._finished = False
-
-        # Schemas and channels
-        self.schemas: dict[int, Schema] = {}
-        self.channels: dict[int, Channel] = {}
-
-        # Track which schemas/channels have been written to main file (not in chunks)
-        self._main_written_schemas: set[int] = set()
-        self._main_written_channels: set[int] = set()
-
-        # Indexes
-        self.chunk_indices: list[ChunkIndex] = []
-        self.attachment_indexes: list[AttachmentIndex] = []
-        self.metadata_indexes: list[MetadataIndex] = []
-
-        # Encoder factory caching (for automatic schema/channel registration)
-        self._schema_ids_by_name: dict[str, int] = {}
-        self._channel_ids_by_topic: dict[str, int] = {}
-        self._next_schema_id = 1
-        self._next_channel_id = 1
-
-        # Statistics tracking
-        self.statistics = Statistics(
-            attachment_count=0,
-            channel_count=0,
-            channel_message_counts=defaultdict(int),
-            chunk_count=0,
-            message_count=0,
-            metadata_count=0,
-            message_start_time=0,
-            message_end_time=0,
-            schema_count=0,
-        )
-
-        # I/O components
-        self.crc_writer = _CRCWriter(output, enable_crcs)
         self.chunk_builder: _ChunkBuilder | None = None
         if use_chunking:
             self.chunk_builder = _ChunkBuilder(
                 compression, enable_crcs, chunk_size, self.schemas, self.channels
             )
 
-    def start(self, profile: str = "", library: str = "pymcap-cli 0.1.0") -> None:
-        """Start writing the MCAP file."""
-        if self._started:
-            raise RuntimeError("Writer already started")
-
-        # Use factory profile/library if available
-        if self.encoder_factory is not None:
-            profile = self.encoder_factory.profile
-            library = self.encoder_factory.library
-
-        # Write header
-        self.crc_writer.write(MAGIC)
-        header_data = Header(profile=profile, library=library).write_record()
-        self.crc_writer.write(header_data)
-
-        self._started = True
-
-    def add_schema(self, schema_id: int, name: str, encoding: str, data: bytes) -> None:
-        """Add a schema to the file."""
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        schema = Schema(id=schema_id, name=name, encoding=encoding, data=data)
-        self.schemas[schema.id] = schema
-
-        self._write_record(schema)
-
-    def add_channel(
+    def add_message_encode(
         self,
         channel_id: int,
-        topic: str,
-        message_encoding: str,
-        schema_id: int,
-        metadata: dict[str, str] | None = None,
+        log_time: int,
+        data: Any,
+        publish_time: int,
+        sequence: int = 0,
     ) -> None:
-        """Add a channel to the file."""
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
+        if self.encoder_factory is None:
+            raise RuntimeError("encoder_factory must be set to use add_message_object()")
 
-        # Validate schema_id exists if non-zero
-        if schema_id != 0 and schema_id not in self.schemas:
-            raise ValueError(
-                f"Schema ID {schema_id} does not exist. "
-                f"Add the schema using add_schema() before adding this channel."
-            )
-
-        channel = Channel(
-            id=channel_id,
-            schema_id=schema_id,
-            topic=topic,
-            message_encoding=message_encoding,
-            metadata=metadata or {},
-        )
-        self.channels[channel.id] = channel
-
-        self._write_record(channel)
-
-    def ensure_schema_written(self, schema_id: int) -> None:
-        """Ensure a schema is written to the main file (not in chunks).
-
-        This is useful when using fast chunk copying - schemas must be written
-        to the main file before chunks that reference them.
-        """
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        # Skip if already written to main file
-        if schema_id in self._main_written_schemas:
-            return
-
-        # Skip schema_id 0 (no schema)
-        if schema_id == 0:
-            return
-
-        # Get the schema from our registry
-        schema = self.schemas.get(schema_id)
-        if schema is None:
-            raise ValueError(f"Schema ID {schema_id} not found in registry")
-
-        # Write directly to main file, bypassing chunk builder
-        self.crc_writer.write(schema.write_record())
-        self._main_written_schemas.add(schema_id)
-
-    def ensure_channel_written(self, channel_id: int) -> None:
-        """Ensure a channel is written to the main file (not in chunks).
-
-        This is useful when using fast chunk copying - channels must be written
-        to the main file before chunks that reference them.
-        """
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        # Skip if already written to main file
-        if channel_id in self._main_written_channels:
-            return
-
-        # Get the channel from our registry
         channel = self.channels.get(channel_id)
         if channel is None:
-            raise ValueError(f"Channel ID {channel_id} not found in registry")
+            raise ValueError(f"Channel ID {channel_id} does not exist.")
+        schema = self.schemas.get(channel.schema_id)
+        if schema is None:
+            raise ValueError(
+                f"Schema ID {channel.schema_id} for channel ID {channel_id} does not exist."
+            )
 
-        # Ensure the channel's schema is written first
-        self.ensure_schema_written(channel.schema_id)
-
-        # Write directly to main file, bypassing chunk builder
-        self.crc_writer.write(channel.write_record())
-        self._main_written_channels.add(channel_id)
+        encoder = self.encoder_factory.encoder_for(schema)
+        if encoder is None:
+            raise ValueError(f"No encoder found for schema ID {schema.id}.")
+        encoded_data = encoder(data)
+        self.add_message(
+            channel_id=channel_id,
+            log_time=log_time,
+            data=encoded_data,
+            publish_time=publish_time,
+            sequence=sequence,
+        )
 
     def add_message(
         self,
@@ -554,353 +757,38 @@ class McapWriter:
         sequence: int = 0,
     ) -> None:
         """Add a message to the file."""
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        # Validate channel_id exists
-        if channel_id not in self.channels:
-            raise ValueError(
-                f"Channel ID {channel_id} does not exist. "
-                f"Add the channel using add_channel() before adding messages to it."
-            )
-
-        message = Message(
-            channel_id=channel_id,
-            sequence=sequence,
-            log_time=log_time,
-            publish_time=publish_time,
-            data=data,
-        )
-
-        self._write_record(message)
-
-        # Update statistics for non-chunked mode
-        # In chunked mode, statistics are updated when chunks are written
-        if not self.use_chunking:
-            if self.statistics.message_count == 0:
-                self.statistics.message_start_time = log_time
-            else:
-                self.statistics.message_start_time = min(
-                    log_time, self.statistics.message_start_time
-                )
-            self.statistics.message_end_time = max(log_time, self.statistics.message_end_time)
-            self.statistics.channel_message_counts[channel_id] += 1
-            self.statistics.message_count += 1
-
-    def add_attachment(
-        self,
-        log_time: int,
-        create_time: int,
-        name: str,
-        media_type: str,
-        data: bytes,
-    ) -> None:
-        """Add an attachment to the file."""
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        attachment = Attachment(
-            log_time=log_time,
-            create_time=create_time,
-            name=name,
-            media_type=media_type,
-            data=data,
-        )
-        offset = self.crc_writer.tell()
-        data = attachment.write_record()
-        self.crc_writer.write(data)
-
-        self.attachment_indexes.append(
-            AttachmentIndex(
-                offset=offset,
-                length=len(data),
-                log_time=log_time,
-                create_time=create_time,
-                data_size=len(attachment.data),
-                name=name,
-                media_type=media_type,
-            )
-        )
-
-        self.statistics.attachment_count += 1
-
-    def add_metadata(self, name: str, metadata: dict[str, str]) -> None:
-        """Add a metadata record to the file."""
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        record = Metadata(name=name, metadata=metadata)
-
-        offset = self.crc_writer.tell()
-        data = record.write_record()
-        self.crc_writer.write(data)
-
-        self.metadata_indexes.append(MetadataIndex(offset=offset, length=len(data), name=name))
-
-        self.statistics.metadata_count += 1
-
-    def register_schema(self, name: str, data: bytes) -> int:
-        """
-        Register a schema by name and return its ID. If already registered, returns existing ID.
-        Uses encoder_factory.encoding if available, otherwise defaults to empty string.
-
-        :param name: Schema name (e.g., message type)
-        :param data: Schema definition data
-        :return: Schema ID
-        """
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        # Check cache
-        if name in self._schema_ids_by_name:
-            return self._schema_ids_by_name[name]
-
-        # Create new schema
-        schema_id = self._next_schema_id
-        self._next_schema_id += 1
-
-        encoding = self.encoder_factory.encoding if self.encoder_factory else ""
-        self.add_schema(schema_id, name, encoding, data)
-        self._schema_ids_by_name[name] = schema_id
-
-        return schema_id
-
-    def add_message_object(
-        self,
-        topic: str,
-        schema_name: str,
-        schema_data: bytes,
-        message_obj: Any,
-        log_time: int,
-        publish_time: int,
-        sequence: int = 0,
-    ) -> None:
-        """
-        Add a message object, automatically registering schema and channel as needed.
-        Requires encoder_factory to be set.
-
-        :param topic: The topic of the message
-        :param schema_name: The schema name (e.g., message type)
-        :param schema_data: The schema definition data
-        :param message_obj: The message object to encode
-        :param log_time: The time at which the message was logged (nanosecond UNIX timestamp)
-        :param publish_time: The time at which the message was published (nanosecond UNIX timestamp)
-        :param sequence: Optional sequence number
-        """
-        if self.encoder_factory is None:
-            raise RuntimeError("encoder_factory must be set to use add_message_object()")
-
-        # Register schema if needed
-        schema_id = self.register_schema(schema_name, schema_data)
-
-        # Register channel if needed
-        if topic not in self._channel_ids_by_topic:
-            channel_id = self._next_channel_id
-            self._next_channel_id += 1
-            self.add_channel(
+        if self.use_chunking and self.chunk_builder is not None:
+            # Route through chunk builder
+            message = Message(
                 channel_id=channel_id,
-                topic=topic,
-                message_encoding=self.encoder_factory.message_encoding,
-                schema_id=schema_id,
+                sequence=sequence,
+                log_time=log_time,
+                publish_time=publish_time,
+                data=data,
             )
-            self._channel_ids_by_topic[topic] = channel_id
+            self.chunk_builder.add(message)
 
-        channel_id = self._channel_ids_by_topic[topic]
+            # Check if chunk is ready to be written
+            if result := self.chunk_builder.maybe_finalize():
+                chunk, message_indices = result
+                super().add_chunk(chunk, message_indices)
+                self.chunk_builder.reset()
+        else:
+            # No chunking - write directly
+            super().add_message(channel_id, log_time, data, publish_time, sequence)
 
-        # Get schema and encoder
-        schema = self.schemas[schema_id]
-        encoder = self.encoder_factory.encoder_for(schema)
-        if encoder is None:
-            raise RuntimeError(f"encoder_factory returned None for schema {schema_name}")
-
-        # Encode message
-        data = encoder(message_obj)
-
-        # Add encoded message
-        self.add_message(
-            channel_id=channel_id,
-            log_time=log_time,
-            publish_time=publish_time,
-            data=data,
-            sequence=sequence,
-        )
-
-    def add_chunk_with_indexes(self, chunk: Chunk, indexes: list[MessageIndex]) -> None:
-        """
-        Add a pre-built chunk with its indexes directly to the file.
-        This is used for fast chunk copying without decompression.
-        """
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        # Finalize any in-progress chunk first
+    def add_chunk(self, chunk: Chunk, message_indices: dict[int, MessageIndex]) -> None:
         self._finalize_current_chunk()
-
-        # Write the pre-built chunk
-        self._write_chunk(chunk, {idx.channel_id: idx for idx in indexes})
+        return super().add_chunk(chunk, message_indices)
 
     def _finalize_current_chunk(self) -> None:
         """Finalize and write any remaining chunk."""
         if self.chunk_builder is not None and (result := self.chunk_builder.finalize()):
             chunk, message_indices = result
-            self._write_chunk(chunk, message_indices)
+            # do not call self
+            super().add_chunk(chunk, message_indices)
             self.chunk_builder.reset()
 
     def finish(self) -> None:
-        """Finish writing the MCAP file."""
-        if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
-        if self._finished:
-            return
-
-        # Finalize any remaining chunk
         self._finalize_current_chunk()
-
-        # Write DataEnd record
-        data_end = DataEnd(data_section_crc=self.crc_writer.crc).write_record()
-        self.crc_writer.enable_crc = False  # No need to include DataEnd in CRC
-        self.crc_writer.write(data_end)
-
-        # Build and write summary section
-        summary_start = self.crc_writer.tell()
-        summary_data, summary_offsets = self._build_summary(summary_start)
-        summary_crc = _calculate_summary_crc(
-            summary_data, summary_start, summary_offsets, self.use_summary_offsets, self.enable_crcs
-        )
-        self.crc_writer.write(summary_data)
-
-        # Write footer
-        summary_offset_start = _calculate_summary_offset_start(
-            summary_start, summary_data, summary_offsets, self.use_summary_offsets
-        )
-        footer = Footer(
-            summary_start=0 if len(summary_data) == 0 else summary_start,
-            summary_offset_start=summary_offset_start,
-            summary_crc=summary_crc,
-        )
-        self.crc_writer.write(footer.write_record())
-
-        # Write closing magic
-        self.crc_writer.write(MAGIC)
-
-        self._finished = True
-
-    def _write_record(self, record: Schema | Channel | Message) -> None:
-        """Write a record to the output, either directly or via chunk builder."""
-        if not self.use_chunking:
-            self.crc_writer.write(record.write_record())
-            return
-
-        if self.chunk_builder is None:
-            return
-
-        self.chunk_builder.add(record)
-        # Add to chunk builder
-        if result := self.chunk_builder.maybe_finalize():
-            # Chunk was completed, write it
-            chunk, message_indices = result
-            self._write_chunk(chunk, message_indices)
-
-    def _write_chunk(self, chunk: Chunk, message_indices: dict[int, MessageIndex]) -> None:
-        """Write a chunk and its indexes to output."""
-        # Update statistics for messages in chunk
-        if self.statistics.message_count == 0:
-            self.statistics.message_start_time = chunk.message_start_time
-        else:
-            self.statistics.message_start_time = min(
-                chunk.message_start_time, self.statistics.message_start_time
-            )
-        self.statistics.message_end_time = max(
-            chunk.message_end_time, self.statistics.message_end_time
-        )
-
-        for idx in message_indices.values():
-            self.statistics.channel_message_counts[idx.channel_id] += len(idx.records)
-            self.statistics.message_count += len(idx.records)
-
-        self.statistics.chunk_count += 1
-
-        # Write chunk
-        chunk_start_offset = self.crc_writer.tell()
-        chunk_data = chunk.write_record()
-        self.crc_writer.write(chunk_data)
-
-        # Write message indexes
-        message_index_start_offset = self.crc_writer.tell()
-        message_index_offsets: dict[int, int] = {}
-        index_buffer = io.BytesIO()
-
-        if self.index_types & IndexType.MESSAGE:
-            for idx in message_indices.values():
-                message_index_offsets[idx.channel_id] = (
-                    message_index_start_offset + index_buffer.tell()
-                )
-                index_buffer.write(idx.write_record())
-
-        index_data = index_buffer.getvalue()
-        self.crc_writer.write(index_data)
-
-        # Store chunk index
-        self.chunk_indices.append(
-            ChunkIndex(
-                message_start_time=chunk.message_start_time,
-                message_end_time=chunk.message_end_time,
-                chunk_start_offset=chunk_start_offset,
-                chunk_length=len(chunk_data),
-                message_index_offsets=message_index_offsets,
-                message_index_length=len(index_data),
-                compression=chunk.compression,
-                compressed_size=len(chunk.data),
-                uncompressed_size=chunk.uncompressed_size,
-            )
-        )
-
-    def _build_summary(self, summary_start: int) -> tuple[bytes, list[SummaryOffset]]:
-        """Build summary section and return (summary_data, summary_offsets)."""
-        summary_buffer = io.BytesIO()
-        summary_offsets: list[SummaryOffset] = []
-
-        self.statistics.schema_count = len(self.schemas)
-        self.statistics.channel_count = len(self.channels)
-
-        # Define sections to write (opcode, items, should_write)
-        sections: list[tuple[Opcode, list[Any], bool]] = [
-            (Opcode.SCHEMA, list(self.schemas.values()), self.repeat_schemas),
-            (Opcode.CHANNEL, list(self.channels.values()), self.repeat_channels),
-            (Opcode.STATISTICS, [self.statistics], self.use_statistics),
-            (Opcode.CHUNK_INDEX, self.chunk_indices, bool(self.index_types & IndexType.CHUNK)),
-            (
-                Opcode.ATTACHMENT_INDEX,
-                self.attachment_indexes,
-                bool(self.index_types & IndexType.ATTACHMENT),
-            ),
-            (
-                Opcode.METADATA_INDEX,
-                self.metadata_indexes,
-                bool(self.index_types & IndexType.METADATA),
-            ),
-        ]
-
-        # Write all sections using data-driven approach
-        for opcode, items, should_write in sections:
-            if should_write and items:
-                _write_summary_section(
-                    summary_buffer, summary_offsets, opcode, items, summary_start
-                )
-
-        # Write summary offsets at the end
-        if self.use_summary_offsets:
-            for offset in summary_offsets:
-                summary_buffer.write(offset.write_record())
-
-        return summary_buffer.getvalue(), summary_offsets
+        return super().finish()
