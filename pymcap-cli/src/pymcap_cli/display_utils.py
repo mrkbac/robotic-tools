@@ -151,16 +151,18 @@ def display_channels_table(
 
     # Dictionary of sort key functions
     def hz_sort_key(c: ChannelInfo) -> float:
-        if use_median and (hz_median := c.get("hz_median")) is not None:
-            return hz_median
+        hz_stats = c.get("hz_stats")
+        if use_median and hz_stats and (median := hz_stats.get("median")) is not None:
+            return median
         if index_duration and (hz_channel := c.get("hz_channel")) is not None:
             return hz_channel
-        return c["hz"]
+        return hz_stats["average"]
 
     def bps_sort_key(c: ChannelInfo) -> float:
-        if use_median and (bps_median := c.get("bytes_per_second_median")) is not None:
-            return bps_median
-        return c.get("bytes_per_second") or 0
+        bps_stats = c.get("bytes_per_second_stats")
+        if use_median and bps_stats and (median := bps_stats.get("median")) is not None:
+            return median
+        return bps_stats["average"] if bps_stats else 0
 
     sort_keys = {
         "topic": lambda c: c["topic"],
@@ -176,7 +178,7 @@ def display_channels_table(
     get_sort_key = sort_keys.get(sort_key, sort_keys["topic"])
 
     # Check if size data is available
-    has_size_data = any(ch["size_bytes"] is not None for ch in data["channels"])
+    has_size_data = any(ch.get("size_bytes") is not None for ch in data["channels"])
 
     # Check if distribution data is available
     has_distribution_data = any(
@@ -217,9 +219,7 @@ def display_channels_table(
         show_schema = bool(columns & ChannelTableColumn.SCHEMA)
 
     # Calculate total size for percentage column
-    total_size = (
-        sum(ch["size_bytes"] for ch in data["channels"] if ch["size_bytes"]) if show_percent else 0
-    )
+    total_size = sum(ch.get("size_bytes") or 0 for ch in data["channels"]) if show_percent else 0
 
     # Build the table
     channels_table = Table()
@@ -249,15 +249,16 @@ def display_channels_table(
     # Populate rows
     for channel in sorted(data["channels"], key=get_sort_key, reverse=reverse):
         # Determine Hz value to display
-        if use_median and channel.get("hz_median") is not None:
-            hz = channel["hz_median"]
-        elif index_duration and channel["hz_channel"] is not None:
-            hz = channel["hz_channel"]
+        hz_stats = channel.get("hz_stats")
+        if use_median and hz_stats and (hz_median := hz_stats.get("median")) is not None:
+            hz = hz_median
+        elif index_duration and (hz_channel := channel.get("hz_channel")) is not None:
+            hz = hz_channel
         else:
-            hz = channel["hz"]
+            hz = hz_stats["average"] if hz_stats else 0
 
         # Apply color based on schema
-        topic_color = schema_to_color(channel["schema_name"])
+        topic_color = schema_to_color(channel.get("schema_name"))
         colored_topic = f"[{topic_color}]{channel['topic']}[/{topic_color}]"
 
         row = []
@@ -268,7 +269,7 @@ def display_channels_table(
         if columns & ChannelTableColumn.TOPIC:
             row.append(colored_topic)
         if show_schema:
-            row.append(format_schema_with_link(channel["schema_name"]))
+            row.append(format_schema_with_link(channel.get("schema_name")))
         if columns & ChannelTableColumn.MSGS:
             row.append(f"{channel['message_count']:,}")
         if columns & ChannelTableColumn.HZ:
@@ -282,18 +283,16 @@ def display_channels_table(
             row.append(f"{percentage:.2f}%")
         if show_bps:
             # Use median bytes per second if available and requested
-            if use_median and channel.get("bytes_per_second_median") is not None:
-                bps = channel["bytes_per_second_median"]
-            elif channel["bytes_per_second"] is not None:
-                bps = channel["bytes_per_second"]
+            bps_stats = channel.get("bytes_per_second_stats")
+            if use_median and bps_stats and (bps_median := bps_stats.get("median")) is not None:
+                bps = bps_median
+            elif bps_stats:
+                bps = bps_stats["average"]
             else:
-                bps = 0
-            row.append(bytes_to_human(int(bps) if bps is not None else 0))
+                bps = None
+            row.append(bytes_to_human(bps))
         if show_b_per_msg:
-            b_per_msg = (
-                channel["bytes_per_message"] if channel["bytes_per_message"] is not None else 0
-            )
-            row.append(bytes_to_human(int(b_per_msg)))
+            row.append(bytes_to_human(channel.get("bytes_per_message")))
         if show_distribution:
             distribution = channel.get("message_distribution", [])
             if distribution_bar_class:

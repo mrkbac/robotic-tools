@@ -40,7 +40,17 @@ uv run pymcap_cli compress input.mcap -o compressed.mcap --compression lz4
 Display detailed MCAP file information including schemas, channels, message counts, and time ranges.
 
 ```bash
+# Single file
 uv run pymcap_cli info data.mcap
+
+# Multiple files (displays each file separately)
+uv run pymcap_cli info file1.mcap file2.mcap file3.mcap
+
+# JSON output for single file
+uv run pymcap_cli info-json data.mcap
+
+# JSON output for multiple files (returns array)
+uv run pymcap_cli info-json file1.mcap file2.mcap
 ```
 
 ### `recover` - Advanced Recovery

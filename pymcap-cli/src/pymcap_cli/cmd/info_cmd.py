@@ -291,7 +291,7 @@ def _display_channels_table(
 
 
 def info(
-    file: str,
+    files: list[str],
     *,
     rebuild: Annotated[
         bool,
@@ -343,18 +343,20 @@ def info(
         ),
     ] = False,
 ) -> None:
-    """Report statistics about an MCAP file.
+    """Report statistics about MCAP file(s).
 
-    This command displays comprehensive statistics about an MCAP file including:
+    This command displays comprehensive statistics about MCAP files including:
     - File metadata and summary statistics
     - Message distribution over time
     - Compression statistics by type
     - Channel information with message counts, data rates, and distributions
 
+    When multiple files are provided, statistics are displayed separately for each file.
+
     Parameters
     ----------
-    file
-        Path to the MCAP file to analyze (local file or HTTP/HTTPS URL).
+    files
+        Path(s) to MCAP file(s) to analyze (local files or HTTP/HTTPS URLs).
     rebuild
         Rebuild file metadata by scanning all records (use for corrupt or
         summary-less files).
@@ -381,6 +383,9 @@ def info(
     # Basic file info
     pymcap-cli info recording.mcap
 
+    # Multiple files
+    pymcap-cli info file1.mcap file2.mcap file3.mcap
+
     # Rebuild summary with exact message sizes
     pymcap-cli info recording.mcap --rebuild --exact-sizes
 
@@ -391,51 +396,65 @@ def info(
     pymcap-cli info recording.mcap --index-duration
     ```
     """
-    with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
-        if rebuild:
-            info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
-        else:
-            try:
-                info_data = read_info(f_buffered)
-            except (InvalidMagicError, AssertionError):
-                console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
-                f_buffered.seek(0)  # Reset to start
+    # Validate input
+    if not files:
+        console.print("[red]Error:[/red] At least one file must be specified")
+        raise SystemExit(1)
+
+    # Process all files and display each separately
+    for i, file in enumerate(files):
+        if i > 0:
+            console.print("\n" + "=" * 80 + "\n")
+
+        with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
+            if rebuild:
                 info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
+            else:
+                try:
+                    info_data = read_info(f_buffered)
+                except (InvalidMagicError, AssertionError):
+                    console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
+                    f_buffered.seek(0)  # Reset to start
+                    info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
 
-    # Get structured JSON data
-    data = info_to_dict(info_data, str(file), file_size)
+        # Get structured JSON data
+        data = info_to_dict(info_data, str(file), file_size)
+        has_chunk_info = info_data.chunk_information is not None
 
-    # Warn if sorting by size fields when channel_sizes is unavailable
-    has_size_data = any(ch["size_bytes"] is not None for ch in data["channels"])
-    if sort.value in ["size", "bps", "b_per_msg"] and not has_size_data:
-        console.print(
-            "[yellow]Warning:[/yellow] Sorting by size fields requires channel size data. "
-            "Use [cyan]--rebuild[/cyan] to get accurate size information."
+        # Warn if sorting by size fields when channel_sizes is unavailable
+        has_size_data = any(ch.get("size_bytes") is not None for ch in data["channels"])
+        if sort.value in ["size", "bps", "b_per_msg"] and not has_size_data:
+            console.print(
+                "[yellow]Warning:[/yellow] Sorting by size fields requires channel size data. "
+                "Use [cyan]--rebuild[/cyan] to get accurate size information."
+            )
+            console.print()
+
+        # Warn if --index-duration is enabled but no per-channel duration data available
+        has_channel_durations = any(ch.get("hz_channel") is not None for ch in data["channels"])
+        if index_duration and not has_channel_durations:
+            console.print(
+                "[yellow]Warning:[/yellow] --index-duration requires message index data. "
+                "Use [cyan]--rebuild[/cyan] to get per-channel timing information. "
+                "Falling back to global duration."
+            )
+            console.print()
+
+        # Warn if --median is enabled but no median data available
+        has_median_data = any(
+            (hz_stats := ch.get("hz_stats")) and hz_stats.get("median") is not None
+            for ch in data["channels"]
         )
-        console.print()
+        if median and not has_median_data:
+            console.print(
+                "[yellow]Warning:[/yellow] --median requires message interval data. "
+                "Use [cyan]--rebuild[/cyan] to calculate median rates. "
+                "Falling back to mean rates."
+            )
+            console.print()
 
-    # Warn if --index-duration is enabled but no per-channel duration data available
-    has_channel_durations = any(ch["hz_channel"] is not None for ch in data["channels"])
-    if index_duration and not has_channel_durations:
-        console.print(
-            "[yellow]Warning:[/yellow] --index-duration requires message index data. "
-            "Use [cyan]--rebuild[/cyan] to get per-channel timing information. "
-            "Falling back to global duration."
-        )
-        console.print()
-
-    # Warn if --median is enabled but no median data available
-    has_median_data = any(ch["hz_median"] is not None for ch in data["channels"])
-    if median and not has_median_data:
-        console.print(
-            "[yellow]Warning:[/yellow] --median requires message interval data. "
-            "Use [cyan]--rebuild[/cyan] to calculate median rates. "
-            "Falling back to mean rates."
-        )
-        console.print()
-
-    # Display all sections
-    _display_file_info_and_summary(data)
-    _display_message_distribution(data)
-    _display_compression_table(data, info_data.chunk_information is not None)
-    _display_channels_table(data, sort.value, reverse, index_duration, median)
+        # Display all sections
+        _display_file_info_and_summary(data)
+        _display_message_distribution(data)
+        _display_compression_table(data, has_chunk_info)
+        _display_channels_table(data, sort.value, reverse, index_duration, median)

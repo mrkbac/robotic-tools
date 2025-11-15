@@ -1,11 +1,14 @@
 import base64
 import gzip
 import json
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from statistics import mean, median
 from typing import Annotated
 
 from cyclopts import Parameter
+from rich.console import Console
 from small_mcap import Channel, ChunkIndex, InvalidMagicError, RebuildInfo, Schema
 
 from pymcap_cli.input_handler import open_input
@@ -14,6 +17,7 @@ from pymcap_cli.types import (
     CompressionStats,
     McapInfoOutput,
     MessageDistribution,
+    PartialStats,
     SchemaInfo,
     Stats,
 )
@@ -153,12 +157,12 @@ def _calculate_channel_intervals(info: RebuildInfo) -> dict[int, list[int]]:
     return channel_intervals
 
 
-def _calculate_median_rates(
+def _calculate_interval_stats(
     channel_intervals: dict[int, list[int]],
     channel_sizes: dict[int, int] | None,
     message_counts: dict[int, int],
-) -> dict[int, dict[str, float]]:
-    """Calculate median-based rate statistics from message intervals.
+) -> dict[int, dict[str, dict[str, float]]]:
+    """Calculate statistical rate information from message intervals.
 
     Args:
         channel_intervals: Dict mapping channel_id -> list of intervals (ns)
@@ -166,12 +170,11 @@ def _calculate_median_rates(
         message_counts: Dict mapping channel_id -> message count
 
     Returns:
-        Dict mapping channel_id -> dict with median rate statistics:
-            - hz_median: Median Hz (messages per second)
-            - bps_median: Median bytes per second (if size data available)
-            - msgs_per_sec_median: Same as hz_median (for consistency)
+        Dict mapping channel_id -> dict with keys:
+            - hz_stats: dict with min, max, average, median Hz values
+            - bps_stats: dict with min, max, average, median bytes/second (if size data available)
     """
-    median_rates: dict[int, dict[str, float]] = {}
+    interval_stats: dict[int, dict[str, dict[str, float]]] = {}
 
     for channel_id, intervals in channel_intervals.items():
         if not intervals:
@@ -179,34 +182,36 @@ def _calculate_median_rates(
 
         # Convert each interval to Hz
         hz_values = [1_000_000_000 / interval for interval in intervals]
-
-        # Calculate median Hz
         sorted_hz = sorted(hz_values)
-        median_hz = sorted_hz[len(sorted_hz) // 2]
 
-        # Start building the result
-        result: dict[str, float] = {
-            "hz_median": median_hz,
-            "msgs_per_sec_median": median_hz,  # Same value
+        # Calculate Hz statistics
+        hz_stats = {
+            "minimum": min(hz_values),
+            "maximum": max(hz_values),
+            "average": mean(hz_values),
+            "median": median(sorted_hz),
         }
 
-        # Calculate median bytes per second if size data is available
+        result: dict[str, dict[str, float]] = {"hz_stats": hz_stats}
+
+        # Calculate bytes per second statistics if size data is available
         if channel_sizes and channel_id in channel_sizes:
             channel_size = channel_sizes[channel_id]
             message_count = message_counts.get(channel_id, 0)
 
             if message_count > 0:
-                # Median bytes/sec = median Hz * average bytes per message
+                # bytes/sec = Hz * average bytes per message
                 avg_bytes_per_msg = channel_size / message_count
-                result["bps_median"] = median_hz * avg_bytes_per_msg
-            else:
-                result["bps_median"] = 0.0
-        else:
-            result["bps_median"] = None  # type: ignore[assignment]
+                result["bps_stats"] = {
+                    "minimum": hz_stats["minimum"] * avg_bytes_per_msg,
+                    "maximum": hz_stats["maximum"] * avg_bytes_per_msg,
+                    "average": hz_stats["average"] * avg_bytes_per_msg,
+                    "median": hz_stats["median"] * avg_bytes_per_msg,
+                }
 
-        median_rates[channel_id] = result
+        interval_stats[channel_id] = result
 
-    return median_rates
+    return interval_stats
 
 
 def _calculate_optimal_bucket_count(duration_ns: int) -> int:
@@ -417,12 +422,12 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     if info.chunk_information:
         channel_durations = _calculate_channel_durations(info)
 
-    # Calculate per-channel intervals and median rates (always, when available)
+    # Calculate per-channel intervals and interval-based statistics (always, when available)
     channel_intervals: dict[int, list[int]] = {}
-    median_rates: dict[int, dict[str, float]] = {}
+    interval_stats: dict[int, dict[str, dict[str, float]]] = {}
     if info.chunk_information:
         channel_intervals = _calculate_channel_intervals(info)
-        median_rates = _calculate_median_rates(
+        interval_stats = _calculate_interval_stats(
             channel_intervals, info.channel_sizes, statistics.channel_message_counts
         )
 
@@ -485,7 +490,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
         channel_size = info.channel_sizes.get(channel_id) if info.channel_sizes else None
         ch_duration_ns = channel_durations.get(channel_id)
         ch_distribution = per_channel_distributions.get(channel_id, [])
-        ch_median_rates = median_rates.get(channel_id)
+        ch_interval_stats = interval_stats.get(channel_id)
 
         output["channels"].append(
             _build_channel_dict(
@@ -496,7 +501,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
                 channel_duration_ns=ch_duration_ns,
                 global_duration_ns=duration_ns,
                 message_distribution=ch_distribution,
-                median_rates=ch_median_rates,
+                interval_stats=ch_interval_stats,
             )
         )
 
@@ -514,8 +519,8 @@ def _calculate_stats(values: list[int] | list[float]) -> Stats:
     return {
         "minimum": min(values),
         "maximum": max(values),
-        "average": sum(values) / len(values),
-        "median": sorted(values)[len(values) // 2] if values else 0,
+        "average": mean(values),
+        "median": median(values),
     }
 
 
@@ -544,30 +549,57 @@ def _build_channel_dict(
     channel_duration_ns: int | None,
     global_duration_ns: int,
     message_distribution: list[int],
-    median_rates: dict[str, float] | None = None,
+    interval_stats: dict[str, dict[str, float]] | None = None,
 ) -> ChannelInfo:
     """Build channel information dict for JSON output with calculated metrics."""
-    # Calculate Hz metrics
+    # Calculate global Hz (average based on global duration)
     hz_global = (
         message_count / (global_duration_ns / 1_000_000_000) if global_duration_ns > 0 else 0
     )
+
+    # Calculate Hz based on channel duration (first to last message)
     hz_channel = None
     if channel_duration_ns is not None and channel_duration_ns > 0:
         hz_channel = message_count / (channel_duration_ns / 1_000_000_000)
 
-    # Calculate size-based metrics
-    bps = None
-    b_per_msg = None
-    if channel_size is not None:
-        if global_duration_ns > 0:
-            bps = channel_size / (global_duration_ns / 1_000_000_000)
-        if message_count > 0:
-            b_per_msg = channel_size / message_count
+    # Build hz_stats (PartialStats)
+    # Average is always available (from global duration)
+    # Min/max/median only available from interval stats (rebuild mode)
+    hz_stats: PartialStats = {
+        "average": hz_global,
+        "minimum": None,
+        "maximum": None,
+        "median": None,
+    }
+    if interval_stats and "hz_stats" in interval_stats:
+        istats = interval_stats["hz_stats"]
+        hz_stats["minimum"] = istats["minimum"]
+        hz_stats["maximum"] = istats["maximum"]
+        hz_stats["median"] = istats["median"]
 
-    # Extract median rates
-    hz_median = median_rates.get("hz_median") if median_rates else None
-    bps_median = median_rates.get("bps_median") if median_rates else None
-    msgs_per_sec_median = median_rates.get("msgs_per_sec_median") if median_rates else None
+    # Calculate bytes per message
+    b_per_msg = None
+    if channel_size is not None and message_count > 0:
+        b_per_msg = channel_size / message_count
+
+    # Build bytes_per_second_stats (PartialStats | None)
+    # Only available if we have channel size data
+    bps_stats: PartialStats | None = None
+    if channel_size is not None:
+        bps_global = (
+            channel_size / (global_duration_ns / 1_000_000_000) if global_duration_ns > 0 else 0
+        )
+        bps_stats = {
+            "average": bps_global,
+            "minimum": None,
+            "maximum": None,
+            "median": None,
+        }
+        if interval_stats and "bps_stats" in interval_stats:
+            bstats = interval_stats["bps_stats"]
+            bps_stats["minimum"] = bstats["minimum"]
+            bps_stats["maximum"] = bstats["maximum"]
+            bps_stats["median"] = bstats["median"]
 
     return {
         "id": channel.id,
@@ -577,13 +609,10 @@ def _build_channel_dict(
         "message_count": message_count,
         "size_bytes": channel_size,
         "duration_ns": channel_duration_ns,
-        "hz": hz_global,
+        "hz_stats": hz_stats,
         "hz_channel": hz_channel,
-        "hz_median": hz_median,
-        "bytes_per_second": bps,
-        "bytes_per_second_median": bps_median,
+        "bytes_per_second_stats": bps_stats,
         "bytes_per_message": b_per_msg,
-        "messages_per_second_median": msgs_per_sec_median,
         "message_distribution": message_distribution,
     }
 
@@ -596,8 +625,11 @@ def _build_schema_dict(schema_id: int, schema: Schema) -> SchemaInfo:
     }
 
 
+console = Console()
+
+
 def info_json(
-    file: str,
+    files: list[str],
     *,
     rebuild: Annotated[
         bool,
@@ -624,12 +656,12 @@ def info_json(
         ),
     ] = False,
 ) -> None:
-    """Output MCAP file statistics as JSON with all available data.
+    """Output MCAP file(s) statistics as JSON with all available data.
 
     Parameters
     ----------
-    file
-        Path to the MCAP file to analyze (local file or HTTP/HTTPS URL).
+    files
+        Path(s) to MCAP file(s) to analyze (local files or HTTP/HTTPS URLs).
     rebuild
         Rebuild the MCAP file from scratch.
     exact_sizes
@@ -639,28 +671,34 @@ def info_json(
     compress
         Compressed output using gzip and outputs it as base64.
     """
-    with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
-        if rebuild:
-            info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
-        else:
-            try:
-                info = read_info(f_buffered)
-            except InvalidMagicError:
-                if not debug:
-                    # Silently rebuild if invalid magic and not in debug mode
+    # Validate input
+    if not files:
+        print('{"error": "At least one file must be specified"}', file=sys.stderr)  # noqa: T201
+        raise SystemExit(1)
+
+    # Process all files and collect data
+    all_outputs: list[McapInfoOutput] = []
+    for file in files:
+        with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
+            if rebuild:
+                info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
+            else:
+                try:
+                    info = read_info(f_buffered)
+                except InvalidMagicError:
+                    f_buffered.seek(0)
                     info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
-                else:
-                    raise
 
-    # Transform info to JSON-serializable dict
-    output = info_to_dict(info, str(file), file_size)
+        # Transform info to JSON-serializable dict
+        output = info_to_dict(info, str(file), file_size)
+        all_outputs.append(output)
 
-    # Output JSON
-    output_json = json.dumps(output)
+    # Output JSON (single file -> dict, multiple files -> list)
+    output_data = all_outputs[0] if len(all_outputs) == 1 else all_outputs
+    output_json = json.dumps(output_data)
 
     if compress:
         compressed_output = gzip.compress(output_json.encode("utf-8"))
-
         output_b64 = base64.b64encode(compressed_output).decode("utf-8")
         print(output_b64)  # noqa: T201
     else:

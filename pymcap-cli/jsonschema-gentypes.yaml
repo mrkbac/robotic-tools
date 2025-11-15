@@ -3,6 +3,7 @@
 
 # Header added to generated files
 headers: |
+  # ruff: noqa
   # AUTO-GENERATED FILE - DO NOT EDIT
 
 # Post-generation formatters

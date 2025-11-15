@@ -16,8 +16,10 @@ from rich.progress import (
 from small_mcap import RebuildInfo, get_header, get_summary, rebuild_summary
 
 
-def bytes_to_human(size_bytes: float) -> str:
+def bytes_to_human(size_bytes: float | None) -> str:
     """Convert bytes to a human-readable format."""
+    if size_bytes is None:
+        return "N/A"
     for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
         if abs(size_bytes) < 1024:
             return f"{size_bytes:.2f} {unit}"

@@ -55,7 +55,8 @@
           "type": "string"
         },
         "size_bytes": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -92,28 +93,36 @@
       ],
       "properties": {
         "message_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "chunk_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "channel_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "attachment_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "metadata_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "message_start_time": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "message_end_time": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "duration_ns": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -129,16 +138,55 @@
       ],
       "properties": {
         "minimum": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0
         },
         "maximum": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0
         },
         "average": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0
         },
         "median": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "PartialStats": {
+      "title": "PartialStats",
+      "description": "Statistics where only average is always available; min/max/median are only available in rebuild mode.",
+      "type": "object",
+      "required": [
+        "average"
+      ],
+      "properties": {
+        "average": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "maximum": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "median": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
         }
       }
     },
@@ -157,19 +205,24 @@
       ],
       "properties": {
         "count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "compressed_size": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "uncompressed_size": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "compression_ratio": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0
         },
         "message_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "size_stats": {
           "$ref": "#/definitions/Stats"
@@ -189,10 +242,12 @@
       ],
       "properties": {
         "max_concurrent": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "max_concurrent_bytes": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -225,7 +280,7 @@
         "topic",
         "schema_id",
         "message_count",
-        "hz",
+        "hz_stats",
         "message_distribution"
       ],
       "properties": {
@@ -245,63 +300,55 @@
           ]
         },
         "message_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "size_bytes": {
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "minimum": 0
         },
         "duration_ns": {
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "minimum": 0
         },
-        "hz": {
-          "type": "number"
+        "hz_stats": {
+          "$ref": "#/definitions/PartialStats"
         },
         "hz_channel": {
           "type": [
             "number",
             "null"
-          ]
+          ],
+          "minimum": 0
         },
-        "hz_median": {
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "bytes_per_second": {
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "bytes_per_second_median": {
-          "type": [
-            "number",
-            "null"
+        "bytes_per_second_stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PartialStats"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "bytes_per_message": {
           "type": [
             "number",
             "null"
-          ]
-        },
-        "messages_per_second_median": {
-          "type": [
-            "number",
-            "null"
-          ]
+          ],
+          "minimum": 0
         },
         "message_distribution": {
           "type": "array",
           "items": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           }
         }
       }
@@ -335,19 +382,23 @@
       ],
       "properties": {
         "bucket_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "bucket_duration_ns": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         },
         "message_counts": {
           "type": "array",
           "items": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           }
         },
         "max_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         }
       }
     }
