@@ -1,0 +1,355 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "McapInfoOutput",
+  "description": "Complete MCAP info output structure.",
+  "type": "object",
+  "required": [
+    "file",
+    "header",
+    "statistics",
+    "chunks",
+    "channels",
+    "schemas",
+    "message_distribution"
+  ],
+  "properties": {
+    "file": {
+      "$ref": "#/definitions/FileInfo"
+    },
+    "header": {
+      "$ref": "#/definitions/HeaderInfo"
+    },
+    "statistics": {
+      "$ref": "#/definitions/StatisticsInfo"
+    },
+    "chunks": {
+      "$ref": "#/definitions/ChunksInfo"
+    },
+    "channels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ChannelInfo"
+      }
+    },
+    "schemas": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SchemaInfo"
+      }
+    },
+    "message_distribution": {
+      "$ref": "#/definitions/MessageDistribution"
+    }
+  },
+  "definitions": {
+    "FileInfo": {
+      "title": "FileInfo",
+      "description": "File metadata.",
+      "type": "object",
+      "required": [
+        "path",
+        "size_bytes"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        }
+      }
+    },
+    "HeaderInfo": {
+      "title": "HeaderInfo",
+      "description": "MCAP header information.",
+      "type": "object",
+      "required": [
+        "library",
+        "profile"
+      ],
+      "properties": {
+        "library": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        }
+      }
+    },
+    "StatisticsInfo": {
+      "title": "StatisticsInfo",
+      "description": "MCAP statistics.",
+      "type": "object",
+      "required": [
+        "message_count",
+        "chunk_count",
+        "channel_count",
+        "attachment_count",
+        "metadata_count",
+        "message_start_time",
+        "message_end_time",
+        "duration_ns"
+      ],
+      "properties": {
+        "message_count": {
+          "type": "integer"
+        },
+        "chunk_count": {
+          "type": "integer"
+        },
+        "channel_count": {
+          "type": "integer"
+        },
+        "attachment_count": {
+          "type": "integer"
+        },
+        "metadata_count": {
+          "type": "integer"
+        },
+        "message_start_time": {
+          "type": "integer"
+        },
+        "message_end_time": {
+          "type": "integer"
+        },
+        "duration_ns": {
+          "type": "integer"
+        }
+      }
+    },
+    "Stats": {
+      "title": "Stats",
+      "description": "Statistics with minimum, average, and maximum values.",
+      "type": "object",
+      "required": [
+        "minimum",
+        "maximum",
+        "average",
+        "median"
+      ],
+      "properties": {
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "average": {
+          "type": "number"
+        },
+        "median": {
+          "type": "number"
+        }
+      }
+    },
+    "CompressionStats": {
+      "title": "CompressionStats",
+      "description": "Statistics for a specific compression type.",
+      "type": "object",
+      "required": [
+        "count",
+        "compressed_size",
+        "uncompressed_size",
+        "compression_ratio",
+        "message_count",
+        "size_stats",
+        "duration_stats"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "compressed_size": {
+          "type": "integer"
+        },
+        "uncompressed_size": {
+          "type": "integer"
+        },
+        "compression_ratio": {
+          "type": "number"
+        },
+        "message_count": {
+          "type": "integer"
+        },
+        "size_stats": {
+          "$ref": "#/definitions/Stats"
+        },
+        "duration_stats": {
+          "$ref": "#/definitions/Stats"
+        }
+      }
+    },
+    "ChunkOverlaps": {
+      "title": "ChunkOverlaps",
+      "description": "Chunk overlap information.",
+      "type": "object",
+      "required": [
+        "max_concurrent",
+        "max_concurrent_bytes"
+      ],
+      "properties": {
+        "max_concurrent": {
+          "type": "integer"
+        },
+        "max_concurrent_bytes": {
+          "type": "integer"
+        }
+      }
+    },
+    "ChunksInfo": {
+      "title": "ChunksInfo",
+      "description": "Chunk-related information.",
+      "type": "object",
+      "required": [
+        "by_compression",
+        "overlaps"
+      ],
+      "properties": {
+        "by_compression": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/CompressionStats"
+          }
+        },
+        "overlaps": {
+          "$ref": "#/definitions/ChunkOverlaps"
+        }
+      }
+    },
+    "ChannelInfo": {
+      "title": "ChannelInfo",
+      "description": "Information about a channel.",
+      "type": "object",
+      "required": [
+        "id",
+        "topic",
+        "schema_id",
+        "message_count",
+        "hz",
+        "message_distribution"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "topic": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "integer"
+        },
+        "schema_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_count": {
+          "type": "integer"
+        },
+        "size_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_ns": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hz": {
+          "type": "number"
+        },
+        "hz_channel": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "hz_median": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "bytes_per_second": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "bytes_per_second_median": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "bytes_per_message": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "messages_per_second_median": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "message_distribution": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "SchemaInfo": {
+      "title": "SchemaInfo",
+      "description": "Information about a schema.",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "MessageDistribution": {
+      "title": "MessageDistribution",
+      "description": "Message distribution across time buckets.",
+      "type": "object",
+      "required": [
+        "bucket_count",
+        "bucket_duration_ns",
+        "message_counts",
+        "max_count"
+      ],
+      "properties": {
+        "bucket_count": {
+          "type": "integer"
+        },
+        "bucket_duration_ns": {
+          "type": "integer"
+        },
+        "message_counts": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "max_count": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

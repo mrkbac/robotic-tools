@@ -35,7 +35,7 @@ from small_mcap import (
 from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
-from pymcap_cli.types import (
+from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
 )

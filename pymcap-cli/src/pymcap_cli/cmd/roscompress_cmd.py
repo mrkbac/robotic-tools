@@ -32,7 +32,7 @@ from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import confirm_output_overwrite
-from pymcap_cli.types import (
+from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )

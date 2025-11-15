@@ -1,0 +1,32 @@
+# jsonschema-gentypes configuration for MCAP info types
+# This file controls auto-generation of TypedDict definitions from JSON schema
+
+# Header added to generated files
+headers: |
+  # AUTO-GENERATED FILE - DO NOT EDIT
+
+# Post-generation formatters
+# Note: Formatting is handled by pre-commit (ruff-format and ruff-check hooks)
+# so callbacks are not needed here
+callbacks: []
+
+# Pre-commit integration settings
+pre_commit:
+  enabled: true
+  arguments:
+    - --color=never
+
+# Line length for code generation (matches project ruff config)
+lineLength: 100
+
+# Target Python version (matches project requirements)
+python_version: "3.10"
+
+# Generation rules
+generate:
+  - source: pymcap-cli/schemas/mcap_info.json
+    destination: pymcap-cli/src/pymcap_cli/types.py
+    root_name: McapInfoOutput
+    api_arguments:
+      additional_properties: Only explicit # Strict typing - no extra fields allowed
+      get_name_properties: UpperFirst # Use UpperFirst for class names

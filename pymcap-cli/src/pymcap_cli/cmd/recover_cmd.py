@@ -6,7 +6,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions, confirm_output_overwrite
-from pymcap_cli.types import (
+from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,

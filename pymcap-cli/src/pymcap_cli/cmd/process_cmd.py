@@ -17,7 +17,7 @@ from pymcap_cli.mcap_processor import (
     confirm_output_overwrite,
     report_processing_stats,
 )
-from pymcap_cli.types import (
+from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
