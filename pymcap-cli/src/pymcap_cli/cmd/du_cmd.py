@@ -1,10 +1,8 @@
 """DU command - report space usage within an MCAP file."""
 
-from __future__ import annotations
-
 from typing import Annotated
 
-import typer
+from cyclopts import Parameter
 from rich.console import Console
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
@@ -14,24 +12,14 @@ from pymcap_cli.utils import rebuild_info
 
 console = Console()
 
-app = typer.Typer()
 
-
-@app.command()
 def du(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to analyze (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
+    *,
     exact_sizes: Annotated[
         bool,
-        typer.Option(
-            "--exact-sizes",
-            "-e",
-            help="Use exact sizes for message data (may be slower)",
-            show_default=True,
+        Parameter(
+            name=["-e", "--exact-sizes"],
         ),
     ] = False,
 ) -> None:
@@ -41,6 +29,13 @@ def du(
     calculated using the uncompressed size.
 
     Note: This command will scan and uncompress the entire file.
+
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to analyze (local file or HTTP/HTTPS URL).
+    exact_sizes
+        Use exact sizes for message data (may be slower).
     """
     with open_input(file) as (f, file_size):
         # Use rebuild_info to get channel sizes (du always rebuilds)

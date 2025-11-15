@@ -1,14 +1,13 @@
 """TF tree command - display transform tree from MCAP file."""
 
-from __future__ import annotations
-
 import math
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
-import typer
+from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.live import Live
@@ -19,7 +18,9 @@ from small_mcap.reader import include_topics
 from pymcap_cli.input_handler import open_input
 
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+DISPLAY_GROUP = Group("Display")
 
 
 @dataclass
@@ -227,30 +228,35 @@ def _build_tf_table(
     return table
 
 
-@app.command()
 def tftree(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to MCAP file (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
+    *,
     static_only: Annotated[
         bool,
-        typer.Option(
-            "--static-only",
-            help="Show only static transforms (/tf_static)",
+        Parameter(
+            name=["--static-only"],
+            group=DISPLAY_GROUP,
         ),
     ] = False,
     change_only: Annotated[
         bool,
-        typer.Option(
-            "--change-only",
-            help="Update display only when tree structure changes (new frames added)",
+        Parameter(
+            name=["--change-only"],
+            group=DISPLAY_GROUP,
         ),
     ] = False,
 ) -> None:
-    """Display TF transform tree from MCAP file."""
+    """Display TF transform tree from MCAP file.
+
+    Parameters
+    ----------
+    file
+        Path to MCAP file (local file or HTTP/HTTPS URL).
+    static_only
+        Show only static transforms (/tf_static).
+    change_only
+        Update display only when tree structure changes (new frames added).
+    """
     transforms: dict[tuple[str, str], TransformData] = {}
     transform_counts: dict[tuple[str, str], int] = defaultdict(int)
     seen_frame_pairs: set[tuple[str, str]] = set()
@@ -316,4 +322,4 @@ def tftree(
 
     except (OSError, ValueError, RuntimeError) as e:
         console.print(f"[red]Error reading MCAP file: {e}[/red]")
-        raise typer.Exit(1) from e
+        sys.exit(1)

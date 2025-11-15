@@ -1,6 +1,8 @@
-"""Main CLI entry point for pymcap-cli using Typer."""
+"""Main CLI entry point for pymcap-cli using Cyclopts."""
 
-import typer
+import sys
+
+from cyclopts import App
 
 from pymcap_cli.cmd import (
     cat_cmd,
@@ -14,7 +16,6 @@ from pymcap_cli.cmd import (
     process_cmd,
     rechunk_cmd,
     recover_cmd,
-    roscompress_cmd,
     tftree_cmd,
 )
 
@@ -27,21 +28,43 @@ except ImportError:
 
         To enable video functionality, please install pymcap-cli with the 'video' extra:
 
-            pip install pymcap-cli[video]
+            uv add --group video pymcap-cli
         """
-        typer.echo(
-            "[red]Error:\n[/]"
+        print(  # noqa: T201
+            "Error:\n"
             "Video command is unavailable because the 'av' and/or 'numpy' are not installed.\n"
             "To enable video functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    pip install pymcap-cli[video]\n",
+            "    uv add --group video pymcap-cli\n",
+            file=sys.stderr,
         )
+        sys.exit(1)
 
 
-app = typer.Typer(
+try:
+    from pymcap_cli.cmd.roscompress_cmd import roscompress  # type: ignore[unused-ignore]
+except ImportError:
+
+    def roscompress() -> None:  # type: ignore[misc]
+        """ROS compress command is unavailable because the 'av' package is not installed.
+
+        To enable roscompress functionality, please install pymcap-cli with the 'video' extra:
+
+            uv add --group video pymcap-cli
+        """
+        print(  # noqa: T201
+            "Error:\n"
+            "ROS compress command is unavailable because the 'av' package is not installed.\n"
+            "To enable this functionality, please install pymcap-cli with the 'video' extra:\n\n"
+            "    uv add --group video pymcap-cli\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+app = App(
     name="pymcap-cli",
     help="CLI tool for slicing and dicing MCAP files.",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
+    help_format="rich",
 )
 
 
@@ -58,10 +81,10 @@ app.command(name="video")(video)
 app.command(name="filter")(filter_cmd.filter_cmd)
 app.command(name="merge")(merge_cmd.merge)
 app.command(name="compress")(compress_cmd.compress)
-app.command(name="roscompress")(roscompress_cmd.roscompress)
+app.command(name="roscompress")(roscompress)
 
 # Command groups (list has 5 subcommands)
-app.add_typer(list_cmd.list_app)
+app.command(list_cmd.list_app, name="list")
 
 
 if __name__ == "__main__":

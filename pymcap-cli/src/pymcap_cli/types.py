@@ -1,12 +1,10 @@
 """Type definitions for MCAP info structures."""
 
-from __future__ import annotations
-
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, TypedDict
 
-import typer
+from cyclopts import Group, Parameter
 
 
 class FileInfo(TypedDict):
@@ -134,47 +132,37 @@ MIN_CHUNK_SIZE = 1024  # 1 KiB minimum chunk size
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB default chunk size
 DEFAULT_COMPRESSION = CompressionType.ZSTD  # Default compression algorithm
 
+# Parameter groups
+OUTPUT_OPTIONS_GROUP = Group("Output Options")
+
 ChunkSizeOption = Annotated[
     int,
-    typer.Option(
-        "--chunk-size",
-        min=MIN_CHUNK_SIZE,
-        help="Chunk size of output file in bytes",
-        envvar="PYMCAP_CHUNK_SIZE",
-        show_default="4MB",
-        rich_help_panel="Output Options",
+    Parameter(
+        name=["--chunk-size"],
+        group=OUTPUT_OPTIONS_GROUP,
     ),
 ]
 
 CompressionOption = Annotated[
     CompressionType,
-    typer.Option(
-        "--compression",
-        help="Compression algorithm for output file",
-        envvar="PYMCAP_COMPRESSION",
-        show_default=True,
-        rich_help_panel="Output Options",
+    Parameter(
+        name=["--compression"],
+        group=OUTPUT_OPTIONS_GROUP,
     ),
 ]
 
 OutputPathOption = Annotated[
     Path,
-    typer.Option(
-        ...,
-        "-o",
-        "--output",
-        help="Output filename",
-        rich_help_panel="Output Options",
+    Parameter(
+        name=["-o", "--output"],
+        group=OUTPUT_OPTIONS_GROUP,
     ),
 ]
 
 ForceOverwriteOption = Annotated[
     bool,
-    typer.Option(
-        "-f",
-        "--force",
-        help="Force overwrite of output file without confirmation",
-        show_default=True,
-        rich_help_panel="Output Options",
+    Parameter(
+        name=["-f", "--force"],
+        group=OUTPUT_OPTIONS_GROUP,
     ),
 ]

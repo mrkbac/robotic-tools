@@ -1,15 +1,13 @@
 """Unified process command combining recovery and filtering capabilities."""
 
-from __future__ import annotations
-
 import contextlib
+import sys
 from enum import Enum
 from typing import Annotated
 
-import typer
+from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     AttachmentsMode,
@@ -28,8 +26,13 @@ from pymcap_cli.types import (
     OutputPathOption,
 )
 
-app = typer.Typer()
 console = Console()
+
+# Parameter groups
+RECOVERY_GROUP = Group("Recovery Options")
+FILTERING_GROUP = Group("Topic Filtering")
+TIME_FILTERING_GROUP = Group("Time Filtering")
+CONTENT_FILTERING_GROUP = Group("Content Filtering")
 
 
 class RecoveryMode(str, Enum):
@@ -39,158 +42,94 @@ class RecoveryMode(str, Enum):
     DISABLED = "disabled"
 
 
-@app.command(
-    epilog="""
-Examples:
-  # Recover corrupted file with compression change
-  pymcap-cli process corrupt.mcap -o fixed.mcap --compression lz4
-
-  # Filter by topic and time in one pass
-  pymcap-cli process in.mcap -o out.mcap -y '/camera.*' --start-secs 10
-
-  # Merge multiple files
-  pymcap-cli process file1.mcap file2.mcap file3.mcap -o merged.mcap
-
-  # Process with metadata excluded
-  pymcap-cli process in.mcap -o out.mcap --metadata exclude
-"""
-)
 def process(
-    file: Annotated[
-        list[str],
-        typer.Argument(
-            help=(
-                "Path(s) to MCAP file(s) to process "
-                "(local files or HTTP/HTTPS URLs, or merge if multiple)"
-            ),
-        ),
-    ],
+    file: list[str],
     output: OutputPathOption,
-    # Recovery options
+    *,
     recovery_mode: Annotated[
         RecoveryMode,
-        typer.Option(
-            "--recovery",
-            help="Recovery mode: enabled (handle errors gracefully) or disabled (fail on errors)",
-            rich_help_panel="Recovery Options",
-            show_default=True,
+        Parameter(
+            name=["--recovery"],
+            group=RECOVERY_GROUP,
         ),
     ] = RecoveryMode.ENABLED,
     always_decode_chunk: Annotated[
         bool,
-        typer.Option(
-            "-a",
-            "--always-decode-chunk",
-            help="Always decode chunks, never use fast copying",
-            rich_help_panel="Recovery Options",
-            show_default=True,
+        Parameter(
+            name=["-a", "--always-decode-chunk"],
+            group=RECOVERY_GROUP,
         ),
     ] = False,
-    # Topic filtering
     include_topic_regex: Annotated[
         list[str] | None,
-        typer.Option(
-            "-y",
-            "--include-topic-regex",
-            help=(
-                "Include messages with topic names matching this regex (can be used multiple times)"
-            ),
-            autocompletion=complete_all_topics,
-            rich_help_panel="Topic Filtering",
+        Parameter(
+            name=["-y", "--include-topic-regex"],
+            group=FILTERING_GROUP,
         ),
     ] = None,
     exclude_topic_regex: Annotated[
         list[str] | None,
-        typer.Option(
-            "-n",
-            "--exclude-topic-regex",
-            help=(
-                "Exclude messages with topic names matching this regex (can be used multiple times)"
-            ),
-            autocompletion=complete_all_topics,
-            rich_help_panel="Topic Filtering",
+        Parameter(
+            name=["-n", "--exclude-topic-regex"],
+            group=FILTERING_GROUP,
         ),
     ] = None,
-    # Time filtering
     start: Annotated[
         str,
-        typer.Option(
-            "-S",
-            "--start",
-            help="Include messages at or after this time (nanoseconds or RFC3339 date)",
-            rich_help_panel="Time Filtering",
-            show_default="beginning of recording",
+        Parameter(
+            name=["-S", "--start"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = "",
     start_secs: Annotated[
         int,
-        typer.Option(
-            "-s",
-            "--start-secs",
-            help="Include messages at or after this time in seconds (ignored if --start used)",
-            rich_help_panel="Time Filtering",
+        Parameter(
+            name=["-s", "--start-secs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     start_nsecs: Annotated[
         int,
-        typer.Option(
-            "--start-nsecs",
-            help=(
-                "[DEPRECATED - use --start instead] "
-                "Include messages at or after this time in nanoseconds"
-            ),
-            hidden=True,
+        Parameter(
+            name=["--start-nsecs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     end: Annotated[
         str,
-        typer.Option(
-            "-E",
-            "--end",
-            help="Include messages before this time (nanoseconds or RFC3339 date)",
-            rich_help_panel="Time Filtering",
-            show_default="end of recording",
+        Parameter(
+            name=["-E", "--end"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = "",
     end_secs: Annotated[
         int,
-        typer.Option(
-            "-e",
-            "--end-secs",
-            help="Include messages before this time in seconds (ignored if --end used)",
-            rich_help_panel="Time Filtering",
+        Parameter(
+            name=["-e", "--end-secs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     end_nsecs: Annotated[
         int,
-        typer.Option(
-            "--end-nsecs",
-            help=(
-                "[DEPRECATED - use --end instead] Include messages before this time in nanoseconds"
-            ),
-            hidden=True,
+        Parameter(
+            name=["--end-nsecs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
-    # Content filtering
     metadata_mode: Annotated[
         MetadataMode,
-        typer.Option(
-            "--metadata",
-            help="Metadata handling: include or exclude metadata records",
-            rich_help_panel="Content Filtering",
-            show_default=True,
+        Parameter(
+            name=["--metadata"],
+            group=CONTENT_FILTERING_GROUP,
         ),
     ] = MetadataMode.INCLUDE,
     attachments_mode: Annotated[
         AttachmentsMode,
-        typer.Option(
-            "--attachments",
-            help="Attachments handling: include or exclude attachment records",
-            rich_help_panel="Content Filtering",
-            show_default=True,
+        Parameter(
+            name=["--attachments"],
+            group=CONTENT_FILTERING_GROUP,
         ),
     ] = AttachmentsMode.INCLUDE,
-    # Output options
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
@@ -201,10 +140,60 @@ def process(
     and transformation capabilities in a single operation. Can handle corrupt files
     while applying topic/time filters and changing compression.
 
-    Usage:
-      mcap process in.mcap -o out.mcap -y /camera.* --recovery-mode
+    Parameters
+    ----------
+    file
+        Path(s) to MCAP file(s) to process (local files or HTTP/HTTPS URLs, or merge if multiple).
+    output
+        Output filename.
+    recovery_mode
+        Recovery mode: enabled (handle errors gracefully) or disabled (fail on errors).
+    always_decode_chunk
+        Always decode chunks, never use fast copying.
+    include_topic_regex
+        Include messages with topic names matching this regex (can be used multiple times).
+    exclude_topic_regex
+        Exclude messages with topic names matching this regex (can be used multiple times).
+    start
+        Include messages at or after this time (nanoseconds or RFC3339 date).
+    start_secs
+        Include messages at or after this time in seconds (ignored if --start used).
+    start_nsecs
+        [DEPRECATED - use --start instead] Include messages at or after this time in nanoseconds.
+    end
+        Include messages before this time (nanoseconds or RFC3339 date).
+    end_secs
+        Include messages before this time in seconds (ignored if --end used).
+    end_nsecs
+        [DEPRECATED - use --end instead] Include messages before this time in nanoseconds.
+    metadata_mode
+        Metadata handling: include or exclude metadata records.
+    attachments_mode
+        Attachments handling: include or exclude attachment records.
+    chunk_size
+        Chunk size of output file in bytes.
+    compression
+        Compression algorithm for output file.
+    force
+        Force overwrite of output file without confirmation.
+
+    Examples
+    --------
+    ```
+    # Recover corrupted file with compression change
+    pymcap-cli process corrupt.mcap -o fixed.mcap --compression lz4
+
+    # Filter by topic and time in one pass
+    pymcap-cli process in.mcap -o out.mcap -y '/camera.*' --start-secs 10
+
+    # Merge multiple files
+    pymcap-cli process file1.mcap file2.mcap file3.mcap -o merged.mcap
+
+    # Process with metadata excluded
+    pymcap-cli process in.mcap -o out.mcap --metadata exclude
+    ```
     """
-    # Confirm overwrite if needed (file existence validated by Typer)
+    # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
     # Build processing options
@@ -227,7 +216,7 @@ def process(
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
+        sys.exit(1)
 
     input_files = file
 
@@ -254,4 +243,4 @@ def process(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during processing: {e}[/red]")
-            raise typer.Exit(1) from None
+            sys.exit(1)

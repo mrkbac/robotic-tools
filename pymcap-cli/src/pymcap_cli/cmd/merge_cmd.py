@@ -1,11 +1,10 @@
 """Merge command for pymcap-cli."""
 
-from __future__ import annotations
-
 import contextlib
+import sys
 from typing import Annotated
 
-import typer
+from cyclopts import Group, Parameter
 from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
@@ -27,36 +26,27 @@ from pymcap_cli.types import (
 )
 
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+CONTENT_FILTERING_GROUP = Group("Content Filtering")
 
 
-@app.command(name="merge")
 def merge(
-    files: Annotated[
-        list[str],
-        typer.Argument(
-            help=(
-                "Paths to MCAP files to merge (local files or HTTP/HTTPS URLs, 2 or more required)"
-            ),
-        ),
-    ],
+    files: list[str],
     output: OutputPathOption,
+    *,
     metadata_mode: Annotated[
         MetadataMode,
-        typer.Option(
-            "--metadata",
-            help="Metadata handling: include or exclude metadata records",
-            rich_help_panel="Content Filtering",
-            show_default=True,
+        Parameter(
+            name=["--metadata"],
+            group=CONTENT_FILTERING_GROUP,
         ),
     ] = MetadataMode.INCLUDE,
     attachments_mode: Annotated[
         AttachmentsMode,
-        typer.Option(
-            "--attachments",
-            help="Attachments handling: include or exclude attachment records",
-            rich_help_panel="Content Filtering",
-            show_default=True,
+        Parameter(
+            name=["--attachments"],
+            group=CONTENT_FILTERING_GROUP,
         ),
     ] = AttachmentsMode.INCLUDE,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
@@ -68,14 +58,34 @@ def merge(
     Merge multiple MCAP files chronologically by timestamp into a single output file.
     Messages are interleaved in time order across all input files.
 
-    Usage:
-      pymcap merge recording1.mcap recording2.mcap -o combined.mcap
-      pymcap merge *.mcap -o all_recordings.mcap --compression lz4
+    Parameters
+    ----------
+    files
+        Paths to MCAP files to merge (local files or HTTP/HTTPS URLs, 2 or more required).
+    output
+        Output filename.
+    metadata_mode
+        Metadata handling: include or exclude metadata records.
+    attachments_mode
+        Attachments handling: include or exclude attachment records.
+    chunk_size
+        Chunk size of output file in bytes.
+    compression
+        Compression algorithm for output file.
+    force
+        Force overwrite of output file without confirmation.
+
+    Examples
+    --------
+    ```
+    pymcap-cli merge recording1.mcap recording2.mcap -o combined.mcap
+    pymcap-cli merge *.mcap -o all_recordings.mcap --compression lz4
+    ```
     """
-    # Validate inputs (merge requires at least 2 files, existence checked by Typer)
+    # Validate inputs (merge requires at least 2 files)
     if len(files) < 2:
         console.print("[red]Error: At least 2 input files are required for merging[/red]")
-        raise typer.Exit(1)
+        sys.exit(1)
 
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
@@ -110,4 +120,4 @@ def merge(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during merge: {e}[/red]")
-            raise typer.Exit(1) from None
+            sys.exit(1)

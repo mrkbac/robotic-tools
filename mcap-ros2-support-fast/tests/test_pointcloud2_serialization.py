@@ -118,7 +118,9 @@ def test_pointcloud2_basic_roundtrip():
     # Register schema and channel
     schema_id = 1
     channel_id = 1
-    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_schema(
+        schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode()
+    )
     ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
 
     # Create a simple point cloud with 100 points
@@ -198,7 +200,9 @@ def test_pointcloud2_empty():
     # Register schema and channel
     schema_id = 1
     channel_id = 1
-    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_schema(
+        schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode()
+    )
     ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
 
     msg, _ = create_pointcloud2_xyz(0)
@@ -233,7 +237,9 @@ def test_pointcloud2_large():
     # Register schema and channel
     schema_id = 1
     channel_id = 1
-    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_schema(
+        schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode()
+    )
     ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
 
     # Use 4071 points like in the bug report
@@ -303,7 +309,9 @@ def test_pointfield_padding():
     # Register schema and channel
     schema_id = 1
     channel_id = 1
-    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_schema(
+        schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode()
+    )
     ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
 
     ros_writer.add_message_encode(
@@ -339,7 +347,9 @@ def test_pointcloud2_various_sizes(num_points):
     # Register schema and channel
     schema_id = 1
     channel_id = 1
-    ros_writer.add_schema(schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode())
+    ros_writer.add_schema(
+        schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode()
+    )
     ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
 
     msg, _ = create_pointcloud2_xyz(num_points)

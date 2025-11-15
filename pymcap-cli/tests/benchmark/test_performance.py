@@ -41,8 +41,8 @@ def test_benchmark_recover_nuscenes_mcap_cli(benchmark, nuscenes_mcap: Path, tmp
     output_file = tmp_path / "output.mcap"
 
     def run_recover():
-        subprocess.run(  # noqa: S603
-            [  # noqa: S607
+        subprocess.run(
+            [
                 "mcap",
                 "recover",
                 str(nuscenes_mcap),
@@ -94,8 +94,8 @@ def test_benchmark_filter_nuscenes_mcap_cli(benchmark, nuscenes_mcap: Path, tmp_
     output_file = tmp_path / "output.mcap"
 
     def run_filter():
-        subprocess.run(  # noqa: S603
-            [  # noqa: S607
+        subprocess.run(
+            [
                 "mcap",
                 "filter",
                 str(nuscenes_mcap),

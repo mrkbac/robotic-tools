@@ -1,13 +1,11 @@
 """Filter command for pymcap-cli."""
 
-from __future__ import annotations
-
+import sys
 from typing import Annotated
 
-import typer
+from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     AttachmentsMode,
@@ -27,116 +25,85 @@ from pymcap_cli.types import (
 )
 
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+TOPIC_FILTERING_GROUP = Group("Topic Filtering")
+TIME_FILTERING_GROUP = Group("Time Filtering")
+CONTENT_FILTERING_GROUP = Group("Content Filtering")
 
 
-@app.command(name="filter")
 def filter_cmd(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to filter (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
     output: OutputPathOption,
+    *,
     include_topic_regex: Annotated[
         list[str] | None,
-        typer.Option(
-            "-y",
-            "--include-topic-regex",
-            help=(
-                "Include messages with topic names matching this regex (can be used multiple times)"
-            ),
-            autocompletion=complete_all_topics,
-            rich_help_panel="Topic Filtering",
-            show_default="none",
+        Parameter(
+            name=["-y", "--include-topic-regex"],
+            group=TOPIC_FILTERING_GROUP,
         ),
     ] = None,
     exclude_topic_regex: Annotated[
         list[str] | None,
-        typer.Option(
-            "-n",
-            "--exclude-topic-regex",
-            help=(
-                "Exclude messages with topic names matching this regex (can be used multiple times)"
-            ),
-            autocompletion=complete_all_topics,
-            rich_help_panel="Topic Filtering",
-            show_default="none",
+        Parameter(
+            name=["-n", "--exclude-topic-regex"],
+            group=TOPIC_FILTERING_GROUP,
         ),
     ] = None,
     start: Annotated[
         str,
-        typer.Option(
-            "-S",
-            "--start",
-            help="Include messages at or after this time (nanoseconds or RFC3339 date)",
-            rich_help_panel="Time Filtering",
-            show_default="beginning of recording",
+        Parameter(
+            name=["-S", "--start"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = "",
     start_secs: Annotated[
         int,
-        typer.Option(
-            "-s",
-            "--start-secs",
-            help="Include messages at or after this time in seconds (ignored if --start used)",
-            rich_help_panel="Time Filtering",
-            show_default=True,
+        Parameter(
+            name=["-s", "--start-secs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     start_nsecs: Annotated[
         int,
-        typer.Option(
-            "--start-nsecs",
-            help="(Deprecated, use --start) Include messages at or after this time in nanoseconds",
-            hidden=True,
+        Parameter(
+            name=["--start-nsecs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     end: Annotated[
         str,
-        typer.Option(
-            "-E",
-            "--end",
-            help="Include messages before this time (nanoseconds or RFC3339 date)",
-            rich_help_panel="Time Filtering",
-            show_default="end of recording",
+        Parameter(
+            name=["-E", "--end"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = "",
     end_secs: Annotated[
         int,
-        typer.Option(
-            "-e",
-            "--end-secs",
-            help="Include messages before this time in seconds (ignored if --end used)",
-            rich_help_panel="Time Filtering",
-            show_default=True,
+        Parameter(
+            name=["-e", "--end-secs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     end_nsecs: Annotated[
         int,
-        typer.Option(
-            "--end-nsecs",
-            help="(Deprecated, use --end) Include messages before this time in nanoseconds",
-            hidden=True,
+        Parameter(
+            name=["--end-nsecs"],
+            group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
     metadata_mode: Annotated[
         MetadataMode,
-        typer.Option(
-            "--metadata",
-            help="Metadata handling: include or exclude metadata records",
-            rich_help_panel="Content Filtering",
-            show_default=True,
+        Parameter(
+            name=["--metadata"],
+            group=CONTENT_FILTERING_GROUP,
         ),
     ] = MetadataMode.EXCLUDE,
     attachments_mode: Annotated[
         AttachmentsMode,
-        typer.Option(
-            "--attachments",
-            help="Attachments handling: include or exclude attachment records",
-            rich_help_panel="Content Filtering",
-            show_default=True,
+        Parameter(
+            name=["--attachments"],
+            group=CONTENT_FILTERING_GROUP,
         ),
     ] = AttachmentsMode.EXCLUDE,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
@@ -149,10 +116,46 @@ def filter_cmd(
     When multiple regexes are used, topics that match any regex are
     included (or excluded).
 
-    Usage:
-      mcap filter in.mcap -o out.mcap -y /diagnostics -y /tf -y /camera_.*
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to filter (local file or HTTP/HTTPS URL).
+    output
+        Output filename.
+    include_topic_regex
+        Include messages with topic names matching this regex (can be used multiple times).
+    exclude_topic_regex
+        Exclude messages with topic names matching this regex (can be used multiple times).
+    start
+        Include messages at or after this time (nanoseconds or RFC3339 date).
+    start_secs
+        Include messages at or after this time in seconds (ignored if --start used).
+    start_nsecs
+        (Deprecated, use --start) Include messages at or after this time in nanoseconds.
+    end
+        Include messages before this time (nanoseconds or RFC3339 date).
+    end_secs
+        Include messages before this time in seconds (ignored if --end used).
+    end_nsecs
+        (Deprecated, use --end) Include messages before this time in nanoseconds.
+    metadata_mode
+        Metadata handling: include or exclude metadata records.
+    attachments_mode
+        Attachments handling: include or exclude attachment records.
+    chunk_size
+        Chunk size of output file in bytes.
+    compression
+        Compression algorithm for output file.
+    force
+        Force overwrite of output file without confirmation.
+
+    Examples
+    --------
+    ```
+    mcap filter in.mcap -o out.mcap -y /diagnostics -y /tf -y /camera_.*
+    ```
     """
-    # Confirm overwrite if needed (file existence validated by Typer)
+    # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
     # Build processing options
@@ -173,7 +176,7 @@ def filter_cmd(
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
+        sys.exit(1)
 
     # Create processor and run
     processor = McapProcessor(processing_options)
@@ -187,4 +190,4 @@ def filter_cmd(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during filtering: {e}[/red]")
-            raise typer.Exit(1) from None
+            sys.exit(1)

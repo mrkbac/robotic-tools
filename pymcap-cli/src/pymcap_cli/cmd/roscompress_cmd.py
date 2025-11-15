@@ -1,19 +1,19 @@
 """Command to compress CompressedImage topics to CompressedVideo in MCAP files."""
 
-from __future__ import annotations
-
 import io
 import logging
 import platform
+import sys
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import av
 import av.error
 import numpy as np
-import typer
+from av.video.frame import VideoFrame
+from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
@@ -38,8 +38,8 @@ from pymcap_cli.types import (
 )
 
 if TYPE_CHECKING:
+    from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
-    from av.video.frame import VideoFrame
 
 
 FOXGLOVE_COMPRESSED_VIDEO = """builtin_interfaces/Time timestamp
@@ -57,8 +57,10 @@ RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
 IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
 
 console = Console()
-app = typer.Typer(help="Compress CompressedImage topics to CompressedVideo")
 logger = logging.getLogger(__name__)
+
+# Parameter groups
+ENCODING_GROUP = Group("Encoding")
 
 
 class VideoEncoderError(Exception):
@@ -94,7 +96,7 @@ def _detect_encoder() -> str:
 def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
     """Decode a compressed image (JPEG/PNG) to a VideoFrame."""
     try:
-        container = av.open(io.BytesIO(compressed_data), format="image2")
+        container = cast("InputContainer", av.open(io.BytesIO(compressed_data), format="image2"))
         for frame in container.decode(video=0):
             container.close()
             return frame.reformat(format="rgb24")
@@ -161,7 +163,9 @@ class _VideoEncoder:
         self._gop_size = gop_size
 
         try:
-            self._context: VideoCodecContext = av.CodecContext.create(codec_name, "w")
+            self._context: VideoCodecContext = cast(
+                "VideoCodecContext", av.CodecContext.create(codec_name, "w")
+            )
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Failed to create encoder {codec_name}: {exc}") from exc
 
@@ -231,41 +235,52 @@ class _VideoEncoder:
         """Close the encoder (no-op, context cleaned up by garbage collector)."""
 
 
-@app.command()
 def roscompress(
-    file: Annotated[str, typer.Argument(help="Input MCAP file")],
+    file: str,
     output: OutputPathOption,
+    *,
     force: ForceOverwriteOption = False,
     quality: Annotated[
         int,
-        typer.Option(
-            "--quality",
-            "-q",
-            min=0,
-            max=51,
-            help="Video quality (CRF: lower = better, 0-51)",
+        Parameter(
+            name=["--quality", "-q"],
+            group=ENCODING_GROUP,
         ),
     ] = 28,
     codec: Annotated[
         str,
-        typer.Option(
-            "--codec",
-            help="Video codec (h264, h265)",
+        Parameter(
+            name=["--codec"],
+            group=ENCODING_GROUP,
         ),
     ] = "h264",
     encoder: Annotated[
         str | None,
-        typer.Option(
-            "--encoder",
-            help="Force specific encoder (libx264, h264_videotoolbox, etc.)",
+        Parameter(
+            name=["--encoder"],
+            group=ENCODING_GROUP,
         ),
     ] = None,
 ) -> None:
-    """
-    Compress ROS MCAP by converting CompressedImage/Image topics to CompressedVideo.
+    """Compress ROS MCAP by converting CompressedImage/Image topics to CompressedVideo.
 
     This reduces file size while maintaining visual quality by using video compression
     instead of individual image compression.
+
+    Parameters
+    ----------
+    file
+        Input MCAP file (local file or HTTP/HTTPS URL).
+    output
+        Output filename.
+    force
+        Force overwrite of output file without confirmation.
+    quality
+        Video quality (CRF: lower = better, 0-51). Default: 28.
+    codec
+        Video codec (h264, h265). Default: h264.
+    encoder
+        Force specific encoder (libx264, h264_videotoolbox, etc.). If None, auto-detect.
     """
     confirm_output_overwrite(output, force)
 
@@ -273,7 +288,7 @@ def roscompress(
     if encoder:
         if not _test_encoder(encoder):
             console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
-            raise typer.Exit(1)
+            sys.exit(1)
         encoder_name = encoder
     else:
         encoder_name = _detect_encoder()
@@ -286,9 +301,12 @@ def roscompress(
     # Get message count from summary for progress bar
     total_message_count: int | None = None
     with open_input(file) as (f, _file_size):
-        if summary := get_summary(f):
-            if summary.statistics and summary.statistics.channel_message_counts:
-                total_message_count = sum(summary.statistics.channel_message_counts.values())
+        if (
+            (summary := get_summary(f))
+            and summary.statistics
+            and summary.statistics.channel_message_counts
+        ):
+            total_message_count = sum(summary.statistics.channel_message_counts.values())
 
     # Track encoders per topic (lazy initialization)
     encoders: dict[str, _VideoEncoder] = {}
@@ -372,7 +390,7 @@ def roscompress(
                             console.print(
                                 f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}"
                             )
-                            raise typer.Exit(1) from exc
+                            sys.exit(1)
 
                     # Decode image
                     if schema_name in COMPRESSED_SCHEMAS:
@@ -413,12 +431,12 @@ def roscompress(
                                     f"[red]Error:[/red] Software encoder also failed for {topic}: "
                                     f"{fallback_exc}"
                                 )
-                                raise typer.Exit(1) from fallback_exc
+                                sys.exit(1)
                         else:
                             console.print(
                                 f"[red]Error:[/red] Failed to encode frame for {topic}: {exc}"
                             )
-                            raise typer.Exit(1) from exc
+                            sys.exit(1)
 
                     # Create CompressedVideo message
                     compressed_video_msg = {
@@ -437,7 +455,10 @@ def roscompress(
                         schema_id = next_schema_id
                         next_schema_id += 1
                         writer.add_schema(
-                            schema_id, compressed_video_schema, "ros2msg", FOXGLOVE_COMPRESSED_VIDEO.encode()
+                            schema_id,
+                            compressed_video_schema,
+                            "ros2msg",
+                            FOXGLOVE_COMPRESSED_VIDEO.encode(),
                         )
                         schema_ids[compressed_video_schema] = schema_id
                     else:
@@ -447,9 +468,7 @@ def roscompress(
                     if topic not in channel_ids:
                         channel_id = next_channel_id
                         next_channel_id += 1
-                        writer.add_channel(
-                            channel_id, topic, "cdr", schema_id
-                        )
+                        writer.add_channel(channel_id, topic, "cdr", schema_id)
                         channel_ids[topic] = channel_id
                     else:
                         channel_id = channel_ids[topic]
@@ -507,8 +526,8 @@ def roscompress(
 
     finally:
         # Clean up encoders
-        for encoder in encoders.values():
-            encoder.close()
+        for video_encoder in encoders.values():
+            video_encoder.close()
 
     # Report statistics
     console.print("\n[green bold]✓ Compression complete![/green bold]")

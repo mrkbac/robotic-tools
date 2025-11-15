@@ -1,8 +1,7 @@
-from __future__ import annotations
-
+import sys
 from typing import Annotated
 
-import typer
+from cyclopts import Group, Parameter
 from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
@@ -17,38 +16,50 @@ from pymcap_cli.types import (
 )
 
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+RECOVERY_OPTIONS_GROUP = Group("Recovery Options")
 
 
-@app.command()
 def recover(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to recover (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
     output: OutputPathOption,
+    *,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     always_decode_chunk: Annotated[
         bool,
-        typer.Option(
-            "--always-decode-chunk",
-            "-a",
-            help="Always decode chunks, even if the file is not chunked",
-            rich_help_panel="Recovery Options",
-            show_default=True,
+        Parameter(
+            name=["-a", "--always-decode-chunk"],
+            group=RECOVERY_OPTIONS_GROUP,
         ),
     ] = False,
     force: ForceOverwriteOption = False,
 ) -> None:
     """Recover data from a potentially corrupt MCAP file.
 
-    This subcommand reads a potentially corrupt MCAP file and copies data to a new file.
+    This command reads a potentially corrupt MCAP file and copies data to a new file.
 
-    usage:
-      mcap recover in.mcap -o out.mcap
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to recover (local file or HTTP/HTTPS URL).
+    output
+        Output filename.
+    chunk_size
+        Chunk size of output file in bytes.
+    compression
+        Compression algorithm for output file.
+    always_decode_chunk
+        Always decode chunks, even if the file is not chunked.
+    force
+        Force overwrite of output file without confirmation.
+
+    Examples
+    --------
+    ```
+    pymcap-cli recover in.mcap -o out.mcap
+    ```
     """
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
@@ -101,7 +112,7 @@ def recover(
                 console.print("No valid MCAP data found to recover")
             else:
                 console.print(f"[red]Error during recovery: {e}[/red]")
-                raise typer.Exit(1)
+                sys.exit(1)
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during recovery: {e}[/red]")
-            raise typer.Exit(1)
+            sys.exit(1)

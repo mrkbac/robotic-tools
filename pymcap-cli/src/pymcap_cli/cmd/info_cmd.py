@@ -1,12 +1,10 @@
 """Info command - report statistics about an MCAP file."""
 
-from __future__ import annotations
-
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
-import typer
+from cyclopts import Group, Parameter
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.jupyter import JupyterMixin
 from rich.measure import Measurement
@@ -18,13 +16,14 @@ from small_mcap import InvalidMagicError
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
 from pymcap_cli.input_handler import open_input
+from pymcap_cli.types import McapInfoOutput
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
-if TYPE_CHECKING:
-    from pymcap_cli.types import McapInfoOutput
-
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+PROCESSING_GROUP = Group("Processing Options")
+DISPLAY_GROUP = Group("Display Options")
 
 
 class SortChoice(str, Enum):
@@ -291,104 +290,56 @@ def _display_channels_table(
     )
 
 
-@app.command(
-    epilog="""
-Examples:
-  # Basic file info
-  pymcap-cli info recording.mcap
-
-  # Rebuild summary with exact message sizes
-  pymcap-cli info recording.mcap --rebuild --exact-sizes
-
-  # Sort channels by message count (descending)
-  pymcap-cli info recording.mcap --sort msgs --reverse
-
-  # Calculate per-channel Hz using individual durations
-  pymcap-cli info recording.mcap --index-duration
-"""
-)
 def info(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to analyze (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
+    *,
     rebuild: Annotated[
         bool,
-        typer.Option(
-            "--rebuild",
-            "-r",
-            help=(
-                "Rebuild file metadata by scanning all records "
-                "(use for corrupt or summary-less files)"
-            ),
-            rich_help_panel="Processing Options",
-            show_default=True,
+        Parameter(
+            name=["-r", "--rebuild"],
+            group=PROCESSING_GROUP,
         ),
     ] = False,
     exact_sizes: Annotated[
         bool,
-        typer.Option(
-            "--exact-sizes",
-            "-e",
-            help=(
-                "Calculate exact message sizes by decompressing chunks (slower, requires --rebuild)"
-            ),
-            rich_help_panel="Processing Options",
-            show_default=True,
+        Parameter(
+            name=["-e", "--exact-sizes"],
+            group=PROCESSING_GROUP,
         ),
     ] = False,
     debug: Annotated[
         bool,
-        typer.Option(
-            "--debug",
-            help="Enable debug mode with additional diagnostic output",
-            rich_help_panel="Processing Options",
-            show_default=True,
+        Parameter(
+            name=["--debug"],
+            group=PROCESSING_GROUP,
         ),
     ] = False,
     sort: Annotated[
         SortChoice,
-        typer.Option(
-            "--sort",
-            "-s",
-            help="Sort channels by field (topic, id, msgs, size, hz, bps, b_per_msg, schema)",
-            rich_help_panel="Display Options",
-            show_default=True,
+        Parameter(
+            name=["-s", "--sort"],
+            group=DISPLAY_GROUP,
         ),
     ] = SortChoice.TOPIC,
     reverse: Annotated[
         bool,
-        typer.Option(
-            "--reverse",
-            help="Reverse sort order (descending)",
-            rich_help_panel="Display Options",
-            show_default=True,
+        Parameter(
+            name=["--reverse"],
+            group=DISPLAY_GROUP,
         ),
     ] = False,
     index_duration: Annotated[
         bool,
-        typer.Option(
-            "--index-duration",
-            help=(
-                "Calculate Hz per channel based on each channel's first/last "
-                "message times rather than global MCAP duration"
-            ),
-            rich_help_panel="Display Options",
-            show_default=True,
+        Parameter(
+            name=["--index-duration"],
+            group=DISPLAY_GROUP,
         ),
     ] = False,
     median: Annotated[
         bool,
-        typer.Option(
-            "--median",
-            help=(
-                "Display median rates (Hz, bytes/s) instead of mean rates. "
-                "Requires --rebuild to calculate message intervals."
-            ),
-            rich_help_panel="Display Options",
-            show_default=True,
+        Parameter(
+            name=["--median"],
+            group=DISPLAY_GROUP,
         ),
     ] = False,
 ) -> None:
@@ -399,6 +350,46 @@ def info(
     - Message distribution over time
     - Compression statistics by type
     - Channel information with message counts, data rates, and distributions
+
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to analyze (local file or HTTP/HTTPS URL).
+    rebuild
+        Rebuild file metadata by scanning all records (use for corrupt or
+        summary-less files).
+    exact_sizes
+        Calculate exact message sizes by decompressing chunks (slower, requires
+        --rebuild).
+    debug
+        Enable debug mode with additional diagnostic output.
+    sort
+        Sort channels by field (topic, id, msgs, size, hz, bps, b_per_msg,
+        schema).
+    reverse
+        Reverse sort order (descending).
+    index_duration
+        Calculate Hz per channel based on each channel's first/last message
+        times rather than global MCAP duration.
+    median
+        Display median rates (Hz, bytes/s) instead of mean rates. Requires
+        --rebuild to calculate message intervals.
+
+    Examples
+    --------
+    ```
+    # Basic file info
+    pymcap-cli info recording.mcap
+
+    # Rebuild summary with exact message sizes
+    pymcap-cli info recording.mcap --rebuild --exact-sizes
+
+    # Sort channels by message count (descending)
+    pymcap-cli info recording.mcap --sort msgs --reverse
+
+    # Calculate per-channel Hz using individual durations
+    pymcap-cli info recording.mcap --index-duration
+    ```
     """
     with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
         if rebuild:

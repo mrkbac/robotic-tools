@@ -1,10 +1,9 @@
 """Video encoding command for pymcap-cli using av with grid view."""
 
-from __future__ import annotations
-
 import io
 import math
 import platform
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -15,8 +14,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 import av
 import av.error
 import numpy as np
-import typer
 from av import VideoFrame
+from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.progress import (
@@ -31,7 +30,6 @@ from rich.progress import (
 )
 from small_mcap import get_summary, include_topics, read_message_decoded
 
-from pymcap_cli.autocompletion import complete_topic_by_schema
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import confirm_output_overwrite
 
@@ -40,7 +38,11 @@ if TYPE_CHECKING:
 
 
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+INPUT_GROUP = Group("Input Options")
+OUTPUT_GROUP = Group("Output Options")
+ENCODING_GROUP = Group("Encoding Options")
 
 
 COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
@@ -48,15 +50,9 @@ RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
 IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
 
 
-def complete_image_topics(ctx: typer.Context, incomplete: str) -> list[str]:
-    return complete_topic_by_schema(ctx, incomplete, schemas=IMAGE_SCHEMAS)
-
-
 def _validate_topics(topics: list[str]) -> list[str]:
     if not topics:
-        raise typer.BadParameter(
-            "At least one --topic is required. Repeat the flag for multiple topics."
-        )
+        raise ValueError("At least one --topic is required. Repeat the flag for multiple topics.")
     return topics
 
 
@@ -574,92 +570,97 @@ def encode_video(
     console.print(f"[cyan]Total frames:[/cyan] {frame_idx:,}")
 
 
-@app.command(
-    epilog="""
-Examples:
-  pymcap-cli video data.mcap -t /camera/front -o output.mp4
-  pymcap-cli video data.mcap -t /cam/left -t /cam/right -o grid.mp4
-"""
-)
 def video(
-    file: Annotated[
-        str,
-        typer.Argument(help="Path to the MCAP file (local file or HTTP/HTTPS URL)"),
-    ],
+    file: str,
+    *,
     topics: Annotated[
         list[str],
-        typer.Option(
-            "--topic",
-            "-t",
-            callback=_validate_topics,
-            help="Image topic to convert (repeat for multiple topics)",
-            autocompletion=complete_image_topics,
-            rich_help_panel="Input Options",
+        Parameter(
+            name=["-t", "--topic"],
+            group=INPUT_GROUP,
         ),
     ],
     output: Annotated[
         Path,
-        typer.Option(
-            ...,
-            "--output",
-            "-o",
-            help="Output video file path (e.g., output.mp4)",
-            rich_help_panel="Output Options",
+        Parameter(
+            name=["-o", "--output"],
+            group=OUTPUT_GROUP,
         ),
     ],
     codec: Annotated[
         VideoCodec,
-        typer.Option(
-            "--codec",
-            case_sensitive=False,
-            help="Video codec",
-            rich_help_panel="Encoding Options",
-            show_default=True,
+        Parameter(
+            name=["--codec"],
+            group=ENCODING_GROUP,
         ),
     ] = VideoCodec.H264,
     quality: Annotated[
         QualityPreset,
-        typer.Option(
-            "--quality",
-            help="Quality preset (ignored if --crf provided)",
-            rich_help_panel="Encoding Options",
-            show_default=True,
+        Parameter(
+            name=["--quality"],
+            group=ENCODING_GROUP,
         ),
     ] = QualityPreset.MEDIUM,
     crf: Annotated[
         int | None,
-        typer.Option(
-            "--crf",
-            min=0,
-            max=51,
-            help="Manual CRF value (lower = better) overrides --quality",
-            rich_help_panel="Encoding Options",
+        Parameter(
+            name=["--crf"],
+            group=ENCODING_GROUP,
         ),
     ] = None,
     encoder: Annotated[
         EncoderBackend,
-        typer.Option(
-            "--encoder",
-            help="Encoder backend (auto/software/videotoolbox/nvenc/vaapi)",
-            rich_help_panel="Encoding Options",
-            show_default=True,
+        Parameter(
+            name=["--encoder"],
+            group=ENCODING_GROUP,
         ),
     ] = EncoderBackend.AUTO,
     force: Annotated[
         bool,
-        typer.Option(
-            "-f",
-            "--force",
-            help="Force overwrite of output file",
-            rich_help_panel="Output Options",
-            show_default=True,
+        Parameter(
+            name=["-f", "--force"],
+            group=OUTPUT_GROUP,
         ),
     ] = False,
 ) -> None:
-    """Encode video from image topics in an MCAP file."""
+    """Encode video from image topics in an MCAP file.
+
+    This command encodes video from image topics in an MCAP file. It supports
+    multiple video codecs and quality settings, with optional hardware acceleration.
+
+    Parameters
+    ----------
+    file
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    topics
+        Image topic to convert (repeat for multiple topics).
+    output
+        Output video file path (e.g., output.mp4).
+    codec
+        Video codec. Defaults to h264.
+    quality
+        Quality preset (ignored if --crf provided). Defaults to medium.
+    crf
+        Manual CRF value (lower = better) overrides --quality. Range: 0-51.
+    encoder
+        Encoder backend (auto/software/videotoolbox/nvenc/vaapi). Defaults to auto.
+    force
+        Force overwrite of output file. Defaults to False.
+
+    Examples
+    --------
+    # Encode a single camera topic
+    pymcap-cli video data.mcap -t /camera/front -o output.mp4
+
+    # Encode multiple topics in a grid layout
+    pymcap-cli video data.mcap -t /cam/left -t /cam/right -o grid.mp4
+    """
+    # Validate topics
+    topics = _validate_topics(topics)
+
     if not output.parent.exists():
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
-        raise typer.Exit(1)
+        sys.exit(1)
     confirm_output_overwrite(output, force)
     quality_value = crf if crf is not None else QUALITY_PRESETS[codec][quality]
 
@@ -674,4 +675,4 @@ def video(
         )
     except VideoEncoderError as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(1) from exc
+        sys.exit(1)

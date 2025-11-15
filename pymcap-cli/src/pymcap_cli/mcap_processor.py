@@ -2,6 +2,7 @@
 
 import heapq
 import re
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -10,7 +11,6 @@ from pathlib import Path
 from re import Pattern
 from typing import IO, BinaryIO
 
-import typer
 from rich.console import Console
 from small_mcap import (
     Attachment,
@@ -278,13 +278,13 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
         force: If True, skip confirmation
 
     Raises:
-        typer.Abort: If user declines to overwrite
+        SystemExit: If user declines to overwrite
     """
     if output.exists() and not force:
-        typer.confirm(
-            f"Output file '{output}' already exists. Overwrite?",
-            abort=True,
-        )
+        response = input(f"Output file '{output}' already exists. Overwrite? [y/N]: ")
+        if response.lower() not in ("y", "yes"):
+            print("Aborted.")  # noqa: T201
+            sys.exit(1)
 
 
 def build_processing_options(

@@ -1,17 +1,12 @@
 """Rechunk command - reorganize MCAP messages into chunks based on topic patterns."""
 
-from __future__ import annotations
-
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
-if TYPE_CHECKING:
-    from re import Pattern
-
-import typer
+from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
     McapProcessor,
@@ -29,60 +24,31 @@ from pymcap_cli.types import (
     OutputPathOption,
 )
 
+if TYPE_CHECKING:
+    from re import Pattern
+
 console = Console()
-app = typer.Typer()
+
+# Parameter groups
+STRATEGY_GROUP = Group("Rechunking Strategy")
 
 
-@app.command(
-    epilog="""
-Examples:
-  # Pattern-based grouping
-  pymcap-cli rechunk in.mcap --strategy pattern -p '/camera.*' -p '/lidar.*' -o out.mcap
-
-  # Auto-grouping by size (topics >15% get own chunk)
-  pymcap-cli rechunk in.mcap --strategy auto -o out.mcap
-
-  # Each topic in separate chunk
-  pymcap-cli rechunk in.mcap --strategy all -o out.mcap
-
-  # Custom chunk size with pattern strategy
-  pymcap-cli rechunk in.mcap --strategy pattern -p '/high_freq.*' --chunk-size 8388608 -o out.mcap
-"""
-)
 def rechunk(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to rechunk (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
     output: OutputPathOption,
+    *,
     strategy: Annotated[
         RechunkStrategy,
-        typer.Option(
-            "--strategy",
-            "-s",
-            help=(
-                "Rechunking strategy: pattern (group by regex), "
-                "all (each topic separate), or auto (size-based grouping)"
-            ),
-            rich_help_panel="Rechunking Strategy",
-            show_default=True,
+        Parameter(
+            name=["-s", "--strategy"],
+            group=STRATEGY_GROUP,
         ),
-    ],
+    ] = RechunkStrategy.AUTO,
     pattern: Annotated[
         list[str] | None,
-        typer.Option(
-            "-p",
-            "--pattern",
-            help=(
-                "Regex pattern for topic grouping (can be used multiple times, "
-                "only with --strategy=pattern). "
-                "Topics matching the first pattern go into chunk group 1, "
-                "second pattern → group 2, etc. Unmatched topics → separate group."
-            ),
-            autocompletion=complete_all_topics,
-            rich_help_panel="Rechunking Strategy",
+        Parameter(
+            name=["-p", "--pattern"],
+            group=STRATEGY_GROUP,
         ),
     ] = None,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
@@ -96,8 +62,41 @@ def rechunk(
     with unmatched topics going into their own group. Messages are written
     in a streaming fashion as they are read.
 
-    Usage:
-      pymcap-cli rechunk in.mcap -o out.mcap -p '/camera.*' -p '/lidar.*'
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to rechunk (local file or HTTP/HTTPS URL).
+    output
+        Output filename.
+    strategy
+        Rechunking strategy: pattern (group by regex), all (each topic separate),
+        or auto (size-based grouping).
+    pattern
+        Regex pattern for topic grouping (can be used multiple times, only with
+        --strategy=pattern). Topics matching the first pattern go into chunk group 1,
+        second pattern → group 2, etc. Unmatched topics → separate group.
+    chunk_size
+        Chunk size of output file in bytes.
+    compression
+        Compression algorithm for output file.
+    force
+        Force overwrite of output file without confirmation.
+
+    Examples
+    --------
+    ```
+    # Pattern-based grouping
+    pymcap-cli rechunk in.mcap --strategy pattern -p '/camera.*' -p '/lidar.*' -o out.mcap
+
+    # Auto-grouping by size (topics >15% get own chunk)
+    pymcap-cli rechunk in.mcap --strategy auto -o out.mcap
+
+    # Each topic in separate chunk
+    pymcap-cli rechunk in.mcap --strategy all -o out.mcap
+
+    # Custom chunk size with pattern strategy
+    pymcap-cli rechunk in.mcap --strategy pattern -p '/high_freq.*' --chunk-size 8388608 -o out.mcap
+    ```
     """
     # Validate pattern is provided when using PATTERN strategy
     if strategy == RechunkStrategy.PATTERN and not pattern:
@@ -105,11 +104,11 @@ def rechunk(
             "[red]Error: --strategy=pattern requires at least one regex pattern. "
             "Use -p PATTERN[/red]"
         )
-        raise typer.Exit(1)
+        sys.exit(1)
 
     output_file = Path(output)
 
-    # Confirm overwrite if needed (file existence validated by Typer)
+    # Confirm overwrite if needed
     confirm_output_overwrite(output_file, force)
 
     # Compile patterns if using PATTERN strategy
@@ -125,7 +124,7 @@ def rechunk(
             patterns = compile_topic_patterns(pattern or [])
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+            sys.exit(1)
 
         if not patterns:
             console.print(

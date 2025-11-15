@@ -94,7 +94,9 @@ def _read_and_write(
             if msg_data.schema.name not in schema_ids:
                 schema_id = next_schema_id
                 next_schema_id += 1
-                writer.add_schema(schema_id, msg_data.schema.name, msg_data.schema.encoding, msg_data.schema.data)
+                writer.add_schema(
+                    schema_id, msg_data.schema.name, msg_data.schema.encoding, msg_data.schema.data
+                )
                 schema_ids[msg_data.schema.name] = schema_id
             else:
                 schema_id = schema_ids[msg_data.schema.name]
@@ -103,7 +105,13 @@ def _read_and_write(
             if msg_data.channel.topic not in channel_ids:
                 channel_id = next_channel_id
                 next_channel_id += 1
-                writer.add_channel(channel_id, msg_data.channel.topic, msg_data.channel.message_encoding, schema_id, msg_data.channel.metadata)
+                writer.add_channel(
+                    channel_id,
+                    msg_data.channel.topic,
+                    msg_data.channel.message_encoding,
+                    schema_id,
+                    msg_data.channel.metadata,
+                )
                 channel_ids[msg_data.channel.topic] = channel_id
             else:
                 channel_id = channel_ids[msg_data.channel.topic]

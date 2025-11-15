@@ -1,25 +1,23 @@
 """Cat command for pymcap-cli - stream MCAP messages to stdout."""
 
-from __future__ import annotations
-
 import json
+import re
 import sys
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
-import typer
+from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
-from small_mcap.reader import read_message_decoded
+from small_mcap.reader import DecodedMessage, read_message_decoded
 
-from pymcap_cli.autocompletion import complete_all_topics
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import build_processing_options
-
-if TYPE_CHECKING:
-    from small_mcap.reader import DecodedMessage
+from pymcap_cli.mcap_processor import AttachmentsMode, MetadataMode, build_processing_options
 
 console = Console(stderr=True)  # Use stderr for errors, stdout for data
-app = typer.Typer()
+
+# Parameter groups
+FILTERING_GROUP = Group("Filtering")
+OUTPUT_GROUP = Group("Output")
 
 
 def message_to_dict(obj: Any) -> Any:
@@ -91,8 +89,6 @@ def should_include_message(
     end_ns: int,
 ) -> bool:
     """Check if a message should be included based on filters."""
-    import re
-
     # Check time range
     if start_ns > 0 and msg.message.log_time < start_ns:
         return False
@@ -102,103 +98,69 @@ def should_include_message(
     topic = msg.channel.topic
 
     # Check topic filters
-    if include_patterns:
-        if not any(re.search(pattern, topic) for pattern in include_patterns):
-            return False
+    if include_patterns and not any(re.search(pattern, topic) for pattern in include_patterns):
+        return False
 
-    if exclude_patterns:
-        if any(re.search(pattern, topic) for pattern in exclude_patterns):
-            return False
-
-    return True
+    return not (exclude_patterns and any(re.search(pattern, topic) for pattern in exclude_patterns))
 
 
-@app.command(name="cat")
 def cat(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to read (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
+    *,
     topics: Annotated[
         list[str] | None,
-        typer.Option(
-            "-t",
-            "--topics",
-            help="Filter by topic regex patterns (can be used multiple times)",
-            autocompletion=complete_all_topics,
-            rich_help_panel="Filtering",
-            show_default="all topics",
+        Parameter(
+            name=["-t", "--topics"],
+            group=FILTERING_GROUP,
         ),
     ] = None,
     exclude_topics: Annotated[
         list[str] | None,
-        typer.Option(
-            "-n",
-            "--exclude-topics",
-            help="Exclude topics matching regex patterns (can be used multiple times)",
-            autocompletion=complete_all_topics,
-            rich_help_panel="Filtering",
-            show_default="none",
+        Parameter(
+            name=["-n", "--exclude-topics"],
+            group=FILTERING_GROUP,
         ),
     ] = None,
     start: Annotated[
         str,
-        typer.Option(
-            "-S",
-            "--start",
-            help="Include messages at or after this time (nanoseconds or RFC3339 date)",
-            rich_help_panel="Filtering",
-            show_default="beginning of recording",
+        Parameter(
+            name=["-S", "--start"],
+            group=FILTERING_GROUP,
         ),
     ] = "",
     start_secs: Annotated[
         int,
-        typer.Option(
-            "-s",
-            "--start-secs",
-            help="Include messages at or after this time in seconds (ignored if --start used)",
-            rich_help_panel="Filtering",
-            show_default=True,
+        Parameter(
+            name=["-s", "--start-secs"],
+            group=FILTERING_GROUP,
         ),
     ] = 0,
     end: Annotated[
         str,
-        typer.Option(
-            "-E",
-            "--end",
-            help="Include messages before this time (nanoseconds or RFC3339 date)",
-            rich_help_panel="Filtering",
-            show_default="end of recording",
+        Parameter(
+            name=["-E", "--end"],
+            group=FILTERING_GROUP,
         ),
     ] = "",
     end_secs: Annotated[
         int,
-        typer.Option(
-            "-e",
-            "--end-secs",
-            help="Include messages before this time in seconds (ignored if --end used)",
-            rich_help_panel="Filtering",
-            show_default=True,
+        Parameter(
+            name=["-e", "--end-secs"],
+            group=FILTERING_GROUP,
         ),
     ] = 0,
     json_output: Annotated[
         bool,
-        typer.Option(
-            "--json",
-            help="Output messages as JSON (enables ROS2 message decoding)",
-            rich_help_panel="Output",
+        Parameter(
+            name=["--json"],
+            group=OUTPUT_GROUP,
         ),
     ] = False,
     limit: Annotated[
         int | None,
-        typer.Option(
-            "--limit",
-            "-l",
-            help="Maximum number of messages to output",
-            rich_help_panel="Output",
-            show_default="unlimited",
+        Parameter(
+            name=["-l", "--limit"],
+            group=OUTPUT_GROUP,
         ),
     ] = None,
 ) -> None:
@@ -231,14 +193,14 @@ def cat(
             end=end,
             end_nsecs=0,
             end_secs=end_secs,
-            metadata_mode="exclude",
-            attachments_mode="exclude",
+            metadata_mode=MetadataMode.EXCLUDE,
+            attachments_mode=AttachmentsMode.EXCLUDE,
             compression="zstd",
             chunk_size=4 * 1024 * 1024,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
+        sys.exit(1)
 
     start_ns = options.start_time
     end_ns = options.end_time
@@ -257,12 +219,14 @@ def cat(
 
                 # Format and output message
                 if json_output:
-                    # Check if message was decoded (only CDR messages with DecoderFactory will be decoded)
+                    # Check if message was decoded (only CDR messages with
+                    # DecoderFactory will be decoded)
                     if msg.decoded_message is None:
                         # Skip non-CDR messages when JSON output requested
                         console.print(
                             f"[yellow]Warning: Skipping message on {msg.channel.topic} "
-                            f"(encoding '{msg.channel.message_encoding}' not supported for JSON output)[/yellow]"
+                            f"(encoding '{msg.channel.message_encoding}' not supported "
+                            f"for JSON output)[/yellow]"
                         )
                         continue
                     output_line = format_message_json(msg)
@@ -270,7 +234,7 @@ def cat(
                     output_line = format_message_text(msg)
 
                 # Write to stdout
-                print(output_line, file=sys.stdout)
+                print(output_line, file=sys.stdout)  # noqa: T201
 
                 message_count += 1
 
@@ -281,8 +245,8 @@ def cat(
     except KeyboardInterrupt:
         # Allow graceful exit with Ctrl+C
         console.print("\n[yellow]Interrupted by user[/yellow]")
-        raise typer.Exit(0) from None
+        sys.exit(0)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error reading MCAP: {e}[/red]")
-        raise typer.Exit(1) from None
+        sys.exit(1)

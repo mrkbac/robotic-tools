@@ -1,18 +1,12 @@
 """Shared display and formatting utilities for pymcap-cli commands."""
 
-from __future__ import annotations
-
 import enum
-from typing import TYPE_CHECKING
 
+from rich.console import Console
 from rich.table import Table
 
+from pymcap_cli.types import ChannelInfo, McapInfoOutput
 from pymcap_cli.utils import bytes_to_human
-
-if TYPE_CHECKING:
-    from rich.console import Console
-
-    from pymcap_cli.types import ChannelInfo, McapInfoOutput
 
 
 class ChannelTableColumn(enum.IntFlag):

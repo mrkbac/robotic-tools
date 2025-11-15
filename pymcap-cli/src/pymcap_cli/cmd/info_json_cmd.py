@@ -1,32 +1,35 @@
-from __future__ import annotations
-
 import base64
 import gzip
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
-import typer
-from small_mcap import ChunkIndex, InvalidMagicError, RebuildInfo
+from cyclopts import Parameter
+from small_mcap import Channel, ChunkIndex, InvalidMagicError, RebuildInfo, Schema
 
 from pymcap_cli.input_handler import open_input
+from pymcap_cli.types import (
+    ChannelInfo,
+    CompressionStats,
+    McapInfoOutput,
+    MessageDistribution,
+    SchemaInfo,
+    Stats,
+)
 from pymcap_cli.utils import read_info, rebuild_info
 
-if TYPE_CHECKING:
-    from small_mcap import Channel, Schema
 
-    from pymcap_cli.types import (
-        ChannelInfo,
-        CompressionStats,
-        McapInfoOutput,
-        MessageDistribution,
-        SchemaInfo,
-        Stats,
-    )
+@dataclass(slots=True)
+class ChunkStats:
+    count: int = 0
+    compressed_size: int = 0
+    uncompressed_size: int = 0
+    uncompressed_sizes: list[int] = field(default_factory=list)
 
+    message_count: int = 0
 
-app = typer.Typer()
+    durations_ns: list[float] = field(default_factory=list)
 
 
 def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int]:
@@ -593,58 +596,49 @@ def _build_schema_dict(schema_id: int, schema: Schema) -> SchemaInfo:
     }
 
 
-@dataclass(slots=True)
-class ChunkStats:
-    count: int = 0
-    compressed_size: int = 0
-    uncompressed_size: int = 0
-    uncompressed_sizes: list[int] = field(default_factory=list)
-
-    message_count: int = 0
-
-    durations_ns: list[float] = field(default_factory=list)
-
-
-@app.command(name="info-json")
 def info_json(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to analyze (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
+    *,
     rebuild: Annotated[
         bool,
-        typer.Option(
-            "--rebuild",
-            "-r",
-            help="Rebuild the MCAP file from scratch",
+        Parameter(
+            name=["-r", "--rebuild"],
         ),
     ] = False,
     exact_sizes: Annotated[
         bool,
-        typer.Option(
-            "--exact-sizes",
-            "-e",
-            help="Use exact sizes for message data (may be slower, requires --rebuild)",
+        Parameter(
+            name=["-e", "--exact-sizes"],
         ),
     ] = False,
     debug: Annotated[
         bool,
-        typer.Option(
-            "--debug",
-            help="Enable debug mode",
+        Parameter(
+            name=["--debug"],
         ),
     ] = False,
     compress: Annotated[
         bool,
-        typer.Option(
-            "--compress",
-            help="Compressed output using gzip and outputs it as base64",
+        Parameter(
+            name=["--compress"],
         ),
     ] = False,
 ) -> None:
-    """Output MCAP file statistics as JSON with all available data."""
+    """Output MCAP file statistics as JSON with all available data.
+
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to analyze (local file or HTTP/HTTPS URL).
+    rebuild
+        Rebuild the MCAP file from scratch.
+    exact_sizes
+        Use exact sizes for message data (may be slower, requires --rebuild).
+    debug
+        Enable debug mode.
+    compress
+        Compressed output using gzip and outputs it as base64.
+    """
     with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
         if rebuild:
             info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)

@@ -1,9 +1,8 @@
-from __future__ import annotations
+"""List command for pymcap-cli - list various MCAP file records."""
 
 from datetime import datetime
-from typing import Annotated
 
-import typer
+from cyclopts import App
 from rich.console import Console
 from rich.table import Table
 from small_mcap import InvalidMagicError, RebuildInfo
@@ -14,7 +13,7 @@ from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 console = Console()
 
 # Create the list sub-app
-list_app = typer.Typer(name="list", help="List records in an MCAP file")
+list_app = App(help="List records in an MCAP file")
 
 
 def _read_mcap_info(file_path: str) -> RebuildInfo:
@@ -30,16 +29,16 @@ def _read_mcap_info(file_path: str) -> RebuildInfo:
     return info
 
 
-@list_app.command()
 def channels(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
 ) -> None:
-    """List channels in an MCAP file."""
+    """List channels in an MCAP file.
+
+    Parameters
+    ----------
+    file : str
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    """
     info = _read_mcap_info(file)
     summary = info.summary
 
@@ -68,16 +67,16 @@ def channels(
     console.print(table)
 
 
-@list_app.command()
 def chunks(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
 ) -> None:
-    """List chunks in an MCAP file."""
+    """List chunks in an MCAP file.
+
+    Parameters
+    ----------
+    file : str
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    """
     info = _read_mcap_info(file)
     summary = info.summary
 
@@ -131,16 +130,16 @@ def chunks(
     console.print(table)
 
 
-@list_app.command()
 def schemas(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
 ) -> None:
-    """List schemas in an MCAP file."""
+    """List schemas in an MCAP file.
+
+    Parameters
+    ----------
+    file : str
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    """
     info = _read_mcap_info(file)
     summary = info.summary
 
@@ -180,16 +179,16 @@ def schemas(
     console.print(table)
 
 
-@list_app.command()
 def attachments(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
 ) -> None:
-    """List attachments in an MCAP file."""
+    """List attachments in an MCAP file.
+
+    Parameters
+    ----------
+    file : str
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    """
     info = _read_mcap_info(file)
     summary = info.summary
 
@@ -228,16 +227,16 @@ def attachments(
     console.print(table)
 
 
-@list_app.command()
 def metadata(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
 ) -> None:
-    """List metadata records in an MCAP file."""
+    """List metadata records in an MCAP file.
+
+    Parameters
+    ----------
+    file : str
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    """
     info = _read_mcap_info(file)
     summary = info.summary
 
@@ -263,3 +262,11 @@ def metadata(
         )
 
     console.print(table)
+
+
+# Register commands with the app
+list_app.command(channels, name="channels")
+list_app.command(chunks, name="chunks")
+list_app.command(schemas, name="schemas")
+list_app.command(attachments, name="attachments")
+list_app.command(metadata, name="metadata")

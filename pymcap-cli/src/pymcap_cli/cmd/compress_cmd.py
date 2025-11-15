@@ -1,10 +1,7 @@
 """Compress command for pymcap-cli."""
 
-from __future__ import annotations
+import sys
 
-from typing import Annotated
-
-import typer
 from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
@@ -23,18 +20,12 @@ from pymcap_cli.types import (
 )
 
 console = Console()
-app = typer.Typer()
 
 
-@app.command()
 def compress(
-    file: Annotated[
-        str,
-        typer.Argument(
-            help="Path to the MCAP file to compress (local file or HTTP/HTTPS URL)",
-        ),
-    ],
+    file: str,
     output: OutputPathOption,
+    *,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
@@ -43,10 +34,26 @@ def compress(
 
     Copy data in an MCAP file to a new file, compressing the output.
 
-    Usage:
-      mcap compress in.mcap -o out.mcap
+    Parameters
+    ----------
+    file
+        Path to the MCAP file to compress (local file or HTTP/HTTPS URL).
+    output
+        Output filename.
+    chunk_size
+        Chunk size of output file in bytes.
+    compression
+        Compression algorithm for output file.
+    force
+        Force overwrite of output file without confirmation.
+
+    Examples
+    --------
+    ```
+    pymcap-cli compress in.mcap -o out.mcap
+    ```
     """
-    # Confirm overwrite if needed (file existence validated by Typer)
+    # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
     # Convert compress args to unified processing options (include everything)
@@ -80,4 +87,4 @@ def compress(
             )
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during compression: {e}[/red]")
-            raise typer.Exit(1)
+            sys.exit(1)
