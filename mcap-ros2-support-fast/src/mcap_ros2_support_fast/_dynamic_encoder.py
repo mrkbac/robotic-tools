@@ -1,5 +1,4 @@
 import codecs
-import dataclasses
 import struct
 from typing import Any, cast
 
