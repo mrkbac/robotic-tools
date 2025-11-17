@@ -409,14 +409,6 @@ def _read_inner(
     _channels: dict[int, Channel] = channels or {}
 
     for record in reader:
-        if isinstance(record, Schema):
-            _schemas[record.id] = record
-        if isinstance(record, Channel) and record.id not in _channels:  # New channel
-            if record.schema_id != 0 and record.schema_id not in _schemas:
-                raise McapError(f"no schema record found with id {record.schema_id}")
-            _channels[record.id] = record
-            if not should_include(_channels[record.id], _schemas.get(record.schema_id)):
-                exclude_channels.add(record.id)
         if isinstance(record, Message):
             if record.channel_id not in _channels:
                 raise McapError(f"no channel record found with id {record.channel_id}")
@@ -429,6 +421,14 @@ def _read_inner(
             channel = _channels[record.channel_id]
             schema = _schemas.get(channel.schema_id)
             yield (schema, channel, record)
+        elif isinstance(record, Schema):
+            _schemas[record.id] = record
+        elif isinstance(record, Channel) and record.id not in _channels:  # New channel
+            if record.schema_id != 0 and record.schema_id not in _schemas:
+                raise McapError(f"no schema record found with id {record.schema_id}")
+            _channels[record.id] = record
+            if not should_include(_channels[record.id], _schemas.get(record.schema_id)):
+                exclude_channels.add(record.id)
 
 
 def _read_message_seeking(
@@ -465,11 +465,11 @@ def _read_message_seeking(
 
         yield from breakup_chunk(chunk)
 
-    def _lazy_sort(item: McapRecord | ChunkIndex) -> int:
-        if isinstance(item, ChunkIndex):
-            return item.message_start_time
+    def _lazy_sort(item: McapRecord) -> int:
         if isinstance(item, Message):
             return item.log_time
+        if isinstance(item, ChunkIndex):
+            return item.message_start_time
         return 0  # Other records are not yielded
 
     lazy_iterables = (
@@ -487,11 +487,7 @@ def _read_message_seeking(
             key=lambda c: c.message_start_time,
         )
     )
-    reader = (
-        item
-        for item in heapq.merge(*lazy_iterables, key=_lazy_sort)
-        if not isinstance(item, ChunkIndex)  # Filter out sentinels
-    )
+    reader = (item for item in heapq.merge(*lazy_iterables, key=_lazy_sort))
 
     yield from _read_inner(
         reader,
