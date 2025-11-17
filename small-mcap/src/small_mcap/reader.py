@@ -210,10 +210,10 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapReco
         pos += _RECORD_HEADER_SIZE
         record_data_end = pos + length
 
-        if opcode == Opcode.CHANNEL:
-            yield Channel.read(data[pos:record_data_end])
-        elif opcode == Opcode.MESSAGE:
+        if opcode == Opcode.MESSAGE:
             yield Message.read(data[pos:record_data_end])
+        elif opcode == Opcode.CHANNEL:
+            yield Channel.read(data[pos:record_data_end])
         elif opcode == Opcode.SCHEMA:
             yield Schema.read(data[pos:record_data_end])
 
@@ -345,18 +345,18 @@ def _read_summary_from_iterable(stream_reader: Iterable[McapRecord | LazyChunk])
     """read summary records from an MCAP stream reader, collecting them into a Summary."""
     summary = Summary()
     for record in stream_reader:
-        if isinstance(record, Statistics):
-            summary.statistics = record
-        elif isinstance(record, Schema):
-            summary.schemas[record.id] = record
+        if isinstance(record, ChunkIndex):
+            summary.chunk_indexes.append(record)
         elif isinstance(record, Channel):
             summary.channels[record.id] = record
+        elif isinstance(record, Schema):
+            summary.schemas[record.id] = record
         elif isinstance(record, AttachmentIndex):
             summary.attachment_indexes.append(record)
-        elif isinstance(record, ChunkIndex):
-            summary.chunk_indexes.append(record)
         elif isinstance(record, MetadataIndex):
             summary.metadata_indexes.append(record)
+        elif isinstance(record, Statistics):
+            summary.statistics = record
         elif isinstance(record, Footer):
             # There is no summary!
             if record.summary_start == 0:
@@ -787,12 +787,11 @@ def read_message_decoded(
     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
         if schema is None:
             return message.data
-        decoder = decoders.get(hash(schema.data))
-        if decoder is not None:
+        if decoder := decoders.get(schema.id):
             return decoder(message.data)
         for factory in decoder_factories:
             if decoder := factory.decoder_for(channel.message_encoding, schema):
-                decoders[message.channel_id] = decoder
+                decoders[schema.id] = decoder
                 return decoder(message.data)
 
         raise ValueError(
