@@ -1827,7 +1827,9 @@ source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
     { name = "mcap-ros2-support-fast" },
+    { name = "platformdirs" },
     { name = "rich" },
+    { name = "ros-parser" },
     { name = "small-mcap", extra = ["compression"] },
 ]
 
@@ -1845,7 +1847,9 @@ video = [
 requires-dist = [
     { name = "cyclopts", specifier = ">=4" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
+    { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "rich", specifier = ">=14.1.0" },
+    { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
 ]
 

@@ -7,6 +7,7 @@ from cyclopts import App
 from pymcap_cli.cmd import (
     cat_cmd,
     compress_cmd,
+    convert_cmd,
     du_cmd,
     filter_cmd,
     info_cmd,
@@ -81,6 +82,7 @@ app.command(name="video")(video)
 app.command(name="filter")(filter_cmd.filter_cmd)
 app.command(name="merge")(merge_cmd.merge)
 app.command(name="compress")(compress_cmd.compress)
+app.command(name="convert")(convert_cmd.convert)
 app.command(name="roscompress")(roscompress)
 
 # Command groups (list has 5 subcommands)

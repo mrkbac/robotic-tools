@@ -9,6 +9,8 @@ dependencies = [
     "small-mcap[compression]",
     "mcap-ros2-support-fast",
     "cyclopts>=4",
+    "ros-parser",
+    "platformdirs>=4.0.0",
 ]
 
 [build-system]
@@ -31,3 +33,4 @@ video = [
 [tool.uv.sources]
 small-mcap = { workspace = true }
 mcap-ros2-support-fast = { workspace = true }
+ros-parser = { workspace = true }
