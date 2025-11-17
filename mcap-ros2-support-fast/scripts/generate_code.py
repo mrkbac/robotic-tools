@@ -7,14 +7,13 @@ uv run python -m mcap_ros2_support_fast.scripts.generate_code <mcap_file> -o out
 import argparse
 from pathlib import Path
 
-from small_mcap.reader import get_summary
-
 from mcap_ros2_support_fast._dynamic_decoder import (
     DecoderGeneratorFactory,
 )
 from mcap_ros2_support_fast._dynamic_encoder import EncoderGeneratorFactory
 from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
 from mcap_ros2_support_fast._plans import UTF8_FUNC_NAME
+from small_mcap.reader import get_summary
 
 
 def main() -> None:
