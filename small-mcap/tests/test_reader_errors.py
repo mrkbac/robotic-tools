@@ -131,7 +131,7 @@ def test_compression_file(compression_type, expected_name):
     writer.start()
     writer.add_schema(schema_id=1, name="test", encoding="", data=b"")
     writer.add_channel(channel_id=1, topic="test", message_encoding="", schema_id=1)
-    writer.add_message(channel_id=1, log_time=0, data=b"test", publish_time=0)
+    writer.add_message(channel_id=1, log_time=0, publish_time=0, sequence=0, data=b"test" * 100)
     writer.finish()
 
     buffer.seek(0)

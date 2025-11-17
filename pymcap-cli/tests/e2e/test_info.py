@@ -170,11 +170,8 @@ class TestInfoJson:
         # Output should be base64 encoded
         assert result.stdout.strip()
         # Should not be valid JSON directly
-        try:
+        with pytest.raises(json.JSONDecodeError):
             json.loads(result.stdout)
-            assert False, "Compressed output should not be valid JSON"
-        except json.JSONDecodeError:
-            pass  # Expected
 
     def test_info_json_structure(self, image_small_mcap: Path):
         """Test info-json output has expected structure."""

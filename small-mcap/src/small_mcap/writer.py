@@ -565,16 +565,10 @@ class _ChunkBuilder:
         compression: CompressionType,
         enable_crcs: bool,
         chunk_size: int = 1024 * 1024,
-        schemas: dict[int, Schema] | None = None,
-        channels: dict[int, Channel] | None = None,
     ) -> None:
         self.compression = compression
         self.enable_crcs = enable_crcs
         self.chunk_size = chunk_size
-        # Schema and channel registries (for auto-ensure functionality)
-        # Store reference to provided dicts or create empty ones
-        self.schemas = schemas if schemas is not None else {}
-        self.channels = channels if channels is not None else {}
 
         # Pre-allocate buffer to avoid reallocations
         self.buffer_data = bytearray(int(BUFFER_SIZE_MULTIPLIER * chunk_size))
@@ -588,28 +582,8 @@ class _ChunkBuilder:
         self.message_end_time = 0
         self.message_indices: dict[int, MessageIndex] = {}
         self.num_messages = 0
-        self._written_schemas: set[int] = set()
-        self._written_channels: set[int] = set()
-
-    def _ensure_schema_in_chunk(self, schema_id: int) -> None:
-        if schema_id == 0 or schema_id in self._written_schemas:
-            return
-
-        if schema := self.schemas.get(schema_id):
-            self.add(schema)
-
-    def _ensure_channel_in_chunk(self, channel_id: int) -> None:
-        if channel_id in self._written_channels:
-            return
-
-        if channel := self.channels.get(channel_id):
-            self._ensure_schema_in_chunk(channel.schema_id)
-            self.add(channel)
 
     def add(self, record: Schema | Channel | Message) -> None:
-        if isinstance(record, Message):
-            self._ensure_channel_in_chunk(record.channel_id)
-
         # Add record to current chunk
         record_data = record.write_record()
         record_len = len(record_data)
@@ -618,11 +592,7 @@ class _ChunkBuilder:
         if self.buffer_pos + record_len > len(self.buffer_data):
             self.buffer_data.extend(bytearray(max(record_len, self.chunk_size)))
 
-        if isinstance(record, Schema):
-            self._written_schemas.add(record.id)
-        elif isinstance(record, Channel):
-            self._written_channels.add(record.id)
-        elif isinstance(record, Message):
+        if isinstance(record, Message):
             if self.num_messages == 0:
                 self.message_start_time = record.log_time
             else:
@@ -712,9 +682,7 @@ class McapWriter(McapWriterRaw):
         self.encoder_factory = encoder_factory
         self.chunk_builder: _ChunkBuilder | None = None
         if use_chunking:
-            self.chunk_builder = _ChunkBuilder(
-                compression, enable_crcs, chunk_size, self.schemas, self.channels
-            )
+            self.chunk_builder = _ChunkBuilder(compression, enable_crcs, chunk_size)
 
     def add_message_encode(
         self,

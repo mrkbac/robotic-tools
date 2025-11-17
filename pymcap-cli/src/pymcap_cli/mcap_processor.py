@@ -6,7 +6,7 @@ import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from enum import Enum
+from enum import Enum, auto
 from pathlib import Path
 from re import Pattern
 from typing import IO, BinaryIO
@@ -67,7 +67,7 @@ def str_to_compression_type(compression: str) -> CompressionType:
     raise ValueError(f"Unknown compression type: {compression}")
 
 
-# Rechunking strategy enum (must be defined before ProcessingOptions)
+# Rechunking strategy enum
 class RechunkStrategy(str, Enum):
     """Rechunking strategy for organizing messages into chunks."""
 
@@ -77,7 +77,48 @@ class RechunkStrategy(str, Enum):
     AUTO = "auto"  # Auto-group based on size (>15% threshold)
 
 
-@dataclass
+class ShouldDecode(Enum):
+    SKIP = auto()
+    """Chunk does not containing anything new, everything is filtered out"""
+    COPY = auto()
+    """Chunk does not contain anythingn new, everything is coyied"""
+    DECODE = auto()
+    """Chunk must be decoded to change channels or filter on message level"""
+    EXTRACT_METADATA = auto()
+    """Chunk can be copied but must be decoded to detect new information inside the chunk"""
+
+
+@dataclass(slots=True)
+class InputOptions:
+    # Recovery options
+    recovery_mode: bool = True  # Always handle errors gracefully
+    always_decode_chunk: bool = False  # Force individual record processing
+
+    # Filter options - Topic filtering
+    include_topics: list[Pattern[str]] = field(default_factory=list)
+    exclude_topics: list[Pattern[str]] = field(default_factory=list)
+
+    # Filter options - Time filtering (nanoseconds)
+    start_time_ns: int = 0
+    end_time_ns: int = 2**63 - 1  # Max int64
+
+    # Filter options - Content filtering
+    include_metadata: bool = True
+    include_attachments: bool = True
+
+
+@dataclass(slots=True)
+class OutputOptions:
+    # Rechunking options
+    rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
+    rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
+
+    # Output options
+    compression: str = DEFAULT_COMPRESSION
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+
+
+@dataclass(slots=True)
 class ProcessingOptions:
     """Unified options for MCAP processing (recovery + filtering)."""
 
@@ -446,7 +487,6 @@ class McapProcessor:
         # ID remapper for handling multiple files (zero overhead for single file)
         self.remapper = Remapper()
 
-        # Track schemas and channels (shared with writer for auto-ensure)
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
 
@@ -980,72 +1020,38 @@ class McapProcessor:
 
         return self.stats
 
-    def _get_remapped_channel_ids(
-        self, indexes: list[MessageIndex], stream_id: int
-    ) -> tuple[set[int], bool]:
-        """Get remapped channel IDs for indexes and check if metadata extraction is needed.
-
-        Returns:
-            (remapped_channel_ids, needs_metadata_extraction)
-        """
-        remapped_channel_ids = set()
-        needs_metadata_extraction = False
-
-        for idx in indexes:
-            original_id = idx.channel_id
-            remapped_channel = self.remapper.get_remapped_channel(stream_id, original_id)
-            if remapped_channel:
-                remapped_id = remapped_channel.id
-            else:
-                # Not yet in remapper - will keep original ID, but need to extract metadata
-                remapped_id = original_id
-                needs_metadata_extraction = True
-
-            remapped_channel_ids.add(remapped_id)
-
-        # Bulk set operation: check if any IDs are unknown (more efficient than individual checks)
-        if not needs_metadata_extraction:
-            unknown_channels = remapped_channel_ids - self.known_channels
-            if unknown_channels:
-                needs_metadata_extraction = True
-
-        return remapped_channel_ids, needs_metadata_extraction
-
     def _should_decode_chunk(
         self, chunk: Chunk, indexes: list[MessageIndex], stream_id: int
-    ) -> tuple[bool, bool]:
+    ) -> ShouldDecode:
         """Determine if chunk should be decoded or can be fast-copied.
 
         Returns:
-            (should_skip, should_decode): tuple of booleans
+            (should_skip, should_decode, ): tuple of booleans
             - should_skip: True if chunk should be skipped entirely
             - should_decode: True if chunk must be decoded, False if it can be fast-copied
         """
+
         # Chunk time outside of limits - skip entirely
         if (
             chunk.message_end_time < self.options.start_time
             or chunk.message_start_time >= self.options.end_time
         ):
-            return (True, False)
+            return ShouldDecode.SKIP
 
         # Force decode if rechunking is active (must reorganize messages)
         if self.options.is_rechunking:
-            return (False, True)
-
-        # Force decode if requested
-        if self.options.always_decode_chunk:
-            return (False, True)
+            return ShouldDecode.DECODE
 
         # Check if compression matches - must decode to re-compress
         if chunk.compression != self.options.compression_type.value:
-            return (False, True)
+            return ShouldDecode.DECODE
 
         # Check if time filtering requires per-message filtering
         if self.options.has_time_filter and not (
             chunk.message_start_time >= self.options.start_time
             and chunk.message_end_time < self.options.end_time
         ):
-            return (False, True)
+            return ShouldDecode.DECODE
 
         # Check if any channel was remapped - must decode to fix channel IDs
         # Also check if we have metadata for all channels (they might not be loaded yet)
@@ -1053,9 +1059,10 @@ class McapProcessor:
             # Check if channel metadata is available
             if not self.remapper.has_channel(stream_id, idx.channel_id):
                 # Channel not yet seen - must decode to discover it
-                return (False, True)
+                return ShouldDecode.EXTRACT_METADATA
+            # If channel id was remapped, must decode
             if self.remapper.was_channel_remapped(stream_id, idx.channel_id):
-                return (False, True)
+                return ShouldDecode.DECODE
 
         # Check topic filtering in a single pass over indexes
         if self.options.has_topic_filter:
@@ -1069,54 +1076,46 @@ class McapProcessor:
                     and idx.channel_id not in self.excluded_channels
                 ):
                     # Unknown channel - must decode to discover it
-                    return (False, True)
+                    return ShouldDecode.EXTRACT_METADATA
                 if idx.channel_id in self.included_channels:
                     has_include = True
                 else:
                     has_exclude = True
                 # Early exit if we have both - must decode
                 if has_include and has_exclude:
-                    return (False, True)
+                    return ShouldDecode.DECODE
 
             # If chunk has ONLY excluded channels, skip it entirely
             if has_exclude and not has_include:
-                return (True, False)
+                return ShouldDecode.SKIP
 
         # No reason to decode - can fast-copy
-        return (False, False)
+        return ShouldDecode.COPY
 
     def _process_chunk_smart(
         self, chunk: Chunk, indexes: list[MessageIndex], writer: McapWriter, stream_id: int
     ) -> None:
         """Smart chunk processing with fast copying when possible."""
-        should_skip, should_decode = self._should_decode_chunk(chunk, indexes, stream_id)
+        should_decode = self._should_decode_chunk(chunk, indexes, stream_id)
 
-        if should_skip:
+        if should_decode == ShouldDecode.SKIP:
             return
 
-        if should_decode:
+        if (
+            should_decode in (ShouldDecode.DECODE, ShouldDecode.EXTRACT_METADATA)
+            or self.options.always_decode_chunk
+        ):
             self._process_chunk_fallback(chunk, writer, stream_id)
         else:
-            # Fast-copy path: extract schemas/channels first (only if needed)
-            remapped_channel_ids, needs_metadata_extraction = self._get_remapped_channel_ids(
-                indexes, stream_id
-            )
-
-            if needs_metadata_extraction:
-                # Need to decode chunk to discover schemas/channels
-                # Decode and write messages instead of metadata extraction + fast-copy
-                self._process_chunk_fallback(chunk, writer, stream_id)
-            else:
-                # Ensure all channels (and their schemas) are written before fast-copying chunk
-                # Only write channels that pass the filter
-                for channel_id in remapped_channel_ids:
-                    # Check if channel should be included
-                    if channel_id not in self.excluded_channels:
-                        self._ensure_channel_written(channel_id, writer)
-
-                # Fast-copy the chunk with its indexes
-                writer.add_chunk(chunk, {idx.channel_id: idx for idx in indexes})
-                self.stats.chunks_copied += 1
+            # Fast-copy path -> nothing about the chunks must be changed
+            # ensure all channels are written before copying chunk
+            for idx in indexes:
+                # Check if channel should be included
+                if idx.channel_id not in self.excluded_channels:
+                    self._ensure_channel_written(idx.channel_id, writer)
+            # Fast-copy the chunk with its indexes
+            writer.add_chunk(chunk, {idx.channel_id: idx for idx in indexes})
+            self.stats.chunks_copied += 1
 
     def _process_chunk_fallback(
         self, chunk: Chunk, writer: McapWriter | None, stream_id: int

@@ -151,7 +151,7 @@ def display_channels_table(
 
     # Dictionary of sort key functions
     def hz_sort_key(c: ChannelInfo) -> float:
-        hz_stats = c.get("hz_stats")
+        hz_stats = c["hz_stats"]
         if use_median and hz_stats and (median := hz_stats.get("median")) is not None:
             return median
         if index_duration and (hz_channel := c.get("hz_channel")) is not None:
