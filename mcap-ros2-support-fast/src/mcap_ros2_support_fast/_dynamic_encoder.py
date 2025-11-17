@@ -1,5 +1,6 @@
 import codecs
 import struct
+from collections.abc import Mapping
 from typing import Any, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
@@ -16,7 +17,7 @@ from ._plans import (
 
 def _get_field(obj: Any, f: str) -> Any:
     """Get field from object (dict or attribute)."""
-    return obj[f] if isinstance(obj, dict) else getattr(obj, f)
+    return obj[f] if isinstance(obj, Mapping) else getattr(obj, f)
 
 
 class EncoderGeneratorFactory:
