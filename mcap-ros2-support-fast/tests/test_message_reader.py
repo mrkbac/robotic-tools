@@ -125,6 +125,51 @@ def float32_buffer(floats: list[float]) -> bytes:
             ],
             {"blank": 0, "arr": [5.5, 6.5]},
         ),
+        # REGRESSION TEST: unaligned float64[] array (8-byte alignment required)
+        # Uses 5 uint8 fields to create misalignment: after reading uint32 length at offset 12,
+        # we need to align to 8-byte boundary (offset 16) before reading float64 data
+        (
+            "uint8 a\nuint8 b\nuint8 c\nuint8 d\nuint8 e\nfloat64[] arr",
+            [
+                *[0x00, 0x00, 0x00, 0x00, 0x00],  # 5 uint8 fields (offset 0-4)
+                *[0x00, 0x00, 0x00],  # alignment to 4-byte for uint32 length (offset 8)
+                *[0x02, 0x00, 0x00, 0x00],  # length = 2 (offset 8-11, now at offset 12)
+                *[0x00, 0x00, 0x00, 0x00],  # alignment to 8-byte for float64 data (offset 16)
+                *list(struct.pack("<dd", 1.23456789, 9.87654321)),  # float64 data at offset 16
+            ],
+            {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "arr": [1.23456789, 9.87654321]},
+        ),
+        # REGRESSION TEST: unaligned int64[] array (8-byte alignment required)
+        (
+            "uint8 a\nuint8 b\nuint8 c\nuint8 d\nuint8 e\nint64[] arr",
+            [
+                *[0x00, 0x00, 0x00, 0x00, 0x00],  # 5 uint8 fields
+                *[0x00, 0x00, 0x00],  # alignment to 4-byte for uint32 length
+                *[0x02, 0x00, 0x00, 0x00],  # length = 2 (now at offset 12)
+                *[0x00, 0x00, 0x00, 0x00],  # alignment to 8-byte for int64 data
+                *list(struct.pack("<qq", -9223372036854775808, 9223372036854775807)),  # int64 data
+            ],
+            {
+                "a": 0,
+                "b": 0,
+                "c": 0,
+                "d": 0,
+                "e": 0,
+                "arr": [-9223372036854775808, 9223372036854775807],
+            },
+        ),
+        # REGRESSION TEST: unaligned uint64[] array (8-byte alignment required)
+        (
+            "uint8 a\nuint8 b\nuint8 c\nuint8 d\nuint8 e\nuint64[] arr",
+            [
+                *[0x00, 0x00, 0x00, 0x00, 0x00],  # 5 uint8 fields
+                *[0x00, 0x00, 0x00],  # alignment to 4-byte for uint32 length
+                *[0x02, 0x00, 0x00, 0x00],  # length = 2 (now at offset 12)
+                *[0x00, 0x00, 0x00, 0x00],  # alignment to 8-byte for uint64 data
+                *list(struct.pack("<QQ", 0, 18446744073709551615)),  # uint64 data
+            ],
+            {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "arr": [0, 18446744073709551615]},
+        ),
         # multiple dynamic arrays test
         (
             "float32[] first\nfloat32[] second",
@@ -137,6 +182,32 @@ def float32_buffer(floats: list[float]) -> bytes:
             {
                 "first": [5.5, 6.5],
                 "second": [5.5, 6.5],
+            },
+        ),
+        # REGRESSION TEST: string array followed by aligned field
+        # Tests that alignment is properly reset before loop (so each string length is aligned)
+        # and after loop (so the next field is aligned)
+        (
+            "string[] names\nfloat64 value",
+            [
+                *[0x03, 0x00, 0x00, 0x00],  # array length = 3 (offset 0-3, now at 4)
+                # First string: "foo" (4 bytes including null)
+                *[0x04, 0x00, 0x00, 0x00],  # string length = 4 (offset 4-7, now at 8)
+                *b"foo\x00",  # string data (offset 8-11, now at 12)
+                # Second string: "hello" (6 bytes including null)
+                *[0x06, 0x00, 0x00, 0x00],  # string length = 6 (offset 12-15, now at 16)
+                *b"hello\x00",  # string data (offset 16-21, now at 22)
+                # Third string: "x" (2 bytes including null) - at offset 22, need to align to 24
+                *[0x00, 0x00],  # alignment to 4-byte boundary (offset 22-23, now at 24)
+                *[0x02, 0x00, 0x00, 0x00],  # string length = 2 (offset 24-27, now at 28)
+                *b"x\x00",  # string data (offset 28-29, now at 30)
+                # float64 field - needs 8-byte alignment from offset 30 to 32
+                *[0x00, 0x00],  # alignment to 8-byte boundary (offset 30-31, now at 32)
+                *list(struct.pack("<d", 3.14159)),  # float64 at offset 32-39
+            ],
+            {
+                "names": ["foo", "hello", "x"],
+                "value": 3.14159,
             },
         ),
         # string tests

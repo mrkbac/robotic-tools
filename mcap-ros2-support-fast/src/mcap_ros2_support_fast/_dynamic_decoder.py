@@ -118,6 +118,7 @@ class DecoderGeneratorFactory:
                         f"_data[_offset : _offset + _array_size - 1], 'strict', True)[0]"
                     )
                 self.code.append("_offset += _array_size")
+            self.reset_alignment()  # After string unknown position readjustment
         elif type_id == TypeId.WSTRING:
             self.code.append("raise NotImplementedError('wstring not implemented')")
 
@@ -133,6 +134,7 @@ class DecoderGeneratorFactory:
         elif array_size is None:  # dynamic array
             struct_name = TYPE_INFO[type_id]
             struct_size = struct.calcsize(struct_name)
+            self.generate_alignment(struct_size)
             self.code.append(
                 f"{target} = list(_data[_offset : _offset + _array_size * {struct_size}]"
                 f".cast('{struct_name}'))"
@@ -181,7 +183,6 @@ class DecoderGeneratorFactory:
         self.code.append(f"_offset += {struct_size}")
 
         last_size = struct.calcsize(f"<{TYPE_INFO[targets[-1][1]]}")
-        # self.reset_alignment()
         self.reset_alignment(last_size)
 
     def generate_type(self, step: PlanAction) -> list[str]:
