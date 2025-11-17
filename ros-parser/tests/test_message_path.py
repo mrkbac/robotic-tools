@@ -663,12 +663,19 @@ class TestFilterApply:
         assert len(result) == 1
         assert result[0] == {"x": 3, "y": 4}
 
-    def test_apply_filter_on_non_list(self):
-        """Test error when applying filter to non-list."""
+    def test_apply_filter_on_single_object_match(self):
+        """Test applying filter to single object that matches."""
         obj = {"key": "value"}
         filter_action = Filter(field_path="key", operator=ComparisonOperator.EQUAL, value="value")
-        with pytest.raises(MessagePathError, match="can only be applied to lists"):
-            filter_action.apply(obj, {})
+        result = filter_action.apply(obj, {})
+        assert result == obj
+
+    def test_apply_filter_on_single_object_no_match(self):
+        """Test applying filter to single object that doesn't match."""
+        obj = {"key": "value"}
+        filter_action = Filter(field_path="key", operator=ComparisonOperator.EQUAL, value="other")
+        result = filter_action.apply(obj, {})
+        assert result is None
 
     def test_apply_filter_type_mismatch_comparison(self):
         """Test error when comparing incompatible types."""

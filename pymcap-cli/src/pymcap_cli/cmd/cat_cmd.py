@@ -254,6 +254,9 @@ def cat(
 
                     try:
                         data = parsed_query.apply(msg.decoded_message)
+                        # If filter returned None, skip this message
+                        if data is None:
+                            continue
                     except MessagePathError as e:
                         console_err.print(
                             f"[yellow]Filter error on {msg.channel.topic}: {e}[/yellow]",

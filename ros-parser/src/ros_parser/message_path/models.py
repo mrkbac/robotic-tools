@@ -123,18 +123,28 @@ class Filter(Action):
     operator: ComparisonOperator
     value: int | float | str | bool | Variable
 
-    def apply(self, obj: Any, variables: _VariableStore) -> list[Any]:
+    def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """
-        Filter a sequence based on a field comparison.
+        Filter a sequence or single object based on a field comparison.
 
-        Returns a new list containing only items where the field comparison evaluates to true.
+        For sequences (list/tuple): Returns a new list with only matching items.
+        For single objects: Returns the object if it matches, or None if it doesn't.
         """
+        # Handle single objects
         if not isinstance(obj, (list, tuple)):
-            obj_type = type(obj).__name__
-            raise MessagePathError(
-                f"Filter can only be applied to lists or tuples, got '{obj_type}'"
-            )
+            try:
+                field_value = self._get_field_value(obj)
+            except MessagePathError:
+                # Field doesn't exist on this object
+                return None
 
+            compare_value = (
+                variables[self.value.name] if isinstance(self.value, Variable) else self.value
+            )
+            # Return the object if it matches, None otherwise
+            return obj if self._compare(field_value, compare_value) else None
+
+        # Handle sequences (lists/tuples)
         filtered: list[Any] = []
         for item in obj:
             try:
