@@ -1,4 +1,4 @@
-# ruff: noqa
+# ruff: noqa: I001, E501
 # AUTO-GENERATED FILE - DO NOT EDIT
 
 
@@ -58,7 +58,6 @@ class ChannelInfo(TypedDict, total=False):
     """ Required property """
 
 
-
 class ChunkOverlaps(TypedDict, total=False):
     """
     ChunkOverlaps.
@@ -81,7 +80,6 @@ class ChunkOverlaps(TypedDict, total=False):
     """
 
 
-
 class ChunksInfo(TypedDict, total=False):
     """
     ChunksInfo.
@@ -100,7 +98,6 @@ class ChunksInfo(TypedDict, total=False):
 
     Required property
     """
-
 
 
 class CompressionStats(TypedDict, total=False):
@@ -164,7 +161,6 @@ class CompressionStats(TypedDict, total=False):
     """
 
 
-
 class FileInfo(TypedDict, total=False):
     """
     FileInfo.
@@ -183,7 +179,6 @@ class FileInfo(TypedDict, total=False):
     """
 
 
-
 class HeaderInfo(TypedDict, total=False):
     """
     HeaderInfo.
@@ -196,7 +191,6 @@ class HeaderInfo(TypedDict, total=False):
 
     profile: Required[str]
     """ Required property """
-
 
 
 class McapInfoOutput(TypedDict, total=False):
@@ -258,7 +252,6 @@ class McapInfoOutput(TypedDict, total=False):
     """
 
 
-
 class MessageDistribution(TypedDict, total=False):
     """
     MessageDistribution.
@@ -291,7 +284,6 @@ class MessageDistribution(TypedDict, total=False):
     """
 
 
-
 class PartialStats(TypedDict, total=False):
     """
     PartialStats.
@@ -317,7 +309,6 @@ class PartialStats(TypedDict, total=False):
     """ minimum: 0 """
 
 
-
 class SchemaInfo(TypedDict, total=False):
     """
     SchemaInfo.
@@ -330,7 +321,6 @@ class SchemaInfo(TypedDict, total=False):
 
     name: Required[str]
     """ Required property """
-
 
 
 class StatisticsInfo(TypedDict, total=False):
@@ -397,7 +387,6 @@ class StatisticsInfo(TypedDict, total=False):
     """
 
 
-
 class Stats(TypedDict, total=False):
     """
     Stats.
@@ -434,17 +423,13 @@ class Stats(TypedDict, total=False):
     """
 
 
-
 _ChannelInfobytespersecondstats = Union["PartialStats", None]
 """ Aggregation type: anyOf """
-
 
 
 _ChannelInfomessagedistributionitem = int
 """ minimum: 0 """
 
 
-
 _MessageDistributionmessagecountsitem = int
 """ minimum: 0 """
-

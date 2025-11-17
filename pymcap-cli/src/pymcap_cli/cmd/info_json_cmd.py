@@ -11,8 +11,7 @@ from cyclopts import Parameter
 from rich.console import Console
 from small_mcap import Channel, ChunkIndex, InvalidMagicError, RebuildInfo, Schema
 
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.types import (
+from pymcap_cli.info_types import (
     ChannelInfo,
     CompressionStats,
     McapInfoOutput,
@@ -21,6 +20,7 @@ from pymcap_cli.types import (
     SchemaInfo,
     Stats,
 )
+from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import read_info, rebuild_info
 
 

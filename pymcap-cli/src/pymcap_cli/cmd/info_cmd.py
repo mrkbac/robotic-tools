@@ -15,8 +15,8 @@ from small_mcap import InvalidMagicError
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
+from pymcap_cli.info_types import McapInfoOutput
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.types import McapInfoOutput
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
 console = Console()

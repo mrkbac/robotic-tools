@@ -3,7 +3,7 @@
 
 # Header added to generated files
 headers: |
-  # ruff: noqa
+  # ruff: noqa: I001, E501
   # AUTO-GENERATED FILE - DO NOT EDIT
 
 # Post-generation formatters
@@ -26,7 +26,7 @@ python_version: "3.10"
 # Generation rules
 generate:
   - source: pymcap-cli/schemas/mcap_info.json
-    destination: pymcap-cli/src/pymcap_cli/types.py
+    destination: pymcap-cli/src/pymcap_cli/info_types.py
     root_name: McapInfoOutput
     api_arguments:
       additional_properties: Only explicit # Strict typing - no extra fields allowed

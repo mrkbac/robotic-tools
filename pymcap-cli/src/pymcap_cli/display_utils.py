@@ -5,7 +5,7 @@ import enum
 from rich.console import Console
 from rich.table import Table
 
-from pymcap_cli.types import ChannelInfo, McapInfoOutput
+from pymcap_cli.info_types import ChannelInfo, McapInfoOutput
 from pymcap_cli.utils import bytes_to_human
 
 
