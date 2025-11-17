@@ -85,7 +85,7 @@ class EncoderGeneratorFactory:
             self.generate_primitive_writer("_str_size", TypeId.UINT32)
             self.code.append("_buffer.extend(_str_bytes)")
             self.code.append("_buffer.append(0)")  # null terminator
-            self.code.append("_offset += len(_str_bytes) + 1")
+            self.code.append("_offset += _str_size")
             self.reset_alignment()  # After string unknown position readjustment
         elif type_id == TypeId.WSTRING:
             self.code.append("raise NotImplementedError('wstring not implemented')")
@@ -119,7 +119,7 @@ class EncoderGeneratorFactory:
                 self.generate_primitive_writer("_str_size", TypeId.UINT32)
                 self.code.append("_buffer.extend(_str_bytes)")
                 self.code.append("_buffer.append(0)")  # null terminator
-                self.code.append("_offset += len(_str_bytes) + 1")
+                self.code.append("_offset += _str_size")
         elif type_id == TypeId.WSTRING:
             self.code.append("raise NotImplementedError('wstring not implemented')")
 
