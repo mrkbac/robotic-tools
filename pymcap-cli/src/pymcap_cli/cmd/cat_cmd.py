@@ -6,14 +6,22 @@ import sys
 from typing import Annotated, Any
 
 from cyclopts import Group, Parameter
+from lark.exceptions import LarkError
 from mcap_ros2_support_fast.decoder import DecoderFactory
+from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
-from small_mcap.reader import DecodedMessage, read_message_decoded
+from rich.json import JSON
+from rich.panel import Panel
+from rich.text import Text
+from ros_parser.message_path import MessagePathError, parse_message_path
+from small_mcap.reader import read_message_decoded
+from small_mcap.records import Channel
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import AttachmentsMode, MetadataMode, build_processing_options
+from pymcap_cli.mcap_processor import parse_timestamp_args
 
-console = Console(stderr=True)  # Use stderr for errors, stdout for data
+console_err = Console(stderr=True)  # Use stderr for errors
+console_out = Console()  # Use stdout for data output
 
 # Parameter groups
 FILTERING_GROUP = Group("Filtering")
@@ -52,56 +60,45 @@ def message_to_dict(obj: Any) -> Any:
     return obj
 
 
-def format_message_json(msg: DecodedMessage) -> str:
-    """Format a decoded message as a single-line JSON object."""
-    output = {
-        "topic": msg.channel.topic,
-        "sequence": msg.message.sequence,
-        "log_time": msg.message.log_time,
-        "publish_time": msg.message.publish_time,
-    }
+def truncate_for_display(obj: Any, max_bytes: int = 100, max_array: int = 5) -> Any:
+    """Truncate large data structures for display in table mode.
 
-    # Add schema info if available
-    if msg.schema:
-        output["schema"] = msg.schema.name
+    Args:
+        obj: Object to truncate
+        max_bytes: Maximum number of bytes to show for byte arrays
+        max_array: Maximum number of array elements to show
 
-    # Add decoded message if available
-    if msg.decoded_message is not None:
-        output["message"] = message_to_dict(msg.decoded_message)
+    Returns:
+        Truncated representation suitable for display
+    """
+    # Handle dataclass-like objects with __slots__
+    if hasattr(obj, "__slots__"):
+        result = {}
+        for slot in obj.__slots__:
+            if slot.startswith("_"):
+                continue
+            value = getattr(obj, slot, None)
+            result[slot] = truncate_for_display(value, max_bytes, max_array)
+        return result
 
-    return json.dumps(output, separators=(",", ":"))
+    # Handle bytes-like objects - show size and preview
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        size = len(obj)
+        if size > max_bytes:
+            preview = list(obj[:max_bytes])
+            return f"<{size} bytes: {preview}...>"
+        return list(obj)
 
+    # Handle sequences - truncate long arrays
+    if isinstance(obj, (list, tuple)):
+        if len(obj) > max_array:
+            truncated = [
+                truncate_for_display(item, max_bytes, max_array) for item in obj[:max_array]
+            ]
+            return [*truncated, f"... ({len(obj) - max_array} more items)"]
+        return [truncate_for_display(item, max_bytes, max_array) for item in obj]
 
-def format_message_text(msg: DecodedMessage) -> str:
-    """Format a message as human-readable text."""
-    topic = msg.channel.topic
-    log_time = msg.message.log_time
-    schema = msg.schema.name if msg.schema else "unknown"
-
-    return f"{topic} [{log_time}] ({schema})"
-
-
-def should_include_message(
-    msg: DecodedMessage,
-    include_patterns: list[str] | None,
-    exclude_patterns: list[str] | None,
-    start_ns: int,
-    end_ns: int,
-) -> bool:
-    """Check if a message should be included based on filters."""
-    # Check time range
-    if start_ns > 0 and msg.message.log_time < start_ns:
-        return False
-    if end_ns > 0 and msg.message.log_time >= end_ns:
-        return False
-
-    topic = msg.channel.topic
-
-    # Check topic filters
-    if include_patterns and not any(re.search(pattern, topic) for pattern in include_patterns):
-        return False
-
-    return not (exclude_patterns and any(re.search(pattern, topic) for pattern in exclude_patterns))
+    return obj
 
 
 def cat(
@@ -118,6 +115,13 @@ def cat(
         list[str] | None,
         Parameter(
             name=["-n", "--exclude-topics"],
+            group=FILTERING_GROUP,
+        ),
+    ] = None,
+    query: Annotated[
+        str | None,
+        Parameter(
+            name=["-q", "--query"],
             group=FILTERING_GROUP,
         ),
     ] = None,
@@ -149,13 +153,6 @@ def cat(
             group=FILTERING_GROUP,
         ),
     ] = 0,
-    json_output: Annotated[
-        bool,
-        Parameter(
-            name=["--json"],
-            group=OUTPUT_GROUP,
-        ),
-    ] = False,
     limit: Annotated[
         int | None,
         Parameter(
@@ -166,75 +163,135 @@ def cat(
 ) -> None:
     """Stream MCAP messages to stdout.
 
-    By default, prints topic, timestamp, and schema for each message.
-    With --json, decodes ROS2 messages and outputs full message content as JSON.
+    Decodes ROS2 messages and outputs as JSON. When output is to a terminal (TTY),
+    displays messages in a Rich table. When piped, outputs JSONL (one JSON per line).
 
     Examples:
-      # Print all messages
+      # Display messages in a table (interactive)
       pymcap-cli cat recording.mcap
 
-      # Output specific topics as JSON
-      pymcap-cli cat recording.mcap --topics /camera/image --json
+      # Pipe to file as JSONL
+      pymcap-cli cat recording.mcap > messages.jsonl
+
+      # Filter specific topics
+      pymcap-cli cat recording.mcap --topics /camera/image
 
       # Filter by time range
       pymcap-cli cat recording.mcap --start-secs 10 --end-secs 20
 
       # Limit output
       pymcap-cli cat recording.mcap --limit 100
+
+      # Query specific field using message path
+      pymcap-cli cat recording.mcap --query '/odom.pose.position.x'
+
+      # Filter array elements
+      pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
     """
-    # Parse time filters
-    try:
-        options = build_processing_options(
-            include_topic_regex=None,  # We'll handle filtering manually
-            exclude_topic_regex=None,
-            start=start,
-            start_nsecs=0,
-            start_secs=start_secs,
-            end=end,
-            end_nsecs=0,
-            end_secs=end_secs,
-            metadata_mode=MetadataMode.EXCLUDE,
-            attachments_mode=AttachmentsMode.EXCLUDE,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-    except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
 
-    start_ns = options.start_time
-    end_ns = options.end_time
+    start_time_ns = parse_timestamp_args(start, 0, start_secs)
+    end_time_ns = parse_timestamp_args(end, 0, end_secs)
+    # Default end time to max if not specified
+    if end_time_ns == 0:
+        end_time_ns = 2**63 - 1
 
-    # Setup decoder factory if JSON output requested
-    decoder_factories = [DecoderFactory()] if json_output else []
+    # Parse message path query if provided
+    parsed_query = None
+    if query:
+        try:
+            parsed_query = parse_message_path(query)
+        except LarkError as e:
+            console_err.print(f"[red]Invalid query syntax: {e}[/red]")
+            sys.exit(1)
+
+    # Always decode messages
+    decoder_factories = [DecoderFactory()]
+
+    # Detect if output is to a TTY (terminal) or piped
+    is_tty = sys.stdout.isatty()
 
     message_count = 0
 
+    def should_include_message(
+        channel: Channel,
+        _schema: Schema | None,
+    ) -> bool:
+        """Check if a message should be included based on filters."""
+        topic = channel.topic
+
+        # If query is specified, filter by query topic (smart filtering)
+        if parsed_query:
+            if topic != parsed_query.topic:
+                return False
+        elif topics and not any(re.search(pattern, topic) for pattern in topics):
+            # Otherwise use explicit topic filters
+            return False
+
+        return not (exclude_topics and any(re.search(pattern, topic) for pattern in exclude_topics))
+
     try:
         with open_input(file) as (input_stream, _):
-            for msg in read_message_decoded(input_stream, decoder_factories=decoder_factories):
-                # Apply filters
-                if not should_include_message(msg, topics, exclude_topics, start_ns, end_ns):
-                    continue
-
-                # Format and output message
-                if json_output:
-                    # Check if message was decoded (only CDR messages with
-                    # DecoderFactory will be decoded)
+            for msg in read_message_decoded(
+                input_stream,
+                decoder_factories=decoder_factories,
+                start_time_ns=start_time_ns,
+                end_time_ns=end_time_ns,
+                should_include=should_include_message,
+            ):
+                # Filter data if query is specified
+                if parsed_query:
                     if msg.decoded_message is None:
-                        # Skip non-CDR messages when JSON output requested
-                        console.print(
+                        console_err.print(
                             f"[yellow]Warning: Skipping message on {msg.channel.topic} "
-                            f"(encoding '{msg.channel.message_encoding}' not supported "
-                            f"for JSON output)[/yellow]"
+                            f"(encoding '{msg.channel.message_encoding}' not supported)[/yellow]"
                         )
                         continue
-                    output_line = format_message_json(msg)
-                else:
-                    output_line = format_message_text(msg)
 
-                # Write to stdout
-                print(output_line, file=sys.stdout)  # noqa: T201
+                    try:
+                        data = parsed_query.apply(msg.decoded_message)
+                    except MessagePathError as e:
+                        console_err.print(
+                            f"[yellow]Filter error on {msg.channel.topic}: {e}[/yellow]",
+                        )
+                        continue
+                else:
+                    data = msg.decoded_message
+
+                # Output data (pretty or raw)
+                if is_tty:
+                    # Pretty output with Rich
+                    truncated = truncate_for_display(data)
+                    json_str = json.dumps(message_to_dict(truncated), indent=2)
+
+                    header = Text()
+                    header.append(msg.channel.topic, style="bold cyan")
+                    header.append(" @ ", style="dim")
+                    header.append(str(msg.message.log_time), style="green")
+                    header.append(" [", style="dim")
+                    schema_name = msg.schema.name if msg.schema else "unknown"
+                    header.append(schema_name, style="yellow")
+                    header.append("]", style="dim")
+
+                    panel = Panel(
+                        JSON(json_str),
+                        title=header,
+                        border_style="blue",
+                        expand=False,
+                    )
+                    console_out.print(panel)
+                else:
+                    # Raw JSONL output
+                    output = {
+                        "topic": msg.channel.topic,
+                        "sequence": msg.message.sequence,
+                        "log_time": msg.message.log_time,
+                        "publish_time": msg.message.publish_time,
+                    }
+                    if msg.schema:
+                        output["schema"] = msg.schema.name
+                    output["message"] = message_to_dict(data)
+
+                    print(json.dumps(output, separators=(",", ":")), file=sys.stdout)  # noqa: T201
 
                 message_count += 1
 
@@ -244,9 +301,9 @@ def cat(
 
     except KeyboardInterrupt:
         # Allow graceful exit with Ctrl+C
-        console.print("\n[yellow]Interrupted by user[/yellow]")
+        console_err.print("\n[yellow]Interrupted by user[/yellow]")
         sys.exit(0)
 
     except Exception as e:  # noqa: BLE001
-        console.print(f"[red]Error reading MCAP: {e}[/red]")
+        console_err.print(f"[red]Error reading MCAP: {e}[/red]")
         sys.exit(1)
