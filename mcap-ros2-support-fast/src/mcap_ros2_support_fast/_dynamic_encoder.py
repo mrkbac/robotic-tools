@@ -15,30 +15,9 @@ from ._plans import (
 )
 
 
-@dataclasses.dataclass
-class FieldPath:
-    """Represents a field access path for clean code generation."""
-
-    base_expr: str
-    path: list[str] = dataclasses.field(default_factory=list)
-
-    def extend(self, field_name: str) -> "FieldPath":
-        """Create a new FieldPath with an additional field."""
-        return FieldPath(self.base_expr, [*self.path, field_name])
-
-    def to_code(self) -> str:
-        """Generate the field access code."""
-        if not self.path:
-            return self.base_expr
-        path_args = ", ".join(f"'{field}'" for field in self.path)
-        return f"_get_field({self.base_expr}, {path_args})"
-
-
-def _get_field(obj: Any, *field_path: str) -> Any:
-    """Get nested field using field path (works for both dict and object attributes)."""
-    for f in field_path:
-        obj = obj[f] if isinstance(obj, dict) else getattr(obj, f)
-    return obj
+def _get_field(obj: Any, f: str) -> Any:
+    """Get field from object (dict or attribute)."""
+    return obj[f] if isinstance(obj, dict) else getattr(obj, f)
 
 
 class EncoderGeneratorFactory:
@@ -170,22 +149,20 @@ class EncoderGeneratorFactory:
                     self.code.append(f"_offset += {struct_size}")
 
     def generate_complex_array_writer(
-        self, field_path: FieldPath, plan: PlanList, array_size: int | None
+        self, array_var: str, plan: PlanList, array_size: int | None
     ) -> None:
         """Generate code for complex array fields."""
-        value_expr = field_path.to_code()
         if array_size is None:
-            self.generate_primitive_writer(f"len({value_expr})", TypeId.UINT32)
+            self.generate_primitive_writer(f"len({array_var})", TypeId.UINT32)
 
         random_i = self.generate_var_name()
         self.reset_alignment()  # Need to reset alignment at the start of loops
-        with self.code.indent(f"for {random_i} in {value_expr}:"):
-            # Create a new FieldPath for the array element
-            element_path = FieldPath(random_i)
-            self.generate_plan_writer(element_path, plan)
+        with self.code.indent(f"for {random_i} in {array_var}:"):
+            # Use the loop variable directly as the base for nested accesses
+            self.generate_plan_writer(random_i, plan)
 
     def generate_primitive_group_writer(
-        self, field_path: FieldPath, targets: list[tuple[str, TypeId]]
+        self, parent_var: str, targets: list[tuple[str, TypeId]]
     ) -> None:
         """Generate code for a group of primitive fields."""
         struct_format = "".join(TYPE_INFO[field_type] for _, field_type in targets)
@@ -199,8 +176,9 @@ class EncoderGeneratorFactory:
         field_values = []
         for name, typeid in targets:
             if typeid != TypeId.PADDING:
-                target_path = self._get_field_access(field_path, name)
-                field_values.append(target_path.to_code())
+                field_var = self.generate_var_name()
+                self.code.append(f"{field_var} = _get_field({parent_var}, '{name}')")
+                field_values.append(field_var)
 
         struct_var = self.get_struct_pattern_var_name(pattern)
         self.code.append(f"_buffer.extend({struct_var}({', '.join(field_values)}))")
@@ -209,30 +187,30 @@ class EncoderGeneratorFactory:
         last_size = struct.calcsize(f"<{TYPE_INFO[targets[-1][1]]}")
         self.reset_alignment(last_size)
 
-    def generate_type_writer(self, field_path: FieldPath, step: PlanAction) -> None:
+    def generate_type_writer(self, parent_var: str, step: PlanAction) -> None:
         """Generate code for a single plan action."""
         if step.type == ActionType.PRIMITIVE:
-            target_path = self._get_field_access(field_path, step.target)
-            self.generate_primitive_writer(target_path.to_code(), step.data)
+            field_var = self.generate_var_name()
+            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
+            self.generate_primitive_writer(field_var, step.data)
         elif step.type == ActionType.PRIMITIVE_ARRAY:
-            target_path = self._get_field_access(field_path, step.target)
-            self.generate_primitive_array_writer(target_path.to_code(), step.data, step.size)
+            field_var = self.generate_var_name()
+            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
+            self.generate_primitive_array_writer(field_var, step.data, step.size)
         elif step.type == ActionType.PRIMITIVE_GROUP:
-            self.generate_primitive_group_writer(field_path, step.targets)
+            self.generate_primitive_group_writer(parent_var, step.targets)
         elif step.type == ActionType.COMPLEX:
-            target_path = self._get_field_access(field_path, step.target)
-            self.generate_plan_writer(target_path, step.plan)
+            field_var = self.generate_var_name()
+            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
+            self.generate_plan_writer(field_var, step.plan)
         elif step.type == ActionType.COMPLEX_ARRAY:
-            target_path = self._get_field_access(field_path, step.target)
-            self.generate_complex_array_writer(target_path, step.plan, step.size)
+            field_var = self.generate_var_name()
+            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
+            self.generate_complex_array_writer(field_var, step.plan, step.size)
         else:
             raise ValueError(f"Unknown action type: {step}")
 
-    def _get_field_access(self, field_path: FieldPath, field_name: str) -> FieldPath:
-        """Create a new field path by extending the current one."""
-        return field_path.extend(field_name)
-
-    def generate_plan_writer(self, field_path: FieldPath, plan: PlanList) -> None:
+    def generate_plan_writer(self, base_var: str, plan: PlanList) -> None:
         """Generate code for a complete plan."""
         target_type, fields = plan
         self.message_classes.add(target_type)
@@ -245,7 +223,7 @@ class EncoderGeneratorFactory:
             return
 
         for field in fields:
-            self.generate_type_writer(field_path, field)
+            self.generate_type_writer(base_var, field)
 
     def generate_encoder_code(self, func_name: str) -> str:
         """Generate Python source code for an encoder function"""
@@ -258,8 +236,7 @@ class EncoderGeneratorFactory:
             self.code.append("_offset += 4")
 
             # Generate the main encoding code first to collect all types
-            message_path = FieldPath("message")
-            self.generate_plan_writer(message_path, self.plan)
+            self.generate_plan_writer("message", self.plan)
 
             # Add struct pattern variables to prolog
             for var in self.struct_patterns.values():
