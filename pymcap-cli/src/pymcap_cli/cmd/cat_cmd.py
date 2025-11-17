@@ -238,6 +238,11 @@ def cat(
                 end_time_ns=end_time_ns,
                 should_include=should_include_message,
             ):
+                # Check limit
+                if limit is not None and message_count >= limit:
+                    break
+                message_count += 1
+
                 # Filter data if query is specified
                 if parsed_query:
                     if msg.decoded_message is None:
@@ -292,12 +297,6 @@ def cat(
                     output["message"] = message_to_dict(data)
 
                     print(json.dumps(output, separators=(",", ":")), file=sys.stdout)  # noqa: T201
-
-                message_count += 1
-
-                # Check limit
-                if limit is not None and message_count >= limit:
-                    break
 
     except KeyboardInterrupt:
         # Allow graceful exit with Ctrl+C
