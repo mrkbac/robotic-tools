@@ -405,7 +405,6 @@ def display_channels_table(
     if columns is None:
         columns = (
             ChannelTableColumn.ID
-            | ChannelTableColumn.TOPIC
             | ChannelTableColumn.SCHEMA
             | ChannelTableColumn.MSGS
             | ChannelTableColumn.HZ
@@ -491,8 +490,7 @@ def display_channels_table(
     channels_table = Table()
     if columns & ChannelTableColumn.ID:
         channels_table.add_column("ID", style="bold blue", no_wrap=True, justify="right")
-    if columns & ChannelTableColumn.TOPIC:
-        channels_table.add_column("Topic", overflow="fold")
+    channels_table.add_column("Topic", overflow="fold")
     if show_schema:
         channels_table.add_column("Schema", style="blue")
     if columns & ChannelTableColumn.MSGS:
@@ -529,9 +527,7 @@ def display_channels_table(
             if columns & ChannelTableColumn.ID:
                 row.append("")
 
-            # Add the folder name in the topic column
-            if columns & ChannelTableColumn.TOPIC:
-                row.append(f"{tree_prefix}{_format_parts_with_colors(channel)}")
+            row.append(f"{tree_prefix}{_format_parts_with_colors(channel)}")
 
             channels_table.add_row(*row, end_section=False)
             continue
@@ -544,8 +540,7 @@ def display_channels_table(
         row: list[RenderableType] = []
         if columns & ChannelTableColumn.ID:
             row.append(str(channel["id"]))
-        if columns & ChannelTableColumn.TOPIC:
-            row.append(colored_topic)
+        row.append(colored_topic)
         if show_schema:
             row.append(_format_schema_with_link(channel.get("schema_name")))
         if columns & ChannelTableColumn.MSGS:

@@ -170,7 +170,6 @@ def _display_channels_table(
         reverse=reverse,
         columns=(
             ChannelTableColumn.ID
-            | ChannelTableColumn.TOPIC
             | ChannelTableColumn.SCHEMA
             | ChannelTableColumn.MSGS
             | ChannelTableColumn.HZ

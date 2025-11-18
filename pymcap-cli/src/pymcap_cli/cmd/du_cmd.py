@@ -51,8 +51,7 @@ def du(
             sort_key="size",
             reverse=True,
             columns=(
-                ChannelTableColumn.TOPIC
-                | ChannelTableColumn.MSGS
+                ChannelTableColumn.MSGS
                 | ChannelTableColumn.HZ
                 | ChannelTableColumn.SIZE
                 | ChannelTableColumn.PERCENT
