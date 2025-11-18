@@ -61,7 +61,7 @@ def parse_schema_to_definitions(
     definitions.update(BUILTIN_TYPES)
 
     # Parse all message definitions in the schema
-    _for_each_msgdef(
+    for_each_msgdef(
         schema_name,
         schema_text,
         lambda full_name, short_name, msgdef: _add_msgdef(
@@ -72,7 +72,7 @@ def parse_schema_to_definitions(
     return definitions
 
 
-def _for_each_msgdef(
+def for_each_msgdef(
     schema_name: str,
     schema_text: str,
     fn: Callable[[str, str, MessageDefinition], None],

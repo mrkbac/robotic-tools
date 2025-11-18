@@ -5,17 +5,14 @@ on any specific parser implementation. Plans can be consumed by different
 backends (interpreted, compiled, code-generated, etc.).
 """
 
-import re
 from collections.abc import Callable
 from dataclasses import make_dataclass
 from typing import Any
 
 from ros_parser import (
-    Field,
     MessageDefinition,
-    Type,
-    parse_message_string,
 )
+from ros_parser.message_definition import BUILTIN_TYPES, for_each_msgdef
 
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
 from mcap_ros2_support_fast._dynamic_encoder import create_encoder
@@ -50,26 +47,6 @@ _TYPE_SIZES = {
     TypeId.INT8: 1,
     TypeId.UINT8: 1,
     TypeId.PADDING: 1,
-}
-
-
-_builtin_types = {
-    # https://github.com/ros2/rcl_interfaces/blob/rolling/builtin_interfaces/msg/Time.msg
-    "builtin_interfaces/Time": MessageDefinition(
-        name="builtin_interfaces/Time",
-        fields_all=[
-            Field(Type(type_name="int32"), "sec"),
-            Field(Type(type_name="uint32"), "nanosec"),
-        ],
-    ),
-    # https://github.com/ros2/rcl_interfaces/blob/rolling/builtin_interfaces/msg/Duration.msg
-    "builtin_interfaces/Duration": MessageDefinition(
-        name="builtin_interfaces/Duration",
-        fields_all=[
-            Field(Type(type_name="int32"), "sec"),
-            Field(Type(type_name="uint32"), "nanosec"),
-        ],
-    ),
 }
 
 
@@ -142,7 +119,7 @@ def generate_plans(schema_name: str, schema_text: str) -> PlanList:
     :return: The execution plan for the primary schema type.
     """
     msgdefs: dict[str, MessageDefinition] = {
-        **_builtin_types,  # Include built-in types
+        **BUILTIN_TYPES,  # Include built-in types
     }
 
     def handle_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageDefinition) -> None:
@@ -150,7 +127,7 @@ def generate_plans(schema_name: str, schema_text: str) -> PlanList:
         msgdefs[cur_schema_name] = msgdef
         msgdefs[short_name] = msgdef
 
-    _for_each_msgdef(schema_name, schema_text, handle_msgdef)
+    for_each_msgdef(schema_name, schema_text, handle_msgdef)
 
     # Generate plan for the primary message type
     primary_msgdef = msgdefs.get(schema_name)
@@ -179,47 +156,6 @@ def generate_dynamic(
 
     # Create decoder using the specified parser implementation
     return parser(optimized_plan)
-
-
-def _for_each_msgdef(
-    schema_name: str,
-    schema_text: str,
-    fn: Callable[[str, str, MessageDefinition], None],
-) -> None:
-    cur_schema_name = schema_name
-
-    # Remove empty lines
-    schema_text = "\n".join([s for s in schema_text.splitlines() if s.strip()])
-
-    # Split schema_text by separator lines containing at least 3 = characters
-    # (e.g. "===") using a regular expression
-    for cur_schema_text in re.split(r"^={3,}$", schema_text, flags=re.MULTILINE):
-        cur_schema_text = cur_schema_text.strip()  # noqa: PLW2901
-
-        # Check for a "MSG: pkg_name/msg_name" line
-        match = re.match(r"^MSG:\s+(\S+)$", cur_schema_text, flags=re.MULTILINE)
-        if match:
-            cur_schema_name = match.group(1)
-            # Remove this line from the message definition
-            cur_schema_text = re.sub(r"^MSG:\s+(\S+)$", "", cur_schema_text, flags=re.MULTILINE)  # noqa: PLW2901
-
-        # Parse the package and message names from the schema name
-        # (e.g. "std_msgs/msg/String" -> "std_msgs")
-        pkg_name = cur_schema_name.split("/")[0]
-        msg_name = cur_schema_name.split("/")[-1]
-        short_name = pkg_name + "/" + msg_name
-
-        # Parse the message with the package context
-        msgdef = parse_message_string(cur_schema_text, context_package_name=pkg_name)
-
-        # Set the short name on the message definition (pkg_name/msg_name format)
-        # This is the standard ROS2 message type format used in _type field
-        msgdef = MessageDefinition(
-            name=short_name,
-            fields_all=msgdef.fields_all,
-        )
-
-        fn(cur_schema_name, short_name, msgdef)
 
 
 def _find_groupable_primitives(steps: PlanActions) -> list[tuple[int, int]]:
@@ -395,7 +331,7 @@ def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
 
     # First collect all message definitions
     msgdefs: dict[str, MessageDefinition] = {
-        **_builtin_types,  # Include built-in types
+        **BUILTIN_TYPES,  # Include built-in types
     }
 
     def collect_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageDefinition) -> None:
@@ -403,7 +339,7 @@ def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
         msgdefs[cur_schema_name] = msgdef
         msgdefs[short_name] = msgdef
 
-    _for_each_msgdef(schema_name, schema_text, collect_msgdef)
+    for_each_msgdef(schema_name, schema_text, collect_msgdef)
 
     plan = _generate_plan(msgdefs[schema_name], msgdefs)
     optimized_plan = optimize_plan(plan)
