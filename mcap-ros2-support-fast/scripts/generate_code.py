@@ -93,7 +93,7 @@ def main() -> None:
             "# Utility functions",
             f"{UTF8_FUNC_NAME} = codecs.utf_8_decode",
             "_encode_utf8 = codecs.utf_8_encode",
-            "_get_field = lambda obj, *field_path: (__import__('functools').reduce(lambda o, f: o[f] if isinstance(o, dict) else getattr(o, f), field_path, obj))",  # noqa: E501
+            "_get_field = lambda obj, f: (obj[f] if isinstance(obj, (__import__('collections.abc').Mapping)) else getattr(obj, f))",
             "",
         ]
     )
