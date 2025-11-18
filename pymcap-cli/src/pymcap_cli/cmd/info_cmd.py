@@ -5,16 +5,16 @@ from enum import Enum
 from typing import Annotated
 
 from cyclopts import Group, Parameter
-from rich.console import Console, ConsoleOptions, RenderResult
-from rich.jupyter import JupyterMixin
-from rich.measure import Measurement
-from rich.style import Style
+from rich.console import Console
 from rich.table import Table
-from rich.text import Text
 from small_mcap import InvalidMagicError
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
-from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
+from pymcap_cli.display_utils import (
+    ChannelTableColumn,
+    DistributionBar,
+    display_channels_table,
+)
 from pymcap_cli.info_types import McapInfoOutput
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
@@ -37,111 +37,6 @@ class SortChoice(str, Enum):
     BPS = "bps"
     B_PER_MSG = "b_per_msg"
     SCHEMA = "schema"
-
-
-class DistributionBar(JupyterMixin):
-    """A width-aware distribution bar that automatically scales to fit table cells.
-
-    This renderable creates a visual distribution histogram using Unicode block
-    characters with a color gradient from blue (low) to red (high).
-    """
-
-    def __init__(
-        self,
-        counts: list[int],
-        *,
-        width: int | None = None,
-        min_width: int = 10,
-    ) -> None:
-        """Initialize the distribution bar.
-
-        Args:
-            counts: List of message counts per bucket
-            width: Fixed width in characters, or None to use available width
-            min_width: Minimum width to request
-        """
-        self.counts = counts
-        self.width = width
-        self.min_width = min_width
-
-        # Unicode block characters for vertical bars (8 levels)
-        self.blocks = " ▁▂▃▄▅▆▇█"
-
-        # Color gradient styles for each level (0-8)
-        self.level_styles = [
-            Style(color="gray89", bgcolor="gray89"),  # 0: Empty - light gray
-            Style(color="blue", bgcolor="gray89"),  # 1: Very low - blue
-            Style(color="bright_blue", bgcolor="gray89"),  # 2: Low - brighter blue
-            Style(color="cyan", bgcolor="gray89"),  # 3: Medium-low - cyan
-            Style(color="green", bgcolor="gray89"),  # 4: Medium - green
-            Style(color="yellow", bgcolor="gray89"),  # 5: Medium-high - yellow
-            Style(color="bright_yellow", bgcolor="gray89"),  # 6: High - bright yellow
-            Style(color="red", bgcolor="gray89"),  # 7: Very high - red
-            Style(color="bright_red", bgcolor="gray89"),  # 8: Maximum - bright red
-        ]
-
-    def _downsample_to_width(self, counts: list[int], target_width: int) -> list[int]:
-        num_buckets = len(counts)
-        buckets_per_char = num_buckets / target_width
-
-        scaled = []
-        for i in range(target_width):
-            start_idx = int(i * buckets_per_char)
-            end_idx = int((i + 1) * buckets_per_char)
-            # Take max value in this range (preserves peaks)
-            if start_idx < end_idx:
-                scaled.append(max(counts[start_idx:end_idx]))
-            else:
-                scaled.append(0)
-
-        return scaled
-
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        # Determine actual rendering width
-        # Use specified width OR expand to available width
-        width = min(self.width or options.max_width, options.max_width)
-        width = max(width, self.min_width)  # Respect minimum
-
-        # Handle empty data
-        if not self.counts or max(self.counts) == 0:
-            yield Text("no messages", style="dim")
-            return
-
-        # Scale distribution to fit available width
-        num_buckets = len(self.counts)
-
-        if num_buckets <= width:
-            # Enough space: show each bucket
-            scaled_counts = self.counts
-        else:
-            # Too many buckets: downsample by taking max in each group
-            scaled_counts = self._downsample_to_width(self.counts, width)
-
-        # Render the scaled distribution
-        max_count = max(scaled_counts)
-        result = Text()
-
-        for count in scaled_counts:
-            if count == 0:
-                # Show subtle background for empty buckets
-                result.append("░", style=self.level_styles[0])
-            else:
-                # Scale to 1-8 range based on this channel's max
-                level = int((count / max_count) * 8) if max_count > 0 else 0
-                level = min(level, 8)  # Clamp to max
-                level = max(level, 1)  # Ensure non-zero counts get at least level 1
-                result.append(self.blocks[level], style=self.level_styles[level])
-
-        yield result
-
-    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
-        if self.width is not None:
-            # Fixed width
-            return Measurement(self.width, self.width)
-        # Flexible: cap max width based on actual bucket count and a reasonable maximum
-        # No point displaying wider than the number of buckets, and cap at 80 chars
-        max_useful_width = min(len(self.counts), 80, options.max_width)
-        return Measurement(self.min_width, max_useful_width)
 
 
 def _display_message_distribution(data: McapInfoOutput) -> None:
@@ -286,7 +181,6 @@ def _display_channels_table(
         responsive=True,
         index_duration=index_duration,
         use_median=use_median,
-        distribution_bar_class=DistributionBar,
     )
 
 
