@@ -2,6 +2,7 @@
 
 import enum
 import hashlib
+from collections.abc import Iterator
 from functools import lru_cache
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
@@ -273,6 +274,107 @@ def _format_schema_with_link(schema_name: str | None, distro: str = "jazzy") -> 
     return f"[link={url}]{formatted}[/]"
 
 
+TreeNode = dict[str, tuple[ChannelInfo | None, "TreeNode"]]
+
+
+def build_prefix(channels: list[ChannelInfo]) -> TreeNode:
+    tree: TreeNode = {}
+
+    for channel in channels:
+        parts = channel["topic"].strip("/").split("/")
+        current_node = tree
+
+        for part in parts[:-1]:
+            if part not in current_node:
+                current_node[part] = (None, {})
+            current_node = current_node[part][1]
+
+        # Add the channel info at the leaf
+        leaf_part = parts[-1]
+        current_node[leaf_part] = (channel, {})
+
+    return tree
+
+
+def fold_tree(node: TreeNode) -> TreeNode:
+    """Collapse single-child chains in a tree structure.
+
+    Transforms chains of intermediate nodes (nodes with no channel data and exactly
+    one child) into a single node with a collapsed path key (e.g., "a/b/c").
+
+    Args:
+        node: The tree node to fold
+
+    Returns:
+        A new tree with collapsed single-child chains
+    """
+    folded: TreeNode = {}
+
+    for key, (leaf_value, children) in node.items():
+        # If this is an intermediate node (no channel) with exactly one child,
+        # start collapsing the chain
+        if not leaf_value and len(children) == 1:
+            # Accumulate the path as we walk single-child chains
+            collapsed_path = key
+            current_leaf = leaf_value
+            current_children = children
+
+            # Walk the chain while we have single children and no channel data
+            while len(current_children) == 1 and current_leaf is None:
+                only_key, (only_leaf, only_children) = next(iter(current_children.items()))
+                collapsed_path += "/" + only_key
+                current_leaf = only_leaf
+                current_children = only_children
+
+            # Now we've reached the end of the chain
+            # Recursively fold the subtree and store with collapsed path
+            folded[collapsed_path] = (current_leaf, fold_tree(current_children))
+        else:
+            # Not a collapsible chain - keep as is but fold children
+            folded[key] = (leaf_value, fold_tree(children))
+
+    return folded
+
+
+def tree_iter(
+    node: TreeNode,
+    prefix: str = "",
+    is_root: bool = True,
+) -> Iterator[tuple[str, ChannelInfo | str, str]]:
+    """Iterate over a folded tree structure, yielding display information.
+
+    Yields (tree_prefix, channel_or_string, display_path) tuples where:
+    - tree_prefix contains the tree drawing characters for proper indentation
+    - display_path is the node key (may be a collapsed path like "a/b/c" or just "leaf")
+    """
+    # The input channels are already sorted, so the tree preserves that order
+    items = list(node.items())
+
+    for i, (key, (leaf_value, children)) in enumerate(items):
+        is_last_item = i == len(items) - 1
+
+        # Determine tree characters - no connectors at root level
+        if is_root:
+            connector = ""
+            new_prefix = ""
+        else:
+            connector = "└── " if is_last_item else "├── "
+            new_prefix = prefix + ("    " if is_last_item else "│   ")
+
+        if leaf_value:
+            # This node has channel data
+            # Display the key as-is (which may be a collapsed path or a single segment)
+            yield (prefix + connector, leaf_value, key)
+
+            # If it has children, recurse into them
+            if children:
+                yield from tree_iter(children, new_prefix, is_root=False)
+        else:
+            # Folder name
+            yield (prefix + connector, key, key)
+            yield from tree_iter(children, new_prefix, is_root=False)
+
+
 def display_channels_table(
     data: McapInfoOutput,
     console: Console,
@@ -283,6 +385,7 @@ def display_channels_table(
     responsive: bool = True,
     index_duration: bool = False,
     use_median: bool = False,
+    tree: bool = False,
 ) -> None:
     """Display a channels table with configurable columns and sorting.
 
@@ -295,6 +398,7 @@ def display_channels_table(
         responsive: Enable responsive column hiding based on terminal width
         index_duration: Use per-channel Hz calculation instead of global duration
         use_median: Display median rates instead of mean rates
+        tree: Display channels in a tree hierarchy based on topic path
     """
 
     # Default columns if not specified
@@ -406,8 +510,36 @@ def display_channels_table(
     if show_distribution:
         channels_table.add_column("Distribution")
     # Populate rows
-    for channel in sorted(data["channels"], key=get_sort_key, reverse=reverse):
-        colored_topic = _format_parts_with_colors(channel["topic"])
+    sorted_channels = sorted(data["channels"], key=get_sort_key, reverse=reverse)
+    if tree:
+        # Tree mode: build hierarchy, fold single-child chains, then iterate
+        node = build_prefix(sorted_channels)
+        folded_node = fold_tree(node)
+        channel_iter = tree_iter(folded_node)
+    else:
+        # List mode: sort channels and iterate directly
+        channel_iter = (("", channel, channel["topic"]) for channel in sorted_channels)
+
+    for tree_prefix, channel, display_path in channel_iter:
+        if isinstance(channel, str):
+            # Intermediate node (folder) - create a row that spans with just the folder name
+            row: list[RenderableType] = []
+
+            # Add empty cell for ID column if it exists
+            if columns & ChannelTableColumn.ID:
+                row.append("")
+
+            # Add the folder name in the topic column
+            if columns & ChannelTableColumn.TOPIC:
+                row.append(f"{tree_prefix}{_format_parts_with_colors(channel)}")
+
+            channels_table.add_row(*row, end_section=False)
+            continue
+
+        if tree:
+            colored_topic = tree_prefix + _format_parts_with_colors(display_path)
+        else:
+            colored_topic = _format_parts_with_colors(display_path)
 
         row: list[RenderableType] = []
         if columns & ChannelTableColumn.ID:

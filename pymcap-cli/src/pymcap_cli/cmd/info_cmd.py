@@ -160,6 +160,7 @@ def _display_channels_table(
     reverse: bool,
     index_duration: bool,
     use_median: bool,
+    tree: bool,
 ) -> None:
     """Display channels table with sorting support."""
     display_channels_table(
@@ -181,6 +182,7 @@ def _display_channels_table(
         responsive=True,
         index_duration=index_duration,
         use_median=use_median,
+        tree=tree,
     )
 
 
@@ -236,6 +238,13 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = False,
+    tree: Annotated[
+        bool,
+        Parameter(
+            name=["--tree"],
+            group=DISPLAY_GROUP,
+        ),
+    ] = False,
 ) -> None:
     """Report statistics about MCAP file(s).
 
@@ -270,6 +279,8 @@ def info(
     median
         Display median rates (Hz, bytes/s) instead of mean rates. Requires
         --rebuild to calculate message intervals.
+    tree
+        Display channels in a hierarchical tree structure based on topic paths.
 
     Examples
     --------
@@ -351,4 +362,4 @@ def info(
         _display_file_info_and_summary(data)
         _display_message_distribution(data)
         _display_compression_table(data, has_chunk_info)
-        _display_channels_table(data, sort.value, reverse, index_duration, median)
+        _display_channels_table(data, sort.value, reverse, index_duration, median, tree)
