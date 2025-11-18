@@ -9,6 +9,7 @@ from .models import (
     Filter,
     MessagePath,
     MessagePathError,
+    ValidationError,
     Variable,
 )
 from .parser import parse_message_path
@@ -22,6 +23,7 @@ __all__ = [
     "LarkError",
     "MessagePath",
     "MessagePathError",
+    "ValidationError",
     "Variable",
     "parse_message_path",
 ]

@@ -13,7 +13,8 @@ from rich.console import Console
 from rich.json import JSON
 from rich.panel import Panel
 from rich.text import Text
-from ros_parser.message_path import MessagePathError, parse_message_path
+from ros_parser import parse_schema_to_definitions
+from ros_parser.message_path import MessagePathError, ValidationError, parse_message_path
 from small_mcap.reader import read_message_decoded
 from small_mcap.records import Channel
 
@@ -211,6 +212,7 @@ def cat(
     is_tty = sys.stdout.isatty()
 
     message_count = 0
+    validated_topics: set[str] = set()  # Track which topics have been validated
 
     def should_include_message(
         channel: Channel,
@@ -242,6 +244,52 @@ def cat(
                 if limit is not None and message_count >= limit:
                     break
                 message_count += 1
+
+                # Validate query against schema on first message of each topic
+                if parsed_query and msg.channel.topic not in validated_topics:
+                    validated_topics.add(msg.channel.topic)
+
+                    if msg.schema is None:
+                        console_err.print(
+                            f"[yellow]Warning: Cannot validate query for topic "
+                            f"'{msg.channel.topic}' (no schema available)[/yellow]"
+                        )
+                    else:
+                        try:
+                            # Parse schema into message definitions
+                            all_definitions = parse_schema_to_definitions(
+                                msg.schema.name, msg.schema.data
+                            )
+
+                            # Get the root message definition
+                            root_msgdef = all_definitions.get(msg.schema.name)
+                            if root_msgdef is None:
+                                # Try short name
+                                short_name = "/".join(
+                                    [msg.schema.name.split("/")[0], msg.schema.name.split("/")[-1]]
+                                )
+                                root_msgdef = all_definitions.get(short_name)
+
+                            if root_msgdef is None:
+                                console_err.print(
+                                    f"[yellow]Warning: Could not find message definition "
+                                    f"for schema '{msg.schema.name}'[/yellow]"
+                                )
+                            else:
+                                # Validate the query against the schema
+                                parsed_query.validate(root_msgdef, all_definitions)
+
+                        except ValidationError as e:
+                            console_err.print(
+                                f"[red]Query validation error for topic "
+                                f"'{msg.channel.topic}':[/red]"
+                            )
+                            console_err.print(f"[red]{e}[/red]")
+                            console_err.print(
+                                f"\n[yellow]Query:[/yellow] {query}\n"
+                                f"[yellow]Schema:[/yellow] {msg.schema.name}"
+                            )
+                            sys.exit(1)
 
                 # Filter data if query is specified
                 if parsed_query:

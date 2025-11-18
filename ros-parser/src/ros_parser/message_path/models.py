@@ -1,12 +1,19 @@
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from ros_parser.message_definition import MessageDefinition, Type
+
 
 class MessagePathError(Exception):
     """Exception raised when message path operations fail."""
+
+
+class ValidationError(Exception):
+    """Error raised when a message path is invalid for a given message definition."""
 
 
 class ComparisonOperator(Enum):
@@ -31,12 +38,33 @@ class Action(ABC):
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """Apply this action to an object."""
 
+    @abstractmethod
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate this action against a schema and return the resulting type.
+
+        Args:
+            current_type: The current type before applying this action
+            current_msgdef: The current message definition (if complex type)
+            all_definitions: Dict of all message definitions for resolving types
+
+        Returns:
+            Tuple of (resulting_type, resulting_msgdef) after applying this action
+
+        Raises:
+            ValidationError: If this action is invalid for the current type
+        """
+
 
 @dataclass
 class FieldAccess(Action):
     field_name: str
 
-    def apply(self, obj: Any, _variables: _VariableStore) -> Any:
+    def apply(self, obj: Any, variables: _VariableStore) -> Any:  # noqa: ARG002
         """Access a field from an object, supporting both attribute and dict-like access."""
         # Try dict/mapping access first
         if isinstance(obj, Mapping):
@@ -57,6 +85,49 @@ class FieldAccess(Action):
         raise MessagePathError(
             f"Field '{self.field_name}' not found on object of type '{obj_type}'"
         )
+
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate field access and return the field's type."""
+
+        # Cannot access fields on primitives
+        if current_type.is_primitive:
+            raise ValidationError(
+                f"Cannot access field '{self.field_name}' on primitive type '{current_type}'"
+            )
+
+        # Cannot access fields on arrays directly - need to index/slice first
+        if current_type.is_array:
+            raise ValidationError(
+                f"Cannot access field '{self.field_name}' on array type '{current_type}'. "
+                "Use array indexing or slicing first"
+            )
+
+        # Get the message definition if we don't already have it
+        if current_msgdef is None:
+            current_msgdef = _get_message_definition(current_type, all_definitions)
+
+        # Find the field
+        field = next((f for f in current_msgdef.fields if f.name == self.field_name), None)
+        if not field:
+            available = [f.name for f in current_msgdef.fields]
+            raise ValidationError(
+                f"Field '{self.field_name}' not found in message '{current_type}'. "
+                f"Available fields: {', '.join(available) if available else 'none'}"
+            )
+
+        # Return the field's type and its message definition if it's complex
+        field_msgdef = None
+        if not field.type.is_primitive and not field.type.is_array:
+            # It's a complex type, try to get its definition
+            with contextlib.suppress(ValidationError):
+                field_msgdef = _get_message_definition(field.type, all_definitions)
+
+        return field.type, field_msgdef
 
 
 @dataclass
@@ -79,6 +150,35 @@ class ArrayIndex(Action):
             raise MessagePathError(
                 f"Index {idx} out of range for sequence of length {len(obj)}"
             ) from e
+
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",  # noqa: ARG002
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate array index and return the element type."""
+
+        if not current_type.is_array:
+            raise ValidationError(f"Cannot apply array index to non-array type '{current_type}'")
+
+        # Return element type (unwrap array)
+        element_type = Type(
+            type_name=current_type.type_name,
+            package_name=current_type.package_name,
+            is_array=False,
+            array_size=None,
+            is_upper_bound=False,
+            string_upper_bound=current_type.string_upper_bound,
+        )
+
+        # Get message definition if it's a complex type
+        element_msgdef = None
+        if not element_type.is_primitive:
+            with contextlib.suppress(ValidationError):
+                element_msgdef = _get_message_definition(element_type, all_definitions)
+
+        return element_type, element_msgdef
 
 
 @dataclass
@@ -115,6 +215,20 @@ class ArraySlice(Action):
             raise MessagePathError(
                 f"Slice [{start_idx}:{end_idx}] out of range for sequence of length {len(obj)}"
             ) from e
+
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],  # noqa: ARG002
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate array slice and return the array type (slices preserve array type)."""
+        if not current_type.is_array:
+            raise ValidationError(f"Cannot apply array slice to non-array type '{current_type}'")
+
+        # For slices, the result is still an array (same type as input)
+        # No need to look up message definition as it's the same as current
+        return current_type, current_msgdef
 
 
 @dataclass
@@ -206,6 +320,75 @@ class Filter(Action):
                 f"using operator {self.operator.value}"
             ) from e
 
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate filter operation and return the same type."""
+
+        # Determine the type to validate the filter field path against
+        validate_type = current_type
+        validate_msgdef = current_msgdef
+
+        # If it's an array, validate against the element type
+        if current_type.is_array:
+            validate_type = Type(
+                type_name=current_type.type_name,
+                package_name=current_type.package_name,
+                is_array=False,
+                array_size=None,
+                is_upper_bound=False,
+                string_upper_bound=current_type.string_upper_bound,
+            )
+            # Get element's message definition if complex
+            validate_msgdef = None
+            if not validate_type.is_primitive:
+                with contextlib.suppress(ValidationError):
+                    validate_msgdef = _get_message_definition(validate_type, all_definitions)
+
+        # Validate the filter's field path
+        field_parts = self.field_path.split(".")
+        working_type = validate_type
+        working_msgdef = validate_msgdef
+
+        for part in field_parts:
+            if working_type.is_primitive:
+                raise ValidationError(
+                    f"Cannot access field '{part}' on primitive type '{working_type}' "
+                    f"in filter field path '{self.field_path}'"
+                )
+
+            if working_type.is_array:
+                raise ValidationError(
+                    f"Cannot access field '{part}' on array type '{working_type}' "
+                    f"in filter field path '{self.field_path}'. "
+                    "Nested array filtering is not supported"
+                )
+
+            if working_msgdef is None:
+                working_msgdef = _get_message_definition(working_type, all_definitions)
+
+            field = next((f for f in working_msgdef.fields if f.name == part), None)
+            if not field:
+                available = [f.name for f in working_msgdef.fields]
+                raise ValidationError(
+                    f"Field '{part}' not found in message '{working_type}' "
+                    f"in filter field path '{self.field_path}'. "
+                    f"Available fields: {', '.join(available) if available else 'none'}"
+                )
+
+            working_type = field.type
+            # Update working_msgdef if it's a complex type
+            working_msgdef = None
+            if not working_type.is_primitive and not working_type.is_array:
+                with contextlib.suppress(ValidationError):
+                    working_msgdef = _get_message_definition(working_type, all_definitions)
+
+        # Filter returns the same type as input
+        return current_type, current_msgdef
+
 
 @dataclass
 class MessagePath:
@@ -233,3 +416,79 @@ class MessagePath:
         for segment in self.segments:
             result = segment.apply(result, variables)
         return result
+
+    def validate(
+        self,
+        message_def: "MessageDefinition",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> None:
+        """Validate that this message path is valid for a given message definition.
+
+        Args:
+            message_def: Root message definition for the topic
+            all_definitions: Dict of all message definitions for resolving complex types
+
+        Raises:
+            ValidationError: If the path is invalid with detailed error message
+        """
+
+        # Start with a pseudo-type representing the root message
+        current_type = Type(
+            type_name=message_def.name.split("/")[-1] if message_def.name else "Message",
+            package_name=_extract_package_name(message_def.name) if message_def.name else None,
+            is_array=False,
+            array_size=None,
+            is_upper_bound=False,
+            string_upper_bound=None,
+        )
+
+        # Track the current message definition (for the root)
+        current_msgdef: MessageDefinition | None = message_def
+
+        for segment in self.segments:
+            current_type, current_msgdef = segment.validate(
+                current_type, current_msgdef, all_definitions
+            )
+
+
+def _get_message_definition(
+    type_: "Type",
+    all_definitions: dict[str, "MessageDefinition"],
+) -> "MessageDefinition":
+    """Get the message definition for a type.
+
+    Tries multiple key formats to find the definition:
+    - package_name/msg/type_name (e.g., "geometry_msgs/msg/Point")
+    - package_name/type_name (e.g., "geometry_msgs/Point")
+    - type_name (e.g., "Point")
+    """
+    if type_.is_primitive:
+        raise ValidationError(f"Cannot get message definition for primitive type '{type_}'")
+
+    # Try with package name first
+    if type_.package_name:
+        # Try full path with /msg/
+        type_path = f"{type_.package_name}/msg/{type_.type_name}"
+        if type_path in all_definitions:
+            return all_definitions[type_path]
+
+        # Try without /msg/
+        type_path = f"{type_.package_name}/{type_.type_name}"
+        if type_path in all_definitions:
+            return all_definitions[type_path]
+
+    # Try just the type name
+    if type_.type_name in all_definitions:
+        return all_definitions[type_.type_name]
+
+    raise ValidationError(f"Message definition not found for type '{type_}'")
+
+
+def _extract_package_name(full_name: str | None) -> str | None:
+    """Extract package name from full message name like 'geometry_msgs/msg/Point'."""
+    if not full_name:
+        return None
+    parts = full_name.split("/")
+    if len(parts) >= 2:
+        return parts[0]
+    return None

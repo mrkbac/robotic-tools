@@ -12,9 +12,13 @@ from .message_definition import (
     parse_action_string,
     parse_message_file,
     parse_message_string,
+    parse_schema_to_definitions,
     parse_service_file,
     parse_service_string,
 )
+
+# Re-export message_path validation APIs
+from .message_path import ValidationError
 
 __all__ = [
     "ActionDefinition",
@@ -23,10 +27,12 @@ __all__ = [
     "MessageDefinition",
     "ServiceDefinition",
     "Type",
+    "ValidationError",
     "parse_action_file",
     "parse_action_string",
     "parse_message_file",
     "parse_message_string",
+    "parse_schema_to_definitions",
     "parse_service_file",
     "parse_service_string",
 ]
