@@ -1,6 +1,6 @@
 import codecs
 import struct
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
@@ -18,7 +18,7 @@ from ._plans import (
 class DecoderGeneratorFactory:
     """Factory class for generating decoder code with managed state."""
 
-    def __init__(self, plan: PlanList, *, comments: bool = True, endianness: str = "<") -> None:
+    def __init__(self, plan: PlanList, *, comments: bool = True, endianness: Literal["<", ">"] = "<") -> None:
         self.plan = plan
         self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0
@@ -283,42 +283,63 @@ class DecoderGeneratorFactory:
 
         return str(self.code)
 
-    def create_namespace(self) -> dict[str, Any]:
-        """Create the execution namespace with all required functions and classes."""
-        namespace: dict[str, Any] = {
-            UTF8_FUNC_NAME: codecs.utf_8_decode,
-            # Limit builtins for security
-            "__builtins__": {
-                "memoryview": memoryview,
-                "list": list,
-                "range": range,
-                "NotImplementedError": NotImplementedError,
-            },
-        }
-
-        # Add struct pattern variables
-        for pattern, var_name in self.struct_patterns.items():
-            namespace[f"{var_name}g"] = struct.Struct(pattern).unpack_from
-
-        # Add message classes
-        for msg_class in self.message_classes:
-            namespace[msg_class.__name__] = msg_class
-
-        return namespace
-
 
 def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
     """Create a decoder function from an execution plan using code generation.
 
     This generates optimized Python code for the specific plan, eliminating
     all dispatch overhead and function call overhead.
+
+    The returned decoder automatically detects endianness from the CDR header
+    and dispatches to the appropriate decoder implementation.
     """
-    factory = DecoderGeneratorFactory(plan, comments=comments)
-    target_type_name = f"decoder_{plan[0].__name__}_main"
-    code = factory.generate_decoder_code(target_type_name)
-    namespace = factory.create_namespace()
+    # Create both little-endian and big-endian decoders
+    factory_le = DecoderGeneratorFactory(plan, comments=comments, endianness="<")
+    decoder_le_name = f"decoder_{plan[0].__name__}_le"
+    code_le = factory_le.generate_decoder_code(decoder_le_name)
 
-    # print(code)  # Debug: show generated code
+    factory_be = DecoderGeneratorFactory(plan, comments=comments, endianness=">")
+    decoder_be_name = f"decoder_{plan[0].__name__}_be"
+    code_be = factory_be.generate_decoder_code(decoder_be_name)
 
-    exec(code, namespace)  # noqa: S102
-    return cast("DecoderFunction", namespace[target_type_name])
+    # Create combined namespace with both decoders
+    namespace: dict[str, Any] = {
+        UTF8_FUNC_NAME: codecs.utf_8_decode,
+        "__builtins__": {
+            "memoryview": memoryview,
+            "list": list,
+            "range": range,
+            "NotImplementedError": NotImplementedError,
+        },
+    }
+
+    # Add struct patterns from both factories
+    for pattern, var_name in factory_le.struct_patterns.items():
+        namespace[f"{var_name}g"] = struct.Struct(pattern).unpack_from
+    for pattern, var_name in factory_be.struct_patterns.items():
+        namespace[f"{var_name}g"] = struct.Struct(pattern).unpack_from
+
+    # Add message classes (same for both)
+    for msg_class in factory_le.message_classes:
+        namespace[msg_class.__name__] = msg_class
+
+    # Execute both decoder functions
+    exec(code_le, namespace)  # noqa: S102
+    exec(code_be, namespace)  # noqa: S102
+
+    main_name = f"decoder_{plan[0].__name__}_main"
+
+    # Create dispatcher function that checks endianness
+    dispatcher_code = f"""
+def {main_name}(_raw):
+    '''Decoder that dispatches based on CDR header endianness.'''
+    if _raw[0] == 0x00:  # Little-endian
+        return {decoder_le_name}(_raw)
+    elif _raw[0] == 0x01:  # Big-endian
+        return {decoder_be_name}(_raw)
+    else:
+        raise ValueError(f"Invalid CDR header: {{_raw[0]:#x}}")
+"""
+
+    exec(dispatcher_code, namespace)  # noqa: S102
+    return cast("DecoderFunction", namespace[main_name])

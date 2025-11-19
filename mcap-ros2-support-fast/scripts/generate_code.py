@@ -36,10 +36,13 @@ def main() -> None:
     output_path.parent.mkdir(exist_ok=True, parents=True)
 
     # Generate code for each schema
-    decoder_factories = []
+    decoder_factories_le = []
+    decoder_factories_be = []
     encoder_factories = []
     seen_schemas: set[str] = set()
-    decoder_functions = []
+    decoder_functions_le = []
+    decoder_functions_be = []
+    decoder_dispatchers = []
     encoder_functions = []
 
     with Path(args.mcap_file).open("rb") as f:
@@ -53,17 +56,37 @@ def main() -> None:
             plan = generate_plans(schema.name, schema.data.decode())
             optimized_plan = optimize_plan(plan)
 
-            # Create decoder factory for this schema
-            decoder_factory = DecoderGeneratorFactory(optimized_plan, endianness=endianness)
-            decoder_func_name = f"decode_{schema.name.replace('/', '_')}"
-            decoder_code = decoder_factory.generate_decoder_code(decoder_func_name)
+            # Create BOTH little and big-endian decoder factories
+            # (decoder needs to handle both based on CDR header)
+            safe_name = schema.name.replace("/", "_")
 
-            decoder_factories.append(decoder_factory)
-            decoder_functions.append(decoder_code)
+            decoder_factory_le = DecoderGeneratorFactory(optimized_plan, endianness="<")
+            decoder_func_name_le = f"decode_{safe_name}_le"
+            decoder_code_le = decoder_factory_le.generate_decoder_code(decoder_func_name_le)
+            decoder_factories_le.append(decoder_factory_le)
+            decoder_functions_le.append(decoder_code_le)
 
-            # Create encoder factory for this schema
+            decoder_factory_be = DecoderGeneratorFactory(optimized_plan, endianness=">")
+            decoder_func_name_be = f"decode_{safe_name}_be"
+            decoder_code_be = decoder_factory_be.generate_decoder_code(decoder_func_name_be)
+            decoder_factories_be.append(decoder_factory_be)
+            decoder_functions_be.append(decoder_code_be)
+
+            # Create dispatcher that checks CDR header
+            dispatcher = f"""def decode_{safe_name}(_raw):
+    '''Decoder that dispatches based on CDR header endianness.'''
+    if _raw[0] == 0x00:  # Little-endian
+        return {decoder_func_name_le}(_raw)
+    elif _raw[0] == 0x01:  # Big-endian
+        return {decoder_func_name_be}(_raw)
+    else:
+        raise ValueError(f"Invalid CDR header: {{_raw[0]:#x}}")
+"""
+            decoder_dispatchers.append(dispatcher)
+
+            # Create encoder factory for this schema (only one endianness needed)
             encoder_factory = EncoderGeneratorFactory(optimized_plan, endianness=endianness)
-            encoder_func_name = f"encode_{schema.name.replace('/', '_')}"
+            encoder_func_name = f"encode_{safe_name}"
             encoder_code = encoder_factory.generate_encoder_code(encoder_func_name)
 
             encoder_factories.append(encoder_factory)
@@ -74,7 +97,11 @@ def main() -> None:
     all_encoder_struct_patterns = {}
     all_message_classes = set()
 
-    for decoder_factory in decoder_factories:
+    for decoder_factory in decoder_factories_le:
+        all_decoder_struct_patterns.update(decoder_factory.struct_patterns)
+        all_message_classes.update(decoder_factory.message_classes)
+
+    for decoder_factory in decoder_factories_be:
         all_decoder_struct_patterns.update(decoder_factory.struct_patterns)
         all_message_classes.update(decoder_factory.message_classes)
 
@@ -135,9 +162,19 @@ def main() -> None:
             generated_lines.extend(generate_class_definition(msg_class))
     generated_lines.append("")
 
-    # Add decoder functions
-    generated_lines.append("# Decoder functions")
-    for code in decoder_functions:
+    # Add decoder functions (both little and big-endian)
+    generated_lines.append("# Decoder functions (little-endian)")
+    for code in decoder_functions_le:
+        generated_lines.append(code)
+        generated_lines.append("")
+
+    generated_lines.append("# Decoder functions (big-endian)")
+    for code in decoder_functions_be:
+        generated_lines.append(code)
+        generated_lines.append("")
+
+    generated_lines.append("# Decoder dispatchers (auto-detect endianness from CDR header)")
+    for code in decoder_dispatchers:
         generated_lines.append(code)
         generated_lines.append("")
 

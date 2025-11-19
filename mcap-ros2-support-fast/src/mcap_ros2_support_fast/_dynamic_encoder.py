@@ -1,7 +1,7 @@
 import codecs
 import struct
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
@@ -25,7 +25,9 @@ def _get_field(obj: Any, f: str, default: Any) -> Any:
 class EncoderGeneratorFactory:
     """Factory class for generating encoder code with managed state."""
 
-    def __init__(self, plan: PlanList, *, comments: bool = True, endianness: str = "<") -> None:
+    def __init__(
+        self, plan: PlanList, *, comments: bool = True, endianness: Literal["<", ">"] = "<"
+    ) -> None:
         self.plan = plan
         self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0
@@ -292,7 +294,9 @@ class EncoderGeneratorFactory:
 
             # Add CDR header (4 bytes: endianness + padding)
             # Byte 0: 0x00 = little-endian, 0x01 = big-endian
-            cdr_header = "b'\\x00\\x01\\x00\\x00'" if self.endianness == "<" else "b'\\x01\\x01\\x00\\x00'"
+            cdr_header = (
+                "b'\\x00\\x01\\x00\\x00'" if self.endianness == "<" else "b'\\x01\\x01\\x00\\x00'"
+            )
             self.code.append(f"_buffer.extend({cdr_header})  # CDR header")
             self.code.append("_offset += 4")
 
