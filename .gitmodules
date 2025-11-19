@@ -1,0 +1,6 @@
+[submodule "data/data"]
+	path = data/data
+	url = https://github.com/foxglove/ros-foxglove-bridge-benchmark-assets.git
+[submodule "data/mcap"]
+	path = data/mcap
+	url = https://github.com/foxglove/mcap.git

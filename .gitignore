@@ -10,7 +10,6 @@ wheels/
 .venv
 .DS_Store
 
-data/
 *.mcap
 .coverage
 *.mp4
