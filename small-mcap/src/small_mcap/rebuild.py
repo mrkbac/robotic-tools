@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from typing import IO
 
 from small_mcap.reader import (
-    EndOfFileError,
-    InvalidMagicError,
     LazyChunk,
     McapError,
     breakup_chunk,
@@ -78,8 +76,8 @@ class RebuildInfo:
             None if calculate_channel_sizes was False.
         estimated_channel_sizes: Whether channel_sizes are estimated (True) or exact (False).
             Only meaningful when channel_sizes is not None.
-        chunk_information: Optional dict mapping chunk offset to MessageIndex records for that chunk.
-        next_offset: Byte offset where the next read should start. Used for resumable/incremental reads.
+        chunk_information: Optional dict mapping chunk offset to MessageIndex records.
+        next_offset: Byte offset where the next read should start.
     """
 
     header: Header

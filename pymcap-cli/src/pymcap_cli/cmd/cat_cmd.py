@@ -206,9 +206,6 @@ def cat(
             console_err.print(f"[red]Invalid query syntax: {e}[/red]")
             sys.exit(1)
 
-    # Always decode messages
-    decoder_factories = [JSONDecoderFactory(), DecoderFactory()]
-
     # Detect if output is to a TTY (terminal) or piped
     is_tty = sys.stdout.isatty()
 
@@ -236,7 +233,7 @@ def cat(
         with open_input(file) as (input_stream, _):
             for msg in read_message_decoded(
                 input_stream,
-                decoder_factories=decoder_factories,
+                decoder_factories=[JSONDecoderFactory(), DecoderFactory()],
                 start_time_ns=start_time_ns,
                 end_time_ns=end_time_ns,
                 should_include=should_include_message,

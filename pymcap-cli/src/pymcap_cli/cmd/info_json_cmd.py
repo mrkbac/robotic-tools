@@ -126,10 +126,8 @@ def _collect_channel_statistics(
             # Process all records in this chunk
             for timestamp, _ in msg_idx.records:
                 # Update min/max times with manual comparisons (faster than builtin)
-                if timestamp < stats.first_time:
-                    stats.first_time = timestamp
-                if timestamp > stats.last_time:
-                    stats.last_time = timestamp
+                stats.first_time = min(stats.first_time, timestamp)
+                stats.last_time = max(stats.last_time, timestamp)
 
                 # Collect timestamp for interval calculation
                 stats.timestamps.append(timestamp)
@@ -445,10 +443,8 @@ def _calculate_stats(values: list[int] | list[float]) -> Stats:
     sum_val = 0.0
 
     for val in values:
-        if val < min_val:
-            min_val = val
-        if val > max_val:
-            max_val = val
+        min_val = min(min_val, val)
+        max_val = max(max_val, val)
         sum_val += val
 
     avg_val = sum_val / len(values)

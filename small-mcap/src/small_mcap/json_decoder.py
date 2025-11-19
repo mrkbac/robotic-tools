@@ -12,7 +12,9 @@ class JSONDecoderFactory:
     """
 
     def decoder_for(
-        self, message_encoding: str, _schema: Any | None
+        self,
+        message_encoding: str,
+        schema: Any | None,  # noqa: ARG002
     ) -> Callable[[bytes], Any] | None:
         """Return a JSON decoder if message encoding is 'json', otherwise None."""
         if message_encoding.lower() == "json":
