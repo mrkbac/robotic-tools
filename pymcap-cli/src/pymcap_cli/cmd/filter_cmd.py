@@ -1,6 +1,5 @@
 """Filter command for pymcap-cli."""
 
-import sys
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -109,7 +108,7 @@ def filter_cmd(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Copy filtered MCAP data to a new file.
 
     Filter an MCAP file by topic and time range to create a new file.
@@ -176,7 +175,7 @@ def filter_cmd(
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
+        return 1
 
     # Create processor and run
     processor = McapProcessor(processing_options)
@@ -190,4 +189,6 @@ def filter_cmd(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during filtering: {e}[/red]")
-            sys.exit(1)
+            return 1
+
+    return 0

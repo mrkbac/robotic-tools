@@ -3,7 +3,6 @@
 import io
 import logging
 import platform
-import sys
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -261,7 +260,7 @@ def roscompress(
             group=ENCODING_GROUP,
         ),
     ] = None,
-) -> None:
+) -> int:
     """Compress ROS MCAP by converting CompressedImage/Image topics to CompressedVideo.
 
     This reduces file size while maintaining visual quality by using video compression
@@ -288,7 +287,7 @@ def roscompress(
     if encoder:
         if not _test_encoder(encoder):
             console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
-            sys.exit(1)
+            return 1
         encoder_name = encoder
     else:
         encoder_name = _detect_encoder()
@@ -390,7 +389,7 @@ def roscompress(
                             console.print(
                                 f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}"
                             )
-                            sys.exit(1)
+                            return 1
 
                     # Decode image
                     if schema_name in COMPRESSED_SCHEMAS:
@@ -431,12 +430,12 @@ def roscompress(
                                     f"[red]Error:[/red] Software encoder also failed for {topic}: "
                                     f"{fallback_exc}"
                                 )
-                                sys.exit(1)
+                                return 1
                         else:
                             console.print(
                                 f"[red]Error:[/red] Failed to encode frame for {topic}: {exc}"
                             )
-                            sys.exit(1)
+                            return 1
 
                     # Create CompressedVideo message
                     compressed_video_msg = {
@@ -550,3 +549,5 @@ def roscompress(
         console.print(f"[green]Reduction:[/green] {reduction_pct:.1f}%")
     else:
         console.print(f"[yellow]Size change:[/yellow] {-reduction_pct:.1f}% increase")
+
+    return 0

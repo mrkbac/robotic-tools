@@ -1,7 +1,6 @@
 """Unified process command combining recovery and filtering capabilities."""
 
 import contextlib
-import sys
 from enum import Enum
 from typing import Annotated
 
@@ -133,7 +132,7 @@ def process(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Process MCAP files with unified recovery and filtering.
 
     Unified command for processing MCAP files. Combines recovery, filtering,
@@ -216,7 +215,7 @@ def process(
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
+        return 1
 
     input_files = file
 
@@ -243,4 +242,6 @@ def process(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during processing: {e}[/red]")
-            sys.exit(1)
+            return 1
+
+    return 0

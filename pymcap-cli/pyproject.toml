@@ -18,7 +18,7 @@ requires = ["uv_build>=0.8.9,<0.9.0"]
 build-backend = "uv_build"
 
 [project.scripts]
-pymcap-cli = "pymcap_cli.cli:app"
+pymcap-cli = "pymcap_cli.cli:main"
 
 
 [dependency-groups]

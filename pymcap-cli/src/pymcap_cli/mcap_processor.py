@@ -2,7 +2,6 @@
 
 import heapq
 import re
-import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -257,8 +256,6 @@ class MessageGroup:
         writer: McapWriter,
         chunk_size: int,
         compression_type: CompressionType,
-        schemas: dict[int, Schema],
-        channels: dict[int, Channel],
     ) -> None:
         self.writer = writer
         self.chunk_size = chunk_size
@@ -270,8 +267,6 @@ class MessageGroup:
             chunk_size=chunk_size,
             compression=compression_type,
             enable_crcs=writer.enable_crcs,
-            schemas=schemas,
-            channels=channels,
         )
 
     def add_message(self, message: Message) -> None:
@@ -325,7 +320,7 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
         response = input(f"Output file '{output}' already exists. Overwrite? [y/N]: ")
         if response.lower() not in ("y", "yes"):
             print("Aborted.")  # noqa: T201
-            sys.exit(1)
+            raise SystemExit(1)
 
 
 def build_processing_options(
@@ -641,8 +636,6 @@ class McapProcessor:
                 writer,
                 self.options.chunk_size,
                 self.options.compression_type,
-                self.schemas,
-                self.channels,
             )
             self.channel_to_group[channel_id] = group
             self.rechunk_groups.append(group)
@@ -656,8 +649,6 @@ class McapProcessor:
                     writer,
                     self.options.chunk_size,
                     self.options.compression_type,
-                    self.schemas,
-                    self.channels,
                 )
                 self.channel_to_group[channel_id] = group
                 self.rechunk_groups.append(group)
@@ -675,8 +666,6 @@ class McapProcessor:
                 writer,
                 self.options.chunk_size,
                 self.options.compression_type,
-                self.schemas,
-                self.channels,
             )
             self.channel_to_group[channel_id] = group
             self.rechunk_groups.append(group)
@@ -697,8 +686,6 @@ class McapProcessor:
             writer,
             self.options.chunk_size,
             self.options.compression_type,
-            self.schemas,
-            self.channels,
         )
         self.channel_to_group[channel_id] = group
         self.pattern_index_to_group[group_key] = group

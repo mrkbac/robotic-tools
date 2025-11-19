@@ -1,7 +1,5 @@
 """Compress command for pymcap-cli."""
 
-import sys
-
 from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
@@ -29,7 +27,7 @@ def compress(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Create a compressed copy of an MCAP file.
 
     Copy data in an MCAP file to a new file, compressing the output.
@@ -87,4 +85,6 @@ def compress(
             )
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during compression: {e}[/red]")
-            sys.exit(1)
+            return 1
+
+    return 0

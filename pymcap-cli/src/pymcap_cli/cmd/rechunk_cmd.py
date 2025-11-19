@@ -1,6 +1,5 @@
 """Rechunk command - reorganize MCAP messages into chunks based on topic patterns."""
 
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -54,7 +53,7 @@ def rechunk(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Reorganize MCAP messages into chunks based on topic patterns.
 
     Rechunk MCAP files by organizing messages into separate chunk groups
@@ -104,7 +103,7 @@ def rechunk(
             "[red]Error: --strategy=pattern requires at least one regex pattern. "
             "Use -p PATTERN[/red]"
         )
-        sys.exit(1)
+        return 1
 
     output_file = Path(output)
 
@@ -124,7 +123,7 @@ def rechunk(
             patterns = compile_topic_patterns(pattern or [])
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-            sys.exit(1)
+            return 1
 
         if not patterns:
             console.print(
@@ -165,3 +164,5 @@ def rechunk(
             )
         elif strategy == RechunkStrategy.PATTERN and patterns:
             console.print(f"Used {len(patterns)} topic pattern(s) for grouping")
+
+    return 0

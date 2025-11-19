@@ -24,7 +24,7 @@ try:
     from pymcap_cli.cmd.video_cmd import video  # type: ignore[unused-ignore]
 except ImportError:
 
-    def video() -> None:  # type: ignore[misc]
+    def video() -> int:  # type: ignore[misc]
         """Video command is unavailable because the 'av' and/or 'numpy' are not installed.
 
         To enable video functionality, please install pymcap-cli with the 'video' extra:
@@ -38,14 +38,14 @@ except ImportError:
             "    uv add --group video pymcap-cli\n",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return 1
 
 
 try:
     from pymcap_cli.cmd.roscompress_cmd import roscompress  # type: ignore[unused-ignore]
 except ImportError:
 
-    def roscompress() -> None:  # type: ignore[misc]
+    def roscompress() -> int:  # type: ignore[misc]
         """ROS compress command is unavailable because the 'av' package is not installed.
 
         To enable roscompress functionality, please install pymcap-cli with the 'video' extra:
@@ -59,7 +59,7 @@ except ImportError:
             "    uv add --group video pymcap-cli\n",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return 1
 
 
 app = App(
@@ -89,5 +89,9 @@ app.command(name="roscompress")(roscompress)
 app.command(list_cmd.list_app, name="list")
 
 
-if __name__ == "__main__":
+def main() -> None:
     app()
+
+
+if __name__ == "__main__":
+    main()

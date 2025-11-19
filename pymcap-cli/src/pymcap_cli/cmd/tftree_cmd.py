@@ -1,7 +1,6 @@
 """TF tree command - display transform tree from MCAP file."""
 
 import math
-import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -245,7 +244,7 @@ def tftree(
             group=DISPLAY_GROUP,
         ),
     ] = False,
-) -> None:
+) -> int:
     """Display TF transform tree from MCAP file.
 
     Parameters
@@ -322,4 +321,6 @@ def tftree(
 
     except (OSError, ValueError, RuntimeError) as e:
         console.print(f"[red]Error reading MCAP file: {e}[/red]")
-        sys.exit(1)
+        return 1
+
+    return 0

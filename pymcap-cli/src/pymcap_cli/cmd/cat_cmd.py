@@ -162,7 +162,7 @@ def cat(
             group=OUTPUT_GROUP,
         ),
     ] = None,
-) -> None:
+) -> int:
     """Stream MCAP messages to stdout.
 
     Decodes ROS2 messages and outputs as JSON. When output is to a terminal (TTY),
@@ -204,7 +204,7 @@ def cat(
             parsed_query = parse_message_path(query)
         except LarkError as e:
             console_err.print(f"[red]Invalid query syntax: {e}[/red]")
-            sys.exit(1)
+            return 1
 
     # Detect if output is to a TTY (terminal) or piped
     is_tty = sys.stdout.isatty()
@@ -287,7 +287,7 @@ def cat(
                                 f"\n[yellow]Query:[/yellow] {query}\n"
                                 f"[yellow]Schema:[/yellow] {msg.schema.name}"
                             )
-                            sys.exit(1)
+                            return 1
 
                 # Filter data if query is specified
                 if parsed_query:
@@ -345,13 +345,15 @@ def cat(
             console_err.print(
                 f"[red]Error: Topic '{parsed_query.topic}' not found in MCAP file[/red]"
             )
-            sys.exit(1)
+            return 1
 
     except KeyboardInterrupt:
         # Allow graceful exit with Ctrl+C
         console_err.print("\n[yellow]Interrupted by user[/yellow]")
-        sys.exit(0)
+        return 0
 
     except Exception as e:  # noqa: BLE001
         console_err.print(f"[red]Error reading MCAP: {e}[/red]")
-        sys.exit(1)
+        return 1
+
+    return 0

@@ -1,4 +1,3 @@
-import sys
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -35,7 +34,7 @@ def recover(
         ),
     ] = False,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Recover data from a potentially corrupt MCAP file.
 
     This command reads a potentially corrupt MCAP file and copies data to a new file.
@@ -112,7 +111,9 @@ def recover(
                 console.print("No valid MCAP data found to recover")
             else:
                 console.print(f"[red]Error during recovery: {e}[/red]")
-                sys.exit(1)
+                return 1
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during recovery: {e}[/red]")
-            sys.exit(1)
+            return 1
+
+    return 0

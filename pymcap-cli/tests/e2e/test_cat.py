@@ -147,10 +147,9 @@ class TestCat:
 
     def test_cat_nonexistent_file(self, capsys):
         """Test cat with nonexistent file."""
-        with pytest.raises(SystemExit) as exc_info:
-            cat(file="nonexistent.mcap")
+        exit_code = cat(file="nonexistent.mcap")
 
-        assert exc_info.value.code == 1
+        assert exit_code == 1
         captured = capsys.readouterr()
         assert "Error" in captured.err or "error" in captured.err.lower()
 
@@ -220,10 +219,11 @@ class TestCatQueryValidation:
 
     def test_query_invalid_field_fails(self, image_small_mcap: Path, capsys):
         """Test that query on non-existent field fails with error."""
-        with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image_compressed.nonexistent", limit=1)
+        exit_code = cat(
+            file=str(image_small_mcap), query="/camera/image_compressed.nonexistent", limit=1
+        )
 
-        assert exc_info.value.code == 1
+        assert exit_code == 1
         captured = capsys.readouterr()
         # Should contain validation error message
         assert "validation error" in captured.err.lower() or "not found" in captured.err.lower()
@@ -234,36 +234,35 @@ class TestCatQueryValidation:
 
     def test_query_invalid_nested_field(self, image_small_mcap: Path, capsys):
         """Test invalid nested field access fails."""
-        with pytest.raises(SystemExit) as exc_info:
-            cat(
-                file=str(image_small_mcap),
-                query="/camera/image_compressed.header.invalid_field",
-                limit=1,
-            )
+        exit_code = cat(
+            file=str(image_small_mcap),
+            query="/camera/image_compressed.header.invalid_field",
+            limit=1,
+        )
 
-        assert exc_info.value.code == 1
+        assert exit_code == 1
         captured = capsys.readouterr()
         assert "validation error" in captured.err.lower() or "not found" in captured.err.lower()
 
     def test_query_field_on_primitive_fails(self, image_small_mcap: Path, capsys):
         """Test accessing field on primitive type fails."""
-        with pytest.raises(SystemExit) as exc_info:
-            cat(
-                file=str(image_small_mcap),
-                query="/camera/image_compressed.format.something",
-                limit=1,
-            )
+        exit_code = cat(
+            file=str(image_small_mcap),
+            query="/camera/image_compressed.format.something",
+            limit=1,
+        )
 
-        assert exc_info.value.code == 1
+        assert exit_code == 1
         captured = capsys.readouterr()
         assert "primitive" in captured.err.lower() or "cannot access" in captured.err.lower()
 
     def test_query_array_index_without_array_fails(self, image_small_mcap: Path, capsys):
         """Test indexing non-array field fails."""
-        with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image_compressed.format[0]", limit=1)
+        exit_code = cat(
+            file=str(image_small_mcap), query="/camera/image_compressed.format[0]", limit=1
+        )
 
-        assert exc_info.value.code == 1
+        assert exit_code == 1
         captured = capsys.readouterr()
         assert "array" in captured.err.lower() or "cannot apply" in captured.err.lower()
 
@@ -272,16 +271,16 @@ class TestCatQueryValidation:
         # Assuming multi_topic_mcap has messages with numeric fields
         # This might fail if the topic doesn't exist, but should fail gracefully
         # The important thing is it doesn't crash
-        with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(multi_topic_mcap), query="/odom.pose", limit=1)
-        assert exc_info.value.code in [0, 1]
+        exit_code = cat(file=str(multi_topic_mcap), query="/odom.pose", limit=1)
+        assert exit_code in [0, 1]
 
     def test_validation_error_shows_helpful_message(self, image_small_mcap: Path, capsys):
         """Test that validation errors show helpful messages with available fields."""
-        with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image_compressed.bad_field", limit=1)
+        exit_code = cat(
+            file=str(image_small_mcap), query="/camera/image_compressed.bad_field", limit=1
+        )
 
-        assert exc_info.value.code == 1
+        assert exit_code == 1
         captured = capsys.readouterr()
         # Should show available fields
         assert "available" in captured.err.lower() or "Available" in captured.err

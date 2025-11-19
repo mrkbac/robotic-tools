@@ -3,7 +3,6 @@
 import io
 import math
 import platform
-import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -622,7 +621,7 @@ def video(
             group=OUTPUT_GROUP,
         ),
     ] = False,
-) -> None:
+) -> int:
     """Encode video from image topics in an MCAP file.
 
     This command encodes video from image topics in an MCAP file. It supports
@@ -660,7 +659,7 @@ def video(
 
     if not output.parent.exists():
         console.print(f"[red]Error:[/red] Output directory not found: {output.parent}")
-        sys.exit(1)
+        return 1
     confirm_output_overwrite(output, force)
     quality_value = crf if crf is not None else QUALITY_PRESETS[codec][quality]
 
@@ -675,4 +674,6 @@ def video(
         )
     except VideoEncoderError as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        sys.exit(1)
+        return 1
+
+    return 0
