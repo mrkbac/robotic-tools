@@ -60,14 +60,19 @@ class EncoderGeneratorFactory:
         return self.struct_patterns[pattern]
 
     def generate_alignment(self, size: int) -> None:
-        """Generate optimized alignment code for a given size requirement."""
+        """Generate optimized alignment code for a given size requirement.
+
+        Alignment is calculated from the start of the CDR payload (after the 4-byte header),
+        not from the absolute offset 0.
+        """
         if self.current_alignment >= size:
             self.current_alignment = size
             return
         self.current_alignment = size
         if size > 1 and size in (2, 4, 8):
             mask = size - 1
-            self.code.append(f"_pad = ((_offset + {mask}) & ~{mask}) - _offset")
+            # Align based on payload offset (subtract 4 for CDR header)
+            self.code.append(f"_pad = (((_offset - 4 + {mask}) & ~{mask}) + 4) - _offset")
             self.code.append("if _pad:")
             with self.code.indent(None):
                 self.code.append("_buffer.extend(b'\\x00' * _pad)")
