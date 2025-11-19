@@ -32,8 +32,6 @@ uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=websock
 
 ## License
 
-All tools in this repo are licensed under MIT.
-
 These tools draw inspiration from the following projects (mostly MIT licensed):
 
 - <https://github.com/foxglove/mcap>

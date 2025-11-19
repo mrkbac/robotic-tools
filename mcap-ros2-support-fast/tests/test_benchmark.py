@@ -52,8 +52,8 @@ def _read_all(factory, msgs: int):
     )
 
     with file.open("rb") as f:
-        for _ in itertools.islice(read_message_decoded(f, decoder_factories=[factory]), msgs):
-            pass
+        for msg in itertools.islice(read_message_decoded(f, decoder_factories=[factory]), msgs):
+            _ = msg.decoded_message  # Force decoding by accessing the property
 
 
 def _read_and_write(
