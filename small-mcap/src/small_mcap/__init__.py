@@ -6,6 +6,7 @@ a container format designed for storing timestamped multimodal data.
 
 # Record types and core data structures
 # Reader classes and functions
+from small_mcap.json_decoder import JSONDecoderFactory
 from small_mcap.reader import (
     CRCValidationError,
     DecodedMessage,
@@ -83,6 +84,7 @@ __all__ = [
     "Header",
     "IndexType",
     "InvalidMagicError",
+    "JSONDecoderFactory",
     "LazyChunk",
     # Reader
     "McapError",

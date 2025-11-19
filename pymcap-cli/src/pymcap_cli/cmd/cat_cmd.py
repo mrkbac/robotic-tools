@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.text import Text
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import MessagePathError, ValidationError, parse_message_path
+from small_mcap import JSONDecoderFactory
 from small_mcap.reader import read_message_decoded
 from small_mcap.records import Channel
 
@@ -206,7 +207,7 @@ def cat(
             sys.exit(1)
 
     # Always decode messages
-    decoder_factories = [DecoderFactory()]
+    decoder_factories = [JSONDecoderFactory(), DecoderFactory()]
 
     # Detect if output is to a TTY (terminal) or piped
     is_tty = sys.stdout.isatty()
@@ -293,13 +294,6 @@ def cat(
 
                 # Filter data if query is specified
                 if parsed_query:
-                    if msg.decoded_message is None:
-                        console_err.print(
-                            f"[yellow]Warning: Skipping message on {msg.channel.topic} "
-                            f"(encoding '{msg.channel.message_encoding}' not supported)[/yellow]"
-                        )
-                        continue
-
                     try:
                         data = parsed_query.apply(msg.decoded_message)
                         # If filter returned None, skip this message

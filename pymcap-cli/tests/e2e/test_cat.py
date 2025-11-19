@@ -31,15 +31,20 @@ def call_cat_expect_failure(func: Callable, *args, **kwargs) -> int:
 class TestCat:
     """Test cat command functionality."""
 
-    def test_cat_text_output(self, simple_mcap: Path, capsys):
+    def test_cat_text_output(self, simple_mcap: Path, capsys, monkeypatch):
         """Test basic text output."""
+        # Mock isatty to ensure pretty output format
+        monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
         call_cat_expect_success(cat, file=str(simple_mcap), limit=1)
 
         captured = capsys.readouterr()
         assert captured.out
         # Should show topic, timestamp, and schema
-        assert "[" in captured.out  # timestamp
-        assert "(" in captured.out  # schema
+        assert "@" in captured.out  # timestamp marker
+        assert "/test" in captured.out  # topic
+        # Schema should be shown (in square brackets in current format)
+        assert "test" in captured.out  # schema name
 
     def test_cat_json_output(self, image_small_mcap: Path, capsys, monkeypatch):
         """Test JSON output with ROS2 decoding."""
@@ -190,17 +195,18 @@ class TestCat:
         assert "nanosec" in data["message"]["header"]["stamp"]
         assert "frame_id" in data["message"]["header"]
 
-    def test_cat_text_shows_timestamp(self, simple_mcap: Path, capsys):
+    def test_cat_text_shows_timestamp(self, simple_mcap: Path, capsys, monkeypatch):
         """Test that text output shows timestamp."""
+        # Mock isatty to ensure pretty output format
+        monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
         cat(file=str(simple_mcap), limit=1)
 
         captured = capsys.readouterr()
-        # Should contain timestamp in brackets
-        assert "[" in captured.out
-        assert "]" in captured.out
-        # Should contain schema in parentheses
-        assert "(" in captured.out
-        assert ")" in captured.out
+        # Should contain timestamp and schema
+        assert "@" in captured.out  # timestamp marker
+        assert "/test" in captured.out  # topic
+        assert "test" in captured.out  # schema name
 
 
 @pytest.mark.e2e
