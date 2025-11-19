@@ -22,7 +22,15 @@ def main() -> None:
     parser.add_argument(
         "-o", "--output", required=True, help="Output python file to write generated code to"
     )
+    parser.add_argument(
+        "--endianness",
+        choices=["little", "big"],
+        default="little",
+        help="Endianness for code generation (default: little)",
+    )
     args = parser.parse_args()
+
+    endianness = "<" if args.endianness == "little" else ">"
 
     output_path = Path(args.output)
     output_path.parent.mkdir(exist_ok=True, parents=True)
@@ -46,7 +54,7 @@ def main() -> None:
             optimized_plan = optimize_plan(plan)
 
             # Create decoder factory for this schema
-            decoder_factory = DecoderGeneratorFactory(optimized_plan)
+            decoder_factory = DecoderGeneratorFactory(optimized_plan, endianness=endianness)
             decoder_func_name = f"decode_{schema.name.replace('/', '_')}"
             decoder_code = decoder_factory.generate_decoder_code(decoder_func_name)
 
@@ -54,7 +62,7 @@ def main() -> None:
             decoder_functions.append(decoder_code)
 
             # Create encoder factory for this schema
-            encoder_factory = EncoderGeneratorFactory(optimized_plan)
+            encoder_factory = EncoderGeneratorFactory(optimized_plan, endianness=endianness)
             encoder_func_name = f"encode_{schema.name.replace('/', '_')}"
             encoder_code = encoder_factory.generate_encoder_code(encoder_func_name)
 
@@ -84,6 +92,7 @@ def main() -> None:
         "import dataclasses",
         "import struct",
         "import typing",
+        "import collections.abc",
         "",
     ]
 
@@ -93,7 +102,12 @@ def main() -> None:
             "# Utility functions",
             f"{UTF8_FUNC_NAME} = codecs.utf_8_decode",
             "_encode_utf8 = codecs.utf_8_encode",
-            "_get_field = lambda obj, f: (obj[f] if isinstance(obj, (__import__('collections.abc').Mapping)) else getattr(obj, f))",  # noqa: E501
+            "",
+            "def _get_field(obj, f, default):",
+            "    '''Get field from object (dict or attribute) with default.'''",
+            "    value = obj.get(f) if isinstance(obj, collections.abc.Mapping) else getattr(obj, f, None)",  # noqa: E501
+            "    # We need to do it this way, since `f` could be a attribute of `obj` with value None",  # noqa: E501
+            "    return default if value is None else value",
             "",
         ]
     )

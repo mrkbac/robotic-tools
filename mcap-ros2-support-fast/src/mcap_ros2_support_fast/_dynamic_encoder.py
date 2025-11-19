@@ -17,14 +17,17 @@ from ._plans import (
 
 def _get_field(obj: Any, f: str, default: Any) -> Any:
     """Get field from object (dict or attribute) with default."""
-    return obj.get(f, default) if isinstance(obj, Mapping) else getattr(obj, f, default)
+    value = obj.get(f) if isinstance(obj, Mapping) else getattr(obj, f, None)
+    # We need to do it this way, since `f` could be a attribute of `obj` with value None
+    return default if value is None else value
 
 
 class EncoderGeneratorFactory:
     """Factory class for generating encoder code with managed state."""
 
-    def __init__(self, plan: PlanList, *, comments: bool = True) -> None:
+    def __init__(self, plan: PlanList, *, comments: bool = True, endianness: str = "<") -> None:
         self.plan = plan
+        self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0
         self.struct_patterns: dict[str, str] = {}
         self.code = CodeWriter(comments=comments)
@@ -50,7 +53,8 @@ class EncoderGeneratorFactory:
             safe_name = (
                 pattern.replace("<", "le_").replace(">", "be_").replace(" ", "_").replace("?", "b")
             )
-            self.struct_patterns[pattern] = f"_{safe_name}"
+            # Add encoder prefix to prevent conflicts with decoder patterns
+            self.struct_patterns[pattern] = f"_e_{safe_name}"
         return self.struct_patterns[pattern]
 
     def generate_alignment(self, size: int) -> None:
@@ -94,7 +98,7 @@ class EncoderGeneratorFactory:
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
 
-            pattern = f"<{struct_name}"
+            pattern = f"{self.endianness}{struct_name}"
             pattern_var = self.get_struct_pattern_var_name(pattern)
             self.code.append(f"_buffer.extend({pattern_var}({value_expr}))")
             self.code.append(f"_offset += {struct_size}")
@@ -148,14 +152,14 @@ class EncoderGeneratorFactory:
             # For dynamic or bounded arrays, use a loop
             if array_size is not None and not is_upper_bound:
                 # Fixed-size array - use optimized struct pack
-                pattern = f"<{array_size}{struct_name}"
+                pattern = f"{self.endianness}{array_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
                 self.code.append(f"_buffer.extend({pattern_var}(*{value_expr}))")
                 self.code.append(f"_offset += {array_size * struct_size}")
             else:
                 # Dynamic or bounded array - use a loop
                 random_i = self.generate_var_name()
-                pattern = f"<{struct_name}"
+                pattern = f"{self.endianness}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
                 with self.code.indent(f"for {random_i} in {value_expr}:"):
                     self.code.append(f"_buffer.extend({pattern_var}({random_i}))")
@@ -189,11 +193,11 @@ class EncoderGeneratorFactory:
     ) -> None:
         """Generate code for a group of primitive fields."""
         struct_format = "".join(TYPE_INFO[field_type] for _, field_type, _ in targets)
-        struct_size = struct.calcsize(f"<{struct_format}")
-        pattern = f"<{struct_format}"
+        struct_size = struct.calcsize(f"{self.endianness}{struct_format}")
+        pattern = f"{self.endianness}{struct_format}"
 
         # Align to the first type
-        first_type_size = struct.calcsize(f"<{TYPE_INFO[targets[0][1]]}")
+        first_type_size = struct.calcsize(f"{self.endianness}{TYPE_INFO[targets[0][1]]}")
         self.generate_alignment(first_type_size)
 
         field_values = []
@@ -287,7 +291,9 @@ class EncoderGeneratorFactory:
             self.code.append("_offset = 0")
 
             # Add CDR header (4 bytes: endianness + padding)
-            self.code.append("_buffer.extend(b'\\x00\\x01\\x00\\x00')  # CDR header")
+            # Byte 0: 0x00 = little-endian, 0x01 = big-endian
+            cdr_header = "b'\\x00\\x01\\x00\\x00'" if self.endianness == "<" else "b'\\x01\\x01\\x00\\x00'"
+            self.code.append(f"_buffer.extend({cdr_header})  # CDR header")
             self.code.append("_offset += 4")
 
             # Generate the main encoding code first to collect all types

@@ -18,8 +18,9 @@ from ._plans import (
 class DecoderGeneratorFactory:
     """Factory class for generating decoder code with managed state."""
 
-    def __init__(self, plan: PlanList, *, comments: bool = True) -> None:
+    def __init__(self, plan: PlanList, *, comments: bool = True, endianness: str = "<") -> None:
         self.plan = plan
+        self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0
         self.struct_patterns: dict[str, str] = {}
         self.code = CodeWriter(comments=comments)
@@ -45,7 +46,8 @@ class DecoderGeneratorFactory:
             safe_name = (
                 pattern.replace("<", "le_").replace(">", "be_").replace(" ", "_").replace("?", "b")
             )
-            self.struct_patterns[pattern] = f"_{safe_name}"
+            # Add decoder prefix to prevent conflicts with encoder patterns
+            self.struct_patterns[pattern] = f"_d_{safe_name}"
         return self.struct_patterns[pattern]
 
     def generate_alignment(self, size: int) -> None:
@@ -85,7 +87,7 @@ class DecoderGeneratorFactory:
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
 
-            pattern = f"<{struct_name}"
+            pattern = f"{self.endianness}{struct_name}"
             pattern_var = self.get_struct_pattern_var_name(pattern)
             self.code.append(f"{target} = {pattern_var}(_data, _offset)[0]")
             self.code.append(f"_offset += {struct_size}")
@@ -170,11 +172,11 @@ class DecoderGeneratorFactory:
     def generate_primitive_group(self, targets: list[tuple[str, TypeId]]) -> None:
         """Generate code for a group of primitive fields."""
         struct_format = "".join(TYPE_INFO[field_type] for _, field_type in targets)
-        struct_size = struct.calcsize(f"<{struct_format}")
-        pattern = f"<{struct_format}"
+        struct_size = struct.calcsize(f"{self.endianness}{struct_format}")
+        pattern = f"{self.endianness}{struct_format}"
 
         # Align to the first type
-        first_type_size = struct.calcsize(f"<{TYPE_INFO[targets[0][1]]}")
+        first_type_size = struct.calcsize(f"{self.endianness}{TYPE_INFO[targets[0][1]]}")
         self.generate_alignment(first_type_size)
 
         target_str = ", ".join(name for name, typeid in targets if typeid != TypeId.PADDING)
@@ -239,12 +241,12 @@ class DecoderGeneratorFactory:
             # Convert 3-tuple targets to 2-tuple for unpacking
             targets = [(name, typeid) for name, typeid, _ in fields[0].targets]
             struct_format = "".join(TYPE_INFO[field_type] for _, field_type in targets)
-            pattern = f"<{struct_format}"
+            pattern = f"{self.endianness}{struct_format}"
             struct_var = self.get_struct_pattern_var_name(pattern)
             struct_size = struct.calcsize(pattern)
 
             # Generate alignment for the first type
-            first_type_size = struct.calcsize(f"<{TYPE_INFO[targets[0][1]]}")
+            first_type_size = struct.calcsize(f"{self.endianness}{TYPE_INFO[targets[0][1]]}")
             self.generate_alignment(first_type_size)
 
             # Generate optimized constructor call with argument unpacking
