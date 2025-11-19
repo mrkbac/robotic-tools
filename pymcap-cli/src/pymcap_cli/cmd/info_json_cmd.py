@@ -4,7 +4,6 @@ import json
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from statistics import mean, median
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -74,87 +73,104 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
     return len(max_concurrent_chunks), max_concurrent_bytes
 
 
-def _calculate_channel_durations(info: RebuildInfo) -> dict[int, int]:
-    """Calculate per-channel duration in nanoseconds from message indexes.
+@dataclass(slots=True)
+class ChannelStatistics:
+    """Collected statistics for a single channel from a single-pass iteration."""
 
-    Returns a dict mapping channel_id -> duration_ns (last_msg_time - first_msg_time).
-    Uses message index information from rebuild.
+    channel_id: int
+    timestamps: list[int] = field(default_factory=list)
+    first_time: int = sys.maxsize
+    last_time: int = 0
+    message_count: int = 0
+
+
+def _collect_channel_statistics(
+    info: RebuildInfo, start_time: int, bucket_count: int, bucket_duration_ns: int
+) -> tuple[
+    dict[int, int],  # channel_durations
+    dict[int, list[int]],  # channel_intervals
+    list[int],  # global message_counts per bucket
+    dict[int, list[int]],  # per_channel_distributions
+]:
+    """Single-pass collection of all channel statistics and distributions.
+
+    Returns:
+        Tuple of (channel_durations, channel_intervals, message_counts, per_channel_distributions)
     """
-    if not info.chunk_information:
-        return {}
+    # Initialize data structures
+    channel_stats: dict[int, ChannelStatistics] = {}
+    global_message_counts = [0] * bucket_count
+    per_channel_distributions: dict[int, list[int]] = {}
 
-    # Track first and last message times per channel
-    channel_times: dict[int, tuple[float, float]] = defaultdict(
-        lambda: (float("inf"), float("-inf"))
-    )
+    # Handle edge case
+    if not info.chunk_information or bucket_duration_ns <= 0:
+        return {}, {}, global_message_counts, {}
 
-    for chunk_info_list in info.chunk_information.values():
-        for chunk_info in chunk_info_list:
-            if not chunk_info.records:
+    # Single pass over all chunk information
+    for msg_idx_list in info.chunk_information.values():
+        for msg_idx in msg_idx_list:
+            if not msg_idx.records:
                 continue
 
-            timestamps = [record[0] for record in chunk_info.records]
-            if not timestamps:
-                continue
+            channel_id = msg_idx.channel_id
 
-            msg_first, msg_last = min(timestamps), max(timestamps)
-            prev_first, prev_last = channel_times[chunk_info.channel_id]
-            channel_times[chunk_info.channel_id] = (
-                min(prev_first, msg_first),
-                max(prev_last, msg_last),
-            )
+            # Initialize channel stats if first time seeing this channel
+            if channel_id not in channel_stats:
+                stats = ChannelStatistics(channel_id=channel_id)
+                channel_stats[channel_id] = stats
+                per_channel_distributions[channel_id] = [0] * bucket_count
+
+            stats = channel_stats[channel_id]
+            channel_dist = per_channel_distributions[channel_id]
+
+            # Process all records in this chunk
+            for timestamp, _ in msg_idx.records:
+                # Update min/max times with manual comparisons (faster than builtin)
+                if timestamp < stats.first_time:
+                    stats.first_time = timestamp
+                if timestamp > stats.last_time:
+                    stats.last_time = timestamp
+
+                # Collect timestamp for interval calculation
+                stats.timestamps.append(timestamp)
+                stats.message_count += 1
+
+                # Update distributions
+                offset = timestamp - start_time
+                bucket_idx = int(offset / bucket_duration_ns)
+                if bucket_idx >= bucket_count:
+                    bucket_idx = bucket_count - 1
+                if bucket_idx >= 0:
+                    global_message_counts[bucket_idx] += 1
+                    channel_dist[bucket_idx] += 1
 
     # Calculate durations
-    return {
-        channel_id: int(last_time - first_time)
-        for channel_id, (first_time, last_time) in channel_times.items()
+    channel_durations = {
+        channel_id: int(stats.last_time - stats.first_time)
+        for channel_id, stats in channel_stats.items()
+        if stats.first_time != float("inf")
     }
 
-
-def _calculate_channel_intervals(info: RebuildInfo) -> dict[int, list[int]]:
-    """Calculate per-channel message intervals from message indexes.
-
-    Returns a dict mapping channel_id -> list of intervals (ns) between consecutive messages.
-    Uses message index information from rebuild. Intervals are calculated as
-    delta between consecutive message timestamps.
-    """
-    if not info.chunk_information:
-        return {}
-
-    # Collect all timestamps per channel
-    channel_timestamps: dict[int, list[int]] = defaultdict(list)
-
-    for chunk_info_list in info.chunk_information.values():
-        for chunk_info in chunk_info_list:
-            if not chunk_info.records:
-                continue
-
-            timestamps = [record[0] for record in chunk_info.records]
-            channel_timestamps[chunk_info.channel_id].extend(timestamps)
-
-    # Calculate intervals between consecutive messages
+    # Calculate intervals
     channel_intervals: dict[int, list[int]] = {}
-    for channel_id, timestamps in channel_timestamps.items():
-        if len(timestamps) < 2:
-            # Need at least 2 messages to calculate intervals
+    for channel_id, stats in channel_stats.items():
+        if len(stats.timestamps) < 2:
             continue
 
-        # Sort timestamps to ensure correct ordering
-        sorted_timestamps = sorted(timestamps)
+        # Sort timestamps once
+        sorted_timestamps = sorted(stats.timestamps)
 
-        # Calculate deltas between consecutive messages
+        # Calculate intervals between consecutive messages and filter in one pass
         intervals = [
-            int(sorted_timestamps[i + 1] - sorted_timestamps[i])
+            interval
             for i in range(len(sorted_timestamps) - 1)
+            if (interval := int(sorted_timestamps[i + 1] - sorted_timestamps[i])) > 0
         ]
-
-        # Filter out zero or negative intervals (can happen with concurrent publishers)
-        intervals = [interval for interval in intervals if interval > 0]
 
         if intervals:
             channel_intervals[channel_id] = intervals
 
-    return channel_intervals
+    return channel_durations, channel_intervals, global_message_counts, per_channel_distributions
 
 
 def _calculate_interval_stats(
@@ -180,16 +196,21 @@ def _calculate_interval_stats(
         if not intervals:
             continue
 
-        # Convert each interval to Hz
-        hz_values = [1_000_000_000 / interval for interval in intervals]
-        sorted_hz = sorted(hz_values)
+        hz_values = sorted(1_000_000_000 / interval for interval in intervals)
+        hz_avg = sum(hz_values) / len(hz_values)
+        # Calculate median manually from sorted list
+        n = len(hz_values)
+        if n % 2 == 1:
+            median_hz = hz_values[n // 2]
+        else:
+            median_hz = (hz_values[n // 2 - 1] + hz_values[n // 2]) / 2
 
         # Calculate Hz statistics
         hz_stats = {
-            "minimum": min(hz_values),
-            "maximum": max(hz_values),
-            "average": mean(hz_values),
-            "median": median(sorted_hz),
+            "minimum": hz_values[0],
+            "maximum": hz_values[-1],
+            "average": hz_avg,
+            "median": median_hz,
         }
 
         result: dict[str, dict[str, float]] = {"hz_stats": hz_stats}
@@ -270,116 +291,6 @@ def _calculate_optimal_bucket_count(duration_ns: int) -> int:
     return best_bucket_count
 
 
-def _calculate_message_distribution(
-    info: RebuildInfo, start_time: int, end_time: int
-) -> MessageDistribution:
-    """Calculate message distribution across dynamic time buckets.
-
-    Uses 20-80 buckets, choosing the count that produces the most "round"
-    time duration per bucket (1s, 10s, 1min, etc.).
-
-    Args:
-        info: Info object containing chunk_information with message records
-        start_time: Global message start time in nanoseconds
-        end_time: Global message end time in nanoseconds
-
-    Returns:
-        MessageDistribution with optimal bucket count and message counts
-    """
-    duration_ns = end_time - start_time
-
-    # Handle edge case: zero duration
-    if duration_ns <= 0:
-        bucket_count = 20
-        return {
-            "bucket_count": bucket_count,
-            "bucket_duration_ns": 0,
-            "message_counts": [0] * bucket_count,
-            "max_count": 0,
-        }
-
-    # Calculate optimal bucket count for round durations
-    bucket_count = _calculate_optimal_bucket_count(duration_ns)
-
-    # Initialize empty buckets
-    message_counts = [0] * bucket_count
-    bucket_duration_ns = duration_ns // bucket_count
-
-    # Process all messages from chunk_information
-    if info.chunk_information:
-        for chunk_info_list in info.chunk_information.values():
-            for chunk_info in chunk_info_list:
-                if not chunk_info.records:
-                    continue
-
-                for timestamp, *_ in chunk_info.records:
-                    # Calculate which bucket this message belongs to
-                    offset = timestamp - start_time
-                    bucket_idx = int(offset / bucket_duration_ns)
-                    # Clamp to valid range (handle edge case where timestamp == end_time)
-                    bucket_idx = min(bucket_idx, bucket_count - 1)
-                    if bucket_idx >= 0:
-                        message_counts[bucket_idx] += 1
-
-    max_count = max(message_counts) if message_counts else 0
-
-    return {
-        "bucket_count": bucket_count,
-        "bucket_duration_ns": bucket_duration_ns,
-        "message_counts": message_counts,
-        "max_count": max_count,
-    }
-
-
-def _calculate_per_channel_distributions(
-    info: RebuildInfo, bucket_count: int, bucket_duration_ns: int, start_time: int
-) -> dict[int, list[int]]:
-    """Calculate message distribution per channel using global time buckets.
-
-    Uses the same bucket parameters as the global distribution to allow
-    direct comparison across channels.
-
-    Args:
-        info: Info object containing chunk_information with message records
-        bucket_count: Number of time buckets (from global distribution)
-        bucket_duration_ns: Duration of each bucket in nanoseconds
-        start_time: Global message start time in nanoseconds
-
-    Returns:
-        Dictionary mapping channel_id to list of message counts per bucket
-    """
-    # Initialize empty distributions for all channels
-    channel_distributions: dict[int, list[int]] = {}
-
-    # Handle edge case: zero duration or no bucket duration
-    if bucket_duration_ns <= 0:
-        return channel_distributions
-
-    # Process all messages from chunk_information
-    if info.chunk_information:
-        for chunk_info_list in info.chunk_information.values():
-            for chunk_info in chunk_info_list:
-                channel_id = chunk_info.channel_id
-
-                # Initialize this channel's distribution if not seen yet
-                if channel_id not in channel_distributions:
-                    channel_distributions[channel_id] = [0] * bucket_count
-
-                if not chunk_info.records:
-                    continue
-
-                for timestamp, *_ in chunk_info.records:
-                    # Calculate which bucket this message belongs to
-                    offset = timestamp - start_time
-                    bucket_idx = int(offset / bucket_duration_ns)
-                    # Clamp to valid range
-                    bucket_idx = min(bucket_idx, bucket_count - 1)
-                    if bucket_idx >= 0:
-                        channel_distributions[channel_id][bucket_idx] += 1
-
-    return channel_distributions
-
-
 def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoOutput:
     """Transform MCAP Info object into a JSON-serializable dictionary.
 
@@ -417,32 +328,43 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     # Calculate chunk overlaps
     max_concurrent, overlap_size = _calculate_chunk_overlaps(summary.chunk_indexes)
 
-    # Calculate per-channel durations (always, when available)
-    channel_durations: dict[int, int] = {}
-    if info.chunk_information:
-        channel_durations = _calculate_channel_durations(info)
+    # Calculate optimal bucket count for distributions
+    bucket_count = _calculate_optimal_bucket_count(duration_ns)
+    bucket_duration_ns = duration_ns // bucket_count if duration_ns > 0 else 0
 
-    # Calculate per-channel intervals and interval-based statistics (always, when available)
+    # Single-pass collection of all channel statistics and distributions
+    channel_durations: dict[int, int] = {}
     channel_intervals: dict[int, list[int]] = {}
+    global_message_counts: list[int] = []
+    per_channel_distributions: dict[int, list[int]] = {}
     interval_stats: dict[int, dict[str, dict[str, float]]] = {}
+
     if info.chunk_information:
-        channel_intervals = _calculate_channel_intervals(info)
+        (
+            channel_durations,
+            channel_intervals,
+            global_message_counts,
+            per_channel_distributions,
+        ) = _collect_channel_statistics(
+            info,
+            statistics.message_start_time,
+            bucket_count,
+            bucket_duration_ns,
+        )
         interval_stats = _calculate_interval_stats(
             channel_intervals, info.channel_sizes, statistics.channel_message_counts
         )
+    else:
+        global_message_counts = [0] * bucket_count
 
-    # Calculate message distribution
-    message_distribution = _calculate_message_distribution(
-        info, statistics.message_start_time, statistics.message_end_time
-    )
-
-    # Calculate per-channel distributions using the same buckets
-    per_channel_distributions = _calculate_per_channel_distributions(
-        info,
-        message_distribution["bucket_count"],
-        message_distribution["bucket_duration_ns"],
-        statistics.message_start_time,
-    )
+    # Build message distribution from collected data
+    max_count = max(global_message_counts) if global_message_counts else 0
+    message_distribution: MessageDistribution = {
+        "bucket_count": bucket_count,
+        "bucket_duration_ns": bucket_duration_ns,
+        "message_counts": global_message_counts,
+        "max_count": max_count,
+    }
 
     # Build JSON output structure
     output: McapInfoOutput = {
@@ -513,14 +435,37 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
 
 
 def _calculate_stats(values: list[int] | list[float]) -> Stats:
-    """Calculate min, max, and average from a list of values."""
+    """Calculate min, max, average, and median from a list of values."""
     if not values:
         return {"minimum": 0, "maximum": 0, "average": 0.0, "median": 0.0}
+
+    # Single pass for min, max, sum
+    min_val = values[0]
+    max_val = values[0]
+    sum_val = 0.0
+
+    for val in values:
+        if val < min_val:
+            min_val = val
+        if val > max_val:
+            max_val = val
+        sum_val += val
+
+    avg_val = sum_val / len(values)
+
+    # Sort for median
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+    if n % 2 == 1:
+        median_val = sorted_values[n // 2]
+    else:
+        median_val = (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
+
     return {
-        "minimum": min(values),
-        "maximum": max(values),
-        "average": mean(values),
-        "median": median(values),
+        "minimum": min_val,
+        "maximum": max_val,
+        "average": avg_val,
+        "median": median_val,
     }
 
 
