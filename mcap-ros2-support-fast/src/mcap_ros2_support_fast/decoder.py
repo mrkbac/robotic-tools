@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
+from mcap_ros2_support_fast._plans import McapROS2DecodeError as _McapROS2DecodeError
 
 from ._planner import generate_dynamic
 
@@ -24,8 +25,8 @@ class _SchemaProtocol(Protocol):
     data: bytes
 
 
-class McapROS2DecodeError(Exception):
-    """Raised if a MCAP message record cannot be decoded as a ROS2 message."""
+# Re-export the exception from _plans to maintain public API
+McapROS2DecodeError = _McapROS2DecodeError
 
 
 class DecoderFactory:

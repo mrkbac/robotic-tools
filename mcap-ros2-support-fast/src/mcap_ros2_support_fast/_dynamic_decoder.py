@@ -193,12 +193,13 @@ class DecoderGeneratorFactory:
             return [rvar]
         if step.type == ActionType.PRIMITIVE_ARRAY:
             type_id = step.data
-            array_size = step.size
+            # For bounded arrays, treat as dynamic (they have length prefix)
+            array_size = None if step.is_upper_bound else step.size
             rvar = self.generate_var_name()
             self.generate_primitive_array(rvar, type_id, array_size)
             return [rvar]
         if step.type == ActionType.PRIMITIVE_GROUP:
-            rfields = [(self.generate_var_name(), tid) for _, tid in step.targets]
+            rfields = [(self.generate_var_name(), tid) for _, tid, _ in step.targets]
             self.generate_primitive_group(rfields)
             return [name for name, tid in rfields if tid != TypeId.PADDING]
         if step.type == ActionType.COMPLEX:
@@ -207,7 +208,8 @@ class DecoderGeneratorFactory:
             return [rvar]
         if step.type == ActionType.COMPLEX_ARRAY:
             plan = step.plan
-            array_size = step.size
+            # For bounded arrays, treat as dynamic (they have length prefix)
+            array_size = None if step.is_upper_bound else step.size
             rvar = self.generate_var_name()
             self.generate_complex_array(rvar, plan, array_size)
             return [rvar]
@@ -231,10 +233,11 @@ class DecoderGeneratorFactory:
         if (
             len(fields) == 1
             and fields[0].type == ActionType.PRIMITIVE_GROUP
-            and all(typeid != TypeId.PADDING for _, typeid in fields[0].targets)
+            and all(typeid != TypeId.PADDING for _, typeid, _ in fields[0].targets)
         ):
             # Get the struct pattern for direct unpacking
-            targets = fields[0].targets
+            # Convert 3-tuple targets to 2-tuple for unpacking
+            targets = [(name, typeid) for name, typeid, _ in fields[0].targets]
             struct_format = "".join(TYPE_INFO[field_type] for _, field_type in targets)
             pattern = f"<{struct_format}"
             struct_var = self.get_struct_pattern_var_name(pattern)

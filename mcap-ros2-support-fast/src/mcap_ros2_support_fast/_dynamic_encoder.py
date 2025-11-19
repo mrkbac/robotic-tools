@@ -15,9 +15,9 @@ from ._plans import (
 )
 
 
-def _get_field(obj: Any, f: str) -> Any:
-    """Get field from object (dict or attribute)."""
-    return obj[f] if isinstance(obj, Mapping) else getattr(obj, f)
+def _get_field(obj: Any, f: str, default: Any) -> Any:
+    """Get field from object (dict or attribute) with default."""
+    return obj.get(f, default) if isinstance(obj, Mapping) else getattr(obj, f, default)
 
 
 class EncoderGeneratorFactory:
@@ -102,10 +102,20 @@ class EncoderGeneratorFactory:
             raise NotImplementedError(f"Unsupported type: {type_id}")
 
     def generate_primitive_array_writer(
-        self, value_expr: str, type_id: TypeId, array_size: int | None
+        self, value_expr: str, type_id: TypeId, array_size: int | None, is_upper_bound: bool = False
     ) -> None:
         """Generate code for primitive array fields."""
-        if array_size is None:  # dynamic array
+        # For dynamic or bounded arrays, write length prefix
+        if array_size is None or is_upper_bound:  # dynamic or bounded array
+            # For bounded arrays, truncate to upper bound if needed
+            if is_upper_bound and array_size is not None:
+                truncated_var = self.generate_var_name()
+                self.code.append(
+                    f"{truncated_var} = {value_expr}[:{array_size}] "
+                    f"if len({value_expr}) > {array_size} else {value_expr}"
+                )
+                value_expr = truncated_var
+            # Write array length
             self.generate_primitive_writer(f"len({value_expr})", TypeId.UINT32)
 
         if type_id == TypeId.STRING:
@@ -134,13 +144,16 @@ class EncoderGeneratorFactory:
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
 
-            if array_size is not None:
+            # For fixed arrays (not bounded), use optimized struct packing
+            # For dynamic or bounded arrays, use a loop
+            if array_size is not None and not is_upper_bound:
+                # Fixed-size array - use optimized struct pack
                 pattern = f"<{array_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
                 self.code.append(f"_buffer.extend({pattern_var}(*{value_expr}))")
                 self.code.append(f"_offset += {array_size * struct_size}")
             else:
-                # Dynamic array
+                # Dynamic or bounded array - use a loop
                 random_i = self.generate_var_name()
                 pattern = f"<{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
@@ -149,10 +162,20 @@ class EncoderGeneratorFactory:
                     self.code.append(f"_offset += {struct_size}")
 
     def generate_complex_array_writer(
-        self, array_var: str, plan: PlanList, array_size: int | None
+        self, array_var: str, plan: PlanList, array_size: int | None, is_upper_bound: bool = False
     ) -> None:
         """Generate code for complex array fields."""
-        if array_size is None:
+        # Bounded arrays (<=N) and dynamic arrays ([]) both write length prefix
+        if array_size is None or is_upper_bound:
+            # For bounded arrays, truncate to upper bound if needed
+            if is_upper_bound and array_size is not None:
+                truncated_var = self.generate_var_name()
+                self.code.append(
+                    f"{truncated_var} = {array_var}[:{array_size}] "
+                    f"if len({array_var}) > {array_size} else {array_var}"
+                )
+                array_var = truncated_var
+            # Write array length
             self.generate_primitive_writer(f"len({array_var})", TypeId.UINT32)
 
         random_i = self.generate_var_name()
@@ -162,10 +185,10 @@ class EncoderGeneratorFactory:
             self.generate_plan_writer(random_i, plan)
 
     def generate_primitive_group_writer(
-        self, parent_var: str, targets: list[tuple[str, TypeId]]
+        self, parent_var: str, targets: list[tuple[str, TypeId, Any]]
     ) -> None:
         """Generate code for a group of primitive fields."""
-        struct_format = "".join(TYPE_INFO[field_type] for _, field_type in targets)
+        struct_format = "".join(TYPE_INFO[field_type] for _, field_type, _ in targets)
         struct_size = struct.calcsize(f"<{struct_format}")
         pattern = f"<{struct_format}"
 
@@ -174,10 +197,21 @@ class EncoderGeneratorFactory:
         self.generate_alignment(first_type_size)
 
         field_values = []
-        for name, typeid in targets:
+        for name, typeid, default_val in targets:
             if typeid != TypeId.PADDING:
                 field_var = self.generate_var_name()
-                self.code.append(f"{field_var} = _get_field({parent_var}, '{name}')")
+                # Compute default value with proper fallbacks
+                if default_val is not None:
+                    default = default_val
+                elif typeid == TypeId.STRING:
+                    default = ""
+                elif typeid == TypeId.BOOL:
+                    default = False
+                elif typeid in {TypeId.FLOAT32, TypeId.FLOAT64}:
+                    default = 0.0
+                else:
+                    default = 0
+                self.code.append(f"{field_var} = _get_field({parent_var}, '{name}', {default!r})")
                 field_values.append(field_var)
 
         struct_var = self.get_struct_pattern_var_name(pattern)
@@ -191,22 +225,43 @@ class EncoderGeneratorFactory:
         """Generate code for a single plan action."""
         if step.type == ActionType.PRIMITIVE:
             field_var = self.generate_var_name()
-            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
+            # Compute default value with proper fallbacks
+            if step.default_value is not None:
+                default = step.default_value
+            elif step.data == TypeId.STRING:
+                default = ""
+            elif step.data == TypeId.BOOL:
+                default = False
+            elif step.data in {TypeId.FLOAT32, TypeId.FLOAT64}:
+                default = 0.0
+            else:
+                default = 0
+            self.code.append(
+                f"{field_var} = _get_field({parent_var}, '{step.target}', {default!r})"
+            )
             self.generate_primitive_writer(field_var, step.data)
         elif step.type == ActionType.PRIMITIVE_ARRAY:
             field_var = self.generate_var_name()
-            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
-            self.generate_primitive_array_writer(field_var, step.data, step.size)
+            # Arrays default to empty list or provided default
+            default = step.default_value if step.default_value is not None else []
+            self.code.append(
+                f"{field_var} = _get_field({parent_var}, '{step.target}', {default!r})"
+            )
+            self.generate_primitive_array_writer(
+                field_var, step.data, step.size, step.is_upper_bound
+            )
         elif step.type == ActionType.PRIMITIVE_GROUP:
             self.generate_primitive_group_writer(parent_var, step.targets)
         elif step.type == ActionType.COMPLEX:
             field_var = self.generate_var_name()
-            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
+            # Complex types don't have defaults - they must exist
+            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}', None)")
             self.generate_plan_writer(field_var, step.plan)
         elif step.type == ActionType.COMPLEX_ARRAY:
             field_var = self.generate_var_name()
-            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}')")
-            self.generate_complex_array_writer(field_var, step.plan, step.size)
+            # Complex arrays default to empty list
+            self.code.append(f"{field_var} = _get_field({parent_var}, '{step.target}', [])")
+            self.generate_complex_array_writer(field_var, step.plan, step.size, step.is_upper_bound)
         else:
             raise ValueError(f"Unknown action type: {step}")
 

@@ -23,6 +23,7 @@ from mcap_ros2_support_fast._plans import (
     ComplexArrayAction,
     DecoderFunction,
     EncoderFunction,
+    McapROS2DecodeError,
     PlanActions,
     PlanList,
     PrimitiveAction,
@@ -89,7 +90,15 @@ def _generate_plan(
             if field_type.is_array:
                 # Array of complex types
                 nested_plan = _generate_plan(nested_msgdef, msgdefs)
-                plan.append(ComplexArrayAction(field_name, nested_plan, field_type.array_size))
+                # For bounded arrays (<=N), size is the upper bound and is_upper_bound is True
+                # For unbounded arrays ([]), size is None and is_upper_bound is False
+                # For fixed arrays ([N]), size is N and is_upper_bound is False
+                array_size = field_type.array_size  # Keep size even for bounded arrays
+                plan.append(
+                    ComplexArrayAction(
+                        field_name, nested_plan, array_size, field_type.is_upper_bound
+                    )
+                )
             else:
                 # Single complex type
                 plan.append(ComplexAction(field_name, _generate_plan(nested_msgdef, msgdefs)))
@@ -101,9 +110,25 @@ def _generate_plan(
                 raise ValueError(f"Unknown primitive type: {type_name}")
 
             if field_type.is_array:
-                plan.append(PrimitiveArrayAction(field_name, type_id, field_type.array_size))
+                # For bounded arrays (<=N), size is the upper bound and is_upper_bound is True
+                # For unbounded arrays ([]), size is None and is_upper_bound is False
+                # For fixed arrays ([N]), size is N and is_upper_bound is False
+                array_size = field_type.array_size  # Keep size even for bounded arrays
+                # Extract default value for array fields (if it's a list)
+                default_val = field.default_value if isinstance(field.default_value, list) else None
+                plan.append(
+                    PrimitiveArrayAction(
+                        field_name, type_id, array_size, field_type.is_upper_bound, default_val
+                    )
+                )
             else:
-                plan.append(PrimitiveAction(field_name, type_id))
+                # Extract default value for primitive fields
+                default_val = (
+                    field.default_value
+                    if field.default_value is not None and not isinstance(field.default_value, list)
+                    else None
+                )
+                plan.append(PrimitiveAction(field_name, type_id, default_val))
 
     return msg_class, plan
 
@@ -132,7 +157,7 @@ def generate_plans(schema_name: str, schema_text: str) -> PlanList:
     # Generate plan for the primary message type
     primary_msgdef = msgdefs.get(schema_name)
     if primary_msgdef is None:
-        raise ValueError(f"Primary message definition not found for {schema_name}")
+        raise McapROS2DecodeError(f'schema parsing failed for "{schema_name}"')
 
     return _generate_plan(primary_msgdef, msgdefs)
 
@@ -240,7 +265,7 @@ def _create_primitive_groups(steps: PlanActions) -> PlanActions:
             optimized_steps.append(steps[current_idx])
             current_idx += 1
 
-        targets: list[tuple[str, TypeId]] = []
+        targets: list[tuple[str, TypeId, Any]] = []
         cumulative_offset = 0
         max_alignment = 0
 
@@ -264,11 +289,11 @@ def _create_primitive_groups(steps: PlanActions) -> PlanActions:
 
                     # Add padding bytes
                     for _ in range(padding_needed):
-                        targets.append((f"__padding_{len(targets)}__", TypeId.PADDING))
+                        targets.append((f"__padding_{len(targets)}__", TypeId.PADDING, None))
 
                     cumulative_offset = aligned_offset
 
-                targets.append((step.target, step.data))
+                targets.append((step.target, step.data, step.default_value))
                 cumulative_offset += type_size
             else:
                 raise ValueError(f"Unexpected action type: {step.type}")

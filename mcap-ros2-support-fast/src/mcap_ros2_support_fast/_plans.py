@@ -12,6 +12,11 @@ from enum import IntEnum
 from types import SimpleNamespace
 from typing import Any, ClassVar, Literal
 
+
+class McapROS2DecodeError(Exception):
+    """Raised if a MCAP message record cannot be decoded as a ROS2 message."""
+
+
 # Type aliases for plan data structures
 DecodedMessage = SimpleNamespace
 DecoderFunction = Callable[[bytes], DecodedMessage]
@@ -66,6 +71,7 @@ class PrimitiveAction:
     type: ClassVar[Literal[ActionType.PRIMITIVE]] = ActionType.PRIMITIVE
     target: str
     data: TypeId
+    default_value: PrimitiveValue | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,12 +80,14 @@ class PrimitiveArrayAction:
     target: str
     data: TypeId
     size: int | None
+    is_upper_bound: bool = False  # Whether size is an upper bound (<=N)
+    default_value: list[PrimitiveValue] | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class PrimitiveGroupAction:
     type: ClassVar[Literal[ActionType.PRIMITIVE_GROUP]] = ActionType.PRIMITIVE_GROUP
-    targets: list[tuple[str, TypeId]]
+    targets: list[tuple[str, TypeId, PrimitiveValue | None]]  # (name, type_id, default_value)
 
 
 @dataclass(slots=True, frozen=True)
@@ -95,6 +103,7 @@ class ComplexArrayAction:
     target: str
     plan: "PlanList"
     size: int | None
+    is_upper_bound: bool = False  # Whether size is an upper bound (<=N)
 
 
 # Union type for all possible actions
@@ -133,7 +142,7 @@ STRING_TO_TYPE_ID = {
 TYPE_INFO: dict[TypeId, str] = {
     TypeId.BOOL: "?",
     TypeId.BYTE: "B",
-    TypeId.CHAR: "B",
+    TypeId.CHAR: "b",  # signed byte, not unsigned
     TypeId.FLOAT32: "f",
     TypeId.FLOAT64: "d",
     TypeId.INT8: "b",

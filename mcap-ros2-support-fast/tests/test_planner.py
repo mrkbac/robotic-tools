@@ -153,7 +153,10 @@ def test_generate_plan_optimized() -> None:
                                 type("builtin_interfaces_Time", (SimpleNamespace,), {}),
                                 [
                                     PrimitiveGroupAction(
-                                        targets=[("sec", TypeId.INT32), ("nanosec", TypeId.UINT32)]
+                                        targets=[
+                                            ("sec", TypeId.INT32, None),
+                                            ("nanosec", TypeId.UINT32, None),
+                                        ]
                                     )
                                 ],
                             ),
@@ -175,9 +178,9 @@ def test_generate_plan_optimized() -> None:
                                 [
                                     PrimitiveGroupAction(
                                         targets=[
-                                            ("x", TypeId.FLOAT64),
-                                            ("y", TypeId.FLOAT64),
-                                            ("z", TypeId.FLOAT64),
+                                            ("x", TypeId.FLOAT64, None),
+                                            ("y", TypeId.FLOAT64, None),
+                                            ("z", TypeId.FLOAT64, None),
                                         ]
                                     )
                                 ],
@@ -190,10 +193,10 @@ def test_generate_plan_optimized() -> None:
                                 [
                                     PrimitiveGroupAction(
                                         targets=[
-                                            ("x", TypeId.FLOAT64),
-                                            ("y", TypeId.FLOAT64),
-                                            ("z", TypeId.FLOAT64),
-                                            ("w", TypeId.FLOAT64),
+                                            ("x", TypeId.FLOAT64, None),
+                                            ("y", TypeId.FLOAT64, None),
+                                            ("z", TypeId.FLOAT64, None),
+                                            ("w", TypeId.FLOAT64, None),
                                         ]
                                     )
                                 ],
