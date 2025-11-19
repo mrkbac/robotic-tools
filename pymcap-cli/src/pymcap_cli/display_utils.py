@@ -521,15 +521,15 @@ def display_channels_table(
     for tree_prefix, channel, display_path in channel_iter:
         if isinstance(channel, str):
             # Intermediate node (folder) - create a row that spans with just the folder name
-            row: list[RenderableType] = []
+            hrow: list[RenderableType] = []
 
             # Add empty cell for ID column if it exists
             if columns & ChannelTableColumn.ID:
-                row.append("")
+                hrow.append("")
 
-            row.append(f"{tree_prefix}{_format_parts_with_colors(channel)}")
+            hrow.append(f"{tree_prefix}{_format_parts_with_colors(channel)}")
 
-            channels_table.add_row(*row, end_section=False)
+            channels_table.add_row(*hrow, end_section=False)
             continue
 
         if tree:

@@ -1,11 +1,10 @@
 """E2E tests for the cat command."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pytest
-
 from pymcap_cli.cmd.cat_cmd import cat
 
 
@@ -22,9 +21,10 @@ def call_cat_expect_failure(func: Callable, *args, **kwargs) -> int:
     """Call cat function expecting failure, return exit code."""
     try:
         func(*args, **kwargs)
-        return 0  # No exception = success
     except SystemExit as exc:
         return exc.code
+    else:
+        return 0  # No exception = success
 
 
 @pytest.mark.e2e
@@ -171,7 +171,9 @@ class TestCat:
         # At least one should be present (may not have both in first 10 messages)
         assert has_camera or has_lidar
 
-    def test_cat_json_preserves_message_structure(self, image_compressed_mcap: Path, capsys, monkeypatch):
+    def test_cat_json_preserves_message_structure(
+        self, image_compressed_mcap: Path, capsys, monkeypatch
+    ):
         """Test that JSON output preserves nested message structure."""
         # Mock isatty to ensure JSONL output format
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)
@@ -254,12 +256,11 @@ class TestCatQueryValidation:
     def test_query_with_filter_valid_field(self, multi_topic_mcap: Path):
         """Test filter with valid field."""
         # Assuming multi_topic_mcap has messages with numeric fields
-        try:
+        # This might fail if the topic doesn't exist, but should fail gracefully
+        # The important thing is it doesn't crash
+        with pytest.raises(SystemExit) as exc_info:
             cat(file=str(multi_topic_mcap), query="/odom.pose", limit=1)
-        except SystemExit as exc:
-            # This might fail if the topic doesn't exist, but should fail gracefully
-            # The important thing is it doesn't crash
-            assert exc.code in [0, 1]
+        assert exc_info.value.code in [0, 1]
 
     def test_validation_error_shows_helpful_message(self, image_small_mcap: Path, capsys):
         """Test that validation errors show helpful messages with available fields."""
