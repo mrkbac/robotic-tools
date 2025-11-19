@@ -6,7 +6,14 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import IO
 
-from small_mcap.reader import LazyChunk, McapError, breakup_chunk, stream_reader
+from small_mcap.reader import (
+    EndOfFileError,
+    InvalidMagicError,
+    LazyChunk,
+    McapError,
+    breakup_chunk,
+    stream_reader,
+)
 from small_mcap.records import (
     Attachment,
     AttachmentIndex,
@@ -71,6 +78,8 @@ class RebuildInfo:
             None if calculate_channel_sizes was False.
         estimated_channel_sizes: Whether channel_sizes are estimated (True) or exact (False).
             Only meaningful when channel_sizes is not None.
+        chunk_information: Optional dict mapping chunk offset to MessageIndex records for that chunk.
+        next_offset: Byte offset where the next read should start. Used for resumable/incremental reads.
     """
 
     header: Header
@@ -78,6 +87,7 @@ class RebuildInfo:
     channel_sizes: dict[int, int] | None = None
     estimated_channel_sizes: bool = False
     chunk_information: dict[int, list[MessageIndex]] | None = None
+    next_offset: int = 0
 
 
 def rebuild_summary(
@@ -86,6 +96,8 @@ def rebuild_summary(
     validate_crc: bool,
     calculate_channel_sizes: bool,
     exact_sizes: bool,
+    initial_state: RebuildInfo | None = None,
+    skip_magic: bool = False,
 ) -> RebuildInfo:
     """Rebuild summary section from an MCAP file's data section.
 
@@ -100,35 +112,49 @@ def rebuild_summary(
         exact_sizes: When True, decompresses all chunks for exact sizes. When False, estimates
             sizes from MessageIndex offsets (faster but approximate). Only relevant when
             calculate_channel_sizes=True.
+        initial_state: Optional previous RebuildInfo to resume from. When used for resuming, first
+            seek to initial_state.next_offset before calling and set skip_magic=True.
 
     Returns:
         RebuildInfo containing header, summary, and optionally channel_sizes.
         The estimated_channel_sizes flag indicates if sizes are estimated.
+        The next_offset field contains the byte position where reading stopped.
 
     Raises:
         McapError: If the file is invalid or header is missing
     """
-    header: Header | None = None
-    summary = Summary()
-    statistics = Statistics(
-        attachment_count=0,
-        channel_count=0,
-        channel_message_counts=defaultdict(int),
-        chunk_count=0,
-        message_count=0,
-        message_end_time=0,
-        message_start_time=0,
-        metadata_count=0,
-        schema_count=0,
-    )
-    channel_sizes: defaultdict[int, int] = defaultdict(int)
-    # Track chunks and their MessageIndex for estimation mode
+    # Initialize or resume from previous state
+    if initial_state is not None:
+        # Resume from previous state
+        header = initial_state.header
+        summary = initial_state.summary
+        statistics = summary.statistics
+        assert statistics is not None, "Initial state's summary must have statistics"
+        channel_sizes = defaultdict(int, initial_state.channel_sizes or {})
+        chunk_information = dict(initial_state.chunk_information or {})
+    else:
+        # Start fresh
+        header = None
+        summary = Summary()
+        statistics = Statistics(
+            attachment_count=0,
+            channel_count=0,
+            channel_message_counts=defaultdict(int),
+            chunk_count=0,
+            message_count=0,
+            message_end_time=0,
+            message_start_time=0,
+            metadata_count=0,
+            schema_count=0,
+        )
+        channel_sizes = defaultdict(int)
+        chunk_information = {}
+
+    # These always start fresh (handle chunk boundaries)
     pending_chunk: LazyChunk | None = None
     pending_chunk_start_offset: int = 0
     pending_indexes: list[MessageIndex] = []
     pending_message_index_offsets: dict[int, int] = {}
-    # Store MessageIndex records per chunk for detailed analysis
-    chunk_information: dict[int, list[MessageIndex]] = {}
 
     def update_message(record: Message) -> None:
         # Update message time statistics
@@ -192,12 +218,20 @@ def rebuild_summary(
     prev_pos: int = 0
     last_message_index_end_offset: int = 0
 
+    # Track position for resumable reads
+    next_offset = stream.tell()
+
     try:
         for record in stream_reader(
-            stream, emit_chunks=True, lazy_chunks=True, validate_crc=validate_crc
+            stream,
+            skip_magic=skip_magic,
+            emit_chunks=True,
+            lazy_chunks=True,
+            validate_crc=validate_crc,
         ):
             record_start_pos = prev_pos
             current_pos = stream.tell()
+            next_offset = current_pos  # Track position after each successful record read
             prev_pos = current_pos
 
             if not isinstance(record, MessageIndex):
@@ -268,7 +302,7 @@ def rebuild_summary(
             elif isinstance(record, MetadataIndex):
                 summary.metadata_indexes.append(record)
     except Exception as e:  # noqa: BLE001
-        print(f"Warning: Error while rebuilding summary: {e}")  # noqa: T201
+        print(f"Warning: Error while rebuilding summary at offset {next_offset}: {e}")  # noqa: T201
     # TODO: figure out how to handle partial message indexes of broken mcaps
     # final ChunkIndex
     if pending_chunk is not None:
@@ -302,4 +336,5 @@ def rebuild_summary(
         channel_sizes=channel_sizes if calculate_channel_sizes else None,
         estimated_channel_sizes=calculate_channel_sizes and not exact_sizes,
         chunk_information=chunk_information if chunk_information else None,
+        next_offset=next_offset,
     )
