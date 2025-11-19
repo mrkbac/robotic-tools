@@ -38,16 +38,6 @@ def show_code_for_endianness(plan: tuple, endianness: str, label: str) -> None:
     print("-" * 80)
     print(encoder_code)
 
-    # Show struct patterns to verify no conflicts
-    print("\nStruct patterns:")
-    print("-" * 80)
-    print("Decoder patterns:")
-    for pattern, var_name in decoder_factory.struct_patterns.items():
-        print(f"  {var_name}: {pattern}")
-    print("Encoder patterns:")
-    for pattern, var_name in encoder_factory.struct_patterns.items():
-        print(f"  {var_name}: {pattern}")
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show generated code for a message definition.")

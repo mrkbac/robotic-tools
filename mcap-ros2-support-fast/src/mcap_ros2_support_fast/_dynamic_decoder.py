@@ -140,8 +140,8 @@ class DecoderGeneratorFactory:
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
             self.code.append(
-                f"{target} = list(_data[_offset : _offset + _array_size * {struct_size}]"
-                f".cast('{struct_name}'))"
+                f"{target} = _data[_offset : _offset + _array_size * {struct_size}]"
+                f".cast('{struct_name}').tolist()"
             )
             self.code.append(f"_offset += _array_size * {struct_size}")
         else:
@@ -151,8 +151,8 @@ class DecoderGeneratorFactory:
             self.generate_alignment(struct_size)
 
             self.code.append(
-                f"{target} = list(_data[_offset : _offset + {array_size * struct_size}]"
-                f".cast('{struct_name}'))"
+                f"{target} = _data[_offset : _offset + {array_size * struct_size}]"
+                f".cast('{struct_name}').tolist()"
             )
             self.code.append(f"_offset += {array_size * struct_size}")
 

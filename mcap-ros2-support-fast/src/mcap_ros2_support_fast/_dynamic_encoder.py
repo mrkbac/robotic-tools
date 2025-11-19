@@ -1,6 +1,5 @@
 import codecs
 import struct
-from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
@@ -17,9 +16,12 @@ from ._plans import (
 
 def _get_field(obj: Any, f: str, default: Any) -> Any:
     """Get field from object (dict or attribute) with default."""
-    value = obj.get(f) if isinstance(obj, Mapping) else getattr(obj, f, None)
-    # We need to do it this way, since `f` could be a attribute of `obj` with value None
-    return default if value is None else value
+    try:
+        value = getattr(obj, f)
+        return default if value is None else value  # noqa: TRY300
+    except AttributeError:
+        # Fallback to dict access for dict-like objects
+        return obj.get(f, default)
 
 
 class EncoderGeneratorFactory:
@@ -72,11 +74,9 @@ class EncoderGeneratorFactory:
         if size > 1 and size in (2, 4, 8):
             mask = size - 1
             # Align based on payload offset (subtract 4 for CDR header)
-            self.code.append(f"_pad = (((_offset - 4 + {mask}) & ~{mask}) + 4) - _offset")
-            self.code.append("if _pad:")
-            with self.code.indent(None):
-                self.code.append("_buffer.extend(b'\\x00' * _pad)")
-                self.code.append("_offset += _pad")
+            self.code.append(f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}")
+            self.code.append("_buffer.extend(b'\\x00' * _pad)")
+            self.code.append("_offset += _pad")
 
     def reset_alignment(self, initial: int = 0) -> None:
         """Reset the current alignment to zero."""
@@ -164,13 +164,16 @@ class EncoderGeneratorFactory:
                 self.code.append(f"_buffer.extend({pattern_var}(*{value_expr}))")
                 self.code.append(f"_offset += {array_size * struct_size}")
             else:
-                # Dynamic or bounded array - use a loop
-                random_i = self.generate_var_name()
-                pattern = f"{self.endianness}{struct_name}"
-                pattern_var = self.get_struct_pattern_var_name(pattern)
-                with self.code.indent(f"for {random_i} in {value_expr}:"):
-                    self.code.append(f"_buffer.extend({pattern_var}({random_i}))")
-                    self.code.append(f"_offset += {struct_size}")
+                # Dynamic or bounded array - use vectorized bulk packing
+                array_len_var = self.generate_var_name()
+                self.code.append(f"{array_len_var} = len({value_expr})")
+                with self.code.indent(f"if {array_len_var} > 0:"):
+                    self.code.append(
+                        "_buffer.extend(struct.pack("
+                        f"f'{self.endianness}{{{array_len_var}}}{struct_name}', *{value_expr}"
+                        "))"
+                    )
+                self.code.append(f"_offset += {array_len_var} * {struct_size}")
 
     def generate_complex_array_writer(
         self, array_var: str, plan: PlanList, array_size: int | None, is_upper_bound: bool = False
@@ -326,6 +329,7 @@ class EncoderGeneratorFactory:
         namespace: dict[str, Any] = {
             "_encode_utf8": codecs.utf_8_encode,
             "_get_field": _get_field,
+            "struct": struct,  # Add struct module for vectorized array packing
             # Limit builtins for security
             "__builtins__": {
                 "bytearray": bytearray,

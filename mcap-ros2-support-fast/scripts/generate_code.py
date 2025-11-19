@@ -132,9 +132,12 @@ def main() -> None:
             "",
             "def _get_field(obj, f, default):",
             "    '''Get field from object (dict or attribute) with default.'''",
-            "    value = obj.get(f) if isinstance(obj, collections.abc.Mapping) else getattr(obj, f, None)",  # noqa: E501
-            "    # We need to do it this way, since `f` could be a attribute of `obj` with value None",  # noqa: E501
-            "    return default if value is None else value",
+            "    try:",
+            "        value = getattr(obj, f)",
+            "        return default if value is None else value",
+            "    except AttributeError:",
+            "        # Fallback to dict access for dict-like objects",
+            "        return obj.get(f, default)",
             "",
         ]
     )
