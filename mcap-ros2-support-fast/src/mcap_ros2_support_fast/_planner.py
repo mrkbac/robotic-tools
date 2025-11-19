@@ -123,12 +123,10 @@ def _generate_plan(
                 )
             else:
                 # Extract default value for primitive fields
-                default_val = (
-                    field.default_value
-                    if field.default_value is not None and not isinstance(field.default_value, list)
-                    else None
-                )
-                plan.append(PrimitiveAction(field_name, type_id, default_val))
+                prim_default: bool | int | float | str | None = None
+                if field.default_value is not None and not isinstance(field.default_value, list):
+                    prim_default = field.default_value
+                plan.append(PrimitiveAction(field_name, type_id, prim_default))
 
     return msg_class, plan
 

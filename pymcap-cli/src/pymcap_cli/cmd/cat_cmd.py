@@ -340,6 +340,13 @@ def cat(
 
                     print(json.dumps(output, separators=(",", ":")), file=sys.stdout)  # noqa: T201
 
+        # Check if query was specified but topic was not found
+        if parsed_query and not validated_topics:
+            console_err.print(
+                f"[red]Error: Topic '{parsed_query.topic}' not found in MCAP file[/red]"
+            )
+            sys.exit(1)
+
     except KeyboardInterrupt:
         # Allow graceful exit with Ctrl+C
         console_err.print("\n[yellow]Interrupted by user[/yellow]")

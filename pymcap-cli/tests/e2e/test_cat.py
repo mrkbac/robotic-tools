@@ -215,13 +215,13 @@ class TestCatQueryValidation:
 
     def test_query_valid_field(self, image_small_mcap: Path):
         """Test that valid query on existing field works."""
-        cat(file=str(image_small_mcap), query="/camera/image.header", limit=1)
+        cat(file=str(image_small_mcap), query="/camera/image_compressed.header", limit=1)
         # Should output successfully
 
     def test_query_invalid_field_fails(self, image_small_mcap: Path, capsys):
         """Test that query on non-existent field fails with error."""
         with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image.nonexistent", limit=1)
+            cat(file=str(image_small_mcap), query="/camera/image_compressed.nonexistent", limit=1)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -230,12 +230,16 @@ class TestCatQueryValidation:
 
     def test_query_nested_field_valid(self, image_small_mcap: Path):
         """Test valid nested field access."""
-        cat(file=str(image_small_mcap), query="/camera/image.header.stamp.sec", limit=1)
+        cat(file=str(image_small_mcap), query="/camera/image_compressed.header.stamp.sec", limit=1)
 
     def test_query_invalid_nested_field(self, image_small_mcap: Path, capsys):
         """Test invalid nested field access fails."""
         with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image.header.invalid_field", limit=1)
+            cat(
+                file=str(image_small_mcap),
+                query="/camera/image_compressed.header.invalid_field",
+                limit=1,
+            )
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -244,7 +248,11 @@ class TestCatQueryValidation:
     def test_query_field_on_primitive_fails(self, image_small_mcap: Path, capsys):
         """Test accessing field on primitive type fails."""
         with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image.width.something", limit=1)
+            cat(
+                file=str(image_small_mcap),
+                query="/camera/image_compressed.format.something",
+                limit=1,
+            )
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -253,7 +261,7 @@ class TestCatQueryValidation:
     def test_query_array_index_without_array_fails(self, image_small_mcap: Path, capsys):
         """Test indexing non-array field fails."""
         with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image.width[0]", limit=1)
+            cat(file=str(image_small_mcap), query="/camera/image_compressed.format[0]", limit=1)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -271,7 +279,7 @@ class TestCatQueryValidation:
     def test_validation_error_shows_helpful_message(self, image_small_mcap: Path, capsys):
         """Test that validation errors show helpful messages with available fields."""
         with pytest.raises(SystemExit) as exc_info:
-            cat(file=str(image_small_mcap), query="/camera/image.bad_field", limit=1)
+            cat(file=str(image_small_mcap), query="/camera/image_compressed.bad_field", limit=1)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()

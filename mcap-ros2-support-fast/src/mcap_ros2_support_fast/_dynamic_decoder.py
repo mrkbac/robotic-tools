@@ -18,7 +18,9 @@ from ._plans import (
 class DecoderGeneratorFactory:
     """Factory class for generating decoder code with managed state."""
 
-    def __init__(self, plan: PlanList, *, comments: bool = True, endianness: Literal["<", ">"] = "<") -> None:
+    def __init__(
+        self, plan: PlanList, *, comments: bool = True, endianness: Literal["<", ">"] = "<"
+    ) -> None:
         self.plan = plan
         self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0

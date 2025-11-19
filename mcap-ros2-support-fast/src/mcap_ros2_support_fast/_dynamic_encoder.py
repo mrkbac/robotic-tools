@@ -249,9 +249,11 @@ class EncoderGeneratorFactory:
         elif step.type == ActionType.PRIMITIVE_ARRAY:
             field_var = self.generate_var_name()
             # Arrays default to empty list or provided default
-            default = step.default_value if step.default_value is not None else []
+            array_default: list[bool | int | float | str] = (
+                step.default_value if step.default_value is not None else []
+            )
             self.code.append(
-                f"{field_var} = _get_field({parent_var}, '{step.target}', {default!r})"
+                f"{field_var} = _get_field({parent_var}, '{step.target}', {array_default!r})"
             )
             self.generate_primitive_array_writer(
                 field_var, step.data, step.size, step.is_upper_bound
