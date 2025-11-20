@@ -1833,10 +1833,7 @@ dependencies = [
     { name = "small-mcap", extra = ["compression"] },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "mcap" },
-]
+[package.optional-dependencies]
 video = [
     { name = "av" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1845,20 +1842,16 @@ video = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", marker = "extra == 'video'", specifier = ">=12.0.0" },
     { name = "cyclopts", specifier = ">=4" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
+    { name = "numpy", marker = "extra == 'video'", specifier = ">=1.24.0" },
     { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "mcap", specifier = ">=1.3.0" }]
-video = [
-    { name = "av", specifier = ">=12.0.0" },
-    { name = "numpy", specifier = ">=1.24.0" },
-]
+provides-extras = ["video"]
 
 [[package]]
 name = "pytest"

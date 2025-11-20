@@ -6,7 +6,6 @@ import sys
 from typing import Annotated, Any
 
 from cyclopts import Group, Parameter
-from lark.exceptions import LarkError
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
@@ -202,7 +201,7 @@ def cat(
     if query:
         try:
             parsed_query = parse_message_path(query)
-        except LarkError as e:
+        except Exception as e:  # noqa: BLE001
             console_err.print(f"[red]Invalid query syntax: {e}[/red]")
             return 1
 
