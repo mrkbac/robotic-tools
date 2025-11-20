@@ -91,11 +91,20 @@ def _collect_channel_statistics(
     dict[int, list[int]],  # channel_intervals
     list[int],  # global message_counts per bucket
     dict[int, list[int]],  # per_channel_distributions
+    dict[int, int],  # message_start_time
+    dict[int, int],  # message_end_time
 ]:
     """Single-pass collection of all channel statistics and distributions.
 
     Returns:
-        Tuple of (channel_durations, channel_intervals, message_counts, per_channel_distributions)
+        Tuple of (
+            channel_durations,
+            channel_intervals,
+            message_counts,
+            per_channel_distributions,
+            message_start_time,
+            message_end_time,
+        )
     """
     # Initialize data structures
     channel_stats: dict[int, ChannelStatistics] = {}
@@ -104,7 +113,7 @@ def _collect_channel_statistics(
 
     # Handle edge case
     if not info.chunk_information or bucket_duration_ns <= 0:
-        return {}, {}, global_message_counts, {}
+        return {}, {}, global_message_counts, {}, {}, {}
 
     # Single pass over all chunk information
     for msg_idx_list in info.chunk_information.values():
@@ -168,7 +177,26 @@ def _collect_channel_statistics(
         if intervals:
             channel_intervals[channel_id] = intervals
 
-    return channel_durations, channel_intervals, global_message_counts, per_channel_distributions
+    # Collect first and last times
+    message_start_time = {
+        channel_id: stats.first_time
+        for channel_id, stats in channel_stats.items()
+        if stats.first_time != sys.maxsize
+    }
+    message_end_time = {
+        channel_id: stats.last_time
+        for channel_id, stats in channel_stats.items()
+        if stats.last_time != 0
+    }
+
+    return (
+        channel_durations,
+        channel_intervals,
+        global_message_counts,
+        per_channel_distributions,
+        message_start_time,
+        message_end_time,
+    )
 
 
 def _calculate_interval_stats(
@@ -335,6 +363,8 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     channel_intervals: dict[int, list[int]] = {}
     global_message_counts: list[int] = []
     per_channel_distributions: dict[int, list[int]] = {}
+    message_start_time: dict[int, int] = {}
+    message_end_time: dict[int, int] = {}
     interval_stats: dict[int, dict[str, dict[str, float]]] = {}
 
     if info.chunk_information:
@@ -343,6 +373,8 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
             channel_intervals,
             global_message_counts,
             per_channel_distributions,
+            message_start_time,
+            message_end_time,
         ) = _collect_channel_statistics(
             info,
             statistics.message_start_time,
@@ -411,6 +443,8 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
         ch_duration_ns = channel_durations.get(channel_id)
         ch_distribution = per_channel_distributions.get(channel_id, [])
         ch_interval_stats = interval_stats.get(channel_id)
+        ch_first_time = message_start_time.get(channel_id)
+        ch_last_time = message_end_time.get(channel_id)
 
         output["channels"].append(
             _build_channel_dict(
@@ -422,6 +456,8 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
                 global_duration_ns=duration_ns,
                 message_distribution=ch_distribution,
                 interval_stats=ch_interval_stats,
+                message_start_time=ch_first_time,
+                message_end_time=ch_last_time,
             )
         )
 
@@ -491,6 +527,8 @@ def _build_channel_dict(
     global_duration_ns: int,
     message_distribution: list[int],
     interval_stats: dict[str, dict[str, float]] | None = None,
+    message_start_time: int | None = None,
+    message_end_time: int | None = None,
 ) -> ChannelInfo:
     """Build channel information dict for JSON output with calculated metrics."""
     # Calculate global Hz (average based on global duration)
@@ -555,6 +593,8 @@ def _build_channel_dict(
         "bytes_per_second_stats": bps_stats,
         "bytes_per_message": b_per_msg,
         "message_distribution": message_distribution,
+        "message_start_time": message_start_time,
+        "message_end_time": message_end_time,
     }
 
 

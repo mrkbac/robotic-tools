@@ -350,6 +350,20 @@
             "type": "integer",
             "minimum": 0
           }
+        },
+        "message_start_time": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "message_end_time": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
         }
       }
     },

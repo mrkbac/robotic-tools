@@ -4,7 +4,7 @@
 # Header added to generated files
 headers: |
   # ruff: noqa: I001, E501
-  # AUTO-GENERATED FILE - DO NOT EDIT
+  # AUTO-GENERATED from pymcap-cli/schemas/mcap_info.json - DO NOT EDIT
 
 # Post-generation formatters
 # Note: Formatting is handled by pre-commit (ruff-format and ruff-check hooks)

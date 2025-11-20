@@ -1,5 +1,5 @@
 # ruff: noqa: I001, E501
-# AUTO-GENERATED FILE - DO NOT EDIT
+# AUTO-GENERATED from pymcap-cli/schemas/mcap_info.json - DO NOT EDIT
 
 
 from typing import TypedDict, Union
@@ -56,6 +56,12 @@ class ChannelInfo(TypedDict, total=False):
 
     message_distribution: Required[list["_ChannelInfomessagedistributionitem"]]
     """ Required property """
+
+    message_start_time: int | None
+    """ minimum: 0 """
+
+    message_end_time: int | None
+    """ minimum: 0 """
 
 
 class ChunkOverlaps(TypedDict, total=False):
