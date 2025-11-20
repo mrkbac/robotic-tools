@@ -24,6 +24,8 @@ console = Console()
 # Parameter groups
 PROCESSING_GROUP = Group("Processing Options")
 DISPLAY_GROUP = Group("Display Options")
+_NS_TO_MS = 1_000_000
+_NS_TO_SEC = 1_000_000_000
 
 
 class SortChoice(str, Enum):
@@ -50,7 +52,7 @@ def _display_message_distribution(data: McapInfoOutput) -> None:
 
     # Format bucket duration using timedelta
     bucket_duration_ns = distribution["bucket_duration_ns"]
-    bucket_duration = timedelta(milliseconds=bucket_duration_ns / 1_000_000)
+    bucket_duration = timedelta(milliseconds=bucket_duration_ns / _NS_TO_MS)
 
     # Format timedelta for display
     total_seconds = bucket_duration.total_seconds()
@@ -65,36 +67,45 @@ def _display_message_distribution(data: McapInfoOutput) -> None:
         hours = total_seconds / 3600
         duration_str = f"{hours:.1f} hr"
 
-    console.print("\n[bold cyan]Message Distribution:[/bold cyan] ", end="")
+    console.print("\n[bold cyan]Message Distribution:[/] ", end="")
     console.print(DistributionBar(distribution["message_counts"]))
-    console.print(f"[dim]Max: {max_count:,} msgs/bucket | Bucket size: {duration_str}[/dim]\n")
+    console.print(f"[dim]Max: {max_count:,} msgs/bucket | Bucket size: {duration_str}[/]\n")
 
 
 def _display_file_info_and_summary(data: McapInfoOutput) -> None:
     """Display file information and summary statistics."""
     stats = data["statistics"]
     duration_ns = stats["duration_ns"]
-    duration_human = timedelta(milliseconds=duration_ns / 1_000_000)
-    date_start = datetime.fromtimestamp(stats["message_start_time"] / 1_000_000_000)
-    date_end = datetime.fromtimestamp(stats["message_end_time"] / 1_000_000_000)
+    duration_human = timedelta(milliseconds=duration_ns / _NS_TO_MS)
+    date_start = datetime.fromtimestamp(stats["message_start_time"] / _NS_TO_SEC)
+    date_end = datetime.fromtimestamp(stats["message_end_time"] / _NS_TO_SEC)
 
     info_table = Table.grid(padding=(0, 1))
     info_table.add_column(style="bold blue")
     info_table.add_column()
-    info_table.add_row("File:", f"[green]{data['file']['path']}[/green]")
-    info_table.add_row("Library:", f"[yellow]{data['header']['library']}[/yellow]")
-    info_table.add_row("Profile:", f"[yellow]{data['header']['profile']}[/yellow]")
-    info_table.add_row("Messages:", f"[green]{stats['message_count']:,}[/green]")
-    info_table.add_row("Chunks:", f"[cyan]{stats['chunk_count']}[/cyan]")
+    info_table.add_row("File:", f"[green]{data['file']['path']}[/]")
+
+    bytes_per_sec = data["file"]["size_bytes"] / (duration_ns / _NS_TO_SEC)
+    bytes_per_hour = bytes_per_sec * 3600
+    info_table.add_row(
+        "Size:",
+        f"[green]{bytes_to_human(data['file']['size_bytes'])}[/]"
+        f" [red]{bytes_to_human(bytes_per_sec)}/s[/]"
+        f" [orange]{bytes_to_human(bytes_per_hour)}/h[/]",
+    )
+    info_table.add_row("Library:", f"[yellow]{data['header']['library']}[/]")
+    info_table.add_row("Profile:", f"[yellow]{data['header']['profile']}[/]")
+    info_table.add_row("Messages:", f"[green]{stats['message_count']:,}[/]")
+    info_table.add_row("Chunks:", f"[cyan]{stats['chunk_count']}[/]")
     info_table.add_row(
         "Duration:",
-        f"[yellow]{duration_ns / 1_000_000:.2f} ms[/yellow] [cyan]({duration_human})[/cyan]",
+        f"[yellow]{duration_ns / 1_000_000:.2f} ms[/] [cyan]({duration_human})[/]",
     )
-    info_table.add_row("Start:", f"[cyan]{date_start}[/cyan]")
-    info_table.add_row("End:", f"[cyan]{date_end}[/cyan]")
-    info_table.add_row("Channels:", f"[green]{stats['channel_count']}[/green]")
-    info_table.add_row("Attachments:", f"[yellow]{stats['attachment_count']}[/yellow]")
-    info_table.add_row("Metadata:", f"[cyan]{stats['metadata_count']}[/cyan]")
+    info_table.add_row("Start:", f"[cyan]{date_start}[/]")
+    info_table.add_row("End:", f"[cyan]{date_end}[/]")
+    info_table.add_row("Channels:", f"[green]{stats['channel_count']}[/]")
+    info_table.add_row("Attachments:", f"[yellow]{stats['attachment_count']}[/]")
+    info_table.add_row("Metadata:", f"[cyan]{stats['metadata_count']}[/]")
     console.print(info_table)
 
 
@@ -128,9 +139,9 @@ def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> No
             bytes_to_human(size_stats["minimum"]),
             bytes_to_human(int(size_stats["average"])),
             bytes_to_human(size_stats["maximum"]),
-            f"{duration_stats['minimum'] / 1_000_000:.2f} ms",
-            f"{duration_stats['average'] / 1_000_000:.2f} ms",
-            f"{duration_stats['maximum'] / 1_000_000:.2f} ms",
+            f"{duration_stats['minimum'] / _NS_TO_MS:.2f} ms",
+            f"{duration_stats['average'] / _NS_TO_MS:.2f} ms",
+            f"{duration_stats['maximum'] / _NS_TO_MS:.2f} ms",
         ]
         if has_chunk_info:
             row.append(f"{chunk_stats['message_count']}")
@@ -147,8 +158,8 @@ def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> No
         overlap_table.add_column()
         overlap_table.add_row(
             "Overlaps:",
-            f"[green]{overlaps['max_concurrent']}[/green] max concurrent, "
-            f"[yellow]{bytes_to_human(overlaps['max_concurrent_bytes'])}[/yellow] "
+            f"[green]{overlaps['max_concurrent']}[/] max concurrent, "
+            f"[yellow]{bytes_to_human(overlaps['max_concurrent_bytes'])}[/] "
             f"max total size at once",
         )
         console.print(overlap_table)
@@ -302,7 +313,7 @@ def info(
     """
     # Validate input
     if not files:
-        console.print("[red]Error:[/red] At least one file must be specified")
+        console.print("[red]Error:[/] At least one file must be specified")
         raise SystemExit(1)
 
     # Process all files and display each separately
@@ -317,7 +328,7 @@ def info(
                 try:
                     info_data = read_info(f_buffered)
                 except (InvalidMagicError, AssertionError):
-                    console.print("[red]Invalid MCAP magic, rebuilding info.[/red]")
+                    console.print("[red]Invalid MCAP magic, rebuilding info.[/]")
                     f_buffered.seek(0)  # Reset to start
                     info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
 
@@ -329,8 +340,8 @@ def info(
         has_size_data = any(ch.get("size_bytes") is not None for ch in data["channels"])
         if sort.value in ["size", "bps", "b_per_msg"] and not has_size_data:
             console.print(
-                "[yellow]Warning:[/yellow] Sorting by size fields requires channel size data. "
-                "Use [cyan]--rebuild[/cyan] to get accurate size information."
+                "[yellow]Warning:[/] Sorting by size fields requires channel size data. "
+                "Use [cyan]--rebuild[/] to get accurate size information."
             )
             console.print()
 
@@ -338,8 +349,8 @@ def info(
         has_channel_durations = any(ch.get("hz_channel") is not None for ch in data["channels"])
         if index_duration and not has_channel_durations:
             console.print(
-                "[yellow]Warning:[/yellow] --index-duration requires message index data. "
-                "Use [cyan]--rebuild[/cyan] to get per-channel timing information. "
+                "[yellow]Warning:[/] --index-duration requires message index data. "
+                "Use [cyan]--rebuild[/] to get per-channel timing information. "
                 "Falling back to global duration."
             )
             console.print()
@@ -351,8 +362,8 @@ def info(
         )
         if median and not has_median_data:
             console.print(
-                "[yellow]Warning:[/yellow] --median requires message interval data. "
-                "Use [cyan]--rebuild[/cyan] to calculate median rates. "
+                "[yellow]Warning:[/] --median requires message interval data. "
+                "Use [cyan]--rebuild[/] to calculate median rates. "
                 "Falling back to mean rates."
             )
             console.print()
