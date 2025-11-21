@@ -85,9 +85,9 @@ class McapError(Exception):
 
 
 class InvalidMagicError(McapError):
-    def __init__(self, bad_magic: bytes) -> None:
+    def __init__(self, bad_magic: bytes | memoryview) -> None:
         super().__init__(
-            f"not a valid MCAP file, invalid magic: {bad_magic.decode('utf-8', 'replace')}"
+            f"not a valid MCAP file, invalid magic: {bytes(bad_magic).decode('utf-8', 'replace')}"
         )
 
 
@@ -270,14 +270,14 @@ def stream_reader(
     record_size_limit = _RECORD_SIZE_LIMIT
     checksum = 0
 
-    def read(n: int) -> bytes:
+    def read(n: int) -> memoryview:
         data = stream.read(n)
         if len(data) < n:
             raise EndOfFileError
         if validate_crc and not skip_magic and not lazy_chunks:
             nonlocal checksum
             checksum = zlib.crc32(data, checksum)
-        return data
+        return memoryview(data)
 
     cached_pos = stream.tell()
 
