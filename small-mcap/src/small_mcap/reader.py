@@ -575,6 +575,7 @@ def _read_message_seeking(
 
     # If chunks don't overlap, we can yield sequentially without heap merging
     # This is more efficient as it avoids the heap overhead
+    reader: Iterable[McapRecord]
     if chunks_non_overlapping:
         # Chunks are ordered, no need for heap merge
         reader = itertools.chain.from_iterable(lazy_iterables)
