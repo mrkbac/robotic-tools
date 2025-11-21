@@ -564,9 +564,9 @@ def _read_message_seeking(
         key=lambda c: c.message_start_time,
     )
 
-    # Check if chunks are non-overlapping (ordered)
+    # Check if chunks are non-overlapping
     # This is a common case for well-formed MCAP files
-    chunks_ordered = all(
+    chunks_non_overlapping = all(
         prev.message_end_time <= current.message_start_time
         for prev, current in itertools.pairwise(sorted_chunks)
     )
@@ -575,7 +575,7 @@ def _read_message_seeking(
 
     # If chunks don't overlap, we can yield sequentially without heap merging
     # This is more efficient as it avoids the heap overhead
-    if chunks_ordered:
+    if chunks_non_overlapping:
         # Chunks are ordered, no need for heap merge
         reader = itertools.chain.from_iterable(lazy_iterables)
     else:
