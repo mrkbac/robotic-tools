@@ -2,6 +2,7 @@ import bisect
 import contextlib
 import heapq
 import io
+import itertools
 import sys
 import zlib
 from collections.abc import Callable, Iterable
@@ -565,12 +566,10 @@ def _read_message_seeking(
 
     # Check if chunks are non-overlapping (ordered)
     # This is a common case for well-formed MCAP files
-    chunks_ordered = True
-    for i in range(1, len(sorted_chunks)):
-        # If previous chunk ends before current chunk starts, they don't overlap
-        if sorted_chunks[i - 1].message_end_time > sorted_chunks[i].message_start_time:
-            chunks_ordered = False
-            break
+    chunks_ordered = all(
+        prev.message_end_time <= current.message_start_time
+        for prev, current in itertools.pairwise(sorted_chunks)
+    )
 
     lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
 
@@ -578,14 +577,10 @@ def _read_message_seeking(
     # This is more efficient as it avoids the heap overhead
     if chunks_ordered:
         # Chunks are ordered, no need for heap merge
-        def _sequential_reader() -> Iterable[McapRecord]:
-            for iterable in lazy_iterables:
-                yield from iterable
-
-        reader = _sequential_reader()
+        reader = itertools.chain.from_iterable(lazy_iterables)
     else:
         # Chunks overlap, use heap merge to maintain time order
-        reader = (item for item in heapq.merge(*lazy_iterables, key=_lazy_sort))
+        reader = heapq.merge(*lazy_iterables, key=_lazy_sort)
 
     yield from _read_inner(
         reader,
@@ -625,8 +620,9 @@ def _read_message_non_seeking(
                     pending_chunk.message_start_time < end_time_ns
                     and pending_chunk.message_end_time >= start_time_ns
                 )
-                if new_channels or (
-                    in_time_range and (not all_excluded or not pending_message_indexes)
+                # Only decompress if in time range AND (has new channels OR has messages to yield)
+                if in_time_range and (
+                    new_channels or not all_excluded or not pending_message_indexes
                 ):
                     yield from breakup_chunk(pending_chunk, validate_crc=validate_crc)
                     pending_chunk = None
