@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import IO
 
 from small_mcap.reader import (
-    LazyChunk,
     McapError,
     breakup_chunk,
     stream_reader,
@@ -19,6 +18,7 @@ from small_mcap.records import (
     Chunk,
     ChunkIndex,
     Header,
+    LazyChunk,
     Message,
     MessageIndex,
     Metadata,

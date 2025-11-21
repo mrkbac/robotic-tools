@@ -2,7 +2,6 @@ import bisect
 import contextlib
 import heapq
 import io
-import struct
 import sys
 import zlib
 from collections.abc import Callable, Iterable
@@ -37,6 +36,7 @@ from small_mcap.records import (
     DataEnd,
     Footer,
     Header,
+    LazyChunk,
     McapRecord,
     Message,
     MessageIndex,
@@ -116,50 +116,6 @@ class RecordLengthLimitExceededError(McapError):
 class UnsupportedCompressionError(McapError):
     def __init__(self, compression: str) -> None:
         super().__init__(f"unsupported compression type {compression}")
-
-
-@dataclass(slots=True)
-class LazyChunk:
-    """
-    Lazy-loaded chunk that stores metadata without reading the compressed data.
-    Used for efficient scanning of MCAP files when chunk data is not immediately needed.
-    """
-
-    message_start_time: int
-    message_end_time: int
-    uncompressed_size: int
-    uncompressed_crc: int
-    compression: str
-    record_start: int  # Offset where the Chunk record begins
-    data_len: int  # Length of the compressed data
-
-    @classmethod
-    def read_from_stream(cls, stream: IO[bytes], record_start: int) -> "LazyChunk":
-        """Read chunk metadata from stream without loading the compressed data."""
-        data = stream.read(8 + 8 + 8 + 4 + 4)
-        message_start_time, message_end_time, uncompressed_size, uncompressed_crc, str_len = (
-            struct.unpack("<QQQII", data)
-        )
-        compression = stream.read(str_len).decode("utf-8")
-        data_len = struct.unpack("<Q", stream.read(8))[0]
-        stream.seek(data_len, 1)  # Skip the data for now
-        return cls(
-            message_start_time,
-            message_end_time,
-            uncompressed_size,
-            uncompressed_crc,
-            compression,
-            record_start,
-            data_len,
-        )
-
-    def to_chunk(self, stream: IO[bytes]) -> Chunk:
-        """Convert to a full Chunk by reading from the stream."""
-        current_pos = stream.tell()
-        stream.seek(self.record_start)
-        chunk = Chunk.read_record(stream)
-        stream.seek(current_pos)
-        return chunk
 
 
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | memoryview:
