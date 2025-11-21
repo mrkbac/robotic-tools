@@ -5,12 +5,14 @@ work correctly for both time-based and channel-based filtering.
 """
 
 import io
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from small_mcap import include_topics, read_message
 from small_mcap.reader import breakup_chunk
+from small_mcap.writer import IndexType, McapWriter
 
 
 class TestChunkSkipping:
@@ -204,6 +206,101 @@ class TestChunkSkipping:
             # Verify message times are in range
             for _, _, msg in messages:
                 assert 4 <= msg.log_time < 6
+
+    def test_chunks_without_message_indexes_are_not_skipped(self):
+        """Test that chunks without message indexes are still processed when using channel filters.
+
+        Regression test for bug where all([]) returns True, causing chunks with empty
+        message_index_offsets to be incorrectly skipped even when channels are not excluded.
+
+        The bug occurred in seekable streams when:
+        1. MCAP file has chunks but no per-channel message indexes (IndexType.MESSAGE disabled)
+        2. Channel filtering is applied via exclude_channels
+        3. The check `if all(cid in exclude_channels for cid in index.message_index_offsets)`
+           would return True for empty message_index_offsets (because all([]) returns True)
+        4. This caused valid chunks to be skipped entirely, losing messages
+        """
+        # Create a temporary MCAP file with chunks but NO message indexes
+        with tempfile.NamedTemporaryFile(suffix=".mcap", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            # Write MCAP file with IndexType excluding MESSAGE indexes
+            with open(tmp_path, "wb") as f:
+                # Disable MESSAGE indexes so chunks will have empty message_index_offsets
+                writer = McapWriter(f, chunk_size=100, index_types=IndexType.CHUNK)
+                writer.start()
+
+                # Add schema
+                schema_id = 1
+                writer.add_schema(schema_id=schema_id, name="example", encoding="json", data=b"{}")
+
+                # Add two channels
+                included_channel_id = 1
+                excluded_channel_id = 2
+                writer.add_channel(
+                    channel_id=included_channel_id,
+                    topic="/included",
+                    message_encoding="json",
+                    schema_id=schema_id,
+                )
+                writer.add_channel(
+                    channel_id=excluded_channel_id,
+                    topic="/excluded",
+                    message_encoding="json",
+                    schema_id=schema_id,
+                )
+
+                # Add messages to both channels (will create chunks due to chunk_size=100)
+                for i in range(10):
+                    writer.add_message(
+                        channel_id=included_channel_id,
+                        log_time=i * 1000,
+                        data=b'{"value": "included"}',
+                        publish_time=i * 1000,
+                    )
+
+                for i in range(10):
+                    writer.add_message(
+                        channel_id=excluded_channel_id,
+                        log_time=i * 1000,
+                        data=b'{"value": "excluded"}',
+                        publish_time=i * 1000,
+                    )
+
+                writer.finish()
+
+            # Read with seekable stream, filtering to include only /included topic
+            # Bug would cause 0 messages because chunks with empty message_index_offsets are skipped
+            with open(tmp_path, "rb") as f:
+                messages = list(read_message(f, should_include=include_topics(["/included"])))
+
+                # Should get all 10 messages from /included channel
+                assert len(messages) == 10, (
+                    f"Expected 10 messages from /included channel, got {len(messages)}. "
+                    "Chunks with empty message_index_offsets should not be skipped!"
+                )
+
+                # Verify all messages are from the correct channel
+                for _schema, channel, _message in messages:
+                    assert channel.topic == "/included"
+
+            # Also test with excluding the /excluded topic (inverse filter)
+            with open(tmp_path, "rb") as f:
+                messages = list(read_message(f, should_include=include_topics(["/excluded"])))
+
+                # Should get all 10 messages from /excluded channel
+                assert len(messages) == 10, (
+                    f"Expected 10 messages from /excluded channel, got {len(messages)}. "
+                    "Chunks with empty message_index_offsets should not be skipped!"
+                )
+
+                for _schema, channel, _message in messages:
+                    assert channel.topic == "/excluded"
+
+        finally:
+            # Clean up temporary file
+            Path(tmp_path).unlink(missing_ok=True)
 
 
 class TestChunkBuffering:

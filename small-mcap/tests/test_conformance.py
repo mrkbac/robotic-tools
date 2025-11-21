@@ -15,7 +15,7 @@ from small_mcap import McapRecord, stream_reader
 
 def normalize_value(value: Any) -> Any:
     """Normalize a value for conformance comparison."""
-    if isinstance(value, bytes):
+    if isinstance(value, (bytes, memoryview)):
         return [str(b) for b in value]
     if isinstance(value, int):
         return str(value)

@@ -319,7 +319,7 @@ class EncoderGeneratorFactory:
             for f, t in self.alias.items():
                 self.code.prolog(f"{t} = {f}")
 
-            self.code.append("return bytes(_buffer)")
+            self.code.append("return memoryview(_buffer)")
 
         return str(self.code)
 
@@ -334,6 +334,7 @@ class EncoderGeneratorFactory:
             "__builtins__": {
                 "bytearray": bytearray,
                 "bytes": bytes,
+                "memoryview": memoryview,
                 "len": len,
                 "range": range,
                 "NotImplementedError": NotImplementedError,

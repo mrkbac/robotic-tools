@@ -19,8 +19,8 @@ class McapROS2DecodeError(Exception):
 
 # Type aliases for plan data structures
 DecodedMessage = SimpleNamespace
-DecoderFunction = Callable[[bytes], DecodedMessage]
-EncoderFunction = Callable[[Any], bytes]
+DecoderFunction = Callable[[bytes | memoryview], DecodedMessage]
+EncoderFunction = Callable[[Any], bytes | memoryview]
 PrimitiveValue = bool | int | float | str
 DefaultValue = PrimitiveValue | list[PrimitiveValue]
 

@@ -1,3 +1,4 @@
+import bisect
 import contextlib
 import heapq
 import io
@@ -26,6 +27,7 @@ else:
 from small_mcap.records import (
     MAGIC,
     MAGIC_SIZE,
+    OPCODE_AND_LEN_STRUCT,
     OPCODE_TO_RECORD,
     Attachment,
     AttachmentIndex,
@@ -160,13 +162,14 @@ class LazyChunk:
         return chunk
 
 
-def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
+def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | memoryview:
     # Validate compression string
     if not isinstance(chunk.compression, str):
         raise UnsupportedCompressionError(
             f"compression must be a string, got {type(chunk.compression).__name__}"
         )
 
+    data: bytes | memoryview
     if chunk.compression == "zstd":
         if zstd_decompress is None:
             raise UnsupportedCompressionError(
@@ -203,21 +206,68 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes:
 
 def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapRecord]:
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+    view = memoryview(data)
     pos = 0
 
-    while pos < len(data):
-        opcode, length = struct.unpack_from("<BQ", data, pos)
+    while pos < len(view):
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
         pos += _RECORD_HEADER_SIZE
         record_data_end = pos + length
 
         if opcode == Opcode.MESSAGE:
-            yield Message.read(data[pos:record_data_end])
+            yield Message.read(view[pos:record_data_end])
         elif opcode == Opcode.CHANNEL:
-            yield Channel.read(data[pos:record_data_end])
+            yield Channel.read(view[pos:record_data_end])
         elif opcode == Opcode.SCHEMA:
-            yield Schema.read(data[pos:record_data_end])
+            yield Schema.read(view[pos:record_data_end])
+        # TODO: raise illegal opcode in chunk error
 
         pos = record_data_end
+
+
+def _breakup_chunk_with_indexes(
+    chunk: Chunk, message_indexes: list[MessageIndex], validate_crc: bool = False
+) -> Iterable[McapRecord]:
+    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+    view = memoryview(data)
+
+    for _timestamp, offset in heapq.merge(
+        # sort by time
+        *(x.records for x in message_indexes),
+        key=lambda mi: mi[0],
+    ):
+        pos = offset
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
+        pos += _RECORD_HEADER_SIZE
+        record_data_end = pos + length
+        if opcode == Opcode.MESSAGE:
+            yield Message.read(view[pos:record_data_end])
+        # TODO: raise illegal opcode in chunk error
+
+
+def _read_chunk_and_indexes(data: bytes) -> tuple[Chunk, list[MessageIndex]]:
+    view = memoryview(data)
+    # Read the chunk record header (opcode + length)
+    opcode, chunk_length = OPCODE_AND_LEN_STRUCT.unpack_from(view, 0)
+    pos = _RECORD_HEADER_SIZE
+
+    chunk = Chunk.read(view[pos : pos + chunk_length])
+    pos += chunk_length
+
+    # Read message index records that follow the chunk
+    message_indexes: list[MessageIndex] = []
+    while pos < len(view):
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
+        pos += _RECORD_HEADER_SIZE
+        record_data_end = pos + length
+
+        if opcode == Opcode.MESSAGE_INDEX:
+            message_index = MessageIndex.read(view[pos:record_data_end])
+            message_indexes.append(message_index)
+
+        pos = record_data_end
+
+    return chunk, message_indexes
 
 
 @overload
@@ -283,7 +333,7 @@ def stream_reader(
 
     while True:
         checksum_before_read = checksum
-        opcode, length = struct.unpack("<BQ", read(_RECORD_HEADER_SIZE))
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack(read(_RECORD_HEADER_SIZE))
         if record_size_limit is not None and length > record_size_limit:
             raise RecordLengthLimitExceededError(opcode, length, record_size_limit)
 
@@ -431,6 +481,52 @@ def _read_inner(
                 exclude_channels.add(record.id)
 
 
+def _filter_message_index_by_time(
+    message_index: MessageIndex,
+    start_time_ns: int,
+    end_time_ns: int,
+) -> MessageIndex:
+    """Filter a MessageIndex to only include records within the time range using binary search.
+
+    Args:
+        message_index: The MessageIndex to filter
+        start_time_ns: Start time (inclusive) in nanoseconds
+        end_time_ns: End time (exclusive) in nanoseconds
+
+    Returns:
+        A new MessageIndex with filtered records, or the original if no filtering needed
+    """
+    if not message_index.records:
+        return message_index
+
+    # Check if we need to filter at all
+    first_time = message_index.records[0][0]
+    last_time = message_index.records[-1][0]
+
+    if first_time >= start_time_ns and last_time < end_time_ns:
+        # All records are within range, no filtering needed
+        return message_index
+
+    if last_time < start_time_ns or first_time >= end_time_ns:
+        # No records are within range
+        return MessageIndex(message_index.channel_id, [])
+
+    # Binary search for start index (first record >= start_time_ns)
+    start_idx = bisect.bisect_left(
+        message_index.records, start_time_ns, key=lambda record: record[0]
+    )
+
+    # Binary search for end index (first record >= end_time_ns)
+    end_idx = bisect.bisect_left(message_index.records, end_time_ns, key=lambda record: record[0])
+
+    # If no records in range, return empty MessageIndex
+    if start_idx >= end_idx:
+        return MessageIndex(message_index.channel_id, [])
+
+    # Return filtered MessageIndex
+    return MessageIndex(message_index.channel_id, message_index.records[start_idx:end_idx])
+
+
 def _read_message_seeking(
     stream: IO[bytes],
     should_include: _ShouldIncludeType,
@@ -454,40 +550,86 @@ def _read_message_seeking(
     }
 
     def _lazy_yield(stream: IO[bytes], index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
-        # Emit the chunk index to prevent early loading and decompression of chunk
+        # Emit the chunk index first to enable lazy loading - this allows heapq.merge
+        # to initialize by looking at just metadata without loading all chunks into memory
         yield index
+
         # late check for mcap with empty channel summary if this chunks is excluded entirely
-        if all(cid in exclude_channels for cid in index.message_index_offsets):
+        if index.message_index_offsets and all(
+            cid in exclude_channels for cid in index.message_index_offsets
+        ):
             return
 
         stream.seek(index.chunk_start_offset)
-        chunk = Chunk.read_record(stream)
+        chunk_and_message_index = stream.read(index.chunk_length + index.message_index_length)
+        chunk, message_indexes = _read_chunk_and_indexes(chunk_and_message_index)
 
-        yield from breakup_chunk(chunk)
+        # Filter message indexes to only include non-excluded channels
+        filtered_message_indexes = [
+            mi for mi in message_indexes if mi.channel_id not in exclude_channels
+        ]
+
+        # Filter message indexes by time range using binary search
+        if start_time_ns > 0 or end_time_ns < sys.maxsize:
+            filtered_message_indexes = [
+                _filter_message_index_by_time(mi, start_time_ns, end_time_ns)
+                for mi in filtered_message_indexes
+            ]
+            # Remove empty message indexes after time filtering
+            filtered_message_indexes = [mi for mi in filtered_message_indexes if mi.records]
+
+        # Use indexed reading if we have message indexes, otherwise fall back to full scan
+        if filtered_message_indexes:
+            yield from _breakup_chunk_with_indexes(chunk, filtered_message_indexes, validate_crc)
+        else:
+            # No message indexes or all filtered out, use full chunk scan
+            yield from breakup_chunk(chunk, validate_crc)
 
     def _lazy_sort(item: McapRecord) -> int:
         if isinstance(item, Message):
             return item.log_time
         if isinstance(item, ChunkIndex):
             return item.message_start_time
-        return 0  # Other records are not yielded
+        return 0  # Schema and Channel records should come before messages
 
-    lazy_iterables = (
-        _lazy_yield(stream, cidx)
-        for cidx in sorted(
-            (
-                cidx
-                for cidx in summary.chunk_indexes
-                if not all(
-                    channel_id in exclude_channels for channel_id in cidx.message_index_offsets
-                )
-                and (cidx.message_end_time >= start_time_ns)
-                and (cidx.message_start_time < end_time_ns)
-            ),
-            key=lambda c: c.message_start_time,
-        )
+    # Filter and sort chunks that overlap with the time range
+    sorted_chunks = sorted(
+        (
+            cidx
+            for cidx in summary.chunk_indexes
+            if not (
+                cidx.message_index_offsets
+                and all(channel_id in exclude_channels for channel_id in cidx.message_index_offsets)
+            )
+            and (cidx.message_end_time >= start_time_ns)
+            and (cidx.message_start_time < end_time_ns)
+        ),
+        key=lambda c: c.message_start_time,
     )
-    reader = (item for item in heapq.merge(*lazy_iterables, key=_lazy_sort))
+
+    # Check if chunks are non-overlapping (ordered)
+    # This is a common case for well-formed MCAP files
+    chunks_ordered = True
+    for i in range(1, len(sorted_chunks)):
+        # If previous chunk ends before current chunk starts, they don't overlap
+        if sorted_chunks[i - 1].message_end_time > sorted_chunks[i].message_start_time:
+            chunks_ordered = False
+            break
+
+    lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
+
+    # If chunks don't overlap, we can yield sequentially without heap merging
+    # This is more efficient as it avoids the heap overhead
+    if chunks_ordered:
+        # Chunks are ordered, no need for heap merge
+        def _sequential_reader() -> Iterable[McapRecord]:
+            for iterable in lazy_iterables:
+                yield from iterable
+
+        reader = _sequential_reader()
+    else:
+        # Chunks overlap, use heap merge to maintain time order
+        reader = (item for item in heapq.merge(*lazy_iterables, key=_lazy_sort))
 
     yield from _read_inner(
         reader,
@@ -760,7 +902,7 @@ class _SchemaProtocol(Protocol):
 class DecoderFactoryProtocol(Protocol):
     def decoder_for(
         self, message_encoding: str, schema: _SchemaProtocol | None
-    ) -> Callable[[bytes], Any] | None: ...
+    ) -> Callable[[bytes | memoryview], Any] | None: ...
 
 
 @dataclass(frozen=True)
@@ -782,7 +924,7 @@ def read_message_decoded(
     end_time_ns: int = sys.maxsize,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
 ) -> Iterable[DecodedMessage]:
-    decoders: dict[int, Callable[[bytes], Any]] = {}
+    decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
 
     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
         if schema is None:

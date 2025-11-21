@@ -40,7 +40,7 @@ class DecoderFactory:
 
     def decoder_for(
         self, message_encoding: str, schema: _SchemaProtocol | None
-    ) -> Callable[[bytes], Any] | None:
+    ) -> Callable[[bytes | memoryview], Any] | None:
         if (
             message_encoding != _MESSAGE_ENCODING_CDR
             or schema is None

@@ -9,6 +9,8 @@ from typing import IO, ClassVar, Final, TypeVar, cast
 MAGIC = b"\x89MCAP0\r\n"
 MAGIC_SIZE = len(MAGIC)
 
+OPCODE_AND_LEN_STRUCT = struct.Struct("<BQ")
+
 
 @unique
 class Opcode(IntEnum):
@@ -35,7 +37,7 @@ class Opcode(IntEnum):
     SUMMARY_OFFSET = 0x0E
 
 
-def _read_string(data: bytes, offset: int) -> tuple[str, int]:
+def _read_string(data: bytes | memoryview, offset: int) -> tuple[str, int]:
     """Read a length-prefixed string from bytes.
 
     Strings are serialized using a uint32 byte length followed by UTF-8 encoded string data.
@@ -49,12 +51,15 @@ def _read_string(data: bytes, offset: int) -> tuple[str, int]:
     """
     string_len = struct.unpack_from("<I", data, offset)[0]
     offset += 4
-    string_val = data[offset : offset + string_len].decode("utf-8")
+    string_bytes = data[offset : offset + string_len]
+    string_val = (
+        string_bytes.tobytes() if isinstance(string_bytes, memoryview) else string_bytes
+    ).decode("utf-8")
     offset += string_len
     return string_val, offset
 
 
-def _read_map(data: bytes, offset: int) -> tuple[dict[str, str], int]:
+def _read_map(data: bytes | memoryview, offset: int) -> tuple[dict[str, str], int]:
     """Read a length-prefixed map from bytes.
 
     Maps are serialized using a uint32 byte length followed by key/value pairs,
@@ -108,10 +113,7 @@ def _write_map(value: dict[str, str]) -> bytes:
     if not value:
         return struct.pack("<I", 0)
 
-    parts: list[bytes] = []
-    for k, v in value.items():
-        parts.append(_write_string(k))
-        parts.append(_write_string(v))
+    parts = [_write_string(k) + _write_string(v) for k, v in value.items()]
     entries = b"".join(parts)
     return struct.pack("<I", len(entries)) + entries
 
@@ -144,11 +146,11 @@ class McapRecord(ABC):
             The complete serialized record: <opcode><length><content>
         """
         content = self.write()
-        return struct.pack("<BQ", self.OPCODE, len(content)) + content
+        return OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
 
     @classmethod
     @abstractmethod
-    def read(cls, data: bytes) -> "McapRecord":
+    def read(cls, data: bytes | memoryview) -> "McapRecord":
         """Deserialize the record content without opcode and length prefix.
 
         Note: Always use `unpack_from` to also handle padding correctly.
@@ -178,7 +180,7 @@ class McapRecord(ABC):
         header = data.read(9)
         if len(header) < 9:
             raise EOFError("Not enough data to read record header")
-        opcode, length = struct.unpack("<BQ", header)
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack(header)
         content = data.read(length)
         if len(content) < length:
             raise EOFError("Not enough data to read record content")
@@ -209,7 +211,7 @@ class Attachment(McapRecord):
     create_time: int
     name: str
     media_type: str
-    data: bytes
+    data: bytes | memoryview = field(repr=False)
 
     def write(self) -> bytes:
         content = (
@@ -222,7 +224,7 @@ class Attachment(McapRecord):
         return content + struct.pack("<I", zlib.crc32(content))
 
     @classmethod
-    def read(cls, data: bytes) -> "Attachment":
+    def read(cls, data: bytes | memoryview) -> "Attachment":
         log_time, create_time = struct.unpack_from("<QQ", data, 0)
         name, offset = _read_string(data, 16)
         media_type, offset = _read_string(data, offset)
@@ -273,7 +275,7 @@ class AttachmentIndex(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "AttachmentIndex":
+    def read(cls, data: bytes | memoryview) -> "AttachmentIndex":
         offset, length, log_time, create_time, data_size = struct.unpack_from("<QQQQQ", data, 0)
         name, off = _read_string(data, 40)
         media_type, _ = _read_string(data, off)
@@ -314,7 +316,7 @@ class Channel(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "Channel":
+    def read(cls, data: bytes | memoryview) -> "Channel":
         channel_id, schema_id = struct.unpack_from("<HH", data, 0)
         topic, offset = _read_string(data, 4)
         message_encoding, offset = _read_string(data, offset)
@@ -348,7 +350,7 @@ class Chunk(McapRecord):
     uncompressed_size: int
     uncompressed_crc: int
     compression: str
-    data: bytes = field(repr=False)
+    data: bytes | memoryview = field(repr=False)
 
     def write(self) -> bytes:
         return (
@@ -365,7 +367,7 @@ class Chunk(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "Chunk":
+    def read(cls, data: bytes | memoryview) -> "Chunk":
         message_start_time, message_end_time, uncompressed_size, uncompressed_crc = (
             struct.unpack_from("<QQQI", data, 0)
         )
@@ -437,18 +439,13 @@ class ChunkIndex(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "ChunkIndex":
+    def read(cls, data: bytes | memoryview) -> "ChunkIndex":
         message_start_time, message_end_time, chunk_start_offset, chunk_length = struct.unpack_from(
             "<QQQQ", data, 0
         )
         map_len = struct.unpack_from("<I", data, 32)[0]
-        offset = 36
-        map_end = offset + map_len
-        message_index_offsets: dict[int, int] = {}
-        while offset < map_end:
-            channel_id, channel_offset = struct.unpack_from("<HQ", data, offset)
-            message_index_offsets[channel_id] = channel_offset
-            offset += 10
+        message_index_offsets = dict(struct.iter_unpack("<HQ", data[36 : 36 + map_len]))
+        offset = 36 + map_len
         message_index_length = struct.unpack_from("<Q", data, offset)[0]
         compression, offset = _read_string(data, offset + 8)
         compressed_size, uncompressed_size = struct.unpack_from("<QQ", data, offset)
@@ -485,7 +482,7 @@ class DataEnd(McapRecord):
         return struct.pack("<I", self.data_section_crc)
 
     @classmethod
-    def read(cls, data: bytes) -> "DataEnd":
+    def read(cls, data: bytes | memoryview) -> "DataEnd":
         return cls(struct.unpack_from("<I", data, 0)[0])
 
 
@@ -516,7 +513,7 @@ class Footer(McapRecord):
         return struct.pack("<QQI", self.summary_start, self.summary_offset_start, self.summary_crc)
 
     @classmethod
-    def read(cls, data: bytes) -> "Footer":
+    def read(cls, data: bytes | memoryview) -> "Footer":
         return cls(*struct.unpack_from("<QQI", data, 0))
 
 
@@ -544,7 +541,7 @@ class Header(McapRecord):
         return _write_string(self.profile) + _write_string(self.library)
 
     @classmethod
-    def read(cls, data: bytes) -> "Header":
+    def read(cls, data: bytes | memoryview) -> "Header":
         profile, offset = _read_string(data, 0)
         library, _ = _read_string(data, offset)
         return cls(profile, library)
@@ -572,7 +569,7 @@ class Message(McapRecord):
     sequence: int
     log_time: int
     publish_time: int
-    data: bytes
+    data: bytes | memoryview = field(repr=False)
 
     def write(self) -> bytes:
         return (
@@ -587,7 +584,7 @@ class Message(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "Message":
+    def read(cls, data: bytes | memoryview) -> "Message":
         channel_id, sequence, log_time, publish_time = struct.unpack_from("<HIQQ", data, 0)
         return cls(channel_id, sequence, log_time, publish_time, data[22:])
 
@@ -626,7 +623,7 @@ class MessageIndex(McapRecord):
         return bytes(buffer)
 
     @classmethod
-    def read(cls, data: bytes) -> "MessageIndex":
+    def read(cls, data: bytes | memoryview) -> "MessageIndex":
         channel_id = struct.unpack_from("<H", data, 0)[0]
         records_len = struct.unpack_from("<I", data, 2)[0]
         if records_len == 0:
@@ -654,7 +651,7 @@ class Metadata(McapRecord):
         return _write_string(self.name) + _write_map(self.metadata)
 
     @classmethod
-    def read(cls, data: bytes) -> "Metadata":
+    def read(cls, data: bytes | memoryview) -> "Metadata":
         name, offset = _read_string(data, 0)
         metadata, _ = _read_map(data, offset)
         return cls(name, metadata)
@@ -680,7 +677,7 @@ class MetadataIndex(McapRecord):
         return struct.pack("<QQ", self.offset, self.length) + _write_string(self.name)
 
     @classmethod
-    def read(cls, data: bytes) -> "MetadataIndex":
+    def read(cls, data: bytes | memoryview) -> "MetadataIndex":
         offset, length = struct.unpack_from("<QQ", data, 0)
         name, _ = _read_string(data, 16)
         return cls(offset, length, name)
@@ -709,7 +706,7 @@ class Schema(McapRecord):
     id: int
     name: str
     encoding: str
-    data: bytes
+    data: bytes = field(repr=False)
 
     def write(self) -> bytes:
         return (
@@ -721,12 +718,18 @@ class Schema(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "Schema":
+    def read(cls, data: bytes | memoryview) -> "Schema":
         schema_id = struct.unpack_from("<H", data, 0)[0]
         name, offset = _read_string(data, 2)
         encoding, offset = _read_string(data, offset)
         data_len = struct.unpack_from("<I", data, offset)[0]
-        return cls(schema_id, name, encoding, data[offset + 4 : offset + 4 + data_len])
+        schema_data = data[offset + 4 : offset + 4 + data_len]
+        return cls(
+            schema_id,
+            name,
+            encoding,
+            bytes(schema_data) if isinstance(schema_data, memoryview) else schema_data,
+        )
 
 
 @dataclass(slots=True)
@@ -783,7 +786,7 @@ class Statistics(McapRecord):
         )
 
     @classmethod
-    def read(cls, data: bytes) -> "Statistics":
+    def read(cls, data: bytes | memoryview) -> "Statistics":
         message_count = struct.unpack_from("<Q", data, 0)[0]
         schema_count = struct.unpack_from("<H", data, 8)[0]
         channel_count, attachment_count, metadata_count, chunk_count = struct.unpack_from(
@@ -791,12 +794,7 @@ class Statistics(McapRecord):
         )
         message_start_time, message_end_time = struct.unpack_from("<QQ", data, 26)
         counts_len = struct.unpack_from("<I", data, 42)[0]
-        offset, counts_end = 46, 46 + counts_len
-        channel_message_counts = {}
-        while offset < counts_end:
-            channel_id, count = struct.unpack_from("<HQ", data, offset)
-            channel_message_counts[channel_id] = count
-            offset += 10
+        channel_message_counts = dict(struct.iter_unpack("<HQ", data[46 : 46 + counts_len]))
         return cls(
             message_count,
             schema_count,
@@ -834,7 +832,7 @@ class SummaryOffset(McapRecord):
         return struct.pack("<BQQ", self.group_opcode, self.group_start, self.group_length)
 
     @classmethod
-    def read(cls, data: bytes) -> "SummaryOffset":
+    def read(cls, data: bytes | memoryview) -> "SummaryOffset":
         return cls(*struct.unpack_from("<BQQ", data, 0))
 
 

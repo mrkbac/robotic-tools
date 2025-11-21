@@ -83,7 +83,7 @@ class _CRCWriter:
         self.enable_crc = enable_crc
         self._crc = 0
 
-    def write(self, data: bytes) -> int:
+    def write(self, data: bytes | memoryview) -> int:
         if self.enable_crc:
             self._crc = zlib.crc32(data, self._crc)
         return self._f.write(data)
@@ -127,7 +127,7 @@ def _write_summary_section(
 
 def _calculate_summary_offset_start(
     summary_start: int,
-    summary_data: bytes,
+    summary_data: bytes | memoryview,
     summary_offsets: list[SummaryOffset],
     use_summary_offsets: bool,
 ) -> int:
@@ -142,7 +142,7 @@ def _calculate_summary_offset_start(
 
 
 def _calculate_summary_crc(
-    summary_data: bytes,
+    summary_data: bytes | memoryview,
     summary_start: int,
     summary_offsets: list[SummaryOffset],
     use_summary_offsets: bool,
@@ -290,7 +290,7 @@ class McapWriterRaw:
         self,
         channel_id: int,
         log_time: int,
-        data: bytes,
+        data: bytes | memoryview,
         publish_time: int,
         sequence: int = 0,
     ) -> None:
@@ -323,7 +323,7 @@ class McapWriterRaw:
         create_time: int,
         name: str,
         media_type: str,
-        data: bytes,
+        data: bytes | memoryview,
     ) -> None:
         """Add an attachment to the file."""
         if not self._started:
@@ -517,8 +517,8 @@ class McapWriterRaw:
 
 
 def _compress_chunk_data(
-    data: bytes, compression: CompressionType, min_ratio: float = 0.05
-) -> tuple[bytes, str]:
+    data: bytes | memoryview, compression: CompressionType, min_ratio: float = 0.05
+) -> tuple[bytes | memoryview, str]:
     """
     Compress chunk data and return (compressed_data, compression_type_used).
 
@@ -626,7 +626,8 @@ class _ChunkBuilder:
         if self.num_messages == 0:
             return None
 
-        chunk_data = bytes(self.buffer_data[: self.buffer_pos])
+        # Use memoryview to avoid copy before compression
+        chunk_data = memoryview(self.buffer_data)[: self.buffer_pos]
 
         # Compress data (will fall back to uncompressed if < 5% savings)
         compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
@@ -720,7 +721,7 @@ class McapWriter(McapWriterRaw):
         self,
         channel_id: int,
         log_time: int,
-        data: bytes,
+        data: bytes | memoryview,
         publish_time: int,
         sequence: int = 0,
     ) -> None:
