@@ -1,0 +1,116 @@
+// ROS1 Message Definition Grammar
+// Based on: ROS1 genmsg library (msg_loader.py)
+// ROS1 has simpler syntax than ROS2:
+// - No default values (only constants with =)
+// - No string bounds
+// - No bounded arrays (only fixed-size and unbounded)
+// Parser: LALR with contextual lexer for performance and clarity
+
+// Import common terminals from Lark standard library
+%import common.INT
+%import common.SIGNED_INT
+%import common.SIGNED_FLOAT
+%import common.WS_INLINE
+%import common.NEWLINE
+%import common.SH_COMMENT -> COMMENT
+
+// Globally ignore inline whitespace and comments
+%ignore WS_INLINE
+%ignore COMMENT
+
+// Require at least one newline between field/constant definitions
+// Empty files are allowed
+start: _empty
+     | _lines
+
+_empty: NEWLINE*
+_lines: NEWLINE* line (NEWLINE+ line)* NEWLINE*
+
+line: content
+
+content: field_or_constant
+
+// Field or constant definition - disambiguated by presence of '='
+// Note: Constants should only use primitive types (validated in transformer)
+field_or_constant: type_spec identifier constant_tail?
+
+identifier: IDENTIFIER
+
+// Constant definition with '=' separator
+constant_tail: "=" constant_value
+
+// Type specification (ROS1 simpler than ROS2)
+type_spec: primitive_type array_spec?
+         | complex_type array_spec?
+         | local_type array_spec?
+
+// Primitive types (built-in ROS1 types)
+primitive_type: PRIMITIVE_TYPE
+
+complex_type: PACKAGE_NAME "/" TYPE_IDENTIFIER
+local_type: TYPE_IDENTIFIER
+
+// Array specifications (ROS1 only supports fixed and unbounded)
+array_spec: unbounded_array
+          | fixed_array
+
+unbounded_array: "[" "]"
+fixed_array: "[" INTEGER "]"
+
+// Constant values (ROS1 only supports constants with =)
+constant_value: quoted_string
+              | boolean_literal
+              | numeric_literal
+              | unquoted_string
+
+quoted_string: ESCAPED_STRING
+boolean_literal: BOOLEAN
+numeric_literal: HEX_NUMBER | BINARY_NUMBER | OCTAL_NUMBER | SIGNED_NUMBER | FLOAT_NUMBER
+unquoted_string: UNQUOTED_STRING
+
+// ROS1 primitive types - higher priority than regex patterns
+// Includes deprecated types (char, byte) for backwards compatibility
+PRIMITIVE_TYPE.2: "bool" | "byte" | "char"
+                | "float32" | "float64"
+                | "int8" | "uint8"
+                | "int16" | "uint16"
+                | "int32" | "uint32"
+                | "int64" | "uint64"
+                | "string"
+                | "time" | "duration"
+
+// Package names: start with lowercase, no trailing underscore
+// Pattern: [a-z]([a-z0-9_]*[a-z0-9])? - ensures no trailing underscore
+PACKAGE_NAME: /[a-z]([a-z0-9_]*[a-z0-9])?/
+
+// Type identifiers start with uppercase letter
+TYPE_IDENTIFIER: /[A-Z][A-Za-z0-9]*/
+
+// General identifier for field/constant names
+// Pattern: letter optionally followed by alphanumeric/underscores (no trailing underscore)
+IDENTIFIER: /[A-Za-z]([A-Za-z0-9_]*[A-Za-z0-9])?/
+
+// Special base numeric literals - highest priority to match before plain integers
+HEX_NUMBER.2: /[+-]?0[xX][0-9a-fA-F]+/
+BINARY_NUMBER.2: /[+-]?0[bB][01]+/
+OCTAL_NUMBER.2: /[+-]?0[oO][0-7]+/
+
+// Use imported common number terminals - higher priority than UNQUOTED_STRING
+INTEGER.1: INT
+SIGNED_NUMBER.1: SIGNED_INT
+FLOAT_NUMBER.1: SIGNED_FLOAT
+
+// Boolean literals - higher priority than UNQUOTED_STRING
+// Only true/false (1/0 treated as numeric and coerced in semantic pass)
+// Use word boundaries to avoid matching "false" in "falsehood"
+BOOLEAN.1: /\b(true|True|false|False)\b/
+
+// Strings can be quoted or unquoted for compatibility with reference parser
+ESCAPED_STRING: /'(?:[^'\\]|\\.)*'/
+              | /"(?:[^"\\]|\\.)*"/
+
+// Unquoted strings (for constants) - match until comment or end of line
+// This allows strings with spaces for ROS1 string constants
+// LOWEST priority - fallback for anything not matched by other terminals
+// Excludes only comment character and newline (allows spaces, dots, etc.)
+UNQUOTED_STRING.0: /[^#\n]+/

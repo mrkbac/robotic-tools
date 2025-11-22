@@ -6,8 +6,7 @@ from typing import Any, ClassVar, cast
 
 # Import from standalone parser (pre-compiled grammar)
 from .._lark_standalone_runtime import Token, Transformer
-from ._standalone_parser import Lark_StandAlone
-from .models import (
+from ..models import (
     ActionDefinition,
     Constant,
     Field,
@@ -15,6 +14,7 @@ from .models import (
     ServiceDefinition,
     Type,
 )
+from ._standalone_parser import Lark_StandAlone
 
 
 class MessageTransformer(Transformer[Any, MessageDefinition]):

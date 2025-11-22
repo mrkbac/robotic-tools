@@ -9,10 +9,8 @@ from collections.abc import Callable
 from dataclasses import make_dataclass
 from typing import Any
 
-from ros_parser import (
-    MessageDefinition,
-)
-from ros_parser.message_definition import BUILTIN_TYPES, for_each_msgdef
+from ros_parser import MessageDefinition
+from ros_parser.ros2_msg import BUILTIN_TYPES, for_each_msgdef
 
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
 from mcap_ros2_support_fast._dynamic_encoder import create_encoder

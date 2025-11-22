@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from ros_parser.message_definition import MessageDefinition, Type
+from ros_parser.models import MessageDefinition, Type
 
 
 class MessagePathError(Exception):

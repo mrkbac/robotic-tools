@@ -1,26 +1,41 @@
-"""ROS2 message, service, and action definition parser."""
+"""ROS message, service, and action definition parser.
 
-# Re-export from message_definition for backward compatibility
-from .message_definition import (
+Supports both ROS1 and ROS2 message formats.
+
+For ROS2, use:
+    from ros_parser.ros2_msg import parse_message_string
+    from ros_parser import ros2_msg
+
+For ROS1, use:
+    from ros_parser.ros1_msg import parse_message_string
+    from ros_parser import ros1_msg
+
+For shared models:
+    from ros_parser.models import MessageDefinition, Field, Type, Constant
+"""
+
+# Re-export shared models at package level for convenience
+from .models import (
+    PRIMITIVE_TYPE_NAMES,
     ActionDefinition,
     Constant,
     Field,
     MessageDefinition,
     ServiceDefinition,
     Type,
-    parse_action_file,
-    parse_action_string,
-    parse_message_file,
-    parse_message_string,
-    parse_schema_to_definitions,
-    parse_service_file,
-    parse_service_string,
 )
 
 # Re-export message_path validation APIs
 from .message_path import ValidationError
 
+# Re-export commonly used schema parser (ROS2-specific)
+from .ros2_msg.schema_parser import parse_schema_to_definitions
+
+# Make format-specific parsers available as submodules
+from . import ros1_msg, ros2_msg
+
 __all__ = [
+    "PRIMITIVE_TYPE_NAMES",
     "ActionDefinition",
     "Constant",
     "Field",
@@ -28,11 +43,7 @@ __all__ = [
     "ServiceDefinition",
     "Type",
     "ValidationError",
-    "parse_action_file",
-    "parse_action_string",
-    "parse_message_file",
-    "parse_message_string",
     "parse_schema_to_definitions",
-    "parse_service_file",
-    "parse_service_string",
+    "ros1_msg",
+    "ros2_msg",
 ]

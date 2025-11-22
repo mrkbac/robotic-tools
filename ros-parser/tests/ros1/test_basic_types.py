@@ -1,8 +1,8 @@
-"""Tests for basic ROS2 primitive types."""
+"""Tests for basic ROS1 primitive types."""
 
-import pytest
-from ros_parser import Type
-from ros_parser.ros2_msg import parse_message_string
+from ros_parser.ros1_msg import parse_message_string
+
+from .reference_parser import parse_message_string as reference_parse
 
 
 def test_single_field():
@@ -16,7 +16,7 @@ def test_single_field():
 
 
 def test_all_primitive_types():
-    """Test parsing all primitive types."""
+    """Test parsing all ROS1 primitive types."""
     primitive_types = [
         "bool",
         "int8",
@@ -30,7 +30,9 @@ def test_all_primitive_types():
         "float32",
         "float64",
         "string",
-        "wstring",
+        # ROS1 deprecated types
+        "char",
+        "byte",
     ]
 
     for ptype in primitive_types:
@@ -57,33 +59,24 @@ def test_multiple_fields():
 
 
 def test_time_and_duration():
-    """Test parsing time and duration types."""
+    """Test parsing time and duration types (ROS1 built-ins)."""
     msg = parse_message_string("time timestamp\nduration elapsed")
     assert len(msg.fields) == 2
     assert msg.fields[0].name == "timestamp"
     assert msg.fields[0].type.type_name == "time"
+    assert msg.fields[0].type.is_primitive
     assert msg.fields[1].name == "elapsed"
     assert msg.fields[1].type.type_name == "duration"
+    assert msg.fields[1].type.is_primitive
 
 
 def test_type_aliases():
     """Test that type names are kept as-is, matching reference parser behavior."""
-    # char and byte are NOT normalized to uint8 at parse time (reference parser behavior)
+    # char and byte are NOT normalized to uint8 at parse time
     msg = parse_message_string("char c\nbyte b")
     assert len(msg.fields) == 2
     assert msg.fields[0].type.type_name == "char"
     assert msg.fields[1].type.type_name == "byte"
-
-
-def test_builtin_interfaces_types():
-    """Test that builtin_interfaces types are kept as message types, not primitives."""
-    msg = parse_message_string("builtin_interfaces/Time stamp\nbuiltin_interfaces/Duration dur")
-    assert len(msg.fields) == 2
-    # builtin_interfaces/Time and builtin_interfaces/Duration are message types, not primitives
-    assert msg.fields[0].type.type_name == "Time"
-    assert msg.fields[0].type.package_name == "builtin_interfaces"
-    assert msg.fields[1].type.type_name == "Duration"
-    assert msg.fields[1].type.package_name == "builtin_interfaces"
 
 
 def test_comments_ignored():
@@ -103,7 +96,6 @@ def test_comments_ignored():
 def test_empty_lines_ignored():
     """Test that empty lines are properly ignored."""
     definition = """
-
     string name
 
     int32 value
@@ -113,39 +105,25 @@ def test_empty_lines_ignored():
     assert len(msg.fields) == 2
 
 
-@pytest.mark.xfail(reason="Field name validation not implemented")
-def test_field_name_validation():
-    """Test that field names follow the correct pattern."""
-    # Valid field names
-    valid_names = ["name", "field_name", "field123", "a", "value_1"]
-    for name in valid_names:
-        msg = parse_message_string(f"string {name}")
-        assert msg.fields[0].name == name
+def test_comparison_with_reference_parser():
+    """Test that our parser matches the reference parser for basic types."""
+    definition = """
+    bool enabled
+    int32 count
+    float64 ratio
+    string name
+    time timestamp
+    duration elapsed
+    """
 
-    # Invalid field names should fail
-    invalid_names = ["Name", "FIELD", "_field", "field_", "field__name", "123field"]
-    for name in invalid_names:
-        with pytest.raises(Exception):  # noqa: B017, PT011
-            parse_message_string(f"string {name}")
+    # Parse with both parsers
+    our_msg = parse_message_string(definition)
+    ref_msg = reference_parse(definition)
 
+    # Compare field counts
+    assert len(our_msg.fields) == len(ref_msg.fields)
 
-def test_type_string_representation():
-    """Test Type.__str__ method."""
-    t = Type(type_name="string")
-    assert str(t) == "string"
-
-    t = Type(type_name="int32")
-    assert str(t) == "int32"
-
-    t = Type(type_name="Point", package_name="geometry_msgs")
-    assert str(t) == "geometry_msgs/Point"
-
-
-def test_complex_type():
-    """Test parsing complex types."""
-    msg = parse_message_string("geometry_msgs/Point position")
-    assert len(msg.fields) == 1
-    assert msg.fields[0].name == "position"
-    assert msg.fields[0].type.type_name == "Point"
-    assert msg.fields[0].type.package_name == "geometry_msgs"
-    assert not msg.fields[0].type.is_primitive
+    # Compare each field
+    for our_field, ref_field in zip(our_msg.fields, ref_msg.fields, strict=True):
+        assert our_field.name == ref_field.name
+        assert our_field.type.type_name == ref_field.field_type

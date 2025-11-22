@@ -3,8 +3,8 @@
 import re
 from collections.abc import Callable
 
-from ros_parser.message_definition import Field, MessageDefinition, Type
-from ros_parser.message_definition.parser import parse_message_string
+from ros_parser.models import Field, MessageDefinition, Type
+from ros_parser.ros2_msg.parser import parse_message_string
 
 # Built-in ROS2 types that may not be included in schema data
 BUILTIN_TYPES = {
