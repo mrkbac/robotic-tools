@@ -24,6 +24,18 @@ def _get_field(obj: Any, f: str, default: Any) -> Any:
         return obj.get(f, default)
 
 
+def _default_value_from_type(type_id: TypeId) -> Any:
+    """Get the default value for a given TypeId."""
+    if type_id == TypeId.STRING:
+        return ""
+
+    if type_id == TypeId.BOOL:
+        return False
+    if type_id in {TypeId.FLOAT32, TypeId.FLOAT64}:
+        return 0.0
+    return 0
+
+
 class EncoderGeneratorFactory:
     """Factory class for generating encoder code with managed state."""
 
@@ -214,17 +226,9 @@ class EncoderGeneratorFactory:
         for name, typeid, default_val in targets:
             if typeid != TypeId.PADDING:
                 field_var = self.generate_var_name()
-                # Compute default value with proper fallbacks
-                if default_val is not None:
-                    default = default_val
-                elif typeid == TypeId.STRING:
-                    default = ""
-                elif typeid == TypeId.BOOL:
-                    default = False
-                elif typeid in {TypeId.FLOAT32, TypeId.FLOAT64}:
-                    default = 0.0
-                else:
-                    default = 0
+                default = default_val
+                if default is None:
+                    default = _default_value_from_type(typeid)
                 self.code.append(f"{field_var} = _get_field({parent_var}, '{name}', {default!r})")
                 field_values.append(field_var)
 
@@ -239,17 +243,9 @@ class EncoderGeneratorFactory:
         """Generate code for a single plan action."""
         if step.type == ActionType.PRIMITIVE:
             field_var = self.generate_var_name()
-            # Compute default value with proper fallbacks
-            if step.default_value is not None:
-                default = step.default_value
-            elif step.data == TypeId.STRING:
-                default = ""
-            elif step.data == TypeId.BOOL:
-                default = False
-            elif step.data in {TypeId.FLOAT32, TypeId.FLOAT64}:
-                default = 0.0
-            else:
-                default = 0
+            default = step.default_value
+            if default is None:
+                default = _default_value_from_type(step.data)
             self.code.append(
                 f"{field_var} = _get_field({parent_var}, '{step.target}', {default!r})"
             )
