@@ -587,7 +587,7 @@ class _ChunkBuilder:
         self.message_indices: dict[int, MessageIndex] = {}
         self.num_messages = 0
 
-    def add(self, record: Schema | Channel | Message) -> None:
+    def add(self, record: Schema) -> None:
         # Add record to current chunk
         record_data = record.write_record()
         record_len = len(record_data)
@@ -642,8 +642,8 @@ class _ChunkBuilder:
             message_start_time=self.message_start_time,
             message_end_time=self.message_end_time,
             uncompressed_crc=zlib.crc32(chunk_data) if self.enable_crcs else 0,
-            uncompressed_size=len(chunk_data),
-        ), self.message_indices.copy()
+            uncompressed_size=self.buffer_pos,
+        ), self.message_indices
 
 
 class EncoderFactoryProtocol(Protocol):

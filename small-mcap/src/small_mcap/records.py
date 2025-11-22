@@ -1,3 +1,4 @@
+import codecs
 import io
 import struct
 import zlib
@@ -52,9 +53,7 @@ def _read_string(data: bytes | memoryview, offset: int) -> tuple[str, int]:
     string_len = struct.unpack_from("<I", data, offset)[0]
     offset += 4
     string_bytes = data[offset : offset + string_len]
-    string_val = (
-        string_bytes.tobytes() if isinstance(string_bytes, memoryview) else string_bytes
-    ).decode("utf-8")
+    string_val = codecs.decode(string_bytes, "utf-8")
     offset += string_len
     return string_val, offset
 
