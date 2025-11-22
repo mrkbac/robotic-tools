@@ -1,28 +1,42 @@
 """Data models for ROS2 message definitions."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import cached_property
 
-# ROS2 primitive type names
-PRIMITIVE_TYPE_NAMES = {
-    "bool",
-    "byte",
-    "char",
-    "float32",
-    "float64",
-    "int8",
-    "uint8",
-    "int16",
-    "uint16",
-    "int32",
-    "uint32",
-    "int64",
-    "uint64",
-    "string",
-    "wstring",
-    "time",
-    "duration",
-}
+
+class PrimitiveType(str, Enum):
+    """ROS primitive type names as enumeration.
+
+    This enum provides type-safe access to primitive type names
+    with autocomplete support in IDEs.
+    """
+
+    BOOL = "bool"
+    BYTE = "byte"
+    CHAR = "char"
+    FLOAT32 = "float32"
+    FLOAT64 = "float64"
+    INT8 = "int8"
+    UINT8 = "uint8"
+    INT16 = "int16"
+    UINT16 = "uint16"
+    INT32 = "int32"
+    UINT32 = "uint32"
+    INT64 = "int64"
+    UINT64 = "uint64"
+    STRING = "string"
+    WSTRING = "wstring"
+    TIME = "time"
+    DURATION = "duration"
+
+
+# Set of all primitive type names (for backwards compatibility)
+PRIMITIVE_TYPE_NAMES = {member.value for member in PrimitiveType}
+
+# Type aliases for primitive values
+PrimitiveValue = bool | int | float | str
+ArrayValue = list[PrimitiveValue]
 
 
 @dataclass(frozen=True)
@@ -84,7 +98,7 @@ class Field:
 
     type: Type
     name: str
-    default_value: bool | int | float | str | list[bool | int | float | str] | None = None
+    default_value: PrimitiveValue | ArrayValue | None = None
 
     def __str__(self) -> str:
         """Return the string representation of the field."""
@@ -105,7 +119,7 @@ class Constant:
 
     type: Type
     name: str
-    value: bool | int | float | str
+    value: PrimitiveValue
 
     def __post_init__(self) -> None:
         """Validate constant after initialization."""

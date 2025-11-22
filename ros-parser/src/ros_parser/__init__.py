@@ -21,6 +21,7 @@ from .models import (
     Constant,
     Field,
     MessageDefinition,
+    PrimitiveType,
     ServiceDefinition,
     Type,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "Constant",
     "Field",
     "MessageDefinition",
+    "PrimitiveType",
     "ServiceDefinition",
     "Type",
     "ValidationError",
