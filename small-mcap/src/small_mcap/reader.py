@@ -10,20 +10,6 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
-if TYPE_CHECKING:
-    from lz4.frame import decompress as lz4_decompress  # type: ignore[import-untyped]
-    from zstandard import decompress as zstd_decompress
-else:
-    try:
-        from zstandard import decompress as zstd_decompress
-    except ImportError:
-        zstd_decompress = None  # type: ignore[assignment]
-
-    try:
-        from lz4.frame import decompress as lz4_decompress
-    except ImportError:
-        lz4_decompress = None  # type: ignore[assignment]
-
 from small_mcap.records import (
     MAGIC,
     MAGIC_SIZE,
@@ -49,6 +35,22 @@ from small_mcap.records import (
     Summary,
     SummaryOffset,
 )
+
+if TYPE_CHECKING:
+    from lz4.frame import decompress as lz4_decompress  # type: ignore[import-untyped]
+    from zstandard import ZstdDecompressor
+else:
+    try:
+        from zstandard import ZstdDecompressor
+    except ImportError:
+        ZstdDecompressor = None  # type: ignore[assignment,misc]
+
+    try:
+        from lz4.frame import decompress as lz4_decompress
+    except ImportError:
+        lz4_decompress = None  # type: ignore[assignment]
+
+_zstd_decompressor: "ZstdDecompressor | None" = None
 
 _OPCODE_SIZE = 1
 _RECORD_LENGTH_SIZE = 8
@@ -128,12 +130,15 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | 
 
     data: bytes | memoryview
     if chunk.compression == "zstd":
-        if zstd_decompress is None:
+        if ZstdDecompressor is None:
             raise UnsupportedCompressionError(
                 "zstd compression used but zstandard module is not installed. "
                 "Install it with: pip install zstandard"
             )
-        data = zstd_decompress(chunk.data, chunk.uncompressed_size)
+        global _zstd_decompressor  # noqa: PLW0603
+        if _zstd_decompressor is None:
+            _zstd_decompressor = ZstdDecompressor()
+        data = _zstd_decompressor.decompress(chunk.data, max_output_size=chunk.uncompressed_size)
     elif chunk.compression == "lz4":
         if lz4_decompress is None:
             raise UnsupportedCompressionError(

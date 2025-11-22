@@ -43,6 +43,8 @@ else:
         lz4_compress = None  # type: ignore[assignment]
 
 
+_zstd_compressor: "zstandard.ZstdCompressor | None" = None
+
 # Buffer allocation multiplier for chunk builder
 BUFFER_SIZE_MULTIPLIER = 1.25
 
@@ -536,8 +538,10 @@ def _compress_chunk_data(
     if compression == CompressionType.ZSTD:
         if zstandard is None:
             raise ImportError("zstandard module not available")
-        cctx = zstandard.ZstdCompressor()
-        compressed = cctx.compress(data)
+        global _zstd_compressor  # noqa: PLW0603
+        if _zstd_compressor is None:
+            _zstd_compressor = zstandard.ZstdCompressor()
+        compressed = _zstd_compressor.compress(data)
     elif compression == CompressionType.LZ4:
         if lz4_compress is None:
             raise ImportError("lz4 module not available")
