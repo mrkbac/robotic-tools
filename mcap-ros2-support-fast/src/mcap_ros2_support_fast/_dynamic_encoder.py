@@ -330,10 +330,6 @@ class EncoderGeneratorFactory:
             # Generate the main encoding code first to collect all types
             self.generate_plan_writer("message", self.plan)
 
-            # Add struct pattern variables to prolog
-            for var in self.struct_patterns.values():
-                self.code.prolog(f"{var} = {var}g")
-
             self.code.append("return memoryview(_buffer)")
 
         return str(self.code)
@@ -359,9 +355,9 @@ class EncoderGeneratorFactory:
             },
         }
 
-        # Add struct pattern variables
+        # Add struct pattern variables directly (no 'g' suffix needed anymore)
         for pattern, var_name in self.struct_patterns.items():
-            namespace[f"{var_name}g"] = struct.Struct(pattern).pack
+            namespace[var_name] = struct.Struct(pattern).pack
 
         # Add message classes
         for msg_class in self.message_classes:

@@ -146,11 +146,11 @@ def main() -> None:
 
     # Decoder struct patterns (unpack_from)
     for pattern, var_name in all_decoder_struct_patterns.items():
-        generated_lines.append(f"{var_name}g = struct.Struct('{pattern}').unpack_from")
+        generated_lines.append(f"{var_name} = struct.Struct('{pattern}').unpack_from")
 
     # Encoder struct patterns (pack)
     for pattern, var_name in all_encoder_struct_patterns.items():
-        generated_lines.append(f"{var_name}g = struct.Struct('{pattern}').pack")
+        generated_lines.append(f"{var_name} = struct.Struct('{pattern}').pack")
 
     generated_lines.append("")
 

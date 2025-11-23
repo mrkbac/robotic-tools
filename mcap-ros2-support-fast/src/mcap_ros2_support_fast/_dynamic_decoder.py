@@ -51,8 +51,7 @@ class DecoderGeneratorFactory:
                 .replace("?", "bool")
             )
             # Add decoder prefix to prevent conflicts with encoder patterns
-            # Add 'g' suffix for global reference (used in generation)
-            self.struct_patterns[pattern] = f"_d_{safe_name}g"
+            self.struct_patterns[pattern] = f"_d_{safe_name}"
         return self.struct_patterns[pattern]
 
     def generate_alignment(self, size: int) -> None:
