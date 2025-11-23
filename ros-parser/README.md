@@ -12,7 +12,8 @@ The project uses Lark to generate standalone parsers from grammar files. If you 
 
 ```bash
 uv run _generate_standalone.py \
-  src/ros_parser/message_definition/grammar.lark \
+  src/ros_parser/ros1_msg/grammar.lark \
+  src/ros_parser/ros2_msg/grammar.lark \
   src/ros_parser/message_path/grammar.lark \
   --output-dir src/ros_parser \
   --lexer contextual

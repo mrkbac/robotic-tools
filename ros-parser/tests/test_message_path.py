@@ -1,5 +1,6 @@
 """Tests for Foxglove message path parser."""
 
+import math
 from dataclasses import dataclass
 
 import pytest
@@ -10,6 +11,7 @@ from ros_parser.message_path import (
     FieldAccess,
     Filter,
     LarkError,
+    MathModifier,
     MessagePathError,
     Variable,
     parse_message_path,
@@ -842,3 +844,390 @@ class TestMessagePathApply:
 
         with pytest.raises(MessagePathError):
             path.apply(obj)
+
+
+class TestMathModifierParsing:
+    """Test parsing of math modifier syntax."""
+
+    def test_parse_unary_modifier(self):
+        """Test parsing unary math modifier (no arguments)."""
+
+        result = parse_message_path("/topic.value.@abs")
+        assert len(result.segments) == 2
+        assert isinstance(result.segments[1], MathModifier)
+        assert result.segments[1].operation == "abs"
+        assert result.segments[1].arguments == []
+
+    def test_parse_binary_modifier_with_number(self):
+        """Test parsing math modifier with numeric argument."""
+
+        result = parse_message_path("/topic.value.@mul(2.5)")
+        assert len(result.segments) == 2
+        assert isinstance(result.segments[1], MathModifier)
+        assert result.segments[1].operation == "mul"
+        assert result.segments[1].arguments == [2.5]
+
+    def test_parse_modifier_with_variable(self):
+        """Test parsing math modifier with variable argument."""
+
+        result = parse_message_path("/topic.value.@add($offset)")
+        assert len(result.segments) == 2
+        assert isinstance(result.segments[1], MathModifier)
+        assert result.segments[1].operation == "add"
+        assert len(result.segments[1].arguments) == 1
+        assert isinstance(result.segments[1].arguments[0], Variable)
+        assert result.segments[1].arguments[0].name == "offset"
+
+    def test_parse_chained_modifiers(self):
+        """Test parsing multiple chained math modifiers."""
+
+        result = parse_message_path("/topic.value.@mul(1.8).@add(32)")
+        assert len(result.segments) == 3
+        assert isinstance(result.segments[1], MathModifier)
+        assert result.segments[1].operation == "mul"
+        assert isinstance(result.segments[2], MathModifier)
+        assert result.segments[2].operation == "add"
+
+    def test_parse_modifier_after_array_index(self):
+        """Test math modifier after array indexing."""
+
+        result = parse_message_path("/topic.values[0].@abs")
+        assert len(result.segments) == 3
+        assert isinstance(result.segments[1], ArrayIndex)
+        assert isinstance(result.segments[2], MathModifier)
+
+    def test_parse_modifier_with_round_precision(self):
+        """Test round modifier with precision argument."""
+
+        result = parse_message_path("/topic.value.@round(2)")
+        assert isinstance(result.segments[1], MathModifier)
+        assert result.segments[1].operation == "round"
+        assert result.segments[1].arguments == [2]
+
+
+class TestMathModifierApply:
+    """Test applying math modifiers to data."""
+
+    def test_abs_positive(self):
+        """Test abs on positive number."""
+
+        modifier = MathModifier(operation="abs", arguments=[])
+        result = modifier.apply(5.5, {})
+        assert result == 5.5
+
+    def test_abs_negative(self):
+        """Test abs on negative number."""
+
+        modifier = MathModifier(operation="abs", arguments=[])
+        result = modifier.apply(-10, {})
+        assert result == 10
+
+    def test_add_with_number(self):
+        """Test add operation."""
+
+        modifier = MathModifier(operation="add", arguments=[5])
+        result = modifier.apply(10, {})
+        assert result == 15
+
+    def test_sub_with_number(self):
+        """Test subtract operation."""
+
+        modifier = MathModifier(operation="sub", arguments=[3])
+        result = modifier.apply(10, {})
+        assert result == 7
+
+    def test_mul_with_number(self):
+        """Test multiply operation."""
+
+        modifier = MathModifier(operation="mul", arguments=[2.5])
+        result = modifier.apply(4, {})
+        assert result == 10.0
+
+    def test_div_with_number(self):
+        """Test division operation."""
+
+        modifier = MathModifier(operation="div", arguments=[2])
+        result = modifier.apply(10, {})
+        assert result == 5.0
+
+    def test_div_by_zero(self):
+        """Test division by zero raises error."""
+
+        modifier = MathModifier(operation="div", arguments=[0])
+        with pytest.raises(MessagePathError, match="Division by zero"):
+            modifier.apply(10, {})
+
+    def test_sqrt(self):
+        """Test square root operation."""
+
+        modifier = MathModifier(operation="sqrt", arguments=[])
+        result = modifier.apply(16, {})
+        assert result == 4.0
+
+    def test_sqrt_negative(self):
+        """Test sqrt of negative number raises error."""
+
+        modifier = MathModifier(operation="sqrt", arguments=[])
+        with pytest.raises(MessagePathError, match="Math error"):
+            modifier.apply(-1, {})
+
+    def test_round_no_args(self):
+        """Test round without precision argument."""
+
+        modifier = MathModifier(operation="round", arguments=[])
+        result = modifier.apply(3.7, {})
+        assert result == 4
+
+    def test_round_with_precision(self):
+        """Test round with precision argument."""
+
+        modifier = MathModifier(operation="round", arguments=[2])
+        result = modifier.apply(3.14159, {})
+        assert result == 3.14
+
+    def test_ceil(self):
+        """Test ceil operation."""
+
+        modifier = MathModifier(operation="ceil", arguments=[])
+        result = modifier.apply(3.2, {})
+        assert result == 4
+
+    def test_floor(self):
+        """Test floor operation."""
+
+        modifier = MathModifier(operation="floor", arguments=[])
+        result = modifier.apply(3.8, {})
+        assert result == 3
+
+    def test_sign_positive(self):
+        """Test sign of positive number."""
+
+        modifier = MathModifier(operation="sign", arguments=[])
+        result = modifier.apply(5, {})
+        assert result == 1
+
+    def test_sign_negative(self):
+        """Test sign of negative number."""
+
+        modifier = MathModifier(operation="sign", arguments=[])
+        result = modifier.apply(-5, {})
+        assert result == -1
+
+    def test_sign_zero(self):
+        """Test sign of zero."""
+
+        modifier = MathModifier(operation="sign", arguments=[])
+        result = modifier.apply(0, {})
+        assert result == 0
+
+    def test_negative(self):
+        """Test negative operation."""
+
+        modifier = MathModifier(operation="negative", arguments=[])
+        result = modifier.apply(5, {})
+        assert result == -5
+
+    def test_trig_functions(self):
+        """Test trigonometric functions."""
+
+        # Test sin
+        modifier = MathModifier(operation="sin", arguments=[])
+        result = modifier.apply(0, {})
+        assert abs(result - 0) < 1e-10
+
+        # Test cos
+        modifier = MathModifier(operation="cos", arguments=[])
+        result = modifier.apply(0, {})
+        assert abs(result - 1.0) < 1e-10
+
+        # Test tan
+        modifier = MathModifier(operation="tan", arguments=[])
+        result = modifier.apply(0, {})
+        assert abs(result - 0) < 1e-10
+
+    def test_log_functions(self):
+        """Test logarithm functions."""
+
+        # Test log (natural log)
+        modifier = MathModifier(operation="log", arguments=[])
+        result = modifier.apply(math.e, {})
+        assert abs(result - 1.0) < 1e-10
+
+        # Test log10
+        modifier = MathModifier(operation="log10", arguments=[])
+        result = modifier.apply(100, {})
+        assert abs(result - 2.0) < 1e-10
+
+        # Test log2
+        modifier = MathModifier(operation="log2", arguments=[])
+        result = modifier.apply(8, {})
+        assert abs(result - 3.0) < 1e-10
+
+    def test_modifier_with_variable_arg(self):
+        """Test modifier with variable argument."""
+
+        modifier = MathModifier(operation="mul", arguments=[Variable(name="scale")])
+        result = modifier.apply(10, {"scale": 2.5})
+        assert result == 25.0
+
+    def test_element_wise_on_list(self):
+        """Test element-wise application on list."""
+
+        modifier = MathModifier(operation="abs", arguments=[])
+        result = modifier.apply([1, -2, 3, -4], {})
+        assert result == [1, 2, 3, 4]
+
+    def test_element_wise_on_tuple(self):
+        """Test element-wise application on tuple."""
+
+        modifier = MathModifier(operation="mul", arguments=[2])
+        result = modifier.apply((1, 2, 3), {})
+        assert result == (2, 4, 6)
+        assert isinstance(result, tuple)
+
+    def test_element_wise_with_complex_operation(self):
+        """Test element-wise with more complex operations."""
+
+        modifier = MathModifier(operation="add", arguments=[10])
+        result = modifier.apply([1.5, 2.5, 3.5], {})
+        assert result == [11.5, 12.5, 13.5]
+
+    def test_error_on_non_numeric(self):
+        """Test error when applying to non-numeric type."""
+
+        modifier = MathModifier(operation="abs", arguments=[])
+        with pytest.raises(MessagePathError, match="can only be applied to numeric types"):
+            modifier.apply("not a number", {})
+
+    def test_error_on_nan(self):
+        """Test error when receiving NaN."""
+
+        modifier = MathModifier(operation="abs", arguments=[])
+        with pytest.raises(MessagePathError, match="received NaN"):
+            modifier.apply(float("nan"), {})
+
+    def test_unknown_operation(self):
+        """Test error on unknown operation."""
+
+        modifier = MathModifier(operation="unknown_op", arguments=[])
+        with pytest.raises(MessagePathError, match="Unknown math modifier"):
+            modifier.apply(10, {})
+
+    def test_add_multiple_args(self):
+        """Test add with multiple arguments."""
+
+        modifier = MathModifier(operation="add", arguments=[5, 10, 3])
+        result = modifier.apply(2, {})
+        assert result == 20  # 2 + 5 + 10 + 3
+
+    def test_sub_multiple_args(self):
+        """Test subtract with multiple arguments."""
+
+        modifier = MathModifier(operation="sub", arguments=[2, 3])
+        result = modifier.apply(10, {})
+        assert result == 5  # 10 - 2 - 3
+
+    def test_mul_multiple_args(self):
+        """Test multiply with multiple arguments."""
+
+        modifier = MathModifier(operation="mul", arguments=[2, 3, 2])
+        result = modifier.apply(5, {})
+        assert result == 60  # 5 * 2 * 3 * 2
+
+    def test_min_operation(self):
+        """Test min operation."""
+
+        modifier = MathModifier(operation="min", arguments=[5, 2, 8])
+        result = modifier.apply(3, {})
+        assert result == 2  # min(3, 5, 2, 8)
+
+    def test_max_operation(self):
+        """Test max operation."""
+
+        modifier = MathModifier(operation="max", arguments=[5, 2, 8])
+        result = modifier.apply(3, {})
+        assert result == 8  # max(3, 5, 2, 8)
+
+
+class TestMathModifierIntegration:
+    """Test math modifiers in complete message paths."""
+
+    def test_celsius_to_fahrenheit(self):
+        """Test converting Celsius to Fahrenheit: C * 1.8 + 32."""
+        path = parse_message_path("/topic.temperature.@mul(1.8).@add(32)")
+        result = path.apply({"temperature": 0}, {})
+        assert result == 32.0
+
+        result = path.apply({"temperature": 100}, {})
+        assert result == 212.0
+
+    def test_with_nested_fields(self):
+        """Test math modifier on nested field access."""
+        path = parse_message_path("/topic.position.x.@abs")
+        obj = {"position": {"x": -5.5}}
+        result = path.apply(obj, {})
+        assert result == 5.5
+
+    def test_with_array_slice(self):
+        """Test math modifier after array slicing."""
+        path = parse_message_path("/topic.values[:].@mul(2)")
+        obj = {"values": [1, 2, 3, 4]}
+        result = path.apply(obj, {})
+        assert result == [2, 4, 6, 8]
+
+    def test_with_filter_and_modifier(self):
+        """Test combining filter with math modifier."""
+        # Filter first, then access value field on each item, then apply sqrt
+        path = parse_message_path("/topic.readings[:]{value>0}")
+        obj = {
+            "readings": [
+                {"value": 4},
+                {"value": -1},
+                {"value": 16},
+                {"value": 9},
+            ]
+        }
+        result = path.apply(obj, {})
+        # Filter keeps only positive values
+        assert result == [{"value": 4}, {"value": 16}, {"value": 9}]
+
+        # Now test with a simpler structure - array of numbers
+        path2 = parse_message_path("/topic.values[:].@abs")
+        obj2 = {"values": [-4, 1, -16, 9]}
+        result2 = path2.apply(obj2, {})
+        assert result2 == [4, 1, 16, 9]
+
+    def test_multiple_modifiers_chain(self):
+        """Test chaining multiple math modifiers."""
+        path = parse_message_path("/topic.value.@mul(2).@add(10).@div(4)")
+        result = path.apply({"value": 5}, {})
+        # (5 * 2 + 10) / 4 = 20 / 4 = 5.0
+        assert result == 5.0
+
+    def test_with_variables(self):
+        """Test math modifiers with variable substitution."""
+        path = parse_message_path("/topic.value.@mul($scale).@add($offset)")
+        result = path.apply({"value": 10}, {"scale": 2, "offset": 5})
+        assert result == 25
+
+    def test_add_multiple_args_parsed(self):
+        """Test parsing and applying add with multiple arguments."""
+        path = parse_message_path("/topic.value.@add(5,10,3)")
+        result = path.apply({"value": 2}, {})
+        assert result == 20  # 2 + 5 + 10 + 3
+
+    def test_mul_multiple_args_parsed(self):
+        """Test parsing and applying multiply with multiple arguments."""
+        path = parse_message_path("/topic.value.@mul(2,3)")
+        result = path.apply({"value": 5}, {})
+        assert result == 30  # 5 * 2 * 3
+
+    def test_min_max_parsed(self):
+        """Test parsing and applying min/max operations."""
+        path_min = parse_message_path("/topic.value.@min(5,2,8)")
+        result_min = path_min.apply({"value": 3}, {})
+        assert result_min == 2
+
+        path_max = parse_message_path("/topic.value.@max(5,2,8)")
+        result_max = path_max.apply({"value": 3}, {})
+        assert result_max == 8

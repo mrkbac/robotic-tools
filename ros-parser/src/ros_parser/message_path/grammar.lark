@@ -18,14 +18,24 @@ message_path: topic_ref path_segment*
 // Topic reference: starts with / and allows hierarchical names
 topic_ref: "/" IDENTIFIER ("/" IDENTIFIER)*
 
-// Path segments can be field access, array operations, or filters (inline)
+// Path segments can be field access, array operations, filters, or math modifiers
 ?path_segment: field_access
              | array_index
              | array_slice
              | filter
+             | math_modifier
 
 // Field access with dot notation
 field_access: "." IDENTIFIER
+
+// Math modifier: .@abs, .@mul(2), .@add($var)
+math_modifier: ".@" IDENTIFIER "(" modifier_args ")"  -> math_modifier_with_args
+             | ".@" IDENTIFIER                        -> math_modifier_no_args
+
+modifier_args: modifier_arg ("," modifier_arg)*
+
+?modifier_arg: SIGNED_NUMBER
+             | variable
 
 // Array index: [5], [-1], [$var]
 array_index: "[" index_value "]"

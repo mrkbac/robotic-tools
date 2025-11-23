@@ -10,6 +10,7 @@ from .models import (
     ComparisonOperator,
     FieldAccess,
     Filter,
+    MathModifier,
     MessagePath,
     Variable,
 )
@@ -85,6 +86,22 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         """Build field path string from identifiers."""
         # Join all identifiers with dots
         return ".".join(str(item) for item in items)
+
+    def math_modifier_with_args(self, items: list[Any]) -> MathModifier:
+        """Build MathModifier with arguments from parsed tokens."""
+        operation = str(items[0])  # IDENTIFIER token
+        # items[1] is the list of arguments from modifier_args
+        arguments = items[1] if len(items) > 1 else []
+        return MathModifier(operation=operation, arguments=arguments)
+
+    def math_modifier_no_args(self, items: list[Any]) -> MathModifier:
+        """Build MathModifier without arguments from parsed tokens."""
+        operation = str(items[0])  # IDENTIFIER token
+        return MathModifier(operation=operation, arguments=[])
+
+    def modifier_args(self, items: list[Any]) -> list[int | float | Variable]:
+        """Collect all modifier arguments into a flat list."""
+        return items
 
     def variable(self, items: list[Token]) -> Variable:
         """Build Variable from name."""

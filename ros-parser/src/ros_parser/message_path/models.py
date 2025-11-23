@@ -1,9 +1,10 @@
 import contextlib
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from ros_parser.models import MessageDefinition, Type
 
@@ -390,10 +391,181 @@ class Filter(Action):
         return current_type, current_msgdef
 
 
+def _add(value: float, *args: float) -> float:
+    """Add multiple values."""
+    return sum([value, *args])
+
+
+def _sub(value: float, *args: float) -> float:
+    """Subtract multiple values from the initial value."""
+    return value - sum(args)
+
+
+def _mul(value: float, *args: float) -> float:
+    """Multiply by multiple values."""
+    result = value
+    for arg in args:
+        result *= arg
+    return result
+
+
+def _div(value: float, divisor: float) -> float:
+    """Divide by multiple values with zero check."""
+    if divisor == 0:
+        raise ZeroDivisionError("Division by zero")
+    return value / divisor
+
+
+def _round_with_arg(value: float, precision: float | None = None) -> int | float:
+    """Round with optional precision argument."""
+    if precision is None:
+        return round(value)
+    return round(value, int(precision))
+
+
+def _min(*args: float) -> float:
+    """Return minimum of values."""
+    return min(args)
+
+
+def _max(*args: float) -> float:
+    """Return maximum of values."""
+    return max(args)
+
+
+_FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
+    "abs": abs,
+    "acos": math.acos,
+    "asin": math.asin,
+    "atan": math.atan,
+    "ceil": math.ceil,
+    "cos": math.cos,
+    "floor": math.floor,
+    "log": math.log,
+    "log1p": math.log1p,
+    "log2": math.log2,
+    "log10": math.log10,
+    "negative": lambda value: -value,
+    "sign": lambda value: 1 if value > 0 else (-1 if value < 0 else 0),
+    "sin": math.sin,
+    "sqrt": math.sqrt,
+    "tan": math.tan,
+    "trunc": math.trunc,
+    "add": _add,
+    "sub": _sub,
+    "mul": _mul,
+    "div": _div,
+    "round": _round_with_arg,
+    "min": _min,
+    "max": _max,
+}
+
+
+@dataclass
+class MathModifier(Action):
+    """Apply mathematical operations to numeric values."""
+
+    operation: str
+    arguments: list[int | float | Variable]
+
+    def apply(self, obj: Any, variables: _VariableStore) -> Any:
+        """Apply the math operation to the object, supporting element-wise array operations."""
+        # Resolve arguments (convert Variables to actual values)
+        resolved_args = [
+            variables[arg.name] if isinstance(arg, Variable) else arg for arg in self.arguments
+        ]
+
+        # Check if obj is a sequence for element-wise operation
+        if isinstance(obj, (list, tuple)):
+            # Apply element-wise
+            result = [self._apply_operation(item, resolved_args) for item in obj]
+            # Return same type as input (list or tuple)
+            return type(obj)(result) if isinstance(obj, tuple) else result
+
+        # Apply to single value
+        return self._apply_operation(obj, resolved_args)
+
+    def _apply_operation(self, value: Any, args: list[int | float]) -> int | float:
+        """Apply the math operation to a single numeric value."""
+        # Validate that value is numeric
+        if not isinstance(value, (int, float)):
+            raise MessagePathError(
+                f"Math modifier '{self.operation}' can only be applied to numeric types, "
+                f"got {type(value).__name__}"
+            )
+
+        # Check for NaN
+        if isinstance(value, float) and math.isnan(value):
+            raise MessagePathError(f"Math modifier '{self.operation}' received NaN value")
+
+        try:
+            if func := _FUNCTIONS_NO_ARGS.get(self.operation):
+                return cast("int | float", func(value, *args))
+
+            # Unknown operation
+            raise MessagePathError(f"Unknown math modifier '{self.operation}'")
+
+        except ValueError as e:
+            # Math domain errors (sqrt of negative, log of negative, etc.)
+            raise MessagePathError(f"Math error in '{self.operation}': {e!s}") from e
+        except ZeroDivisionError as e:
+            raise MessagePathError(f"Division by zero in '{self.operation}'") from e
+
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],  # noqa: ARG002
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate that the math modifier can be applied to the current type."""
+        # Math operations work on both single numeric values and arrays of numeric values
+        working_type = current_type
+
+        # If it's an array, check the element type
+        if current_type.is_array:
+            working_type = Type(
+                type_name=current_type.type_name,
+                package_name=current_type.package_name,
+                is_array=False,
+                array_size=None,
+                is_upper_bound=False,
+                string_upper_bound=current_type.string_upper_bound,
+            )
+
+        # Check if the base type is numeric
+        if not working_type.is_primitive:
+            raise ValidationError(
+                f"Math modifier '{self.operation}' can only be applied to numeric types, "
+                f"got complex type '{working_type}'"
+            )
+
+        # Check if it's a numeric primitive (int, float, double, etc.)
+        numeric_types = {
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "float32",
+            "float64",
+        }
+        if working_type.type_name not in numeric_types:
+            raise ValidationError(
+                f"Math modifier '{self.operation}' can only be applied to numeric types, "
+                f"got '{working_type.type_name}'"
+            )
+
+        # Math modifiers preserve the type (single value -> single value, array -> array)
+        return current_type, current_msgdef
+
+
 @dataclass
 class MessagePath:
     topic: str
-    segments: list[FieldAccess | ArrayIndex | ArraySlice | Filter]
+    segments: list[FieldAccess | ArrayIndex | ArraySlice | Filter | MathModifier]
 
     def apply(self, obj: Any, variables: _VariableStore | None = None) -> Any:
         """
