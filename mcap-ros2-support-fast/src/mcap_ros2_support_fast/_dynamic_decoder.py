@@ -1,5 +1,7 @@
+import array
 import codecs
 import struct
+import sys
 from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
@@ -30,6 +32,10 @@ class DecoderGeneratorFactory:
         self.message_classes: set[type] = set()
         self.current_alignment = 8  # perfect alignment at the start
         self.alias: dict[str, str] = {}
+        # Determine if byteswap is needed based on system vs data endianness
+        is_system_le = sys.byteorder == "little"
+        is_data_le = endianness == "<"
+        self.needs_byteswap = is_system_le != is_data_le
 
     def generate_var_name(self) -> str:
         """Generate a unique variable name."""
@@ -142,21 +148,44 @@ class DecoderGeneratorFactory:
             struct_name = TYPE_INFO[type_id]
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
-            self.code.append(
-                f"{target} = _data[_offset : _offset + _array_size * {struct_size}]"
-                f".cast('{struct_name}')"
-            )
+            # Optimize: use fast .cast() when no byteswap needed
+            if not self.needs_byteswap or struct_size == 1:
+                # Fast path: matching endianness, use memoryview.cast()
+                self.code.append(
+                    f"{target} = _data[_offset : _offset + _array_size * {struct_size}]"
+                    f".cast('{struct_name}')"
+                )
+            else:
+                # Slow path: need byteswap, use array.array
+                arr_var = self.generate_var_name()
+                self.code.append(f"{arr_var} = array.array('{struct_name}')")
+                self.code.append(
+                    f"{arr_var}.frombytes(_data[_offset : _offset + _array_size * {struct_size}])"
+                )
+                self.code.append(f"{arr_var}.byteswap()")
+                self.code.append(f"{target} = {arr_var}")
             self.code.append(f"_offset += _array_size * {struct_size}")
         else:
             # Fixed-size array
             struct_name = TYPE_INFO[type_id]
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
-
-            self.code.append(
-                f"{target} = _data[_offset : _offset + {array_size * struct_size}]"
-                f".cast('{struct_name}')"
-            )
+            # Optimize: use fast .cast() when no byteswap needed
+            if not self.needs_byteswap or struct_size == 1:
+                # Fast path: matching endianness, use memoryview.cast()
+                self.code.append(
+                    f"{target} = _data[_offset : _offset + {array_size * struct_size}]"
+                    f".cast('{struct_name}')"
+                )
+            else:
+                # Slow path: need byteswap, use array.array
+                arr_var = self.generate_var_name()
+                self.code.append(f"{arr_var} = array.array('{struct_name}')")
+                self.code.append(
+                    f"{arr_var}.frombytes(_data[_offset : _offset + {array_size * struct_size}])"
+                )
+                self.code.append(f"{arr_var}.byteswap()")
+                self.code.append(f"{target} = {arr_var}")
             self.code.append(f"_offset += {array_size * struct_size}")
 
     def generate_complex_array(self, target: str, plan: PlanList, array_size: int | None) -> None:
@@ -310,6 +339,7 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
     # Create combined namespace with both decoders
     namespace: dict[str, Any] = {
         UTF8_FUNC_NAME: codecs.utf_8_decode,
+        "array": array,
         "__builtins__": {
             "memoryview": memoryview,
             "list": list,
