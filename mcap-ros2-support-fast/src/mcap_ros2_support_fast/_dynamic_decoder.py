@@ -8,7 +8,7 @@ from mcap_ros2_support_fast.code_writer import CodeWriter
 
 from ._plans import (
     TYPE_INFO,
-    UTF8_FUNC_NAME,
+    UTF8_DECODE_NAME,
     ActionType,
     DecoderFunction,
     PlanAction,
@@ -31,7 +31,6 @@ class DecoderGeneratorFactory:
         # Collect all required types and classes during generation
         self.message_classes: set[type] = set()
         self.current_alignment = 8  # perfect alignment at the start
-        self.alias: dict[str, str] = {}
         # Determine if byteswap is needed based on system vs data endianness
         is_system_le = sys.byteorder == "little"
         is_data_le = endianness == "<"
@@ -41,12 +40,6 @@ class DecoderGeneratorFactory:
         """Generate a unique variable name."""
         self.name_counter += 1
         return f"_v{self.name_counter}"
-
-    def generate_alias(self, base_name: str) -> str:
-        """Generate a unique alias name based on the base name."""
-        if base_name not in self.alias:
-            self.alias[base_name] = self.generate_var_name()
-        return self.alias[base_name]
 
     def get_struct_pattern_var_name(self, pattern: str) -> str:
         """Get or create a variable name for a struct pattern."""
@@ -58,7 +51,8 @@ class DecoderGeneratorFactory:
                 .replace("?", "bool")
             )
             # Add decoder prefix to prevent conflicts with encoder patterns
-            self.struct_patterns[pattern] = f"_d_{safe_name}"
+            # Add 'g' suffix for global reference (used in generation)
+            self.struct_patterns[pattern] = f"_d_{safe_name}g"
         return self.struct_patterns[pattern]
 
     def generate_alignment(self, size: int) -> None:
@@ -83,12 +77,14 @@ class DecoderGeneratorFactory:
             self.code.append("_offset += 1")
 
         elif type_id == TypeId.STRING:
-            str_fnc = self.generate_alias(UTF8_FUNC_NAME)
             self.generate_primitive_reader("_str_size", TypeId.UINT32)
-            self.code.append(
-                f'{target} = {str_fnc}(_data[_offset:_offset + _str_size - 1], "strict", True)[0] '
-                f'if _str_size > 1 else ""'
-            )
+            with self.code.indent("if _str_size > 1:"):
+                self.code.append(
+                    f"{target}, _ = {UTF8_DECODE_NAME}"
+                    '(_data[_offset:_offset + _str_size - 1], "strict", True)'
+                )
+            with self.code.indent("else:"):
+                self.code.append(f'{target} = ""')
             self.code.append("_offset += _str_size")
             self.reset_alignment()  # After string unknown position readjustment
         elif type_id == TypeId.WSTRING:
@@ -100,7 +96,7 @@ class DecoderGeneratorFactory:
 
             pattern = f"{self.endianness}{struct_name}"
             pattern_var = self.get_struct_pattern_var_name(pattern)
-            self.code.append(f"{target} = {pattern_var}(_data, _offset)[0]")
+            self.code.append(f"{target}, = {pattern_var}(_data, _offset)")
             self.code.append(f"_offset += {struct_size}")
         else:
             raise NotImplementedError(f"Unsupported type: {type_id}")
@@ -113,7 +109,6 @@ class DecoderGeneratorFactory:
             self.generate_primitive_reader("_array_size", TypeId.UINT32)
 
         if type_id == TypeId.STRING:
-            str_fnc = self.generate_alias(UTF8_FUNC_NAME)
             if array_size is None:
                 self.code.append(f"{target} = [''] * _array_size")
             else:
@@ -127,8 +122,8 @@ class DecoderGeneratorFactory:
                 self.generate_primitive_reader("_array_size", TypeId.UINT32)
                 with self.code.indent("if _array_size > 1:"):
                     self.code.append(
-                        f"{target}[{random_i}] = {str_fnc}("
-                        f"_data[_offset : _offset + _array_size - 1], 'strict', True)[0]"
+                        f"{target}[{random_i}], _ = {UTF8_DECODE_NAME}("
+                        f"_data[_offset : _offset + _array_size - 1], 'strict', True)"
                     )
                 self.code.append("_offset += _array_size")
             self.reset_alignment()  # After string unknown position readjustment
@@ -157,13 +152,11 @@ class DecoderGeneratorFactory:
                 )
             else:
                 # Slow path: need byteswap, use array.array
-                arr_var = self.generate_var_name()
-                self.code.append(f"{arr_var} = array.array('{struct_name}')")
+                self.code.append(f"{target} = array.array('{struct_name}')")
                 self.code.append(
-                    f"{arr_var}.frombytes(_data[_offset : _offset + _array_size * {struct_size}])"
+                    f"{target}.frombytes(_data[_offset : _offset + _array_size * {struct_size}])"
                 )
-                self.code.append(f"{arr_var}.byteswap()")
-                self.code.append(f"{target} = {arr_var}")
+                self.code.append(f"{target}.byteswap()")
             self.code.append(f"_offset += _array_size * {struct_size}")
         else:
             # Fixed-size array
@@ -179,29 +172,29 @@ class DecoderGeneratorFactory:
                 )
             else:
                 # Slow path: need byteswap, use array.array
-                arr_var = self.generate_var_name()
-                self.code.append(f"{arr_var} = array.array('{struct_name}')")
+                self.code.append(f"{target} = array.array('{struct_name}')")
                 self.code.append(
-                    f"{arr_var}.frombytes(_data[_offset : _offset + {array_size * struct_size}])"
+                    f"{target}.frombytes(_data[_offset : _offset + {array_size * struct_size}])"
                 )
-                self.code.append(f"{arr_var}.byteswap()")
-                self.code.append(f"{target} = {arr_var}")
+                self.code.append(f"{target}.byteswap()")
             self.code.append(f"_offset += {array_size * struct_size}")
 
     def generate_complex_array(self, target: str, plan: PlanList, array_size: int | None) -> None:
         """Generate code for complex array fields."""
         random_i = self.generate_var_name()
+        temp_var = self.generate_var_name()
         if array_size is None:
             self.generate_primitive_reader("_array_size", TypeId.UINT32)
-            self.code.append(f"{target} = [None] * _array_size")
+            self.code.append(f"{target} = []")
             self.code.append(f"for {random_i} in range(_array_size):")
         else:
-            self.code.append(f"{target} = [None] * {array_size}")
+            self.code.append(f"{target} = []")
             self.code.append(f"for {random_i} in range({array_size}):")
 
         self.reset_alignment()  # Need to reset alignment at the start of loops
         with self.code:
-            self.generate_plan(f"{target}[{random_i}]", plan)
+            self.generate_plan(temp_var, plan)
+            self.code.append(f"{target}.append({temp_var})")
 
     def generate_primitive_group(self, targets: list[tuple[str, TypeId]]) -> None:
         """Generate code for a group of primitive fields."""
@@ -255,12 +248,11 @@ class DecoderGeneratorFactory:
         """Generate code for a complete plan."""
         target_type, fields = plan
         self.message_classes.add(target_type)
-        target_alias = self.generate_alias(target_type.__name__)
 
         # Handle empty message case (ROS 2 structure_needs_at_least_one_member)
         if not fields:
             self.code.append("_offset += 1  # structure_needs_at_least_one_member")
-            self.code.append(f"{plan_target} = {target_alias}()")
+            self.code.append(f"{plan_target} = {target_type.__name__}()")
             self.reset_alignment()
             return
 
@@ -284,7 +276,9 @@ class DecoderGeneratorFactory:
             self.generate_alignment(first_type_size)
 
             # Generate optimized constructor call with argument unpacking
-            self.code.append(f"{plan_target} = {target_alias}(*{struct_var}(_data, _offset))")
+            self.code.append(
+                f"{plan_target} = {target_type.__name__}(*{struct_var}(_data, _offset))"
+            )
 
             # Update offset and alignment
             self.code.append(f"_offset += {struct_size}")
@@ -298,7 +292,7 @@ class DecoderGeneratorFactory:
             field_vars.extend(self.generate_type(field))
 
         # Create instance
-        self.code.append(f"{plan_target} = {target_alias}({', '.join(field_vars)})")
+        self.code.append(f"{plan_target} = {target_type.__name__}({', '.join(field_vars)})")
 
     def generate_decoder_code(self, func_name: str) -> str:
         """Generate Python source code for a decoder function"""
@@ -309,10 +303,6 @@ class DecoderGeneratorFactory:
             # Generate the main parsing code first to collect all types
             ret_var = self.generate_var_name()
             self.generate_plan(ret_var, self.plan)
-            for var in self.struct_patterns.values():
-                self.code.prolog(f"{var} = {var}g")
-            for f, t in self.alias.items():
-                self.code.prolog(f"{t} = {f}")
             self.code.append(f"return {ret_var}")
 
         return str(self.code)
@@ -338,7 +328,7 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
 
     # Create combined namespace with both decoders
     namespace: dict[str, Any] = {
-        UTF8_FUNC_NAME: codecs.utf_8_decode,
+        UTF8_DECODE_NAME: codecs.utf_8_decode,
         "array": array,
         "__builtins__": {
             "memoryview": memoryview,
@@ -350,9 +340,9 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
 
     # Add struct patterns from both factories
     for pattern, var_name in factory_le.struct_patterns.items():
-        namespace[f"{var_name}g"] = struct.Struct(pattern).unpack_from
+        namespace[var_name] = struct.Struct(pattern).unpack_from
     for pattern, var_name in factory_be.struct_patterns.items():
-        namespace[f"{var_name}g"] = struct.Struct(pattern).unpack_from
+        namespace[var_name] = struct.Struct(pattern).unpack_from
 
     # Add message classes (same for both)
     for msg_class in factory_le.message_classes:

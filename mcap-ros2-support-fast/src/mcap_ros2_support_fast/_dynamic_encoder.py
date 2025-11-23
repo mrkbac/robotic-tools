@@ -7,6 +7,7 @@ from mcap_ros2_support_fast.code_writer import CodeWriter
 
 from ._plans import (
     TYPE_INFO,
+    UTF8_ENCODE_NAME,
     ActionType,
     EncoderFunction,
     PlanAction,
@@ -51,18 +52,11 @@ class EncoderGeneratorFactory:
         # Collect all required types and classes during generation
         self.message_classes: set[type] = set()
         self.current_alignment = 8  # perfect alignment at the start
-        self.alias: dict[str, str] = {}
 
     def generate_var_name(self) -> str:
         """Generate a unique variable name."""
         self.name_counter += 1
         return f"_v{self.name_counter}"
-
-    def generate_alias(self, base_name: str) -> str:
-        """Generate a unique alias name based on the base name."""
-        if base_name not in self.alias:
-            self.alias[base_name] = self.generate_var_name()
-        return self.alias[base_name]
 
     def get_struct_pattern_var_name(self, pattern: str) -> str:
         """Get or create a variable name for a struct pattern."""
@@ -91,7 +85,7 @@ class EncoderGeneratorFactory:
             mask = size - 1
             # Align based on payload offset (subtract 4 for CDR header)
             self.code.append(f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}")
-            self.code.append("_buffer.extend(b'\\x00' * _pad)")
+            self.code.append("_buffer += b'\\x00' * _pad")
             self.code.append("_offset += _pad")
 
     def reset_alignment(self, initial: int = 0) -> None:
@@ -106,11 +100,10 @@ class EncoderGeneratorFactory:
             self.code.append("_offset += 1")
 
         elif type_id == TypeId.STRING:
-            str_fnc = self.generate_alias("_encode_utf8")
-            self.code.append(f"_str_bytes = {str_fnc}({value_expr})[0]")
+            self.code.append(f"_str_bytes, _ = {UTF8_ENCODE_NAME}({value_expr})")
             self.code.append("_str_size = len(_str_bytes) + 1")  # +1 for null terminator
             self.generate_primitive_writer("_str_size", TypeId.UINT32)
-            self.code.append("_buffer.extend(_str_bytes)")
+            self.code.append("_buffer += _str_bytes")
             self.code.append("_buffer.append(0)")  # null terminator
             self.code.append("_offset += _str_size")
             self.reset_alignment()  # After string unknown position readjustment
@@ -123,7 +116,7 @@ class EncoderGeneratorFactory:
 
             pattern = f"{self.endianness}{struct_name}"
             pattern_var = self.get_struct_pattern_var_name(pattern)
-            self.code.append(f"_buffer.extend({pattern_var}({value_expr}))")
+            self.code.append(f"_buffer += {pattern_var}({value_expr})")
             self.code.append(f"_offset += {struct_size}")
         else:
             raise NotImplementedError(f"Unsupported type: {type_id}")
@@ -136,25 +129,30 @@ class EncoderGeneratorFactory:
         if array_size is None or is_upper_bound:  # dynamic or bounded array
             # For bounded arrays, truncate to upper bound if needed
             if is_upper_bound and array_size is not None:
+                len_var = self.generate_var_name()
+                self.code.append(f"{len_var} = len({value_expr})")
                 truncated_var = self.generate_var_name()
                 self.code.append(
                     f"{truncated_var} = {value_expr}[:{array_size}] "
-                    f"if len({value_expr}) > {array_size} else {value_expr}"
+                    f"if {len_var} > {array_size} else {value_expr}"
                 )
+                self.code.append(f"{len_var} = min({len_var}, {array_size})")
                 value_expr = truncated_var
-            # Write array length
-            self.generate_primitive_writer(f"len({value_expr})", TypeId.UINT32)
+                self.generate_primitive_writer(len_var, TypeId.UINT32)
+            else:
+                len_var = self.generate_var_name()
+                self.code.append(f"{len_var} = len({value_expr})")
+                self.generate_primitive_writer(len_var, TypeId.UINT32)
 
         if type_id == TypeId.STRING:
-            str_fnc = self.generate_alias("_encode_utf8")
             random_i = self.generate_var_name()
 
             self.reset_alignment()  # After string unknown position readjustment
             with self.code.indent(f"for {random_i} in {value_expr}:"):
-                self.code.append(f"_str_bytes = {str_fnc}({random_i})[0]")
+                self.code.append(f"_str_bytes, _ = {UTF8_ENCODE_NAME}({random_i})")
                 self.code.append("_str_size = len(_str_bytes) + 1")  # +1 for null terminator
                 self.generate_primitive_writer("_str_size", TypeId.UINT32)
-                self.code.append("_buffer.extend(_str_bytes)")
+                self.code.append("_buffer += _str_bytes")
                 self.code.append("_buffer.append(0)")  # null terminator
                 self.code.append("_offset += _str_size")
         elif type_id == TypeId.WSTRING:
@@ -162,7 +160,14 @@ class EncoderGeneratorFactory:
 
         elif type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}:
             # Special case for byte arrays
-            self.code.append(f"_buffer.extend({value_expr})")
+            with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"):
+                with self.code.indent(f"if isinstance({value_expr}, memoryview):"):
+                    self.code.append(f"_buffer += bytes({value_expr})")
+                with self.code.indent("else:"):
+                    self.code.append(f"_buffer += {value_expr}")
+            with self.code.indent("else:"):
+                # Convert list/tuple to bytes
+                self.code.append(f"_buffer += bytes({value_expr})")
             self.code.append(f"_offset += len({value_expr})")
             self.reset_alignment()  # After string unknown position readjustment
         else:
@@ -177,21 +182,21 @@ class EncoderGeneratorFactory:
                 # Fixed-size array - use optimized struct pack
                 pattern = f"{self.endianness}{array_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
-                self.code.append(f"_buffer.extend({pattern_var}(*{value_expr}))")
+                self.code.append(f"_buffer += {pattern_var}(*{value_expr})")
                 self.code.append(f"_offset += {array_size * struct_size}")
             else:
-                # Dynamic or bounded array - use array.tobytes() for performance
+                # Dynamic or bounded array - use array.tobytes()
                 array_len_var = self.generate_var_name()
                 self.code.append(f"{array_len_var} = len({value_expr})")
                 with self.code.indent(f"if {array_len_var} > 0:"):
                     # Type-check and optimize for different input types
                     with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray)):"):
-                        self.code.append(f"_buffer.extend({value_expr})")
+                        self.code.append(f"_buffer += {value_expr}")
                     with self.code.indent(f"elif isinstance({value_expr}, memoryview):"):
-                        self.code.append(f"_buffer.extend(bytes({value_expr}))")
+                        self.code.append(f"_buffer += bytes({value_expr})")
                     with self.code.indent("else:"):
                         self.code.append(
-                            f"_buffer.extend(array.array('{struct_name}', {value_expr}).tobytes())"
+                            f"_buffer += array.array('{struct_name}', {value_expr}).tobytes()"
                         )
                 self.code.append(f"_offset += {array_len_var} * {struct_size}")
 
@@ -203,14 +208,22 @@ class EncoderGeneratorFactory:
         if array_size is None or is_upper_bound:
             # For bounded arrays, truncate to upper bound if needed
             if is_upper_bound and array_size is not None:
+                len_var = self.generate_var_name()
+                self.code.append(f"{len_var} = len({array_var})")
                 truncated_var = self.generate_var_name()
                 self.code.append(
                     f"{truncated_var} = {array_var}[:{array_size}] "
-                    f"if len({array_var}) > {array_size} else {array_var}"
+                    f"if {len_var} > {array_size} else {array_var}"
                 )
+                self.code.append(f"{len_var} = min({len_var}, {array_size})")
                 array_var = truncated_var
-            # Write array length
-            self.generate_primitive_writer(f"len({array_var})", TypeId.UINT32)
+                # Write the cached length
+                self.generate_primitive_writer(len_var, TypeId.UINT32)
+            else:
+                # Cache len() to avoid redundant function call
+                len_var = self.generate_var_name()
+                self.code.append(f"{len_var} = len({array_var})")
+                self.generate_primitive_writer(len_var, TypeId.UINT32)
 
         random_i = self.generate_var_name()
         self.reset_alignment()  # Need to reset alignment at the start of loops
@@ -241,7 +254,7 @@ class EncoderGeneratorFactory:
                 field_values.append(field_var)
 
         struct_var = self.get_struct_pattern_var_name(pattern)
-        self.code.append(f"_buffer.extend({struct_var}({', '.join(field_values)}))")
+        self.code.append(f"_buffer += {struct_var}({', '.join(field_values)})")
         self.code.append(f"_offset += {struct_size}")
 
         last_size = struct.calcsize(f"<{TYPE_INFO[targets[-1][1]]}")
@@ -311,7 +324,7 @@ class EncoderGeneratorFactory:
             cdr_header = (
                 "b'\\x00\\x01\\x00\\x00'" if self.endianness == "<" else "b'\\x01\\x01\\x00\\x00'"
             )
-            self.code.append(f"_buffer.extend({cdr_header})  # CDR header")
+            self.code.append(f"_buffer += {cdr_header}  # CDR header")
             self.code.append("_offset += 4")
 
             # Generate the main encoding code first to collect all types
@@ -320,8 +333,6 @@ class EncoderGeneratorFactory:
             # Add struct pattern variables to prolog
             for var in self.struct_patterns.values():
                 self.code.prolog(f"{var} = {var}g")
-            for f, t in self.alias.items():
-                self.code.prolog(f"{t} = {f}")
 
             self.code.append("return memoryview(_buffer)")
 
@@ -331,7 +342,7 @@ class EncoderGeneratorFactory:
         """Create the execution namespace with all required functions and classes."""
 
         namespace: dict[str, Any] = {
-            "_encode_utf8": codecs.utf_8_encode,
+            UTF8_ENCODE_NAME: codecs.utf_8_encode,
             "_get_field": _get_field,
             "struct": struct,  # Add struct module for vectorized array packing
             "array": array,  # Add array module for optimized array encoding
@@ -342,6 +353,7 @@ class EncoderGeneratorFactory:
                 "memoryview": memoryview,
                 "isinstance": isinstance,
                 "len": len,
+                "min": min,
                 "range": range,
                 "NotImplementedError": NotImplementedError,
             },
