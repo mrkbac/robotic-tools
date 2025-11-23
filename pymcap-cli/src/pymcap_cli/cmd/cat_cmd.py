@@ -61,47 +61,6 @@ def message_to_dict(obj: Any) -> Any:
     return obj
 
 
-def truncate_for_display(obj: Any, max_bytes: int = 100, max_array: int = 5) -> Any:
-    """Truncate large data structures for display in table mode.
-
-    Args:
-        obj: Object to truncate
-        max_bytes: Maximum number of bytes to show for byte arrays
-        max_array: Maximum number of array elements to show
-
-    Returns:
-        Truncated representation suitable for display
-    """
-    # Handle dataclass-like objects with __slots__
-    if hasattr(obj, "__slots__"):
-        result = {}
-        for slot in obj.__slots__:
-            if slot.startswith("_"):
-                continue
-            value = getattr(obj, slot, None)
-            result[slot] = truncate_for_display(value, max_bytes, max_array)
-        return result
-
-    # Handle bytes-like objects - show size and preview
-    if isinstance(obj, (bytes, bytearray, memoryview)):
-        size = len(obj)
-        if size > max_bytes:
-            preview = list(obj[:max_bytes])
-            return f"<{size} bytes: {preview}...>"
-        return list(obj)
-
-    # Handle sequences - truncate long arrays
-    if isinstance(obj, (list, tuple)):
-        if len(obj) > max_array:
-            truncated = [
-                truncate_for_display(item, max_bytes, max_array) for item in obj[:max_array]
-            ]
-            return [*truncated, f"... ({len(obj) - max_array} more items)"]
-        return [truncate_for_display(item, max_bytes, max_array) for item in obj]
-
-    return obj
-
-
 def cat(
     file: str,
     *,
@@ -306,8 +265,7 @@ def cat(
                 # Output data (pretty or raw)
                 if is_tty:
                     # Pretty output with Rich
-                    truncated = truncate_for_display(data)
-                    json_str = json.dumps(message_to_dict(truncated), indent=2)
+                    json_str = json.dumps(message_to_dict(data), indent=2)
 
                     header = Text()
                     header.append(msg.channel.topic, style="bold cyan")
