@@ -587,7 +587,7 @@ class _ChunkBuilder:
         self.message_indices: dict[int, MessageIndex] = {}
         self.num_messages = 0
 
-    def add(self, record: Schema) -> None:
+    def add(self, record: Message) -> None:
         # Add record to current chunk
         record_data = record.write_record()
         record_len = len(record_data)

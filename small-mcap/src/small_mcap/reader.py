@@ -912,11 +912,11 @@ def read_message_decoded(
         if schema is None:
             return message.data
         if decoder := decoders.get(schema.id):
-            return decoder(message.data)
+            return decoder(bytes(message.data))
         for factory in decoder_factories:
             if decoder := factory.decoder_for(channel.message_encoding, schema):
                 decoders[schema.id] = decoder
-                return decoder(message.data)
+                return decoder(bytes(message.data))
 
         raise ValueError(
             f"no decoder factory supplied for message encoding {channel.message_encoding}, "
