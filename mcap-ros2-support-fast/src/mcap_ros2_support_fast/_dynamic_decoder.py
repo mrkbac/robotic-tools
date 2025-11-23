@@ -46,7 +46,10 @@ class DecoderGeneratorFactory:
         """Get or create a variable name for a struct pattern."""
         if pattern not in self.struct_patterns:
             safe_name = (
-                pattern.replace("<", "le_").replace(">", "be_").replace(" ", "_").replace("?", "b")
+                pattern.replace("<", "le_")
+                .replace(">", "be_")
+                .replace(" ", "_")
+                .replace("?", "bool")
             )
             # Add decoder prefix to prevent conflicts with encoder patterns
             self.struct_patterns[pattern] = f"_d_{safe_name}"
@@ -141,7 +144,7 @@ class DecoderGeneratorFactory:
             self.generate_alignment(struct_size)
             self.code.append(
                 f"{target} = _data[_offset : _offset + _array_size * {struct_size}]"
-                f".cast('{struct_name}').tolist()"
+                f".cast('{struct_name}')"
             )
             self.code.append(f"_offset += _array_size * {struct_size}")
         else:
@@ -152,7 +155,7 @@ class DecoderGeneratorFactory:
 
             self.code.append(
                 f"{target} = _data[_offset : _offset + {array_size * struct_size}]"
-                f".cast('{struct_name}').tolist()"
+                f".cast('{struct_name}')"
             )
             self.code.append(f"_offset += {array_size * struct_size}")
 

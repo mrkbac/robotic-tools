@@ -557,6 +557,14 @@ def _convert_to_dict(obj) -> dict:
     if isinstance(obj, bytes):
         return obj
 
+    # Convert memoryview to list or bytes depending on format
+    if isinstance(obj, memoryview):
+        # If it's unsigned byte (uint8), convert to bytes
+        if obj.format == "B":
+            return bytes(obj)
+        # Otherwise convert to list (including signed int8 to preserve negative values)
+        return obj.tolist()
+
     result = {}
     if hasattr(obj, "__slots__"):
         for slot in obj.__slots__:

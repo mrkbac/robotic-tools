@@ -1,3 +1,4 @@
+import array
 import codecs
 import struct
 from typing import Any, Literal, cast
@@ -67,7 +68,10 @@ class EncoderGeneratorFactory:
         """Get or create a variable name for a struct pattern."""
         if pattern not in self.struct_patterns:
             safe_name = (
-                pattern.replace("<", "le_").replace(">", "be_").replace(" ", "_").replace("?", "b")
+                pattern.replace("<", "le_")
+                .replace(">", "be_")
+                .replace(" ", "_")
+                .replace("?", "bool")
             )
             # Add encoder prefix to prevent conflicts with decoder patterns
             self.struct_patterns[pattern] = f"_e_{safe_name}"
@@ -176,15 +180,19 @@ class EncoderGeneratorFactory:
                 self.code.append(f"_buffer.extend({pattern_var}(*{value_expr}))")
                 self.code.append(f"_offset += {array_size * struct_size}")
             else:
-                # Dynamic or bounded array - use vectorized bulk packing
+                # Dynamic or bounded array - use array.tobytes() for performance
                 array_len_var = self.generate_var_name()
                 self.code.append(f"{array_len_var} = len({value_expr})")
                 with self.code.indent(f"if {array_len_var} > 0:"):
-                    self.code.append(
-                        "_buffer.extend(struct.pack("
-                        f"f'{self.endianness}{{{array_len_var}}}{struct_name}', *{value_expr}"
-                        "))"
-                    )
+                    # Type-check and optimize for different input types
+                    with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray)):"):
+                        self.code.append(f"_buffer.extend({value_expr})")
+                    with self.code.indent(f"elif isinstance({value_expr}, memoryview):"):
+                        self.code.append(f"_buffer.extend(bytes({value_expr}))")
+                    with self.code.indent("else:"):
+                        self.code.append(
+                            f"_buffer.extend(array.array('{struct_name}', {value_expr}).tobytes())"
+                        )
                 self.code.append(f"_offset += {array_len_var} * {struct_size}")
 
     def generate_complex_array_writer(
@@ -326,11 +334,13 @@ class EncoderGeneratorFactory:
             "_encode_utf8": codecs.utf_8_encode,
             "_get_field": _get_field,
             "struct": struct,  # Add struct module for vectorized array packing
+            "array": array,  # Add array module for optimized array encoding
             # Limit builtins for security
             "__builtins__": {
                 "bytearray": bytearray,
                 "bytes": bytes,
                 "memoryview": memoryview,
+                "isinstance": isinstance,
                 "len": len,
                 "range": range,
                 "NotImplementedError": NotImplementedError,
