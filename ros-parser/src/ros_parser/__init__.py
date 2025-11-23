@@ -14,7 +14,8 @@ For shared models:
     from ros_parser.models import MessageDefinition, Field, Type, Constant
 """
 
-# Re-export shared models at package level for convenience
+from . import ros1_msg, ros2_msg
+from .message_path import ValidationError
 from .models import (
     PRIMITIVE_TYPE_NAMES,
     ActionDefinition,
@@ -25,15 +26,7 @@ from .models import (
     ServiceDefinition,
     Type,
 )
-
-# Re-export message_path validation APIs
-from .message_path import ValidationError
-
-# Re-export commonly used schema parser (ROS2-specific)
 from .ros2_msg.schema_parser import parse_schema_to_definitions
-
-# Make format-specific parsers available as submodules
-from . import ros1_msg, ros2_msg
 
 __all__ = [
     "PRIMITIVE_TYPE_NAMES",

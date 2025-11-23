@@ -14,7 +14,7 @@ from urllib.request import urlopen
 from zipfile import ZipFile
 
 import platformdirs
-from ros_parser import parse_message_file
+from ros_parser.ros2_msg import parse_message_file
 
 logger = logging.getLogger(__name__)
 
