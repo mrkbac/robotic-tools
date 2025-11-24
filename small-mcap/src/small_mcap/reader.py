@@ -511,6 +511,7 @@ def _read_message_seeking(
     start_time_ns: int,
     end_time_ns: int,
     validate_crc: bool,
+    reverse: bool,
 ) -> _ReaderReturnType:
     summary = get_summary(stream)
     # No summary or chunk indexes exists
@@ -518,7 +519,7 @@ def _read_message_seeking(
         # seek to start
         stream.seek(0, io.SEEK_SET)
         yield from _read_message_non_seeking(
-            stream, should_include, start_time_ns, end_time_ns, validate_crc
+            stream, should_include, start_time_ns, end_time_ns, validate_crc, reverse
         )
         return
     exclude_channels: set[int] = {
@@ -555,13 +556,6 @@ def _read_message_seeking(
         else:
             yield from breakup_chunk(chunk, validate_crc=validate_crc)
 
-    def _lazy_sort(item: McapRecord) -> int:
-        if isinstance(item, Message):
-            return item.log_time
-        if isinstance(item, ChunkIndex):
-            return item.message_start_time
-        return 0  # Schema and Channel records should come before messages
-
     # Filter and sort chunks that overlap with the time range
     sorted_chunks = sorted(
         (
@@ -574,15 +568,35 @@ def _read_message_seeking(
             and (cidx.message_end_time >= start_time_ns)
             and (cidx.message_start_time < end_time_ns)
         ),
-        key=lambda c: c.message_start_time,
+        key=lambda c: (-c.message_end_time if reverse else c.message_start_time),
     )
 
     # Check if chunks are non-overlapping
     # This is a common case for well-formed MCAP files
-    chunks_non_overlapping = all(
-        prev.message_end_time <= current.message_start_time
-        for prev, current in itertools.pairwise(sorted_chunks)
-    )
+    if reverse:
+        # In reverse: chunks sorted by end_time descending
+        # Non-overlapping means prev starts >= current ends
+        chunks_non_overlapping = all(
+            prev.message_start_time >= current.message_end_time
+            for prev, current in itertools.pairwise(sorted_chunks)
+        )
+    else:
+        # In forward: chunks sorted by start_time ascending
+        # Non-overlapping means prev ends <= current starts
+        chunks_non_overlapping = all(
+            prev.message_end_time <= current.message_start_time
+            for prev, current in itertools.pairwise(sorted_chunks)
+        )
+
+    def _lazy_sort(item: McapRecord) -> int:
+        if isinstance(item, Message):
+            return -item.log_time if reverse else item.log_time
+        if isinstance(item, ChunkIndex):
+            # Use message_end_time for reverse (last message time)
+            # Use message_start_time for forward (first message time)
+            time = item.message_end_time if reverse else item.message_start_time
+            return -time if reverse else time
+        return 0  # Schema and Channel records should come before messages
 
     lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
 
@@ -613,7 +627,11 @@ def _read_message_non_seeking(
     start_time_ns: int,
     end_time_ns: int,
     validate_crc: bool,
+    reverse: bool,
 ) -> _ReaderReturnType:
+    if reverse:
+        raise McapError("reverse=True is not supported for non-seekable streams.")
+
     exclude_channels: set[int] = set()
     seen_channels: set[int] = set()
 
@@ -825,7 +843,25 @@ def read_message(
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
     validate_crc: bool = False,
+    reverse: bool = False,
 ) -> _ReaderReturnType:
+    """Read messages from MCAP stream(s).
+
+    Args:
+        stream: Single IO[bytes] stream or iterable of streams/generators
+        should_include: Filter function for channels
+        start_time_ns: Start time (inclusive) in nanoseconds
+        end_time_ns: End time (exclusive) in nanoseconds
+        validate_crc: Whether to validate CRC checksums
+        reverse: If True, yield messages in descending log_time order.
+                Only supported for seekable streams.
+
+    Returns:
+        Iterable of (schema, channel, message) tuples
+
+    Raises:
+        McapError: If reverse=True on a non-seekable stream
+    """
     if isinstance(stream, io.IOBase):
         if stream.seekable():
             return _read_message_seeking(
@@ -834,6 +870,7 @@ def read_message(
                 start_time_ns,
                 end_time_ns,
                 validate_crc,
+                reverse,
             )
         return _read_message_non_seeking(
             stream,
@@ -841,6 +878,7 @@ def read_message(
             start_time_ns,
             end_time_ns,
             validate_crc,
+            reverse,
         )
 
     if isinstance(stream, Iterable):
@@ -862,14 +900,16 @@ def read_message(
         return heapq.merge(
             *(
                 remap_schema_channel(
-                    read_message(s, should_include, start_time_ns, end_time_ns, validate_crc)
+                    read_message(
+                        s, should_include, start_time_ns, end_time_ns, validate_crc, reverse
+                    )
                     if isinstance(s, io.IOBase)
                     else cast("_ReaderReturnType", s),
                     stream_id=i,
                 )
                 for i, s in enumerate(stream)
             ),
-            key=lambda x: x[2].log_time,
+            key=lambda x: (-x[2].log_time if reverse else x[2].log_time),
         )
     return None
 
@@ -905,6 +945,8 @@ def read_message_decoded(
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
+    reverse: bool = False,
+    validate_crc: bool = False,
 ) -> Iterable[DecodedMessage]:
     decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
 
@@ -924,6 +966,11 @@ def read_message_decoded(
         )
 
     for schema, channel, message in read_message(
-        stream, should_include, start_time_ns, end_time_ns
+        stream,
+        should_include,
+        start_time_ns,
+        end_time_ns,
+        validate_crc=validate_crc,
+        reverse=reverse,
     ):
         yield DecodedMessage(schema, channel, message, decoded_message)
