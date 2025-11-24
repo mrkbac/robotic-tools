@@ -220,10 +220,9 @@ def cat(
                             # Get the root message definition
                             root_msgdef = all_definitions.get(msg.schema.name)
                             if root_msgdef is None:
-                                # Try short name
-                                short_name = "/".join(
-                                    [msg.schema.name.split("/")[0], msg.schema.name.split("/")[-1]]
-                                )
+                                # Try short name (e.g., "pkg/msg/Type" -> "pkg/Type")
+                                parts = msg.schema.name.split("/")
+                                short_name = f"{parts[0]}/{parts[-1]}"
                                 root_msgdef = all_definitions.get(short_name)
 
                             if root_msgdef is None:

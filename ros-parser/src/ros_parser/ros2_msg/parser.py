@@ -49,7 +49,7 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
 
     def content(self, items: list[Any]) -> Field | Constant | None:
         """Extract content from line."""
-        if len(items) == 0:
+        if not items:
             return None
         item = items[0]
         assert isinstance(item, (Field, Constant)) or item is None
@@ -330,7 +330,7 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
     # Line filtering - return None for lines we want to filter out
     def line(self, items: list[Any]) -> Field | Constant | str | None:
         """Process a line and filter out None values."""
-        if len(items) == 0 or items[0] is None:
+        if not items or items[0] is None:
             return None
         item = items[0]
         assert isinstance(item, (Field, Constant, str)) or item is None

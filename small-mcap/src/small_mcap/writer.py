@@ -165,7 +165,7 @@ def _calculate_summary_crc(
         "<BQQQ",
         Opcode.FOOTER,
         8 + 8 + 4,  # Footer record length
-        0 if len(summary_data) == 0 else summary_start,
+        summary_start if summary_data else 0,
         summary_offset_start,
     )
     return zlib.crc32(footer_fields, summary_crc)
@@ -459,7 +459,7 @@ class McapWriterRaw:
             summary_start, summary_data, summary_offsets, self.use_summary_offsets
         )
         footer = Footer(
-            summary_start=0 if len(summary_data) == 0 else summary_start,
+            summary_start=summary_start if summary_data else 0,
             summary_offset_start=summary_offset_start,
             summary_crc=summary_crc,
         )

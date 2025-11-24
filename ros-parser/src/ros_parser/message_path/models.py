@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from operator import neg
 from typing import Any, cast
 
 from ros_parser.models import MessageDefinition, Type
@@ -393,7 +394,7 @@ class Filter(Action):
 
 def _add(value: float, *args: float) -> float:
     """Add multiple values."""
-    return sum([value, *args])
+    return value + sum(args)
 
 
 def _sub(value: float, *args: float) -> float:
@@ -445,7 +446,7 @@ _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "log1p": math.log1p,
     "log2": math.log2,
     "log10": math.log10,
-    "negative": lambda value: -value,
+    "negative": neg,
     "sign": lambda value: 1 if value > 0 else (-1 if value < 0 else 0),
     "sin": math.sin,
     "sqrt": math.sqrt,

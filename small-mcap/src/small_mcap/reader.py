@@ -8,6 +8,7 @@ import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from functools import cached_property
+from operator import itemgetter
 from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 from small_mcap.records import (
@@ -201,7 +202,7 @@ def _breakup_chunk_with_indexes(
     for _timestamp, offset in heapq.merge(
         # sort by time
         *(x.records for x in message_indexes),
-        key=lambda mi: mi[0],
+        key=itemgetter(0),
     ):
         pos = offset
         opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
@@ -479,12 +480,10 @@ def _filter_message_index_by_time(
         return MessageIndex(message_index.channel_id, [])
 
     # Binary search for start index (first record >= start_time_ns)
-    start_idx = bisect.bisect_left(
-        message_index.records, start_time_ns, key=lambda record: record[0]
-    )
+    start_idx = bisect.bisect_left(message_index.records, start_time_ns, key=itemgetter(0))
 
     # Binary search for end index (first record >= end_time_ns)
-    end_idx = bisect.bisect_left(message_index.records, end_time_ns, key=lambda record: record[0])
+    end_idx = bisect.bisect_left(message_index.records, end_time_ns, key=itemgetter(0))
 
     # Return filtered MessageIndex
     return MessageIndex(message_index.channel_id, message_index.records[start_idx:end_idx])

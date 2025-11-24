@@ -322,7 +322,7 @@ def encode_video(
             )
 
             # Validate all requested topics exist
-            missing_topics = set(topics) - set(requested_topic_channels.keys())
+            missing_topics = set(topics) - requested_topic_channels.keys()
             if missing_topics:
                 available_str = "\n".join(f"  - {t}" for t in available_image_topics)
                 raise VideoEncoderError(
@@ -537,7 +537,7 @@ def encode_video(
         if container is None or frame_idx == 0:
             if container:
                 container.close()
-            missing = set(topics) - set(topic_infos.keys())
+            missing = set(topics) - topic_infos.keys()
             if missing:
                 # Show available topics if we can
                 available_str = ""

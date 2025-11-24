@@ -53,7 +53,7 @@ def channels(
     table.add_column("Encoding", style="yellow")
     table.add_column("Metadata", style="blue")
 
-    for channel_id in sorted(summary.channels.keys()):
+    for channel_id in sorted(summary.channels):
         channel = summary.channels[channel_id]
         metadata_str = str(channel.metadata) if channel.metadata else "{}"
         table.add_row(

@@ -1,9 +1,11 @@
 import base64
 import gzip
 import json
+import statistics
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -48,7 +50,7 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
         events.append((chunk.message_end_time, 1, idx))
 
     # Sort by time, then by event type (starts before ends)
-    events.sort(key=lambda e: (e[0], e[1]))
+    events.sort()
 
     # Map of chunk ID to ChunkIndex for currently active chunks
     current_active: dict[int, ChunkIndex] = {}
@@ -170,8 +172,8 @@ def _collect_channel_statistics(
         # Calculate intervals between consecutive messages and filter in one pass
         intervals = [
             interval
-            for i in range(len(sorted_timestamps) - 1)
-            if (interval := int(sorted_timestamps[i + 1] - sorted_timestamps[i])) > 0
+            for prev, curr in pairwise(sorted_timestamps)
+            if (interval := int(curr - prev)) > 0
         ]
 
         if intervals:
@@ -223,13 +225,8 @@ def _calculate_interval_stats(
             continue
 
         hz_values = sorted(1_000_000_000 / interval for interval in intervals)
-        hz_avg = sum(hz_values) / len(hz_values)
-        # Calculate median manually from sorted list
-        n = len(hz_values)
-        if n % 2 == 1:
-            median_hz = hz_values[n // 2]
-        else:
-            median_hz = (hz_values[n // 2 - 1] + hz_values[n // 2]) / 2
+        hz_avg = statistics.mean(hz_values)
+        median_hz = statistics.median(hz_values)
 
         # Calculate Hz statistics
         hz_stats = {
@@ -476,31 +473,11 @@ def _calculate_stats(values: list[int] | list[float]) -> Stats:
     if not values:
         return {"minimum": 0, "maximum": 0, "average": 0.0, "median": 0.0}
 
-    # Single pass for min, max, sum
-    min_val = values[0]
-    max_val = values[0]
-    sum_val = 0.0
-
-    for val in values:
-        min_val = min(min_val, val)
-        max_val = max(max_val, val)
-        sum_val += val
-
-    avg_val = sum_val / len(values)
-
-    # Sort for median
-    sorted_values = sorted(values)
-    n = len(sorted_values)
-    if n % 2 == 1:
-        median_val = sorted_values[n // 2]
-    else:
-        median_val = (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
-
     return {
-        "minimum": min_val,
-        "maximum": max_val,
-        "average": avg_val,
-        "median": median_val,
+        "minimum": min(values),
+        "maximum": max(values),
+        "average": statistics.mean(values),
+        "median": statistics.median(values),
     }
 
 

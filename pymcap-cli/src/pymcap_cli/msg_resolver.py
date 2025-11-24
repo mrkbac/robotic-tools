@@ -149,7 +149,7 @@ def _rglob_first(folder: tuple[Path, ...], pattern: str) -> Path | None:
         if not f.exists():
             continue
         matches = list(f.rglob(pattern))
-        if len(matches) > 0:
+        if matches:
             return matches[0]
     return None
 

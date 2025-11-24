@@ -2,7 +2,7 @@
 
 import enum
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from functools import lru_cache
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
@@ -429,7 +429,7 @@ def display_channels_table(
             return median
         return bps_stats["average"] if bps_stats else 0
 
-    sort_keys = {
+    sort_keys: dict[str, Callable[[ChannelInfo], float | str]] = {
         "topic": lambda c: c["topic"],
         "id": lambda c: c["id"],
         "msgs": lambda c: c["message_count"],
@@ -446,10 +446,7 @@ def display_channels_table(
     has_size_data = any(ch.get("size_bytes") is not None for ch in data["channels"])
 
     # Check if distribution data is available
-    has_distribution_data = any(
-        ch.get("message_distribution") and len(ch["message_distribution"]) > 0
-        for ch in data["channels"]
-    )
+    has_distribution_data = any(ch.get("message_distribution") for ch in data["channels"])
 
     # Determine which columns to show based on responsive mode
     if responsive:

@@ -4,6 +4,7 @@ import heapq
 import itertools
 from collections import defaultdict
 from dataclasses import dataclass
+from operator import itemgetter
 from typing import IO
 
 from small_mcap.reader import (
@@ -52,7 +53,7 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
                 for msg_idx in indexes
             ),
             ((None, chunk_size),),
-            key=lambda x: x[1],
+            key=itemgetter(1),
         )
     ):
         channel, start_offset = cur
