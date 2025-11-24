@@ -1,7 +1,7 @@
 """Rebuild MCAP summary section from data section."""
 
+import heapq
 import itertools
-import operator
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import IO
@@ -43,17 +43,18 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
     Returns:
         Dict mapping channel_id to total estimated bytes for that channel
     """
-    idx_list: list[tuple[int | None, int]] = [
-        (idx.channel_id, offset) for idx in indexes for _, offset in idx.records
-    ]
-
-    # Sort by offset (second element) using operator.itemgetter for better performance
-    idx_list.sort(key=operator.itemgetter(1))
-    idx_list.append((None, chunk_size))
-
     sizes_dd: dict[int, int] = defaultdict(int)
 
-    for cur, (_, end_offset) in itertools.pairwise(idx_list):
+    for cur, (_, end_offset) in itertools.pairwise(
+        heapq.merge(
+            *(
+                ((msg_idx.channel_id, record[1]) for record in msg_idx.records)
+                for msg_idx in indexes
+            ),
+            ((None, chunk_size),),
+            key=lambda x: x[1],
+        )
+    ):
         channel, start_offset = cur
         assert channel is not None, "Channel ID should not be None"
         # Estimate message data size from offset gap minus record overhead
