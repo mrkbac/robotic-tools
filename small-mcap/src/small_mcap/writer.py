@@ -650,7 +650,7 @@ class EncoderFactoryProtocol(Protocol):
     encoding: str  # Schema encoding format
     message_encoding: str  # Message data encoding format
 
-    def encoder_for(self, schema: Schema | None) -> Callable[[Any], bytes] | None: ...
+    def encoder_for(self, schema: Schema | None) -> Callable[[Any], bytes | memoryview] | None: ...
 
 
 class McapWriter(McapWriterRaw):

@@ -4,7 +4,12 @@ from cyclopts import Group, Parameter
 from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import MAX_INT64, McapProcessor, ProcessingOptions, confirm_output_overwrite
+from pymcap_cli.mcap_processor import (
+    MAX_INT64,
+    McapProcessor,
+    ProcessingOptions,
+    confirm_output_overwrite,
+)
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,

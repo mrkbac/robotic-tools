@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from . import __version__
 from ._planner import serialize_dynamic
@@ -38,7 +38,7 @@ class ROS2EncoderFactory:
         self._encoders: dict[int, EncoderFunction] = {}
         self.library = _library_identifier()
 
-    def encoder_for(self, schema: Schema | None) -> Callable[[object], bytes | memoryview] | None:
+    def encoder_for(self, schema: Schema | None) -> Callable[[Any], bytes | memoryview] | None:
         """
         Get an encoder function for the given schema.
 
