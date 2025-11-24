@@ -229,6 +229,7 @@ def generate_class_definition(msg_class: type) -> list[str]:
     slots = getattr(msg_class, "__slots__", [])
     type_info = getattr(msg_class, "_type", "unknown")
     full_text = getattr(msg_class, "_full_text", "")
+    fields_and_field_types = getattr(msg_class, "_fields_and_field_types", {})
 
     # Start class definition
     lines.append("@dataclasses.dataclass(slots=True)")
@@ -236,7 +237,15 @@ def generate_class_definition(msg_class: type) -> list[str]:
     lines.append(f'    """Generated message class for {class_name}."""')
     lines.append(f"    _type: typing.ClassVar[str] = {type_info!r}")
     lines.append(f"    _full_text: typing.ClassVar[str] = {full_text!r}")
+    lines.append(
+        f"    _fields_and_field_types: typing.ClassVar[dict[str, str]] = {fields_and_field_types!r}"
+    )
     lines.extend(f'    {slot}: "typing.Any"' for slot in slots)
+    lines.append("")
+    lines.append("    @classmethod")
+    lines.append("    def get_fields_and_field_types(cls) -> dict[str, str]:")
+    lines.append("        from copy import copy")
+    lines.append("        return copy(cls._fields_and_field_types)")
 
     lines.append("")
 

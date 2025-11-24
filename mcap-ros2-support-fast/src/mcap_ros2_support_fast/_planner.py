@@ -6,10 +6,12 @@ backends (interpreted, compiled, code-generated, etc.).
 """
 
 from collections.abc import Callable
+from copy import copy
 from dataclasses import make_dataclass
 from typing import Any
 
 from ros_parser import MessageDefinition
+from ros_parser.models import Type
 from ros_parser.ros2_msg import BUILTIN_TYPES, for_each_msgdef
 
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
@@ -29,6 +31,49 @@ from mcap_ros2_support_fast._plans import (
     PrimitiveGroupAction,
     TypeId,
 )
+
+
+def _format_field_type(field_type: Type) -> str:
+    """Convert a ROS2 Type object to its string representation for get_fields_and_field_types().
+
+    This follows the ROS2 convention:
+    - Primitives: "int32", "string", "float64", etc.
+    - Complex types: "package_name/MessageType"
+    - Bounded strings: "string<=N"
+    - Unbounded arrays: "sequence<type>"
+    - Bounded arrays: "sequence<type, N>"
+    - Fixed arrays: "type[N]"
+
+    Args:
+        field_type: The Type object from ros_parser
+
+    Returns:
+        String representation of the type
+    """
+    # Build base type string
+    if field_type.package_name:
+        # Complex type with package name
+        base_type = f"{field_type.package_name}/{field_type.type_name}"
+    else:
+        # Primitive type
+        base_type = field_type.type_name
+        # Add string bound if present
+        if field_type.string_upper_bound:
+            base_type += f"<={field_type.string_upper_bound}"
+
+    # Handle arrays
+    if field_type.is_array:
+        if field_type.array_size is None:
+            # Unbounded array: sequence<type>
+            return f"sequence<{base_type}>"
+        if field_type.is_upper_bound:
+            # Bounded array: sequence<type, N>
+            return f"sequence<{base_type}, {field_type.array_size}>"
+        # Fixed-size array: type[N]
+        return f"{base_type}[{field_type.array_size}]"
+
+    return base_type
+
 
 # Type size information for alignment-aware grouping
 _TYPE_SIZES = {
@@ -63,12 +108,21 @@ def _generate_plan(
     # e.g., "std_msgs/msg/String" -> "std_msgs_msg_String"
     class_name = msgdef.name.replace("/", "_") if msgdef.name else "Message"
 
+    # Build the _fields_and_field_types dictionary
+    fields_and_types_dict = {field.name: _format_field_type(field.type) for field in msgdef.fields}
+
+    # Define the get_fields_and_field_types classmethod
+    def get_fields_and_field_types(cls: Any) -> dict[str, str]:
+        return copy(cls._fields_and_field_types)
+
     msg_class = make_dataclass(
         class_name,
         fields,
         namespace={
             "_type": msgdef.name,
             "_full_text": str(msgdef),
+            "_fields_and_field_types": fields_and_types_dict,
+            "get_fields_and_field_types": classmethod(get_fields_and_field_types),
         },
         slots=True,  # Use slots for better performance
         eq=True,

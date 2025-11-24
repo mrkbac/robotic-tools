@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
+from ._cdr import CDR_BIG_ENDIAN, CDR_HEADER_SIZE, CDR_LITTLE_ENDIAN
 from ._plans import (
     TYPE_INFO,
     UTF8_DECODE_NAME,
@@ -296,7 +297,7 @@ class DecoderGeneratorFactory:
     def generate_decoder_code(self, func_name: str) -> str:
         """Generate Python source code for a decoder function"""
         with self.code.indent(f"def {func_name}(_raw):"):
-            self.code.append("_data = memoryview(_raw)[4:]")
+            self.code.append(f"_data = memoryview(_raw)[{CDR_HEADER_SIZE}:]")
             self.code.append("_offset = 0")
 
             # Generate the main parsing code first to collect all types
@@ -357,9 +358,9 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
     dispatcher_code = f"""
 def {main_name}(_raw):
     '''Decoder that dispatches based on CDR header endianness.'''
-    if _raw[0] == 0x00:  # Little-endian
+    if _raw[0] == {CDR_LITTLE_ENDIAN}:  # Little-endian
         return {decoder_le_name}(_raw)
-    elif _raw[0] == 0x01:  # Big-endian
+    elif _raw[0] == {CDR_BIG_ENDIAN}:  # Big-endian
         return {decoder_be_name}(_raw)
     else:
         raise ValueError(f"Invalid CDR header: {{_raw[0]:#x}}")

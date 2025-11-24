@@ -78,19 +78,3 @@ class CodeWriter:
 
     def get_code(self) -> str:
         return "\n".join(self._lines)
-
-
-def _main() -> str:
-    code_writer = CodeWriter(comments=True)
-    code_writer.append("def foo():")
-    with code_writer:
-        code_writer.append("print('Hello, World!')")
-        with code_writer.indent("for i in range(10):"):
-            code_writer.comment("print('Hello before the for loop :)')")
-            code_writer.append("print(i)\nprint(i+2)")
-            code_writer.append("")
-    return code_writer.get_code()
-
-
-if __name__ == "__main__":
-    print(_main())  # noqa: T201

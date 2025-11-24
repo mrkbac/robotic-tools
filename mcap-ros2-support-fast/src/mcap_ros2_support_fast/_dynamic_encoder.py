@@ -5,6 +5,7 @@ from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
+from ._cdr import CDR_HEADER_BIG_ENDIAN, CDR_HEADER_LITTLE_ENDIAN, CDR_HEADER_SIZE
 from ._plans import (
     TYPE_INFO,
     UTF8_ENCODE_NAME,
@@ -320,12 +321,11 @@ class EncoderGeneratorFactory:
             self.code.append("_offset = 0")
 
             # Add CDR header (4 bytes: endianness + padding)
-            # Byte 0: 0x00 = little-endian, 0x01 = big-endian
             cdr_header = (
-                "b'\\x00\\x01\\x00\\x00'" if self.endianness == "<" else "b'\\x01\\x01\\x00\\x00'"
+                CDR_HEADER_LITTLE_ENDIAN if self.endianness == "<" else CDR_HEADER_BIG_ENDIAN
             )
-            self.code.append(f"_buffer += {cdr_header}  # CDR header")
-            self.code.append("_offset += 4")
+            self.code.append(f"_buffer += {cdr_header!r}  # CDR header")
+            self.code.append(f"_offset += {CDR_HEADER_SIZE}")
 
             # Generate the main encoding code first to collect all types
             self.generate_plan_writer("message", self.plan)
