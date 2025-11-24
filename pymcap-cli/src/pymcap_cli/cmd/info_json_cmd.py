@@ -1,5 +1,6 @@
 import base64
 import gzip
+import heapq
 import json
 import statistics
 import sys
@@ -41,38 +42,23 @@ def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int
     if len(chunk_indexes) <= 1:
         return 0, 0
 
-    # Create events for start and end of each chunk
-    # Each event is (time, event_type, chunk_id)
-    # event_type: 0 = start, 1 = end (so starts come before ends at same time)
-    events: list[tuple[int, int, int]] = []
-    for idx, chunk in enumerate(chunk_indexes):
-        events.append((chunk.message_start_time, 0, idx))
-        events.append((chunk.message_end_time, 1, idx))
-
-    # Sort by time, then by event type (starts before ends)
-    events.sort()
-
-    # Map of chunk ID to ChunkIndex for currently active chunks
-    current_active: dict[int, ChunkIndex] = {}
-    # Chunks active at first point of max concurrency
-    max_concurrent_chunks: dict[int, ChunkIndex] = {}
+    # Min-heap of (end_time, uncompressed_size) for active chunks
+    active_heap: list[tuple[int, int]] = []
+    max_concurrent = 0
     max_concurrent_bytes = 0
 
-    for _, event_type, chunk_id in events:
-        if event_type == 0:  # Start event
-            current_active[chunk_id] = chunk_indexes[chunk_id]
-            if len(current_active) > len(max_concurrent_chunks):
-                # Save the chunks that are active at this point of maximum concurrency
-                max_concurrent_chunks = current_active.copy()
-                # Sum the uncompressed size of chunks at the point of maximum concurrency
-                max_concurrent_bytes = max(
-                    max_concurrent_bytes,
-                    sum(chunk.uncompressed_size for chunk in max_concurrent_chunks.values()),
-                )
-        else:  # End event
-            current_active.pop(chunk_id, None)
+    for chunk in sorted(chunk_indexes, key=lambda c: c.message_start_time):
+        # Remove chunks that have ended before this chunk starts
+        while active_heap and active_heap[0][0] < chunk.message_start_time:
+            heapq.heappop(active_heap)
 
-    return len(max_concurrent_chunks), max_concurrent_bytes
+        # Add current chunk
+        heapq.heappush(active_heap, (chunk.message_end_time, chunk.uncompressed_size))
+
+        max_concurrent = max(max_concurrent, len(active_heap))
+        max_concurrent_bytes = max(max_concurrent_bytes, sum(size for _, size in active_heap))
+
+    return max_concurrent, max_concurrent_bytes
 
 
 @dataclass(slots=True)
