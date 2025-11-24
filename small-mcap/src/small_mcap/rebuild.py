@@ -199,7 +199,7 @@ def rebuild_summary(
                     pending_indexes, pending_chunk.uncompressed_size
                 )
                 for channel_id, size in estimated_sizes.items():
-                    channel_sizes[channel_id] = channel_sizes.get(channel_id, 0) + size
+                    channel_sizes[channel_id] += size
 
             for idx in pending_indexes:
                 statistics.message_count += len(idx.records)
@@ -285,11 +285,10 @@ def rebuild_summary(
                     )
                 pending_chunk = record
             elif isinstance(record, MessageIndex):
-                if len(record.records) > 0:
+                if record.records:
                     pending_indexes.append(record)
                     # Track the position of this MessageIndex for this channel
-                    if record.channel_id not in pending_message_index_offsets:
-                        pending_message_index_offsets[record.channel_id] = record_start_pos
+                    pending_message_index_offsets.setdefault(record.channel_id, record_start_pos)
                 # Track the end position of MessageIndex records
                 last_message_index_end_offset = current_pos
             elif isinstance(record, Attachment):

@@ -534,9 +534,7 @@ def _read_message_seeking(
         yield index
 
         # late check for mcap with empty channel summary if this chunks is excluded entirely
-        if index.message_index_offsets and all(
-            cid in exclude_channels for cid in index.message_index_offsets
-        ):
+        if index.message_index_offsets and exclude_channels.issuperset(index.message_index_offsets):
             return
 
         stream.seek(index.chunk_start_offset)
@@ -563,10 +561,10 @@ def _read_message_seeking(
             for cidx in summary.chunk_indexes
             if not (
                 cidx.message_index_offsets
-                and all(channel_id in exclude_channels for channel_id in cidx.message_index_offsets)
+                and exclude_channels.issuperset(cidx.message_index_offsets)
             )
-            and (cidx.message_end_time >= start_time_ns)
-            and (cidx.message_start_time < end_time_ns)
+            and cidx.message_end_time >= start_time_ns
+            and cidx.message_start_time < end_time_ns
         ),
         key=lambda c: (-c.message_end_time if reverse else c.message_start_time),
     )
@@ -648,14 +646,9 @@ def _read_message_non_seeking(
                 )
                 if in_time_range:
                     if pending_message_indexes:
-                        new_channels = any(
-                            (msg_idx.channel_id not in seen_channels)
-                            for msg_idx in pending_message_indexes
-                        )
-                        all_excluded = all(
-                            (msg_idx.channel_id in exclude_channels)
-                            for msg_idx in pending_message_indexes
-                        )
+                        channel_ids = {msg_idx.channel_id for msg_idx in pending_message_indexes}
+                        new_channels = bool(channel_ids - seen_channels)
+                        all_excluded = channel_ids.issubset(exclude_channels)
                         if new_channels or not all_excluded:
                             # Filter message indexes to only include non-excluded channels
                             filtered_message_indexes: Iterable[MessageIndex] = (
@@ -680,7 +673,7 @@ def _read_message_non_seeking(
                 pending_chunk = record
             elif isinstance(record, MessageIndex):
                 # Ignore empty MessageIndex records
-                if len(record.records) > 0:
+                if record.records:
                     pending_message_indexes.append(record)
             else:
                 yield record
@@ -832,9 +825,8 @@ def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
 
 
 def include_topics(topics: str | Iterable[str]) -> Callable[[Channel, Schema | None], bool]:
-    if isinstance(topics, str):
-        topics = {topics}
-    return lambda channel, _schema: channel.topic in topics
+    topic_set = {topics} if isinstance(topics, str) else set(topics)
+    return lambda channel, _schema: channel.topic in topic_set
 
 
 def read_message(

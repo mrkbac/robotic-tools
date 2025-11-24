@@ -603,13 +603,11 @@ class _ChunkBuilder:
                 self.message_start_time = min(self.message_start_time, record.log_time)
             self.message_end_time = max(self.message_end_time, record.log_time)
 
-            if record.channel_id not in self.message_indices:
-                self.message_indices[record.channel_id] = MessageIndex(
-                    channel_id=record.channel_id, records=[]
-                )
-            self.message_indices[record.channel_id].records.append(
-                (record.log_time, self.buffer_pos)
-            )
+            msg_idx = self.message_indices.get(record.channel_id)
+            if msg_idx is None:
+                msg_idx = MessageIndex(channel_id=record.channel_id, records=[])
+                self.message_indices[record.channel_id] = msg_idx
+            msg_idx.records.append((record.log_time, self.buffer_pos))
 
             self.num_messages += 1
         else:
