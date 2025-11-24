@@ -409,6 +409,9 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
         "statistics": {
             "message_count": statistics.message_count,
             "chunk_count": statistics.chunk_count,
+            "message_index_count": sum(map(len, info.chunk_information.values()))
+            if info.chunk_information
+            else 0,
             "channel_count": statistics.channel_count,
             "attachment_count": statistics.attachment_count,
             "metadata_count": statistics.metadata_count,

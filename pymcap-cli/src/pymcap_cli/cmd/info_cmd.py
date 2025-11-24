@@ -96,16 +96,18 @@ def _display_file_info_and_summary(data: McapInfoOutput) -> None:
     info_table.add_row("Library:", f"[yellow]{data['header']['library']}[/]")
     info_table.add_row("Profile:", f"[yellow]{data['header']['profile']}[/]")
     info_table.add_row("Messages:", f"[green]{stats['message_count']:,}[/]")
-    info_table.add_row("Chunks:", f"[cyan]{stats['chunk_count']}[/]")
+    info_table.add_row("Chunks:", f"[cyan]{stats['chunk_count']:,}[/]")
     info_table.add_row(
         "Duration:",
         f"[yellow]{duration_ns / 1_000_000:.2f} ms[/] [cyan]({duration_human})[/]",
     )
     info_table.add_row("Start:", f"[cyan]{date_start}[/]")
     info_table.add_row("End:", f"[cyan]{date_end}[/]")
-    info_table.add_row("Channels:", f"[green]{stats['channel_count']}[/]")
-    info_table.add_row("Attachments:", f"[yellow]{stats['attachment_count']}[/]")
-    info_table.add_row("Metadata:", f"[cyan]{stats['metadata_count']}[/]")
+    info_table.add_row("Channels:", f"[green]{stats['channel_count']:,}[/]")
+    info_table.add_row("Attachments:", f"[yellow]{stats['attachment_count']:,}[/]")
+    info_table.add_row("Metadata:", f"[cyan]{stats['metadata_count']:,}[/]")
+    if msg_idx_count := stats.get("message_index_count"):
+        info_table.add_row("Indexed Messages:", f"[green]{msg_idx_count:,}[/]")
     console.print(info_table)
 
 

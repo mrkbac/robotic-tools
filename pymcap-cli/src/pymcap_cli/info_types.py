@@ -350,6 +350,9 @@ class StatisticsInfo(TypedDict, total=False):
     Required property
     """
 
+    message_index_count: int | None
+    """ minimum: 0 """
+
     channel_count: Required[int]
     """
     minimum: 0
