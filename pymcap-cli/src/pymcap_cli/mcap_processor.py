@@ -42,6 +42,9 @@ from pymcap_cli.utils import ProgressTrackingIO, file_progress
 
 console = Console()
 
+# Maximum value for a signed 64-bit integer (used for unbounded time range)
+MAX_INT64 = 2**63 - 1
+
 
 @dataclass(slots=True)
 class PendingChunk:
@@ -99,7 +102,7 @@ class InputOptions:
 
     # Filter options - Time filtering (nanoseconds)
     start_time_ns: int = 0
-    end_time_ns: int = 2**63 - 1  # Max int64
+    end_time_ns: int = MAX_INT64
 
     # Filter options - Content filtering
     include_metadata: bool = True
@@ -131,7 +134,7 @@ class ProcessingOptions:
 
     # Filter options - Time filtering (nanoseconds)
     start_time: int = 0
-    end_time: int = 2**63 - 1  # Max int64
+    end_time: int = MAX_INT64
 
     # Filter options - Content filtering
     include_metadata: bool = True
@@ -153,7 +156,7 @@ class ProcessingOptions:
     @property
     def has_time_filter(self) -> bool:
         """Check if time filtering is active."""
-        return self.start_time > 0 or self.end_time < 2**63 - 1
+        return self.start_time > 0 or self.end_time < MAX_INT64
 
     @property
     def has_topic_filter(self) -> bool:
@@ -380,7 +383,7 @@ def build_processing_options(
 
     # Default end time to max if not specified
     if end_time == 0:
-        end_time = 2**63 - 1
+        end_time = MAX_INT64
 
     # Validate time range
     if end_time < start_time:

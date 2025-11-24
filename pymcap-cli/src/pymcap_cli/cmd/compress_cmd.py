@@ -4,6 +4,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    MAX_INT64,
     McapProcessor,
     ProcessingOptions,
     confirm_output_overwrite,
@@ -63,7 +64,7 @@ def compress(
         include_topics=[],
         exclude_topics=[],
         start_time=0,
-        end_time=2**63 - 1,
+        end_time=MAX_INT64,
         include_metadata=True,
         include_attachments=True,
         # Output options with specified compression

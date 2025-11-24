@@ -19,7 +19,7 @@ from small_mcap.reader import read_message_decoded
 from small_mcap.records import Channel
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import parse_timestamp_args
+from pymcap_cli.mcap_processor import MAX_INT64, parse_timestamp_args
 
 console_err = Console(stderr=True)  # Use stderr for errors
 console_out = Console()  # Use stdout for data output
@@ -153,7 +153,7 @@ def cat(
     end_time_ns = parse_timestamp_args(end, 0, end_secs)
     # Default end time to max if not specified
     if end_time_ns == 0:
-        end_time_ns = 2**63 - 1
+        end_time_ns = MAX_INT64
 
     # Parse message path query if provided
     parsed_query = None
