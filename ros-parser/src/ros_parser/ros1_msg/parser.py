@@ -1,11 +1,11 @@
 """ROS1 message parser using Lark."""
 
-import re
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
 # Import from standalone parser (pre-compiled grammar)
 from .._lark_standalone_runtime import Token, Transformer
+from .._utils import unescape_string
 
 # Import models (shared between ROS1 and ROS2)
 from ..models import Constant, Field, MessageDefinition, ServiceDefinition, Type
@@ -46,7 +46,8 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         if not items:
             return None
         item = items[0]
-        assert isinstance(item, (Field, Constant)) or item is None
+        if not (isinstance(item, (Field, Constant)) or item is None):
+            raise TypeError(f"Expected Field, Constant, or None, got {type(item).__name__}")
         return item
 
     def field_or_constant(self, items: list[Any]) -> Field | Constant:
@@ -81,7 +82,8 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         ]
         if non_none_items:
             val = non_none_items[0]
-            assert isinstance(val, (bool, int, float, str))
+            if not isinstance(val, (bool, int, float, str)):
+                raise TypeError(f"Expected bool, int, float, or str, got {type(val).__name__}")
             return val
         return ""
 
@@ -160,8 +162,8 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         """Extract array specification from child rule."""
         # The child rule (unbounded_array or fixed_array) returns a tuple
         item = items[0]
-        assert isinstance(item, tuple)
-        assert len(item) == 2
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(f"Expected tuple of length 2, got {type(item).__name__}")
         return item
 
     def unbounded_array(self, items: list[Any]) -> tuple[bool, int | None]:  # noqa: ARG002
@@ -175,7 +177,8 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
     def constant_value(self, items: list[Any]) -> bool | int | float | str:
         """Return constant value."""
         item = items[0]
-        assert isinstance(item, (bool, int, float, str))
+        if not isinstance(item, (bool, int, float, str)):
+            raise TypeError(f"Expected bool, int, float, or str, got {type(item).__name__}")
         return item
 
     def quoted_string(self, items: list[Token]) -> str:
@@ -194,7 +197,7 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
             string_content = string_token
 
         # Use custom unescaping for ROS-specific escape sequences
-        return self._unescape_string(string_content)
+        return unescape_string(string_content)
 
     def boolean_literal(self, items: list[Token]) -> bool:
         """Parse boolean value - returns True for 'true'/'True'/'1', False otherwise."""
@@ -227,7 +230,7 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         """Parse unquoted string."""
         string_content = str(items[0]).strip()
         # Handle escape sequences even in unquoted strings
-        return self._unescape_string(string_content)
+        return unescape_string(string_content)
 
     # Helper methods
 
@@ -236,44 +239,14 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         """Normalize type aliases to standard types."""
         return Ros1MessageTransformer._TYPE_ALIASES.get(type_name, type_name)
 
-    @staticmethod
-    def _unescape_string(s: str) -> str:
-        """Process escape sequences in strings."""
-        # Handle standard escape sequences
-        escape_map = {
-            "\\'": "'",
-            '\\"': '"',
-            "\\a": "\a",
-            "\\b": "\b",
-            "\\f": "\f",
-            "\\n": "\n",
-            "\\r": "\r",
-            "\\t": "\t",
-            "\\v": "\v",
-            "\\\\": "\\",
-        }
-
-        result = s
-        for escaped, unescaped in escape_map.items():
-            result = result.replace(escaped, unescaped)
-
-        # Handle octal escapes (\012)
-        result = re.sub(r"\\([0-7]{1,3})", lambda m: chr(int(m.group(1), 8)), result)
-
-        # Handle hex escapes (\x10)
-        result = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), result)
-
-        # Handle unicode escapes (\u1010, \U0002F804)
-        result = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), result)
-        return re.sub(r"\\U([0-9a-fA-F]{8})", lambda m: chr(int(m.group(1), 16)), result)
-
     # Line filtering - return None for lines we want to filter out
     def line(self, items: list[Any]) -> Field | Constant | str | None:
         """Process a line and filter out None values."""
         if not items or items[0] is None:
             return None
         item = items[0]
-        assert isinstance(item, (Field, Constant, str)) or item is None
+        if not isinstance(item, (Field, Constant, str)):
+            raise TypeError(f"Expected Field, Constant, or str, got {type(item).__name__}")
         return item
 
 

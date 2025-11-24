@@ -1,8 +1,8 @@
 """Helper for parsing MCAP schema data into ROS message definitions."""
 
-import re
 from collections.abc import Callable
 
+from ros_parser._utils import add_msgdef_to_dict, for_each_msgdef_in_schema
 from ros_parser.models import Field, MessageDefinition, Type
 from ros_parser.ros2_msg.parser import parse_message_string
 
@@ -61,10 +61,11 @@ def parse_schema_to_definitions(
     definitions.update(BUILTIN_TYPES)
 
     # Parse all message definitions in the schema
-    for_each_msgdef(
+    for_each_msgdef_in_schema(
         schema_name,
         schema_text,
-        lambda full_name, short_name, msgdef: _add_msgdef(
+        parse_message_string,
+        lambda full_name, short_name, msgdef: add_msgdef_to_dict(
             definitions, full_name, short_name, msgdef
         ),
     )
@@ -87,58 +88,4 @@ def for_each_msgdef(
         schema_text: The schema text containing one or more message definitions
         fn: Callback function(full_name, short_name, msgdef) to call for each definition
     """
-    cur_schema_name = schema_name
-
-    # Remove empty lines
-    schema_text = "\n".join([s for s in schema_text.splitlines() if s.strip()])
-
-    # Split schema_text by separator lines containing at least 3 = characters
-    for cur_schema_text in re.split(r"^={3,}$", schema_text, flags=re.MULTILINE):
-        cur_schema_text = cur_schema_text.strip()  # noqa: PLW2901
-
-        # Check for a "MSG: pkg_name/msg_name" line
-        match = re.match(r"^MSG:\s+(\S+)$", cur_schema_text, flags=re.MULTILINE)
-        if match:
-            cur_schema_name = match.group(1)
-            # Remove this line from the message definition
-            cur_schema_text = re.sub(  # noqa: PLW2901
-                r"^MSG:\s+(\S+)$", "", cur_schema_text, flags=re.MULTILINE
-            )
-
-        # Parse the package and message names from the schema name
-        # e.g., "geometry_msgs/msg/Point" -> package="geometry_msgs", msg="Point"
-        parts = cur_schema_name.split("/")
-        pkg_name = parts[0] if parts else ""
-        msg_name = parts[-1] if parts else cur_schema_name
-
-        # Create short name: "package/MessageName" (without "/msg/" in middle)
-        short_name = f"{pkg_name}/{msg_name}" if pkg_name else msg_name
-
-        # Parse the message with the package context
-        msgdef = parse_message_string(cur_schema_text, context_package_name=pkg_name)
-
-        # Set the short name on the message definition
-        msgdef = MessageDefinition(
-            name=short_name,
-            fields_all=msgdef.fields_all,
-        )
-
-        fn(cur_schema_name, short_name, msgdef)
-
-
-def _add_msgdef(
-    definitions: dict[str, MessageDefinition],
-    full_name: str,
-    short_name: str,
-    msgdef: MessageDefinition,
-) -> None:
-    """Add a message definition to the dictionary with multiple key formats."""
-    # Add with both full name and short name for easier lookup
-    definitions[full_name] = msgdef
-    if short_name != full_name:
-        definitions[short_name] = msgdef
-
-    # Also add with just the message name (e.g., "Point") for simple lookups
-    msg_name_only = full_name.split("/")[-1]
-    if msg_name_only not in definitions:
-        definitions[msg_name_only] = msgdef
+    for_each_msgdef_in_schema(schema_name, schema_text, parse_message_string, fn)

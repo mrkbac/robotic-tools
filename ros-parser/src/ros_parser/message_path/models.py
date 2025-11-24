@@ -125,7 +125,10 @@ class FieldAccess(Action):
         # Return the field's type and its message definition if it's complex
         field_msgdef = None
         if not field.type.is_primitive and not field.type.is_array:
-            # It's a complex type, try to get its definition
+            # It's a complex type, try to get its definition.
+            # ValidationError is suppressed because the type may reference an external
+            # message that isn't in all_definitions - this is valid for partial validation
+            # (e.g., when validating paths without all dependencies loaded).
             with contextlib.suppress(ValidationError):
                 field_msgdef = _get_message_definition(field.type, all_definitions)
 
@@ -174,7 +177,9 @@ class ArrayIndex(Action):
             string_upper_bound=current_type.string_upper_bound,
         )
 
-        # Get message definition if it's a complex type
+        # Get message definition if it's a complex type.
+        # ValidationError is suppressed because the element type may reference an external
+        # message not in all_definitions - this allows partial validation without all deps.
         element_msgdef = None
         if not element_type.is_primitive:
             with contextlib.suppress(ValidationError):
@@ -344,7 +349,9 @@ class Filter(Action):
                 is_upper_bound=False,
                 string_upper_bound=current_type.string_upper_bound,
             )
-            # Get element's message definition if complex
+            # Get element's message definition if complex.
+            # ValidationError is suppressed for partial validation - the element type
+            # may reference a message not included in all_definitions.
             validate_msgdef = None
             if not validate_type.is_primitive:
                 with contextlib.suppress(ValidationError):
@@ -382,7 +389,9 @@ class Filter(Action):
                 )
 
             working_type = field.type
-            # Update working_msgdef if it's a complex type
+            # Update working_msgdef if it's a complex type.
+            # ValidationError is suppressed to allow validation to continue even when
+            # nested types aren't available in all_definitions (partial schema loading).
             working_msgdef = None
             if not working_type.is_primitive and not working_type.is_array:
                 with contextlib.suppress(ValidationError):
