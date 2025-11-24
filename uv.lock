@@ -1831,6 +1831,7 @@ dependencies = [
     { name = "rich" },
     { name = "ros-parser" },
     { name = "small-mcap", extra = ["compression"] },
+    { name = "typing-extensions" },
 ]
 
 [package.optional-dependencies]
@@ -1850,6 +1851,7 @@ requires-dist = [
     { name = "rich", specifier = ">=14.1.0" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
+    { name = "typing-extensions", specifier = ">=4.15.0" },
 ]
 provides-extras = ["video"]
 
