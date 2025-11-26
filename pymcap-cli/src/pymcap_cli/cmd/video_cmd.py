@@ -31,6 +31,7 @@ from small_mcap import get_summary, include_topics, read_message_decoded
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import confirm_output_overwrite
+from pymcap_cli.utils import OSCProgressColumn
 
 if TYPE_CHECKING:
     from av.container import InputContainer, OutputContainer
@@ -386,6 +387,7 @@ def encode_video(
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            OSCProgressColumn(title="Encoding frames"),
             console=console,
         ) as progress,
     ):

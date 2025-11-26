@@ -35,6 +35,7 @@ from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
+from pymcap_cli.utils import OSCProgressColumn
 
 if TYPE_CHECKING:
     from av.container import InputContainer
@@ -329,6 +330,7 @@ def roscompress(
                 MofNCompleteColumn(),
                 TimeElapsedColumn(),
                 TimeRemainingColumn(),
+                OSCProgressColumn(title="Compressing images"),
                 console=console,
             ) as progress,
         ):

@@ -32,6 +32,7 @@ from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
+from pymcap_cli.utils import OSCProgressColumn
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +297,7 @@ def convert_db3_to_mcap(
         BarColumn(),
         TaskProgressColumn(),
         TimeRemainingColumn(),
+        OSCProgressColumn(title="Building definitions"),
         transient=False,
     ) as progress:
         task = progress.add_task("[cyan]Building message definitions...", total=len(topics))
@@ -390,6 +392,7 @@ def convert_db3_to_mcap(
         BarColumn(),
         TaskProgressColumn(),
         TimeRemainingColumn(),
+        OSCProgressColumn(title="Converting messages"),
         transient=False,
     ) as progress:
         task = progress.add_task("[cyan]Converting messages...", total=total_messages)
