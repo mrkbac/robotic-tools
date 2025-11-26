@@ -8,7 +8,7 @@ import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from functools import cached_property
-from operator import itemgetter
+from operator import attrgetter, itemgetter
 from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
 from small_mcap.records import (
@@ -565,7 +565,8 @@ def _read_message_seeking(
             and cidx.message_end_time >= start_time_ns
             and cidx.message_start_time < end_time_ns
         ),
-        key=lambda c: (-c.message_end_time if reverse else c.message_start_time),
+        key=attrgetter("message_end_time") if reverse else attrgetter("message_start_time"),
+        reverse=reverse,
     )
 
     # Check if chunks are non-overlapping
@@ -900,7 +901,8 @@ def read_message(
                 )
                 for i, s in enumerate(stream)
             ),
-            key=lambda x: (-x[2].log_time if reverse else x[2].log_time),
+            key=lambda x: x[2].log_time,
+            reverse=reverse,
         )
     return None
 
