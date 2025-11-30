@@ -135,3 +135,71 @@ class TestIntegration:
             assert stats.message_start_time == 0
             assert stats.message_end_time == 41
             assert stats.channel_message_counts == {1: 42}
+
+    def test_reverse_read_single_channel(self, temp_mcap_file: Path):
+        """Test reading messages in reverse order with a single channel (optimized path)."""
+        with open(temp_mcap_file, "wb") as f:
+            writer = McapWriter(f, chunk_size=1024)
+            writer.start()
+            writer.add_schema(1, "Test", "json", b"{}")
+            writer.add_channel(1, "/test", "json", 1)
+
+            for i in range(10):
+                writer.add_message(1, i * 1000, f"msg{i}".encode(), i * 1000)
+
+            writer.finish()
+
+        # Read forward
+        with open(temp_mcap_file, "rb") as f:
+            forward_msgs = list(read_message(f))
+
+        # Read reverse
+        with open(temp_mcap_file, "rb") as f:
+            reverse_msgs = list(read_message(f, reverse=True))
+
+        assert len(forward_msgs) == 10
+        assert len(reverse_msgs) == 10
+
+        # Verify reverse order
+        for i, (schema, channel, message) in enumerate(reverse_msgs):
+            expected_idx = 9 - i
+            assert message.log_time == expected_idx * 1000
+            assert message.data == f"msg{expected_idx}".encode()
+
+    def test_reverse_read_multiple_channels(self, temp_mcap_file: Path):
+        """Test reading messages in reverse order with multiple channels (heap path)."""
+        with open(temp_mcap_file, "wb") as f:
+            writer = McapWriter(f, chunk_size=4096)
+            writer.start()
+            writer.add_schema(1, "Test", "json", b"{}")
+            writer.add_channel(1, "/a", "json", 1)
+            writer.add_channel(2, "/b", "json", 1)
+
+            # Interleave messages from both channels
+            for i in range(10):
+                writer.add_message(1, i * 1000, f"a{i}".encode(), i * 1000)
+                writer.add_message(2, i * 1000 + 500, f"b{i}".encode(), i * 1000 + 500)
+
+            writer.finish()
+
+        # Read forward
+        with open(temp_mcap_file, "rb") as f:
+            forward_msgs = list(read_message(f))
+
+        # Read reverse
+        with open(temp_mcap_file, "rb") as f:
+            reverse_msgs = list(read_message(f, reverse=True))
+
+        assert len(forward_msgs) == 20
+        assert len(reverse_msgs) == 20
+
+        # Verify messages are in descending log_time order
+        prev_time = float("inf")
+        for schema, channel, message in reverse_msgs:
+            assert message.log_time <= prev_time
+            prev_time = message.log_time
+
+        # Verify reverse order matches reversed forward order
+        forward_times = [msg.log_time for _, _, msg in forward_msgs]
+        reverse_times = [msg.log_time for _, _, msg in reverse_msgs]
+        assert reverse_times == list(reversed(forward_times))

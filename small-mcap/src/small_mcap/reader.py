@@ -189,7 +189,10 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapReco
 
 
 def _breakup_chunk_with_indexes(
-    chunk: Chunk, message_indexes: Iterable[MessageIndex], validate_crc: bool = False
+    chunk: Chunk,
+    message_indexes: Iterable[MessageIndex],
+    validate_crc: bool = False,
+    reverse: bool = False,
 ) -> Iterable[McapRecord]:
     # materialize for truthy emptiness check
     message_indexes = list(message_indexes)
@@ -199,11 +202,25 @@ def _breakup_chunk_with_indexes(
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
     view = memoryview(data)
 
-    for _timestamp, offset in heapq.merge(
-        # sort by time
-        *(x.records for x in message_indexes),
-        key=itemgetter(0),
-    ):
+    records: Iterable[tuple[int, int]]
+    if len(message_indexes) == 1:
+        # Fast path: single channel - direct iteration, no heap needed
+        records = message_indexes[0].records
+        if reverse:
+            records = reversed(records)
+    elif reverse:
+        records = heapq.merge(
+            *(reversed(x.records) for x in message_indexes),
+            key=itemgetter(0),
+            reverse=True,
+        )
+    else:
+        records = heapq.merge(
+            *(x.records for x in message_indexes),
+            key=itemgetter(0),
+        )
+
+    for _timestamp, offset in records:
         pos = offset
         opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
         pos += _RECORD_HEADER_SIZE
@@ -549,7 +566,9 @@ def _read_message_seeking(
                 filtered_message_indexes, start_time_ns, end_time_ns
             )
 
-            yield from _breakup_chunk_with_indexes(chunk, filtered_message_indexes, validate_crc)
+            yield from _breakup_chunk_with_indexes(
+                chunk, filtered_message_indexes, validate_crc, reverse=reverse
+            )
         else:
             yield from breakup_chunk(chunk, validate_crc=validate_crc)
 
