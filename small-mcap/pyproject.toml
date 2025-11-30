@@ -12,6 +12,8 @@ lz4 = ["lz4>=4.3.3"]
 compression = ["small-mcap[zstd]", "small-mcap[lz4]"]
 dev = [
     "mcap>=1.0.0",
+    "rosbags>=0.11.0",
+    "pybag-sdk>=0.6.0",
 ]
 
 [build-system]

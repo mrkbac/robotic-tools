@@ -16,8 +16,16 @@ build-backend = "uv_build"
 dev = [
     "small-mcap",
     "mcap-ros2-support>=0.5.5",
+    "rosbags>=0.11.0",
+    "pytest-benchmark>=5.1.0",
+    "pybag-sdk>=0.6.0",
 ]
 
 [tool.uv.sources]
 small-mcap = { workspace = true }
 ros-parser = { workspace = true }
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

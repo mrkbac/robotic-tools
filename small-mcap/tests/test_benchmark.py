@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 from mcap.reader import make_reader
+from pybag.mcap_reader import McapFileReader
+from rosbags.rosbag2 import Reader as RosbagsReader
+from rosbags.rosbag2 import ReaderError
 from small_mcap import include_topics, read_message
 
 # Test file path - nuScenes MCAP file with 30,900 messages, 19.15s duration, 560 zstd chunks
@@ -140,9 +143,75 @@ def read_mcap(config: BenchmarkConfig) -> int:
     return count
 
 
+def read_rosbags(config: BenchmarkConfig) -> int:
+    """Generic wrapper for rosbags MCAP reading with configurable options."""
+    count = 0
+
+    # rosbags.rosbag2.Reader can read standalone MCAP files directly
+    try:
+        with RosbagsReader(TEST_MCAP_FILE) as reader:
+            # Build topic filter set if specified
+            topic_filter = set(config.topics) if config.topics else None
+
+            # Convert time filter from ms to ns if specified
+            start_time_ns = config.start_time_ms * 1_000_000 if config.start_time_ms else None
+            end_time_ns = config.end_time_ms * 1_000_000 if config.end_time_ms else None
+
+            # Iterate messages with filters
+            for _connection, timestamp, _rawdata in reader.messages(
+                connections=reader.connections
+                if topic_filter is None
+                else [c for c in reader.connections if c.topic in topic_filter]
+            ):
+                # Apply time filter manually (rosbags doesn't have time-range filtering)
+                if start_time_ns and timestamp < start_time_ns:
+                    continue
+                if end_time_ns and timestamp > end_time_ns:
+                    continue
+
+                count += 1
+
+    except ReaderError as e:
+        raise RuntimeError(f"rosbags failed to read MCAP: {e}") from e
+
+    return count
+
+
+def read_pybag(config: BenchmarkConfig) -> int:
+    """Generic wrapper for pybag MCAP reading with configurable options."""
+    count = 0
+
+    with McapFileReader.from_file(TEST_MCAP_FILE) as reader:
+        # Get channel IDs for topics (or all channels if no filter)
+        if config.topics:
+            channel_ids = [
+                reader._reader.get_channel_id(t)
+                for t in config.topics
+                if reader._reader.get_channel_id(t) is not None
+            ]
+        else:
+            channel_ids = None  # All channels
+
+        # Convert time filter (ms to ns)
+        start_ns = config.start_time_ms * 1_000_000 if config.start_time_ms else None
+        end_ns = config.end_time_ms * 1_000_000 if config.end_time_ms else None
+
+        # Use internal reader to get raw messages without decoding
+        for _msg in reader._reader.get_messages(channel_ids, start_ns, end_ns):
+            count += 1
+
+    return count
+
+
 # ============================================================================
 # Benchmark tests
 # ============================================================================
+
+
+def skip_if_nonseekable_required(library, config):
+    """Skip tests for libraries that require seekable streams."""
+    if library in ("rosbags", "pybag") and not config.seekable:
+        pytest.skip(f"{library} requires seekable streams")
 
 
 @pytest.mark.parametrize(
@@ -150,6 +219,8 @@ def read_mcap(config: BenchmarkConfig) -> int:
     [
         pytest.param("small_mcap", read_small_mcap, id="small_mcap"),
         pytest.param("mcap", read_mcap, id="mcap"),
+        pytest.param("rosbags", read_rosbags, id="rosbags"),
+        pytest.param("pybag", read_pybag, id="pybag"),
     ],
 )
 @pytest.mark.parametrize("config", TEST_CONFIGS, ids=lambda c: c.id)
@@ -158,6 +229,8 @@ def test_benchmark_read(benchmark, library, reader_func, config):
 
     Each config creates its own benchmark group for easy comparison between libraries.
     """
+    skip_if_nonseekable_required(library, config)
+
     # Set benchmark group dynamically based on config
     benchmark.group = config.id
 
