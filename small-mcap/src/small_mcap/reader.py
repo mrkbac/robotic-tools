@@ -905,7 +905,14 @@ def read_message(
                 yield (
                     mapped_schema,
                     mapped_channel,
-                    replace(message, channel_id=mapped_channel.id),
+                    # dataclass.replace is upto 4x slow then jsut creating a new instance
+                    Message(
+                        channel_id=mapped_channel.id,
+                        sequence=message.sequence,
+                        log_time=message.log_time,
+                        publish_time=message.publish_time,
+                        data=message.data,
+                    ),
                 )
 
         return heapq.merge(
