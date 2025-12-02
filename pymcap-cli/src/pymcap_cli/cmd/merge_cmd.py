@@ -14,7 +14,6 @@ from pymcap_cli.mcap_processor import (
     MetadataMode,
     build_processing_options,
     confirm_output_overwrite,
-    report_processing_stats,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -115,8 +114,8 @@ def merge(
         try:
             stats = processor.process(input_streams, output_stream, file_sizes)
 
-            # Report results
-            report_processing_stats(stats, console, len(files), "merge")
+            console.print(f"[green]✓ Successfully merged {len(files)} files![/green]")
+            console.print(stats)
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during merge: {e}[/red]")

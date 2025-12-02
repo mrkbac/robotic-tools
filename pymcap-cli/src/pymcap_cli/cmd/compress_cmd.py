@@ -59,7 +59,7 @@ def compress(
     processing_options = ProcessingOptions(
         # Recovery mode with all content included
         recovery_mode=True,
-        always_decode_chunk=False,
+        always_decode_chunk=True,
         # No filtering - include everything
         include_topics=[],
         exclude_topics=[],
@@ -80,10 +80,7 @@ def compress(
             stats = processor.process([f], output_stream, [file_size])
 
             console.print("[green]✓ Compression completed successfully![/green]")
-            console.print(
-                f"Processed {stats.messages_processed:,} messages, "
-                f"wrote {stats.writer_statistics.message_count:,} messages"
-            )
+            console.print(stats)
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during compression: {e}[/red]")
             return 1

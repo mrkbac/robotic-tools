@@ -92,20 +92,8 @@ def recover(
         try:
             stats = processor.process([f], output_stream, [file_size])
 
-            # Report results in recovery-style format
             console.print("[green]✓ Recovery completed successfully![/green]")
-            console.print(
-                f"Recovered {stats.writer_statistics.message_count:,} messages, "
-                f"{stats.writer_statistics.attachment_count} attachments, "
-                f"and {stats.writer_statistics.metadata_count} metadata records."
-            )
-            if stats.chunks_processed > 0:
-                console.print(
-                    f"Processed {stats.chunks_processed} chunks "
-                    f"({stats.chunks_copied} fast copied, {stats.chunks_decoded} decoded)."
-                )
-            if stats.errors_encountered > 0:
-                console.print(f"Encountered {stats.errors_encountered} errors.")
+            console.print(stats)
 
         except RuntimeError as e:
             if "Writer not started" in str(e):

@@ -10,7 +10,9 @@ from pathlib import Path
 from re import Pattern
 from typing import IO, BinaryIO
 
-from rich.console import Console
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.panel import Panel
+from rich.text import Text
 from small_mcap import (
     Attachment,
     Channel,
@@ -81,43 +83,11 @@ class RechunkStrategy(str, Enum):
 
 class ShouldDecode(Enum):
     SKIP = auto()
-    """Chunk does not containing anything new, everything is filtered out"""
+    """Chunk does not contain anything new, everything is filtered out"""
     COPY = auto()
-    """Chunk does not contain anythingn new, everything is coyied"""
+    """Chunk does not contain anything new, everything is copied"""
     DECODE = auto()
     """Chunk must be decoded to change channels or filter on message level"""
-    EXTRACT_METADATA = auto()
-    """Chunk can be copied but must be decoded to detect new information inside the chunk"""
-
-
-@dataclass(slots=True)
-class InputOptions:
-    # Recovery options
-    recovery_mode: bool = True  # Always handle errors gracefully
-    always_decode_chunk: bool = False  # Force individual record processing
-
-    # Filter options - Topic filtering
-    include_topics: list[Pattern[str]] = field(default_factory=list)
-    exclude_topics: list[Pattern[str]] = field(default_factory=list)
-
-    # Filter options - Time filtering (nanoseconds)
-    start_time_ns: int = 0
-    end_time_ns: int = MAX_INT64
-
-    # Filter options - Content filtering
-    include_metadata: bool = True
-    include_attachments: bool = True
-
-
-@dataclass(slots=True)
-class OutputOptions:
-    # Rechunking options
-    rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
-    rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
-
-    # Output options
-    compression: str = DEFAULT_COMPRESSION
-    chunk_size: int = DEFAULT_CHUNK_SIZE
 
 
 @dataclass(slots=True)
@@ -202,6 +172,56 @@ class ProcessingStats:
         )
     )
 
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Render processing statistics as a styled Rich Panel."""
+        lines = Text()
+        ws = self.writer_statistics
+
+        # Messages line - show written count, and decoded count only if different
+        lines.append(f"Messages:     {ws.message_count:,} written")
+        if self.messages_processed > 0 and self.messages_processed != ws.message_count:
+            lines.append(f" ({self.messages_processed:,} decoded)")
+        lines.append("\n")
+
+        # Attachments (only if any were processed)
+        if self.attachments_processed > 0:
+            lines.append(f"Attachments:  {ws.attachment_count} written")
+            lines.append(f" ({self.attachments_processed} processed)\n")
+
+        # Metadata (only if any were processed)
+        if self.metadata_processed > 0:
+            lines.append(f"Metadata:     {ws.metadata_count} written")
+            lines.append(f" ({self.metadata_processed} processed)\n")
+
+        # Schemas and channels
+        lines.append(f"Schemas:      {ws.schema_count} written\n")
+        lines.append(f"Channels:     {ws.channel_count} written\n")
+
+        # Chunks (only if any were processed)
+        if self.chunks_processed > 0:
+            lines.append(f"Chunks:       {self.chunks_processed} ")
+            lines.append(f"({self.chunks_copied} fast copied, ")
+            lines.append(f"{self.chunks_decoded} decoded)\n")
+
+        # Errors (yellow if any)
+        if self.errors_encountered > 0:
+            lines.append("Errors:       ", style="yellow")
+            lines.append(f"{self.errors_encountered}\n", style="yellow")
+
+        # Validation errors (yellow if any)
+        if self.validation_errors > 0:
+            lines.append("Validation:   ", style="yellow")
+            lines.append(f"{self.validation_errors} errors\n", style="yellow")
+
+        # Filter rejections (if any)
+        if self.filter_rejections > 0:
+            lines.append(f"Filtered:     {self.filter_rejections} records\n")
+
+        # Remove trailing newline
+        lines.rstrip()
+
+        yield Panel(lines, title="Processing Statistics", border_style="dim")
+
 
 def parse_time_arg(time_str: str) -> int:
     """Parse time argument that can be nanoseconds or RFC3339 date."""
@@ -280,6 +300,7 @@ class MessageGroup:
         # If chunk builder returns a completed chunk, write it immediately
         if result := self.chunk_builder.maybe_finalize():
             chunk, message_indexes = result
+            # TODO: also check requested chunk size?
             if chunk.compression != self.chunk_builder.compression.value:
                 self.compress_fail_counter += 1
                 if self.compress_fail_counter > 2:
@@ -407,70 +428,6 @@ def build_processing_options(
     )
 
 
-def report_processing_stats(
-    stats: ProcessingStats,
-    console_out: Console,
-    num_files: int = 1,
-    command_context: str = "process",
-) -> None:
-    """Report processing statistics with appropriate messaging.
-
-    Args:
-        stats: Processing statistics to report
-        console_out: Rich console for output
-        num_files: Number of input files processed
-        command_context: Context string (merge/filter/process) for success message
-    """
-    # Success message
-    if command_context == "merge" and num_files > 1:
-        console_out.print(f"[green]✓ Successfully merged {num_files} files![/green]")
-    elif command_context == "filter":
-        console_out.print("[green]✓ Filter completed successfully![/green]")
-    elif num_files > 1:
-        console_out.print(f"[green]✓ Merged {num_files} files successfully![/green]")
-    else:
-        console_out.print("[green]✓ Processing completed successfully![/green]")
-
-    # Basic stats
-    console_out.print(
-        f"Processed {stats.messages_processed:,} messages, "
-        f"wrote {stats.writer_statistics.message_count:,} messages"
-    )
-
-    # Content stats
-    if stats.attachments_processed > 0 and stats.writer_statistics:
-        console_out.print(
-            f"Processed {stats.attachments_processed} attachments, "
-            f"wrote {stats.writer_statistics.attachment_count}"
-        )
-    if stats.metadata_processed > 0 and stats.writer_statistics:
-        console_out.print(
-            f"Processed {stats.metadata_processed} metadata records, "
-            f"wrote {stats.writer_statistics.metadata_count}"
-        )
-
-    # Schema/channel stats
-    console_out.print(
-        f"Wrote {stats.writer_statistics.schema_count} schemas and "
-        f"{stats.writer_statistics.channel_count} channels"
-    )
-
-    # Performance stats
-    if stats.chunks_processed > 0:
-        console_out.print(
-            f"Processed {stats.chunks_processed} chunks "
-            f"({stats.chunks_copied} fast copied, {stats.chunks_decoded} decoded)"
-        )
-
-    # Error stats
-    if stats.errors_encountered > 0:
-        console_out.print(f"[yellow]Encountered {stats.errors_encountered} errors[/yellow]")
-    if stats.validation_errors > 0:
-        console_out.print(f"[yellow]Found {stats.validation_errors} validation errors[/yellow]")
-    if stats.filter_rejections > 0:
-        console_out.print(f"Filtered out {stats.filter_rejections} records")
-
-
 class McapProcessor:
     """Unified MCAP processor combining recovery and filtering capabilities.
 
@@ -553,14 +510,6 @@ class McapProcessor:
 
         # Use Remapper's built-in lookup
         return self.remapper.get_remapped_schema(stream_id, original_schema_id)
-
-    def _get_remapped_channel_id(self, stream_id: int, original_channel_id: int) -> int:
-        # Check if this channel was remapped
-        if self.remapper.was_channel_remapped(stream_id, original_channel_id):
-            # Use get_remapped_channel to get the remapped ID
-            remapped_channel = self.remapper.get_remapped_channel(stream_id, original_channel_id)
-            return remapped_channel.id if remapped_channel else original_channel_id
-        return original_channel_id
 
     def _analyze_for_auto_grouping(self, input_streams: Sequence[IO[bytes]]) -> None:
         """Pre-analyze files to identify large channels (>15% of total uncompressed size)."""
@@ -777,7 +726,7 @@ class McapProcessor:
     def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
         """Handle a message record from the stream."""
         # Use cached channel ID lookup (avoids creating temporary Channel objects)
-        remapped_channel_id = self._get_remapped_channel_id(stream_id, message.channel_id)
+        remapped_channel_id = self.remapper.get_remapped_channel_id(stream_id, message.channel_id)
 
         if remapped_channel_id != message.channel_id:
             # Channel was remapped, create new message with remapped ID
@@ -1016,10 +965,13 @@ class McapProcessor:
         """Determine if chunk should be decoded or can be fast-copied.
 
         Returns:
-            (should_skip, should_decode, ): tuple of booleans
-            - should_skip: True if chunk should be skipped entirely
-            - should_decode: True if chunk must be decoded, False if it can be fast-copied
+            ShouldDecode enum:
+            - SKIP: Chunk should be skipped entirely (filtered out)
+            - COPY: Chunk can be fast-copied without decoding
+            - DECODE: Chunk must be decoded to change channels or filter messages
         """
+        if self.options.always_decode_chunk:
+            return ShouldDecode.DECODE
 
         # Chunk time outside of limits - skip entirely
         if (
@@ -1049,7 +1001,7 @@ class McapProcessor:
             # Check if channel metadata is available
             if not self.remapper.has_channel(stream_id, idx.channel_id):
                 # Channel not yet seen - must decode to discover it
-                return ShouldDecode.EXTRACT_METADATA
+                return ShouldDecode.DECODE
             # If channel id was remapped, must decode
             if self.remapper.was_channel_remapped(stream_id, idx.channel_id):
                 return ShouldDecode.DECODE
@@ -1066,7 +1018,7 @@ class McapProcessor:
                     and idx.channel_id not in self.excluded_channels
                 ):
                     # Unknown channel - must decode to discover it
-                    return ShouldDecode.EXTRACT_METADATA
+                    return ShouldDecode.DECODE
                 if idx.channel_id in self.included_channels:
                     has_include = True
                 else:
@@ -1091,10 +1043,7 @@ class McapProcessor:
         if should_decode == ShouldDecode.SKIP:
             return
 
-        if (
-            should_decode in (ShouldDecode.DECODE, ShouldDecode.EXTRACT_METADATA)
-            or self.options.always_decode_chunk
-        ):
+        if should_decode == ShouldDecode.DECODE:
             self._process_chunk_fallback(chunk, writer, stream_id)
         else:
             # Fast-copy path -> nothing about the chunks must be changed
@@ -1155,7 +1104,7 @@ class McapProcessor:
                     if not writer:
                         continue
                     # Remap message channel ID if needed (using cache to avoid temporary objects)
-                    remapped_channel_id = self._get_remapped_channel_id(
+                    remapped_channel_id = self.remapper.get_remapped_channel_id(
                         stream_id, chunk_record.channel_id
                     )
                     if remapped_channel_id != chunk_record.channel_id:

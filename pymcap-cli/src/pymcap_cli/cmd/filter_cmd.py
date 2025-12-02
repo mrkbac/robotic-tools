@@ -12,7 +12,6 @@ from pymcap_cli.mcap_processor import (
     MetadataMode,
     build_processing_options,
     confirm_output_overwrite,
-    report_processing_stats,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -184,8 +183,8 @@ def filter_cmd(
         try:
             stats = processor.process([f], output_stream, [file_size])
 
-            # Report results
-            report_processing_stats(stats, console, 1, "filter")
+            console.print("[green]✓ Filter completed successfully![/green]")
+            console.print(stats)
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during filtering: {e}[/red]")

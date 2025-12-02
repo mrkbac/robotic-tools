@@ -833,6 +833,11 @@ class Remapper:
         """Get the remapped channel for a given stream and original ID."""
         return self._channel_lookup_fast.get((stream_id, original_id))
 
+    def get_remapped_channel_id(self, stream_id: int, original_id: int) -> int:
+        """Get the remapped channel ID, or the original ID if not remapped."""
+        channel = self._channel_lookup_fast.get((stream_id, original_id))
+        return channel.id if channel else original_id
+
     def get_remapped_schema(self, stream_id: int, original_schema_id: int) -> int:
         """Get the remapped schema ID for a given stream and original schema ID."""
         mapped_schema = self._schema_lookup_fast.get((stream_id, original_schema_id))
@@ -905,7 +910,7 @@ def read_message(
                 yield (
                     mapped_schema,
                     mapped_channel,
-                    # dataclass.replace is upto 4x slow then jsut creating a new instance
+                    # dataclass.replace is upto 4x slow then just creating a new instance
                     Message(
                         channel_id=mapped_channel.id,
                         sequence=message.sequence,

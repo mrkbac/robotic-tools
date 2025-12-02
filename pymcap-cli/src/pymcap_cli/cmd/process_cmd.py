@@ -14,7 +14,6 @@ from pymcap_cli.mcap_processor import (
     MetadataMode,
     build_processing_options,
     confirm_output_overwrite,
-    report_processing_stats,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -237,8 +236,11 @@ def process(
         try:
             stats = processor.process(input_streams, output_stream, file_sizes)
 
-            # Report results
-            report_processing_stats(stats, console, len(input_files), "process")
+            if len(input_files) > 1:
+                console.print(f"[green]✓ Successfully processed {len(input_files)} files![/green]")
+            else:
+                console.print("[green]✓ Processing completed successfully![/green]")
+            console.print(stats)
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during processing: {e}[/red]")
