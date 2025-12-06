@@ -1,7 +1,7 @@
 """Tests for the Remapper class."""
 
 import pytest
-from small_mcap import Channel, McapError, Remapper, Schema
+from small_mcap import Channel, McapError, Remapper, Schema, Summary
 
 
 def test_schema_preserves_original_id():
@@ -155,3 +155,79 @@ def test_has_channel():
     assert not remapper.has_channel(0, 1)
     remapper.remap_channel(0, channel)
     assert remapper.has_channel(0, 1)
+
+
+def test_schema_fast_path_same_stream():
+    """Calling remap_schema twice with same schema returns cached result."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+
+    mapped1 = remapper.remap_schema(0, schema)
+    mapped2 = remapper.remap_schema(0, schema)
+
+    assert mapped1 is mapped2  # Same object from cache
+
+
+def test_channel_fast_path_same_stream():
+    """Calling remap_channel twice with same channel returns cached result."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+
+    channel = Channel(id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+
+    mapped1 = remapper.remap_channel(0, channel)
+    mapped2 = remapper.remap_channel(0, channel)
+
+    assert mapped1 is mapped2  # Same object from cache
+
+
+def test_channel_deduplication():
+    """Identical channels (same topic/encoding) should be deduplicated."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)
+
+    channel1 = Channel(id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+    channel2 = Channel(id=2, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+
+    mapped1 = remapper.remap_channel(0, channel1)
+    mapped2 = remapper.remap_channel(1, channel2)
+
+    assert mapped1.id == mapped2.id  # Same content = same ID
+    assert remapper.was_channel_remapped(1, 2)  # ID changed from 2 to 1
+
+
+def test_get_remapped_channel():
+    """get_remapped_channel should return Channel or None."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+
+    channel = Channel(id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+
+    # Not yet mapped
+    assert remapper.get_remapped_channel(0, 1) is None
+
+    remapper.remap_channel(0, channel)
+
+    # Now mapped
+    result = remapper.get_remapped_channel(0, 1)
+    assert result is not None
+    assert result.id == 1
+    assert result.topic == "/test"
+
+
+def test_get_remapped_schema():
+    """get_remapped_schema should return schema ID or 0 if not found."""
+    remapper = Remapper()
+    schema = Schema(id=5, name="test", encoding="proto", data=b"data")
+
+    # Not yet mapped - returns 0
+    assert remapper.get_remapped_schema(0, 5) == 0
+
+    remapper.remap_schema(0, schema)
+
+    # Now mapped - returns the ID
+    assert remapper.get_remapped_schema(0, 5) == 5

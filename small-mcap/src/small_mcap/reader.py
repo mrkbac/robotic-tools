@@ -740,7 +740,7 @@ class Remapper:
     Deduplicates identical schemas/channels by content to avoid duplicates.
     """
 
-    def __init__(self, summaries: Iterable[tuple[int, Summary]] | None = None) -> None:
+    def __init__(self) -> None:
         self._used_schema_ids: set[int] = set()
         self._used_channel_ids: set[int] = set()
 
@@ -752,13 +752,6 @@ class Remapper:
         # Track which IDs were actually remapped for fast-copy optimization
         self._remapped_schemas: set[tuple[int, int]] = set()  # (stream_id, original_id)
         self._remapped_channels: set[tuple[int, int]] = set()  # (stream_id, original_id)
-
-        if summaries is not None:
-            for stream_id, summary in summaries:
-                for schema in summary.schemas.values():
-                    self.remap_schema(stream_id, schema)
-                for channel in summary.channels.values():
-                    self.remap_channel(stream_id, channel)
 
     @overload
     def remap_schema(self, stream_id: int, schema: None) -> None: ...
