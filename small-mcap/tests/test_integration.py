@@ -161,7 +161,7 @@ class TestIntegration:
         assert len(reverse_msgs) == 10
 
         # Verify reverse order
-        for i, (schema, channel, message) in enumerate(reverse_msgs):
+        for i, (_schema, _channel, message) in enumerate(reverse_msgs):
             expected_idx = 9 - i
             assert message.log_time == expected_idx * 1000
             assert message.data == f"msg{expected_idx}".encode()
@@ -195,7 +195,7 @@ class TestIntegration:
 
         # Verify messages are in descending log_time order
         prev_time = float("inf")
-        for schema, channel, message in reverse_msgs:
+        for _schema, _channel, message in reverse_msgs:
             assert message.log_time <= prev_time
             prev_time = message.log_time
 

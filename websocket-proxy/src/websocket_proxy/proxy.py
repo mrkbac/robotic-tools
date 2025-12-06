@@ -67,7 +67,7 @@ class MessageCodecCache:
 
     def __init__(self) -> None:
         """Initialize the codec cache."""
-        self._encoders: dict[str, Callable[[dict[str, Any]], bytes]] = {}
+        self._encoders: dict[str, Callable[[Any], bytes | memoryview[int]]] = {}
         self._decoders: dict[str, Callable[[bytes], Any]] = {}
 
     def get_decoder(self, schema_name: str, schema_def: str) -> Callable[[bytes], Any]:
@@ -84,7 +84,9 @@ class MessageCodecCache:
             self._decoders[schema_name] = generate_dynamic(schema_name, schema_def)
         return self._decoders[schema_name]
 
-    def get_encoder(self, schema_name: str, schema_def: str) -> Callable[[dict[str, Any]], bytes]:
+    def get_encoder(
+        self, schema_name: str, schema_def: str
+    ) -> Callable[[Any], bytes | memoryview[int]]:
         """Get or create an encoder for the given schema.
 
         Args:
@@ -92,7 +94,7 @@ class MessageCodecCache:
             schema_def: Schema definition string
 
         Returns:
-            Encoder function that takes a message dict and returns CDR bytes
+            Encoder function that takes a message dict and returns CDR bytes or memoryview
         """
         if schema_name not in self._encoders:
             self._encoders[schema_name] = serialize_dynamic(schema_name, schema_def)
@@ -781,4 +783,6 @@ class ProxyBridge:
         """
         schema_def = get_schema(schema_name)
         encoder = self.codec_cache.get_encoder(schema_name, schema_def)
-        return encoder(message)
+        result = encoder(message)
+        # Convert memoryview to bytes if needed
+        return bytes(result) if isinstance(result, memoryview) else result
