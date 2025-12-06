@@ -720,6 +720,19 @@ def _read_message_non_seeking(
     )
 
 
+def _allocate_id(used_ids: set[int], preferred_id: int) -> tuple[int, bool]:
+    """Allocate an ID, preferring the given ID if available."""
+    if preferred_id not in used_ids:
+        used_ids.add(preferred_id)
+        return preferred_id, False
+
+    new_id = preferred_id
+    while new_id in used_ids:
+        new_id += 1
+    used_ids.add(new_id)
+    return new_id, True
+
+
 class Remapper:
     """Smart ID remapper that minimizes remapping by preserving original IDs when possible.
 
@@ -747,6 +760,10 @@ class Remapper:
                 for channel in summary.channels.values():
                     self.remap_channel(stream_id, channel)
 
+    @overload
+    def remap_schema(self, stream_id: int, schema: None) -> None: ...
+    @overload
+    def remap_schema(self, stream_id: int, schema: Schema) -> Schema: ...
     def remap_schema(self, stream_id: int, schema: Schema | None) -> Schema | None:
         if schema is None:
             return None
@@ -768,15 +785,11 @@ class Remapper:
                 self._remapped_schemas.add(fast_key)
             return mapped_schema
 
-        # Try to preserve original ID if not in use
-        new_id = schema.id
-        if new_id in self._used_schema_ids:
-            # ID conflict - must remap
-            while new_id in self._used_schema_ids:
-                new_id += 1
+        # Allocate ID, preserving original if possible
+        new_id, was_remapped = _allocate_id(self._used_schema_ids, schema.id)
+        if was_remapped:
             self._remapped_schemas.add(fast_key)
 
-        self._used_schema_ids.add(new_id)
         mapped_schema = replace(schema, id=new_id)
         self._schema_lookup_slow[slow_key] = mapped_schema
         self._schema_lookup_fast[fast_key] = mapped_schema
@@ -803,16 +816,24 @@ class Remapper:
                 self._remapped_channels.add(fast_key)
             return mapped_channel
 
-        # Try to preserve original ID if not in use
-        new_id = channel.id
-        if new_id in self._used_channel_ids:
-            # ID conflict - must remap
-            while new_id in self._used_channel_ids:
-                new_id += 1
+        # Allocate ID, preserving original if possible
+        new_id, was_remapped = _allocate_id(self._used_channel_ids, channel.id)
+        if was_remapped:
             self._remapped_channels.add(fast_key)
 
-        self._used_channel_ids.add(new_id)
-        mapped_channel = replace(channel, id=new_id, schema_id=0)
+        # Map schema_id to the remapped value
+        # schema_id=0 means no schema (valid per MCAP spec)
+        new_schema_id = 0
+        if channel.schema_id != 0:
+            mapped_schema = self._schema_lookup_fast.get((stream_id, channel.schema_id))
+            if mapped_schema is None:
+                raise McapError(
+                    f"Channel '{channel.topic}' references schema_id={channel.schema_id} "
+                    f"which has not been seen yet (stream_id={stream_id})"
+                )
+            new_schema_id = mapped_schema.id
+
+        mapped_channel = replace(channel, id=new_id, schema_id=new_schema_id)
         self._channel_lookup_slow[slow_key] = mapped_channel
         self._channel_lookup_fast[fast_key] = mapped_channel
         return mapped_channel
