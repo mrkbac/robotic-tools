@@ -6,7 +6,7 @@ a container format designed for storing timestamped multimodal data.
 
 # Record types and core data structures
 # Reader classes and functions
-from small_mcap.json_decoder import JSONDecoderFactory
+from small_mcap.json_decoder import JSONDecoderFactory, JSONEncoderFactory
 from small_mcap.reader import (
     CRCValidationError,
     DecodedMessage,
@@ -65,7 +65,6 @@ from small_mcap.writer import (
 )
 
 __all__ = [
-    # Constants
     "MAGIC",
     "MAGIC_SIZE",
     "OPCODE_TO_RECORD",
@@ -86,22 +85,18 @@ __all__ = [
     "IndexType",
     "InvalidMagicError",
     "JSONDecoderFactory",
+    "JSONEncoderFactory",
     "LazyChunk",
-    # Reader
     "McapError",
-    # Record types
     "McapRecord",
-    # Writer
     "McapWriter",
     "Message",
     "MessageEncoding",
     "MessageIndex",
     "Metadata",
     "MetadataIndex",
-    # Enums
     "Opcode",
     "PrebuiltChunk",
-    # Well-known constants
     "Profile",
     "RebuildInfo",
     "RecordLengthLimitExceededError",
