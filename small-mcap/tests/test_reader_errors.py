@@ -32,7 +32,7 @@ def mcap_buffer():
     buffer = io.BytesIO()
     buffer.write(MAGIC)
     header = Header(profile="", library="")
-    buffer.write(header.write_record())
+    header.write_record_to(buffer)
     return buffer
 
 
@@ -86,7 +86,7 @@ def test_unsupported_compression_type(mcap_buffer):
         compression="bzip2",  # Unsupported compression type
         data=b"\x00" * 10,
     )
-    mcap_buffer.write(chunk.write_record())
+    chunk.write_record_to(mcap_buffer)
     mcap_buffer.seek(0)
 
     with pytest.raises(UnsupportedCompressionError, match="bzip2"):
@@ -168,7 +168,7 @@ def test_chunk_crc_validation_failure(mcap_buffer):
         compression="",
         data=b"\x00" * 10,
     )
-    mcap_buffer.write(chunk.write_record())
+    chunk.write_record_to(mcap_buffer)
     mcap_buffer.seek(0)
 
     # Should raise CRCValidationError when validate_crc=True
@@ -187,7 +187,7 @@ def test_unknown_record_type(mcap_buffer):
 
     # Write footer using record class
     footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
-    mcap_buffer.write(footer.write_record())
+    footer.write_record_to(mcap_buffer)
     mcap_buffer.write(MAGIC)
     mcap_buffer.seek(0)
 
@@ -218,11 +218,11 @@ def test_data_end_crc_validation_failure(mcap_buffer):
     """Test that CRCValidationError is raised when DataEnd CRC doesn't match."""
     # Write DataEnd with WRONG CRC
     data_end = DataEnd(data_section_crc=WRONG_CRC_DATA_END)
-    mcap_buffer.write(data_end.write_record())
+    data_end.write_record_to(mcap_buffer)
 
     # Write footer using record class
     footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
-    mcap_buffer.write(footer.write_record())
+    footer.write_record_to(mcap_buffer)
     mcap_buffer.write(MAGIC)
     mcap_buffer.seek(0)
 
@@ -236,7 +236,13 @@ def test_record_with_padding(mcap_buffer):
     # Write a schema with extra padding at the end
     # Use Schema class to get the data, then manually add padding
     schema = Schema(id=1, name="test", encoding="proto", data=b"schema_data")
-    schema_data = schema.write()  # Get schema content without opcode/length
+
+    # Get schema content without opcode/length by writing to buffer and extracting
+    temp_buf = io.BytesIO()
+    schema.write_record_to(temp_buf)
+    schema_record = temp_buf.getvalue()
+    # Extract content (skip opcode 1 byte + length 8 bytes)
+    schema_data = schema_record[9:]
 
     # Add padding bytes
     padding_bytes = b"\x00" * 10
@@ -249,7 +255,7 @@ def test_record_with_padding(mcap_buffer):
 
     # Write footer using record class
     footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
-    mcap_buffer.write(footer.write_record())
+    footer.write_record_to(mcap_buffer)
     mcap_buffer.write(MAGIC)
     mcap_buffer.seek(0)
 
@@ -267,7 +273,7 @@ def test_get_summary_invalid_magic(mcap_buffer):
     """Test get_summary with invalid ending magic bytes."""
     # Write footer using record class
     footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
-    mcap_buffer.write(footer.write_record())
+    footer.write_record_to(mcap_buffer)
 
     # Write WRONG magic at end
     mcap_buffer.write(b"BADMAGIC")

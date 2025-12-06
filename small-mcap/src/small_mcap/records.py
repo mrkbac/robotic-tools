@@ -1,11 +1,19 @@
-import codecs
 import io
 import struct
 import zlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import IntEnum, unique
-from typing import IO, ClassVar, Final, TypeVar, cast
+from typing import IO, ClassVar, Final, Protocol, TypeVar, cast
+
+
+class WritableBuffer(Protocol):
+    """Protocol for objects that can receive binary data."""
+
+    def write(self, data: bytes | bytearray | memoryview, /) -> int:
+        """Write data to the buffer and return bytes written."""
+        ...
+
 
 MAGIC = b"\x89MCAP0\r\n"
 MAGIC_SIZE = len(MAGIC)
@@ -53,7 +61,7 @@ def _read_string(data: bytes | memoryview, offset: int) -> tuple[str, int]:
     string_len = struct.unpack_from("<I", data, offset)[0]
     offset += 4
     string_bytes = data[offset : offset + string_len]
-    string_val = codecs.decode(string_bytes, "utf-8")
+    string_val = bytes(string_bytes).decode("utf-8")
     offset += string_len
     return string_val, offset
 
@@ -130,22 +138,18 @@ class McapRecord(ABC):
     OPCODE: ClassVar[int]
 
     @abstractmethod
-    def write(self) -> bytes:
-        """Serialize the record content without opcode and length prefix.
+    def write_record_to(self, out: WritableBuffer) -> int:
+        """Write the complete record (opcode + length + content) to a buffer.
+
+        Each record handles its own serialization including opcode and length prefix.
+
+        Args:
+            out: The buffer to write to (any object with a write method)
 
         Returns:
-            The serialized record content as bytes
+            The number of bytes written
         """
         ...
-
-    def write_record(self) -> bytes:
-        """Serialize the complete record with opcode and length prefix.
-
-        Returns:
-            The complete serialized record: <opcode><length><content>
-        """
-        content = self.write()
-        return OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
 
     @classmethod
     @abstractmethod
@@ -205,6 +209,9 @@ class Attachment(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.ATTACHMENT
+    _TIMES_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
+    _DATA_LEN_STRUCT: ClassVar[struct.Struct] = struct.Struct("<Q")
+    _CRC_STRUCT: ClassVar[struct.Struct] = struct.Struct("<I")
 
     log_time: int
     create_time: int
@@ -212,22 +219,27 @@ class Attachment(McapRecord):
     media_type: str
     data: bytes | memoryview = field(repr=False)
 
-    def write(self) -> bytes:
-        content = (
-            struct.pack("<QQ", self.log_time, self.create_time)
-            + _write_string(self.name)
-            + _write_string(self.media_type)
-            + struct.pack("<Q", len(self.data))
-            + self.data
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = b"".join(
+            [
+                self._TIMES_STRUCT.pack(self.log_time, self.create_time),
+                _write_string(self.name),
+                _write_string(self.media_type),
+                self._DATA_LEN_STRUCT.pack(len(self.data)),
+                self.data if isinstance(self.data, bytes) else bytes(self.data),
+            ]
         )
-        return content + struct.pack("<I", zlib.crc32(content))
+        content_with_crc = content + self._CRC_STRUCT.pack(zlib.crc32(content))
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content_with_crc)) + content_with_crc
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Attachment":
-        log_time, create_time = struct.unpack_from("<QQ", data, 0)
+        log_time, create_time = cls._TIMES_STRUCT.unpack_from(data, 0)
         name, offset = _read_string(data, 16)
         media_type, offset = _read_string(data, offset)
-        data_len = struct.unpack_from("<Q", data, offset)[0]
+        data_len = cls._DATA_LEN_STRUCT.unpack_from(data, offset)[0]
         offset += 8
         return cls(log_time, create_time, name, media_type, data[offset : offset + data_len])
 
@@ -250,6 +262,7 @@ class AttachmentIndex(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.ATTACHMENT_INDEX
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQQQQ")
 
     offset: int
     length: int
@@ -259,23 +272,27 @@ class AttachmentIndex(McapRecord):
     name: str
     media_type: str
 
-    def write(self) -> bytes:
-        return (
-            struct.pack(
-                "<QQQQQ",
-                self.offset,
-                self.length,
-                self.log_time,
-                self.create_time,
-                self.data_size,
-            )
-            + _write_string(self.name)
-            + _write_string(self.media_type)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = b"".join(
+            [
+                self._STRUCT.pack(
+                    self.offset,
+                    self.length,
+                    self.log_time,
+                    self.create_time,
+                    self.data_size,
+                ),
+                _write_string(self.name),
+                _write_string(self.media_type),
+            ]
         )
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "AttachmentIndex":
-        offset, length, log_time, create_time, data_size = struct.unpack_from("<QQQQQ", data, 0)
+        offset, length, log_time, create_time, data_size = cls._STRUCT.unpack_from(data, 0)
         name, off = _read_string(data, 40)
         media_type, _ = _read_string(data, off)
         return cls(offset, length, log_time, create_time, data_size, name, media_type)
@@ -299,6 +316,7 @@ class Channel(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.CHANNEL
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<HH")
 
     id: int
     schema_id: int
@@ -306,17 +324,22 @@ class Channel(McapRecord):
     message_encoding: str
     metadata: dict[str, str]
 
-    def write(self) -> bytes:
-        return (
-            struct.pack("<HH", self.id, self.schema_id)
-            + _write_string(self.topic)
-            + _write_string(self.message_encoding)
-            + _write_map(self.metadata)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = b"".join(
+            [
+                self._STRUCT.pack(self.id, self.schema_id),
+                _write_string(self.topic),
+                _write_string(self.message_encoding),
+                _write_map(self.metadata),
+            ]
         )
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Channel":
-        channel_id, schema_id = struct.unpack_from("<HH", data, 0)
+        channel_id, schema_id = cls._STRUCT.unpack_from(data, 0)
         topic, offset = _read_string(data, 4)
         message_encoding, offset = _read_string(data, offset)
         metadata, _ = _read_map(data, offset)
@@ -343,6 +366,8 @@ class Chunk(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.CHUNK
+    _HEADER_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQQI")
+    _DATA_LEN_STRUCT: ClassVar[struct.Struct] = struct.Struct("<Q")
 
     message_start_time: int
     message_end_time: int
@@ -351,27 +376,31 @@ class Chunk(McapRecord):
     compression: str
     data: bytes | memoryview = field(repr=False)
 
-    def write(self) -> bytes:
-        return (
-            struct.pack(
-                "<QQQI",
+    def write_record_to(self, out: WritableBuffer) -> int:
+        """Optimized write_record_to that avoids double copy of large data."""
+        parts = (
+            self._HEADER_STRUCT.pack(
                 self.message_start_time,
                 self.message_end_time,
                 self.uncompressed_size,
                 self.uncompressed_crc,
-            )
-            + _write_string(self.compression)
-            + struct.pack("<Q", len(self.data))
-            + self.data
+            ),
+            _write_string(self.compression),
+            self._DATA_LEN_STRUCT.pack(len(self.data)),
+            self.data if isinstance(self.data, bytes) else bytes(self.data),
         )
+        content_len = sum(len(p) for p in parts)
+        record = b"".join((OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, content_len), *parts))
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Chunk":
         message_start_time, message_end_time, uncompressed_size, uncompressed_crc = (
-            struct.unpack_from("<QQQI", data, 0)
+            cls._HEADER_STRUCT.unpack_from(data, 0)
         )
         compression, offset = _read_string(data, 28)
-        data_len = struct.unpack_from("<Q", data, offset)[0]
+        data_len = cls._DATA_LEN_STRUCT.unpack_from(data, offset)[0]
         return cls(
             message_start_time,
             message_end_time,
@@ -406,6 +435,12 @@ class ChunkIndex(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.CHUNK_INDEX
+    _HEADER_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQQQI")
+    _OFFSET_ENTRY_STRUCT: ClassVar[struct.Struct] = struct.Struct("<HQ")
+    _INDEX_LEN_STRUCT: ClassVar[struct.Struct] = struct.Struct("<Q")
+    _SIZES_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
+    _READ_HEADER_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQQQ")
+    _MAP_LEN_STRUCT: ClassVar[struct.Struct] = struct.Struct("<I")
 
     message_start_time: int
     message_end_time: int
@@ -417,37 +452,43 @@ class ChunkIndex(McapRecord):
     compressed_size: int
     uncompressed_size: int
 
-    def write(self) -> bytes:
+    def write_record_to(self, out: WritableBuffer) -> int:
         offsets_data = b"".join(
-            struct.pack("<HQ", channel_id, offset)
+            self._OFFSET_ENTRY_STRUCT.pack(channel_id, offset)
             for channel_id, offset in self.message_index_offsets.items()
         )
-        return (
-            struct.pack(
-                "<QQQQ",
-                self.message_start_time,
-                self.message_end_time,
-                self.chunk_start_offset,
-                self.chunk_length,
-            )
-            + struct.pack("<I", len(offsets_data))
-            + offsets_data
-            + struct.pack("<Q", self.message_index_length)
-            + _write_string(self.compression)
-            + struct.pack("<QQ", self.compressed_size, self.uncompressed_size)
+        content = b"".join(
+            [
+                self._HEADER_STRUCT.pack(
+                    self.message_start_time,
+                    self.message_end_time,
+                    self.chunk_start_offset,
+                    self.chunk_length,
+                    len(offsets_data),
+                ),
+                offsets_data,
+                self._INDEX_LEN_STRUCT.pack(self.message_index_length),
+                _write_string(self.compression),
+                self._SIZES_STRUCT.pack(self.compressed_size, self.uncompressed_size),
+            ]
         )
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "ChunkIndex":
-        message_start_time, message_end_time, chunk_start_offset, chunk_length = struct.unpack_from(
-            "<QQQQ", data, 0
+        message_start_time, message_end_time, chunk_start_offset, chunk_length = (
+            cls._READ_HEADER_STRUCT.unpack_from(data, 0)
         )
-        map_len = struct.unpack_from("<I", data, 32)[0]
-        message_index_offsets = dict(struct.iter_unpack("<HQ", data[36 : 36 + map_len]))
+        map_len = cls._MAP_LEN_STRUCT.unpack_from(data, 32)[0]
+        message_index_offsets = dict(
+            struct.iter_unpack(cls._OFFSET_ENTRY_STRUCT.format, data[36 : 36 + map_len])
+        )
         offset = 36 + map_len
-        message_index_length = struct.unpack_from("<Q", data, offset)[0]
+        message_index_length = cls._INDEX_LEN_STRUCT.unpack_from(data, offset)[0]
         compression, offset = _read_string(data, offset + 8)
-        compressed_size, uncompressed_size = struct.unpack_from("<QQ", data, offset)
+        compressed_size, uncompressed_size = cls._SIZES_STRUCT.unpack_from(data, offset)
         return cls(
             message_start_time,
             message_end_time,
@@ -474,15 +515,19 @@ class DataEnd(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.DATA_END
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<I")
+    # Fixed content size: 4 bytes for data_section_crc
+    _RECORD_STRUCT: ClassVar[struct.Struct] = struct.Struct("<BQI")
 
     data_section_crc: int
 
-    def write(self) -> bytes:
-        return struct.pack("<I", self.data_section_crc)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        out.write(self._RECORD_STRUCT.pack(self.OPCODE, 4, self.data_section_crc))
+        return 13  # 1 + 8 + 4
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "DataEnd":
-        return cls(struct.unpack_from("<I", data, 0)[0])
+        return cls(cls._STRUCT.unpack_from(data, 0)[0])
 
 
 @dataclass(slots=True)
@@ -503,17 +548,25 @@ class Footer(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.FOOTER
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQI")
+    # Fixed content size: 8 + 8 + 4 = 20 bytes
+    _RECORD_STRUCT: ClassVar[struct.Struct] = struct.Struct("<BQQQI")
 
     summary_start: int
     summary_offset_start: int
     summary_crc: int
 
-    def write(self) -> bytes:
-        return struct.pack("<QQI", self.summary_start, self.summary_offset_start, self.summary_crc)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        out.write(
+            self._RECORD_STRUCT.pack(
+                self.OPCODE, 20, self.summary_start, self.summary_offset_start, self.summary_crc
+            )
+        )
+        return 29  # 1 + 8 + 20
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Footer":
-        return cls(*struct.unpack_from("<QQI", data, 0))
+        return cls(*cls._STRUCT.unpack_from(data, 0))
 
 
 @dataclass(slots=True)
@@ -536,8 +589,11 @@ class Header(McapRecord):
     profile: str
     library: str
 
-    def write(self) -> bytes:
-        return _write_string(self.profile) + _write_string(self.library)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = _write_string(self.profile) + _write_string(self.library)
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Header":
@@ -563,6 +619,9 @@ class Message(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.MESSAGE
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<HIQQ")
+    # Combined struct for write_record_to: opcode + length + fields
+    _RECORD_STRUCT: ClassVar[struct.Struct] = struct.Struct("<BQHIQQ")
 
     channel_id: int
     sequence: int
@@ -570,21 +629,25 @@ class Message(McapRecord):
     publish_time: int
     data: bytes | memoryview = field(repr=False)
 
-    def write(self) -> bytes:
-        return (
-            struct.pack(
-                "<HIQQ",
+    def write_record_to(self, out: WritableBuffer) -> int:
+        """Optimized write_record_to for Message - the hot path."""
+        data_len = len(self.data)
+        out.write(
+            self._RECORD_STRUCT.pack(
+                self.OPCODE,
+                22 + data_len,
                 self.channel_id,
                 self.sequence,
                 self.log_time,
                 self.publish_time,
             )
-            + self.data
         )
+        out.write(self.data)
+        return 31 + data_len
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Message":
-        channel_id, sequence, log_time, publish_time = struct.unpack_from("<HIQQ", data, 0)
+        channel_id, sequence, log_time, publish_time = cls._STRUCT.unpack_from(data, 0)
         return cls(channel_id, sequence, log_time, publish_time, data[22:])
 
 
@@ -603,31 +666,36 @@ class MessageIndex(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.MESSAGE_INDEX
+    _HEADER_STRUCT: ClassVar[struct.Struct] = struct.Struct("<HI")
+    _ENTRY_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
 
     channel_id: int
     records: list[tuple[int, int]]
 
-    def write(self) -> bytes:
+    def write_record_to(self, out: WritableBuffer) -> int:
         # Pre-allocate buffer for better performance
         num_records = len(self.records)
         records_size = num_records * 16  # 2 * 8 bytes per record
-        buffer = bytearray(2 + 4 + records_size)  # channel_id + length + records
+        content_size = 2 + 4 + records_size  # channel_id + length prefix + records
 
-        struct.pack_into("<HI", buffer, 0, self.channel_id, records_size)
-        offset = 6
+        # Build complete record: header (9 bytes) + content
+        buffer = bytearray(9 + content_size)
+        OPCODE_AND_LEN_STRUCT.pack_into(buffer, 0, self.OPCODE, content_size)
+        self._HEADER_STRUCT.pack_into(buffer, 9, self.channel_id, records_size)
+        offset = 15  # 9 + 6
         for timestamp, msg_offset in self.records:
-            struct.pack_into("<QQ", buffer, offset, timestamp, msg_offset)
+            self._ENTRY_STRUCT.pack_into(buffer, offset, timestamp, msg_offset)
             offset += 16
 
-        return bytes(buffer)
+        out.write(buffer)
+        return len(buffer)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "MessageIndex":
-        channel_id = struct.unpack_from("<H", data, 0)[0]
-        records_len = struct.unpack_from("<I", data, 2)[0]
+        channel_id, records_len = cls._HEADER_STRUCT.unpack_from(data, 0)
         if records_len == 0:
             return cls(channel_id, [])
-        records = list(struct.iter_unpack("<QQ", data[6 : 6 + records_len]))
+        records = list(struct.iter_unpack(cls._ENTRY_STRUCT.format, data[6 : 6 + records_len]))
         return cls(channel_id, records)
 
 
@@ -646,8 +714,11 @@ class Metadata(McapRecord):
     name: str
     metadata: dict[str, str]
 
-    def write(self) -> bytes:
-        return _write_string(self.name) + _write_map(self.metadata)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = _write_string(self.name) + _write_map(self.metadata)
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Metadata":
@@ -667,17 +738,21 @@ class MetadataIndex(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.METADATA_INDEX
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
 
     offset: int
     length: int
     name: str
 
-    def write(self) -> bytes:
-        return struct.pack("<QQ", self.offset, self.length) + _write_string(self.name)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = self._STRUCT.pack(self.offset, self.length) + _write_string(self.name)
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "MetadataIndex":
-        offset, length = struct.unpack_from("<QQ", data, 0)
+        offset, length = cls._STRUCT.unpack_from(data, 0)
         name, _ = _read_string(data, 16)
         return cls(offset, length, name)
 
@@ -701,27 +776,34 @@ class Schema(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.SCHEMA
+    _ID_STRUCT: ClassVar[struct.Struct] = struct.Struct("<H")
+    _DATA_LEN_STRUCT: ClassVar[struct.Struct] = struct.Struct("<I")
 
     id: int
     name: str
     encoding: str
     data: bytes = field(repr=False)
 
-    def write(self) -> bytes:
-        return (
-            struct.pack("<H", self.id)
-            + _write_string(self.name)
-            + _write_string(self.encoding)
-            + struct.pack("<I", len(self.data))
-            + self.data
+    def write_record_to(self, out: WritableBuffer) -> int:
+        content = b"".join(
+            [
+                self._ID_STRUCT.pack(self.id),
+                _write_string(self.name),
+                _write_string(self.encoding),
+                self._DATA_LEN_STRUCT.pack(len(self.data)),
+                self.data,
+            ]
         )
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Schema":
-        schema_id = struct.unpack_from("<H", data, 0)[0]
+        schema_id = cls._ID_STRUCT.unpack_from(data, 0)[0]
         name, offset = _read_string(data, 2)
         encoding, offset = _read_string(data, offset)
-        data_len = struct.unpack_from("<I", data, offset)[0]
+        data_len = cls._DATA_LEN_STRUCT.unpack_from(data, offset)[0]
         schema_data = data[offset + 4 : offset + 4 + data_len]
         return cls(
             schema_id,
@@ -753,6 +835,14 @@ class Statistics(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.STATISTICS
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<QHIIIIQQI")
+    _COUNT_ENTRY_STRUCT: ClassVar[struct.Struct] = struct.Struct("<HQ")
+    # For reading - split into parts due to different offsets
+    _MSG_COUNT_STRUCT: ClassVar[struct.Struct] = struct.Struct("<Q")
+    _SCHEMA_COUNT_STRUCT: ClassVar[struct.Struct] = struct.Struct("<H")
+    _COUNTS_STRUCT: ClassVar[struct.Struct] = struct.Struct("<IIII")
+    _TIMES_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
+    _MAP_LEN_STRUCT: ClassVar[struct.Struct] = struct.Struct("<I")
 
     message_count: int
     schema_count: int
@@ -764,36 +854,41 @@ class Statistics(McapRecord):
     message_end_time: int
     channel_message_counts: dict[int, int]
 
-    def write(self) -> bytes:
+    def write_record_to(self, out: WritableBuffer) -> int:
         counts_data = b"".join(
-            struct.pack("<HQ", channel_id, count)
+            self._COUNT_ENTRY_STRUCT.pack(channel_id, count)
             for channel_id, count in self.channel_message_counts.items()
         )
-        return (
-            struct.pack("<Q", self.message_count)
-            + struct.pack("<H", self.schema_count)
-            + struct.pack(
-                "<IIII",
+        content = (
+            self._STRUCT.pack(
+                self.message_count,
+                self.schema_count,
                 self.channel_count,
                 self.attachment_count,
                 self.metadata_count,
                 self.chunk_count,
+                self.message_start_time,
+                self.message_end_time,
+                len(counts_data),
             )
-            + struct.pack("<QQ", self.message_start_time, self.message_end_time)
-            + struct.pack("<I", len(counts_data))
             + counts_data
         )
+        record = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(content)) + content
+        out.write(record)
+        return len(record)
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Statistics":
-        message_count = struct.unpack_from("<Q", data, 0)[0]
-        schema_count = struct.unpack_from("<H", data, 8)[0]
-        channel_count, attachment_count, metadata_count, chunk_count = struct.unpack_from(
-            "<IIII", data, 10
+        message_count = cls._MSG_COUNT_STRUCT.unpack_from(data, 0)[0]
+        schema_count = cls._SCHEMA_COUNT_STRUCT.unpack_from(data, 8)[0]
+        channel_count, attachment_count, metadata_count, chunk_count = (
+            cls._COUNTS_STRUCT.unpack_from(data, 10)
         )
-        message_start_time, message_end_time = struct.unpack_from("<QQ", data, 26)
-        counts_len = struct.unpack_from("<I", data, 42)[0]
-        channel_message_counts = dict(struct.iter_unpack("<HQ", data[46 : 46 + counts_len]))
+        message_start_time, message_end_time = cls._TIMES_STRUCT.unpack_from(data, 26)
+        counts_len = cls._MAP_LEN_STRUCT.unpack_from(data, 42)[0]
+        channel_message_counts = dict(
+            struct.iter_unpack(cls._COUNT_ENTRY_STRUCT.format, data[46 : 46 + counts_len])
+        )
         return cls(
             message_count,
             schema_count,
@@ -822,17 +917,25 @@ class SummaryOffset(McapRecord):
     """
 
     OPCODE: ClassVar[int] = Opcode.SUMMARY_OFFSET
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<BQQ")
+    # Fixed content size: 1 + 8 + 8 = 17 bytes
+    _RECORD_STRUCT: ClassVar[struct.Struct] = struct.Struct("<BQBQQ")
 
     group_opcode: int
     group_start: int
     group_length: int
 
-    def write(self) -> bytes:
-        return struct.pack("<BQQ", self.group_opcode, self.group_start, self.group_length)
+    def write_record_to(self, out: WritableBuffer) -> int:
+        out.write(
+            self._RECORD_STRUCT.pack(
+                self.OPCODE, 17, self.group_opcode, self.group_start, self.group_length
+            )
+        )
+        return 26  # 1 + 8 + 17
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "SummaryOffset":
-        return cls(*struct.unpack_from("<BQQ", data, 0))
+        return cls(*cls._STRUCT.unpack_from(data, 0))
 
 
 @dataclass(slots=True)

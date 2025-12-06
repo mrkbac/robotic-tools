@@ -49,6 +49,7 @@ from small_mcap.records import (
     Statistics,
     Summary,
     SummaryOffset,
+    WritableBuffer,
 )
 
 # Well-known constants
@@ -111,6 +112,7 @@ __all__ = [
     "Summary",
     "SummaryOffset",
     "UnsupportedCompressionError",
+    "WritableBuffer",
     "breakup_chunk",
     "get_header",
     "get_summary",

@@ -1,5 +1,7 @@
 """Tests for small_mcap.data module - record serialization and deserialization."""
 
+import io
+
 from small_mcap import (
     MAGIC,
     MAGIC_SIZE,
@@ -20,7 +22,15 @@ from small_mcap import (
     Statistics,
     SummaryOffset,
 )
-from small_mcap.records import _read_map, _read_string, _write_map, _write_string
+from small_mcap.records import McapRecord, _read_map, _read_string, _write_map, _write_string
+
+
+def write_content(record: McapRecord) -> bytes:
+    """Write record to buffer and extract content (without opcode and length prefix)."""
+    buf = io.BytesIO()
+    record.write_record_to(buf)
+    # Skip opcode (1 byte) and length (8 bytes) to get content only
+    return buf.getvalue()[9:]
 
 
 class TestHelperFunctions:
@@ -106,7 +116,7 @@ class TestHeader:
     def test_header_write_read_roundtrip(self):
         """Test Header write and read roundtrip."""
         original = Header(profile="ros2", library="small-mcap-test")
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Header.read(serialized)
 
         assert deserialized == original
@@ -116,7 +126,7 @@ class TestHeader:
     def test_header_with_empty_profile(self):
         """Test Header with empty profile."""
         original = Header(profile="", library="test")
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Header.read(serialized)
 
         assert deserialized == original
@@ -136,7 +146,7 @@ class TestFooter:
             summary_offset_start=5678,
             summary_crc=0xDEADBEEF,
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Footer.read(serialized)
 
         assert deserialized == original
@@ -151,7 +161,7 @@ class TestFooter:
             summary_offset_start=0,
             summary_crc=0,
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Footer.read(serialized)
 
         assert deserialized == original
@@ -172,7 +182,7 @@ class TestSchema:
             encoding="protobuf",
             data=b"message Test { int32 value = 1; }",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Schema.read(serialized)
 
         assert deserialized == original
@@ -184,7 +194,7 @@ class TestSchema:
     def test_schema_with_empty_data(self):
         """Test Schema with empty data."""
         original = Schema(id=1, name="Empty", encoding="json", data=b"")
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Schema.read(serialized)
 
         assert deserialized == original
@@ -193,7 +203,7 @@ class TestSchema:
         """Test Schema with large data."""
         large_data = b"x" * 100000
         original = Schema(id=1, name="Large", encoding="flatbuffer", data=large_data)
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Schema.read(serialized)
 
         assert deserialized == original
@@ -216,7 +226,7 @@ class TestChannel:
             message_encoding="protobuf",
             metadata={"key": "value", "foo": "bar"},
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Channel.read(serialized)
 
         assert deserialized == original
@@ -235,7 +245,7 @@ class TestChannel:
             message_encoding="json",
             metadata={},
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Channel.read(serialized)
 
         assert deserialized == original
@@ -250,7 +260,7 @@ class TestChannel:
             message_encoding="application/octet-stream",
             metadata={},
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Channel.read(serialized)
 
         assert deserialized == original
@@ -273,7 +283,7 @@ class TestMessage:
             publish_time=1000000001,
             data=b"\x08\x2a",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Message.read(serialized)
 
         assert deserialized == original
@@ -292,7 +302,7 @@ class TestMessage:
             publish_time=0,
             data=b"",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Message.read(serialized)
 
         assert deserialized == original
@@ -307,7 +317,7 @@ class TestMessage:
             publish_time=1000,
             data=large_data,
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Message.read(serialized)
 
         assert deserialized == original
@@ -331,7 +341,7 @@ class TestChunk:
             compression="zstd",
             data=b"\x00\x01\x02\x03",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Chunk.read(serialized)
 
         assert deserialized == original
@@ -352,7 +362,7 @@ class TestChunk:
             compression="",
             data=b"test data",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Chunk.read(serialized)
 
         assert deserialized == original
@@ -379,7 +389,7 @@ class TestMessageIndex:
                 (3000, 600),
             ],
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = MessageIndex.read(serialized)
 
         assert deserialized == original
@@ -389,7 +399,7 @@ class TestMessageIndex:
     def test_message_index_with_empty_records(self):
         """Test MessageIndex with empty records."""
         original = MessageIndex(channel_id=1, records=[])
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = MessageIndex.read(serialized)
 
         assert deserialized == original
@@ -416,7 +426,7 @@ class TestChunkIndex:
             compressed_size=2048,
             uncompressed_size=4096,
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = ChunkIndex.read(serialized)
 
         assert deserialized == original
@@ -443,7 +453,7 @@ class TestChunkIndex:
             compressed_size=200,
             uncompressed_size=200,
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = ChunkIndex.read(serialized)
 
         assert deserialized == original
@@ -466,7 +476,7 @@ class TestAttachment:
             media_type="application/yaml",
             data=b"key: value\n",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Attachment.read(serialized)
 
         assert deserialized == original
@@ -485,7 +495,7 @@ class TestAttachment:
             media_type="text/plain",
             data=b"",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Attachment.read(serialized)
 
         assert deserialized == original
@@ -509,7 +519,7 @@ class TestAttachmentIndex:
             name="file.bin",
             media_type="application/octet-stream",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = AttachmentIndex.read(serialized)
 
         assert deserialized == original
@@ -535,7 +545,7 @@ class TestMetadata:
             name="config",
             metadata={"version": "1.0", "author": "test"},
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Metadata.read(serialized)
 
         assert deserialized == original
@@ -545,7 +555,7 @@ class TestMetadata:
     def test_metadata_with_empty_metadata(self):
         """Test Metadata with empty metadata dict."""
         original = Metadata(name="empty", metadata={})
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Metadata.read(serialized)
 
         assert deserialized == original
@@ -566,7 +576,7 @@ class TestMetadataIndex:
             length=256,
             name="config",
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = MetadataIndex.read(serialized)
 
         assert deserialized == original
@@ -595,7 +605,7 @@ class TestStatistics:
             message_end_time=2000000000,
             channel_message_counts={1: 500, 2: 300, 3: 200},
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Statistics.read(serialized)
 
         assert deserialized == original
@@ -622,7 +632,7 @@ class TestStatistics:
             message_end_time=0,
             channel_message_counts={},
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = Statistics.read(serialized)
 
         assert deserialized == original
@@ -642,7 +652,7 @@ class TestSummaryOffset:
             group_start=1024,
             group_length=2048,
         )
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = SummaryOffset.read(serialized)
 
         assert deserialized == original
@@ -664,7 +674,7 @@ class TestSummaryOffset:
                 group_start=100,
                 group_length=200,
             )
-            serialized = original.write()
+            serialized = write_content(original)
             deserialized = SummaryOffset.read(serialized)
 
             assert deserialized == original
@@ -681,7 +691,7 @@ class TestDataEnd:
     def test_data_end_write_read_roundtrip(self):
         """Test DataEnd write and read roundtrip."""
         original = DataEnd(data_section_crc=0xDEADBEEF)
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = DataEnd.read(serialized)
 
         assert deserialized == original
@@ -690,7 +700,7 @@ class TestDataEnd:
     def test_data_end_with_zero_crc(self):
         """Test DataEnd with zero CRC (CRC validation disabled)."""
         original = DataEnd(data_section_crc=0)
-        serialized = original.write()
+        serialized = write_content(original)
         deserialized = DataEnd.read(serialized)
 
         assert deserialized == original

@@ -45,8 +45,8 @@ else:
 
 _zstd_compressor: "zstandard.ZstdCompressor | None" = None
 
-# Buffer allocation multiplier for chunk builder
-BUFFER_SIZE_MULTIPLIER = 1.25
+# Fixed size of SummaryOffset record (opcode 1 + length 8 + content 17 = 26 bytes)
+SUMMARY_OFFSET_RECORD_SIZE = 26
 
 
 @dataclass(slots=True)
@@ -85,7 +85,7 @@ class _CRCWriter:
         self.enable_crc = enable_crc
         self._crc = 0
 
-    def write(self, data: bytes | memoryview) -> int:
+    def write(self, data: bytes | bytearray | memoryview, /) -> int:
         if self.enable_crc:
             self._crc = zlib.crc32(data, self._crc)
         return self._f.write(data)
@@ -116,7 +116,8 @@ def _write_summary_section(
         return
 
     group_start = buffer.tell()
-    buffer.writelines(item.write_record() for item in items)
+    for item in items:
+        item.write_record_to(buffer)
 
     offsets.append(
         SummaryOffset(
@@ -136,11 +137,7 @@ def _calculate_summary_offset_start(
     """Calculate the summary offset start position."""
     if not use_summary_offsets or not summary_offsets:
         return 0
-    return (
-        summary_start
-        + len(summary_data)
-        - sum(len(offset.write_record()) for offset in summary_offsets)
-    )
+    return summary_start + len(summary_data) - len(summary_offsets) * SUMMARY_OFFSET_RECORD_SIZE
 
 
 def _calculate_summary_crc(
@@ -239,8 +236,7 @@ class McapWriterRaw:
 
         # Write header
         self.crc_writer.write(MAGIC)
-        header_data = Header(profile=profile, library=library).write_record()
-        self.crc_writer.write(header_data)
+        Header(profile=profile, library=library).write_record_to(self.crc_writer)
 
         self._started = True
 
@@ -341,13 +337,12 @@ class McapWriterRaw:
             data=data,
         )
         offset = self.crc_writer.tell()
-        data = attachment.write_record()
-        self.crc_writer.write(data)
+        record_len = attachment.write_record_to(self.crc_writer)
 
         self.attachment_indexes.append(
             AttachmentIndex(
                 offset=offset,
-                length=len(data),
+                length=record_len,
                 log_time=log_time,
                 create_time=create_time,
                 data_size=len(attachment.data),
@@ -368,10 +363,9 @@ class McapWriterRaw:
         record = Metadata(name=name, metadata=metadata)
 
         offset = self.crc_writer.tell()
-        data = record.write_record()
-        self.crc_writer.write(data)
+        record_len = record.write_record_to(self.crc_writer)
 
-        self.metadata_indexes.append(MetadataIndex(offset=offset, length=len(data), name=name))
+        self.metadata_indexes.append(MetadataIndex(offset=offset, length=record_len, name=name))
 
         self.statistics.metadata_count += 1
 
@@ -401,8 +395,7 @@ class McapWriterRaw:
 
         # Write chunk
         chunk_start_offset = self.crc_writer.tell()
-        chunk_data = chunk.write_record()
-        self.crc_writer.write(chunk_data)
+        chunk_len = chunk.write_record_to(self.crc_writer)
 
         # Write message indexes
         message_index_start_offset = self.crc_writer.tell()
@@ -414,7 +407,7 @@ class McapWriterRaw:
                 message_index_offsets[idx.channel_id] = (
                     message_index_start_offset + index_buffer.tell()
                 )
-                index_buffer.write(idx.write_record())
+                idx.write_record_to(index_buffer)
 
         index_data = index_buffer.getvalue()
         self.crc_writer.write(index_data)
@@ -425,7 +418,7 @@ class McapWriterRaw:
                 message_start_time=chunk.message_start_time,
                 message_end_time=chunk.message_end_time,
                 chunk_start_offset=chunk_start_offset,
-                chunk_length=len(chunk_data),
+                chunk_length=chunk_len,
                 message_index_offsets=message_index_offsets,
                 message_index_length=len(index_data),
                 compression=chunk.compression,
@@ -442,9 +435,8 @@ class McapWriterRaw:
             return
 
         # Write DataEnd record
-        data_end = DataEnd(data_section_crc=self.crc_writer.crc).write_record()
         self.crc_writer.enable_crc = False  # No need to include DataEnd in CRC
-        self.crc_writer.write(data_end)
+        DataEnd(data_section_crc=self.crc_writer.crc).write_record_to(self.crc_writer)
 
         # Build and write summary section
         summary_start = self.crc_writer.tell()
@@ -463,7 +455,7 @@ class McapWriterRaw:
             summary_offset_start=summary_offset_start,
             summary_crc=summary_crc,
         )
-        self.crc_writer.write(footer.write_record())
+        footer.write_record_to(self.crc_writer)
 
         # Write closing magic
         self.crc_writer.write(MAGIC)
@@ -472,7 +464,7 @@ class McapWriterRaw:
 
     def _write_record(self, record: McapRecord) -> None:
         """Write a record to the output, either directly or via chunk builder."""
-        self.crc_writer.write(record.write_record())
+        record.write_record_to(self.crc_writer)
 
     def _build_summary(self, summary_start: int) -> tuple[bytes, list[SummaryOffset]]:
         """Build summary section and return (summary_data, summary_offsets)."""
@@ -510,7 +502,7 @@ class McapWriterRaw:
         # Write summary offsets at the end
         if self.use_summary_offsets:
             for offset in summary_offsets:
-                summary_buffer.write(offset.write_record())
+                offset.write_record_to(summary_buffer)
 
         return summary_buffer.getvalue(), summary_offsets
 
@@ -573,51 +565,41 @@ class _ChunkBuilder:
         self.compression = compression
         self.enable_crcs = enable_crcs
         self.chunk_size = chunk_size
-
-        # Pre-allocate buffer to avoid reallocations
-        self.buffer_data = bytearray(int(BUFFER_SIZE_MULTIPLIER * chunk_size))
-
+        self.buffer = io.BytesIO()
         self.reset()
 
     def reset(self) -> None:
         """Reset builder state for a new chunk."""
-        self.buffer_pos = 0
+        self.buffer.seek(0)
+        self.buffer.truncate(0)
         self.message_start_time = 0
         self.message_end_time = 0
         self.message_indices: dict[int, MessageIndex] = {}
         self.num_messages = 0
 
     def add(self, record: Message) -> None:
-        # Add record to current chunk
-        record_data = record.write_record()
-        record_len = len(record_data)
-
-        # Ensure buffer has space (grow if needed)
-        if self.buffer_pos + record_len > len(self.buffer_data):
-            self.buffer_data.extend(bytearray(max(record_len, self.chunk_size)))
-
-        if isinstance(record, Message):
-            if self.num_messages == 0:
-                self.message_start_time = record.log_time
-            else:
-                self.message_start_time = min(self.message_start_time, record.log_time)
-            self.message_end_time = max(self.message_end_time, record.log_time)
-
-            msg_idx = self.message_indices.get(record.channel_id)
-            if msg_idx is None:
-                msg_idx = MessageIndex(channel_id=record.channel_id, records=[])
-                self.message_indices[record.channel_id] = msg_idx
-            msg_idx.records.append((record.log_time, self.buffer_pos))
-
-            self.num_messages += 1
+        # Update time tracking
+        if self.num_messages == 0:
+            self.message_start_time = record.log_time
         else:
-            raise TypeError(f"Unsupported record type: {type(record).__name__}")
-        self.buffer_data[self.buffer_pos : self.buffer_pos + record_len] = record_data
-        self.buffer_pos += record_len
+            self.message_start_time = min(self.message_start_time, record.log_time)
+        self.message_end_time = max(self.message_end_time, record.log_time)
+
+        # Update message index (get position before writing)
+        msg_idx = self.message_indices.get(record.channel_id)
+        if msg_idx is None:
+            msg_idx = MessageIndex(channel_id=record.channel_id, records=[])
+            self.message_indices[record.channel_id] = msg_idx
+        msg_idx.records.append((record.log_time, self.buffer.tell()))
+
+        self.num_messages += 1
+
+        # Write directly to BytesIO buffer
+        record.write_record_to(self.buffer)
 
     def maybe_finalize(self) -> tuple[Chunk, dict[int, MessageIndex]] | None:
         # Check if we need to finalize current chunk before adding this record
-        if self.buffer_pos >= self.chunk_size and self.num_messages > 0:
+        if self.buffer.tell() >= self.chunk_size and self.num_messages > 0:
             result = self.finalize()
             self.reset()
             return result
@@ -628,8 +610,8 @@ class _ChunkBuilder:
         if self.num_messages == 0:
             return None
 
-        # Use memoryview to avoid copy before compression
-        chunk_data = memoryview(self.buffer_data)[: self.buffer_pos]
+        chunk_data = self.buffer.getvalue()
+        uncompressed_size = len(chunk_data)
 
         # Compress data (will fall back to uncompressed if < 5% savings)
         compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
@@ -640,7 +622,7 @@ class _ChunkBuilder:
             message_start_time=self.message_start_time,
             message_end_time=self.message_end_time,
             uncompressed_crc=zlib.crc32(chunk_data) if self.enable_crcs else 0,
-            uncompressed_size=self.buffer_pos,
+            uncompressed_size=uncompressed_size,
         ), self.message_indices
 
 
