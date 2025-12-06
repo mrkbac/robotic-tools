@@ -853,7 +853,6 @@ class Remapper:
         return channel.id if channel else original_id
 
 
-
 def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
     return True
 
@@ -985,14 +984,20 @@ def read_message_decoded(
     decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
 
     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
-        if schema is None:
-            return message.data
-        if decoder := decoders.get(schema.id):
+        # Use schema.id as cache key, or 0 for schemaless
+        cache_key = schema.id if schema else 0
+
+        if decoder := decoders.get(cache_key):
             return decoder(bytes(message.data))
+
         for factory in decoder_factories:
             if decoder := factory.decoder_for(channel.message_encoding, schema):
-                decoders[schema.id] = decoder
+                decoders[cache_key] = decoder
                 return decoder(bytes(message.data))
+
+        # No decoder found - return raw data for schemaless, raise for schema-based
+        if schema is None:
+            return message.data
 
         raise ValueError(
             f"no decoder factory supplied for message encoding {channel.message_encoding}, "

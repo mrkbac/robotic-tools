@@ -1,7 +1,7 @@
 """Tests for the Remapper class."""
 
 import pytest
-from small_mcap import Channel, McapError, Remapper, Schema, Summary
+from small_mcap import Channel, McapError, Remapper, Schema
 
 
 def test_schema_preserves_original_id():

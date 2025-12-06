@@ -246,6 +246,8 @@ class McapWriterRaw:
             raise RuntimeError("Writer not started. Call start() first.")
         if self._finished:
             raise RuntimeError("Writer already finished")
+        if schema_id == 0:
+            raise ValueError("Schema ID cannot be 0")
 
         schema = Schema(id=schema_id, name=name, encoding=encoding, data=data)
         self.schemas[schema.id] = schema
@@ -628,7 +630,6 @@ class _ChunkBuilder:
 
 class EncoderFactoryProtocol(Protocol):
     profile: str
-    library: str
     encoding: str  # Schema encoding format
     message_encoding: str  # Message data encoding format
 
@@ -665,6 +666,7 @@ class McapWriter(McapWriterRaw):
         self.chunk_size = chunk_size
         self.compression = compression
         self.encoder_factory = encoder_factory
+        self.encoder_functions: dict[int, Callable[[Any], bytes | memoryview]] = {}
         self.chunk_builder: _ChunkBuilder | None = None
         if use_chunking:
             self.chunk_builder = _ChunkBuilder(compression, enable_crcs, chunk_size)
@@ -683,15 +685,18 @@ class McapWriter(McapWriterRaw):
         channel = self.channels.get(channel_id)
         if channel is None:
             raise ValueError(f"Channel ID {channel_id} does not exist.")
-        schema = self.schemas.get(channel.schema_id)
-        if schema is None:
-            raise ValueError(
-                f"Schema ID {channel.schema_id} for channel ID {channel_id} does not exist."
-            )
 
-        encoder = self.encoder_factory.encoder_for(schema)
+        # Support schemaless channels (schema_id=0)
+        schema = self.schemas.get(channel.schema_id) if channel.schema_id != 0 else None
+        cache_key = channel.schema_id if schema else 0
+
+        encoder = self.encoder_functions.get(cache_key)
         if encoder is None:
-            raise ValueError(f"No encoder found for schema ID {schema.id}.")
+            encoder = self.encoder_factory.encoder_for(schema)
+            if encoder is None:
+                raise ValueError(f"No encoder found for schema ID {channel.schema_id}.")
+            self.encoder_functions[cache_key] = encoder
+
         encoded_data = encoder(data)
         self.add_message(
             channel_id=channel_id,
