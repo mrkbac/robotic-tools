@@ -217,17 +217,3 @@ def test_get_remapped_channel():
     assert result is not None
     assert result.id == 1
     assert result.topic == "/test"
-
-
-def test_get_remapped_schema():
-    """get_remapped_schema should return schema ID or 0 if not found."""
-    remapper = Remapper()
-    schema = Schema(id=5, name="test", encoding="proto", data=b"data")
-
-    # Not yet mapped - returns 0
-    assert remapper.get_remapped_schema(0, 5) == 0
-
-    remapper.remap_schema(0, schema)
-
-    # Now mapped - returns the ID
-    assert remapper.get_remapped_schema(0, 5) == 5

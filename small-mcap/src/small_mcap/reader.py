@@ -852,10 +852,6 @@ class Remapper:
         channel = self._channel_lookup_fast.get((stream_id, original_id))
         return channel.id if channel else original_id
 
-    def get_remapped_schema(self, stream_id: int, original_schema_id: int) -> int:
-        """Get the remapped schema ID for a given stream and original schema ID."""
-        mapped_schema = self._schema_lookup_fast.get((stream_id, original_schema_id))
-        return mapped_schema.id if mapped_schema else 0
 
 
 def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
