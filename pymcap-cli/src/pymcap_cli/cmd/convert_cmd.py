@@ -24,6 +24,7 @@ from small_mcap.writer import CompressionType as WriterCompressionType
 
 from pymcap_cli.mcap_processor import confirm_output_overwrite
 from pymcap_cli.msg_resolver import ROS2Distro, get_message_definition
+from pymcap_cli.osc_utils import OSCProgressColumn
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
@@ -32,7 +33,6 @@ from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import OSCProgressColumn
 
 logger = logging.getLogger(__name__)
 

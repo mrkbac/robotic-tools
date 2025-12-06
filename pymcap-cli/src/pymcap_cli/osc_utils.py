@@ -10,6 +10,13 @@ import sys
 from enum import Enum
 from pathlib import Path
 
+from rich.progress import (
+    ProgressColumn,
+    Task,
+)
+from rich.table import Column
+from rich.text import Text
+
 
 def supports_osc_9_4() -> bool:
     """Detect terminal capabilities for progress display.
@@ -143,7 +150,76 @@ def set_progress(state: Osc94States, progress: int) -> None:
         >>> set_progress(Osc94States.RESET, 0)   # Reset/complete
         >>> set_progress(Osc94States.ERROR, 0)   # Error
     """
+    if progress < 0 or progress > 100:
+        raise ValueError("Progress percentage must be between 0 and 100")
     sequence = f"\x1b]9;4;{state.value};{progress}\x1b\\"
     # Silent failure - OSC is optional enhancement
     with contextlib.suppress(Exception):
         write_osc(sequence)
+
+
+class OSCProgressColumn(ProgressColumn):
+    """Emits OSC 9;4 terminal progress sequences for native progress indicators.
+
+    Supports Windows Terminal, ConEmu, and Ghostty cross-platform.
+    Falls back gracefully to no-op in unsupported terminals.
+    """
+
+    def __init__(self, title: str | None = None, *, table_column: Column | None = None) -> None:
+        super().__init__(table_column=table_column)
+        self._supports_osc_9_4 = supports_osc_9_4()
+        self._last_state: Osc94States = Osc94States.UNKNOWN
+        self._last_percentage: int = -1  # Cache to avoid redundant updates
+        self._title = title  # Store title for terminal updates
+
+    def render(self, task: "Task") -> Text:
+        if not self._supports_osc_9_4:
+            return Text("")
+
+        # Determine state
+        if task.finished:
+            state = Osc94States.RESET
+        elif task.total is None or task.total == 0:
+            state = Osc94States.INDETERMINATE
+        else:
+            state = Osc94States.PROGRESS
+
+        # Calculate percentage
+        if state == Osc94States.PROGRESS and task.total is not None:
+            percentage = int((task.completed / task.total) * 100)
+            percentage = max(0, min(100, percentage))
+        else:
+            percentage = 0
+
+        if state != self._last_state or (
+            state == Osc94States.PROGRESS and percentage != self._last_percentage
+        ):
+            with contextlib.suppress(Exception):
+                set_progress(state, percentage)
+
+            # Update terminal title with percentage
+            if self._title:
+                with contextlib.suppress(Exception):
+                    if state == Osc94States.PROGRESS:
+                        set_window_title(f"{percentage}% - {self._title}")
+                    elif state == Osc94States.RESET:
+                        set_window_title("")  # Reset to empty on completion
+                    elif state == Osc94States.INDETERMINATE:
+                        set_window_title(f"{self._title}")
+
+            self._last_state = state
+            self._last_percentage = percentage
+
+        return Text("")
+
+    def __del__(self) -> None:
+        """Reset progress on cleanup."""
+        with contextlib.suppress(Exception):
+            # Ignore anything during interpreter shutdown
+            if hasattr(self, "_supports_osc_9_4") and self._supports_osc_9_4:
+                with contextlib.suppress(Exception):
+                    set_progress(Osc94States.RESET, 0)
+                # Reset terminal title
+                if hasattr(self, "_title") and self._title:
+                    with contextlib.suppress(Exception):
+                        set_window_title("")

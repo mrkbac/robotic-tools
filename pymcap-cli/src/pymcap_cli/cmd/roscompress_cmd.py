@@ -31,11 +31,11 @@ from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import confirm_output_overwrite
+from pymcap_cli.osc_utils import OSCProgressColumn
 from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import OSCProgressColumn
 
 if TYPE_CHECKING:
     from av.container import InputContainer
