@@ -210,16 +210,16 @@ def _calculate_interval_stats(
         if not intervals:
             continue
 
-        hz_values = sorted(1_000_000_000 / interval for interval in intervals)
-        hz_avg = statistics.mean(hz_values)
-        median_hz = statistics.median(hz_values)
+        # Convert intervals to Hz values (no sorting needed)
+        hz_values = [1_000_000_000 / interval for interval in intervals]
 
-        # Calculate Hz statistics
+        # Calculate Hz statistics using fast operations
+        # Note: statistics.median() handles unsorted data efficiently
         hz_stats = {
-            "minimum": hz_values[0],
-            "maximum": hz_values[-1],
-            "average": hz_avg,
-            "median": median_hz,
+            "minimum": min(hz_values),
+            "maximum": max(hz_values),
+            "average": sum(hz_values) / len(hz_values),
+            "median": statistics.median(hz_values),
         }
 
         result: dict[str, dict[str, float]] = {"hz_stats": hz_stats}

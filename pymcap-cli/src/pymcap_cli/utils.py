@@ -95,6 +95,9 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
         ...         data = stream.read(8192)
     """
 
+    # Minimum bytes between progress updates to reduce overhead
+    _UPDATE_THRESHOLD = 1_000_000  # 1MB
+
     def __init__(
         self,
         stream: IO[bytes],
@@ -115,13 +118,33 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
         self._progress = progress_obj
         self._last_position = initial_offset
         self._max_position = initial_offset  # Track high water mark
+        self._pending_delta = 0  # Accumulated delta waiting to be reported
 
     def _update_progress(self) -> None:
-        """Update progress bar based on current position."""
+        """Update progress bar based on current position.
+
+        Uses batched updates to reduce overhead from frequent small reads.
+        Progress is only reported when accumulated delta exceeds threshold.
+        """
         if self._last_position > self._max_position:
             delta = self._last_position - self._max_position
-            self._progress.advance(self._progress_task, delta)
+            self._pending_delta += delta
             self._max_position = self._last_position
+
+            # Only update progress bar when we've accumulated enough
+            if self._pending_delta >= self._UPDATE_THRESHOLD:
+                self._progress.advance(self._progress_task, self._pending_delta)
+                self._pending_delta = 0
+
+    def flush_progress(self) -> None:
+        """Flush any pending progress updates.
+
+        Call this when processing is complete to ensure the progress bar
+        shows the final position accurately.
+        """
+        if self._pending_delta > 0:
+            self._progress.advance(self._progress_task, self._pending_delta)
+            self._pending_delta = 0
 
     def read(self, size: int = -1) -> bytes:
         """Read bytes and advance progress by delta."""
@@ -212,6 +235,9 @@ def rebuild_info(
             calculate_channel_sizes=True,
             exact_sizes=exact_sizes,
         )
+
+        # Flush any pending progress updates before completing
+        wrapped_stream.flush_progress()
 
         # Complete progress
         progress.update(task, completed=file_size, visible=False)

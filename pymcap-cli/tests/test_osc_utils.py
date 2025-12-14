@@ -2,8 +2,10 @@
 
 import builtins
 import os
+import sys
 from pathlib import Path
 
+import pytest
 from pymcap_cli.osc_utils import Osc94States, set_progress, set_window_title, write_osc
 
 
@@ -94,6 +96,7 @@ class TestWriteOsc:
         assert len(written_data) == 1
         assert "\x1b]9;4;1;50\x1b\\" in written_data[0]
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
     def test_windows_conout(self, monkeypatch):
         """Test writing via CONOUT$ on Windows."""
         written_data = []
