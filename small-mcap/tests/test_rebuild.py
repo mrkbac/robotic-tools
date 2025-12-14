@@ -4,10 +4,10 @@ import io
 from pathlib import Path
 
 import pytest
-from small_mcap import get_summary, rebuild_summary
+from small_mcap import McapWriter, get_summary, rebuild_summary, stream_reader
 from small_mcap.exceptions import McapError
 from small_mcap.rebuild import MESSAGE_RECORD_OVERHEAD, _estimate_size_from_indexes
-from small_mcap.records import MessageIndex
+from small_mcap.records import LazyChunk, MessageIndex
 
 # Path to conformance test data
 CONFORMANCE_DIR = Path(__file__).parent.parent.parent / "data" / "conformance"
@@ -365,3 +365,55 @@ def test_rebuild_invalid_magic_raises_error():
         rebuild_summary(
             invalid_stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
         )
+
+
+def test_rebuild_pending_chunk_rebuilds_missing_indexes():
+    """Rebuild should decompress final pending chunk and rebuild missing message indexes."""
+    buffer = io.BytesIO()
+    writer = McapWriter(buffer, chunk_size=1024)
+    writer.start()
+    writer.add_schema(1, "Test", "json", b"{}")
+    writer.add_channel(1, "/test", "json", 1)
+    for i in range(3):
+        writer.add_message(1, i, f"msg{i}".encode(), i)
+    writer.finish()
+
+    data = buffer.getvalue()
+    stream = io.BytesIO(data)
+    prev_pos = 0
+    chunk_start_offset = None
+    message_index_start_offset = None
+    for record in stream_reader(stream, emit_chunks=True, lazy_chunks=True):
+        record_start = prev_pos
+        current_pos = stream.tell()
+        if isinstance(record, LazyChunk):
+            chunk_start_offset = record_start
+            message_index_start_offset = current_pos
+            break
+        prev_pos = current_pos
+
+    assert chunk_start_offset is not None
+    assert message_index_start_offset is not None
+
+    truncated_stream = io.BytesIO(data[:message_index_start_offset])
+    rebuild_info = rebuild_summary(
+        truncated_stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+    )
+
+    stats = rebuild_info.summary.statistics
+    assert stats is not None
+    assert stats.message_count == 3
+    assert stats.channel_message_counts[1] == 3
+
+    chunk_indexes = rebuild_info.summary.chunk_indexes
+    assert len(chunk_indexes) == 1
+    assert chunk_indexes[0].message_index_length == 0
+
+    assert rebuild_info.chunk_information is not None
+    rebuilt_indexes = rebuild_info.chunk_information[chunk_start_offset]
+    assert len(rebuilt_indexes) == 1
+    rebuilt_records = rebuilt_indexes[0].records
+    assert [log_time for log_time, _ in rebuilt_records] == [0, 1, 2]
+    assert [offset for _, offset in rebuilt_records] == sorted(
+        offset for _, offset in rebuilt_records
+    )

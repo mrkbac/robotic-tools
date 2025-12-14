@@ -1,15 +1,19 @@
 """Rebuild MCAP summary section from data section."""
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import IO
 
 from small_mcap.exceptions import McapError
 from small_mcap.reader import (
+    _RECORD_HEADER_SIZE,
+    _get_chunk_data_stream,
     breakup_chunk,
     stream_reader,
 )
 from small_mcap.records import (
+    OPCODE_AND_LEN_STRUCT,
     Attachment,
     AttachmentIndex,
     Channel,
@@ -17,10 +21,12 @@ from small_mcap.records import (
     ChunkIndex,
     Header,
     LazyChunk,
+    McapRecord,
     Message,
     MessageIndex,
     Metadata,
     MetadataIndex,
+    Opcode,
     Schema,
     Statistics,
     Summary,
@@ -107,6 +113,34 @@ class RebuildInfo:
     next_offset: int = 0
 
 
+def _breakup_chunk_with_offsets(
+    chunk: Chunk, validate_crc: bool = False
+) -> Iterable[tuple[int, McapRecord]]:
+    """Like breakup_chunk but yields (offset, record) tuples.
+
+    The offset is the byte position of the record within the uncompressed chunk data,
+    suitable for use in MessageIndex records.
+    """
+    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+    view = memoryview(data)
+    pos = 0
+
+    while pos < len(view):
+        record_start = pos  # Offset of this record in chunk
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
+        pos += _RECORD_HEADER_SIZE
+        record_data_end = pos + length
+
+        if opcode == Opcode.MESSAGE:
+            yield (record_start, Message.read(view[pos:record_data_end]))
+        elif opcode == Opcode.CHANNEL:
+            yield (record_start, Channel.read(view[pos:record_data_end]))
+        elif opcode == Opcode.SCHEMA:
+            yield (record_start, Schema.read(view[pos:record_data_end]))
+
+        pos = record_data_end
+
+
 def rebuild_summary(
     stream: IO[bytes],
     *,
@@ -191,8 +225,8 @@ def rebuild_summary(
         if calculate_channel_sizes:
             channel_sizes[record.channel_id] += len(record.data)
 
-    def finish_chunk(*, force: bool = False) -> None:
-        nonlocal pending_chunk
+    def finish_chunk(*, force: bool = False, rebuild_indexes: bool = False) -> None:
+        nonlocal pending_chunk, pending_indexes
         if pending_chunk is None:
             return
 
@@ -201,16 +235,39 @@ def rebuild_summary(
             or exact_sizes
             or any(msg_idx.channel_id not in summary.channels for msg_idx in pending_indexes)
         ):
-            for record in breakup_chunk(
-                pending_chunk.to_chunk(stream),
-                validate_crc=validate_crc,
-            ):
-                if isinstance(record, Channel):
-                    summary.channels[record.id] = record
-                elif isinstance(record, Schema):
-                    summary.schemas[record.id] = record
-                elif isinstance(record, Message):
-                    update_message(record)
+            if rebuild_indexes:
+                # Rebuild MessageIndex records from chunk data
+                rebuilt_indexes: dict[int, MessageIndex] = {}
+                for offset, record in _breakup_chunk_with_offsets(
+                    pending_chunk.to_chunk(stream),
+                    validate_crc=validate_crc,
+                ):
+                    if isinstance(record, Channel):
+                        summary.channels[record.id] = record
+                    elif isinstance(record, Schema):
+                        summary.schemas[record.id] = record
+                    elif isinstance(record, Message):
+                        update_message(record)
+                        # Build MessageIndex entry
+                        if record.channel_id not in rebuilt_indexes:
+                            rebuilt_indexes[record.channel_id] = MessageIndex(
+                                channel_id=record.channel_id, records=[]
+                            )
+                        rebuilt_indexes[record.channel_id].records.append((record.log_time, offset))
+                # Replace pending_indexes with rebuilt ones
+                pending_indexes = list(rebuilt_indexes.values())
+            else:
+                # Original path - no index rebuilding
+                for record in breakup_chunk(
+                    pending_chunk.to_chunk(stream),
+                    validate_crc=validate_crc,
+                ):
+                    if isinstance(record, Channel):
+                        summary.channels[record.id] = record
+                    elif isinstance(record, Schema):
+                        summary.schemas[record.id] = record
+                    elif isinstance(record, Message):
+                        update_message(record)
         else:
             if calculate_channel_sizes:
                 estimated_sizes = _estimate_size_from_indexes(
@@ -223,7 +280,7 @@ def rebuild_summary(
                 statistics.message_count += len(idx.records)
                 statistics.channel_message_counts[idx.channel_id] += len(idx.records)
 
-        # Store MessageIndex records for this chunk before clearing
+        # Store MessageIndex records for this chunk
         if pending_indexes:
             chunk_information[pending_chunk_start_offset] = pending_indexes.copy()
 
@@ -285,6 +342,7 @@ def rebuild_summary(
             elif isinstance(record, LazyChunk):
                 pending_chunk_start_offset = record_start_pos
                 message_index_start_offset = current_pos
+                last_message_index_end_offset = message_index_start_offset
 
                 statistics.chunk_count += 1
 
@@ -319,8 +377,7 @@ def rebuild_summary(
                 summary.metadata_indexes.append(record)
     except Exception as e:  # noqa: BLE001
         print(f"Warning: Error while rebuilding summary at offset {next_offset}: {e}")  # noqa: T201
-    # TODO: figure out how to handle partial message indexes of broken mcaps
-    # final ChunkIndex
+
     if pending_chunk is not None:
         message_index_length = last_message_index_end_offset - message_index_start_offset
         summary.chunk_indexes.append(
@@ -330,13 +387,17 @@ def rebuild_summary(
                 compression=pending_chunk.compression,
                 compressed_size=pending_chunk.data_len,
                 message_end_time=pending_chunk.message_end_time,
-                message_index_length=message_index_length,
+                message_index_length=max(0, message_index_length),
                 message_index_offsets=pending_message_index_offsets,
                 message_start_time=pending_chunk.message_start_time,
                 uncompressed_size=pending_chunk.uncompressed_size,
             )
         )
-    finish_chunk()
+    try:
+        # TODO: we should only rebuild if other chunks have message indexes
+        finish_chunk(force=True, rebuild_indexes=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: Could not process final chunk: {e}")  # noqa: T201
 
     # Finalize statistics
     statistics.schema_count = len(summary.schemas)

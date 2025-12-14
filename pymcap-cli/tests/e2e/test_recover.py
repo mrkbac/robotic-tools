@@ -3,6 +3,10 @@
 from pathlib import Path
 
 import pytest
+from small_mcap import get_summary
+from small_mcap.rebuild import rebuild_summary
+
+from pymcap_cli.cmd.recover_inplace_cmd import recover_inplace
 from pymcap_cli.mcap_processor import (
     InputOptions,
     McapProcessor,
@@ -214,3 +218,23 @@ class TestRecover:
 
         assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
+
+    def test_recover_inplace_rebuilds_summary(self, simple_mcap: Path, tmp_path: Path):
+        """Recover-inplace should rebuild summary/footer after truncation."""
+        truncated = tmp_path / "truncated.mcap"
+        truncated.write_bytes(simple_mcap.read_bytes())
+
+        # Remove existing summary/footer to simulate corruption
+        with truncated.open("r+b") as f:
+            info = rebuild_summary(
+                f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+            )
+            f.truncate(info.next_offset)
+
+        result = recover_inplace(str(truncated), force=True)
+        assert result == 0
+
+        with truncated.open("rb") as f:
+            summary = get_summary(f)
+            assert summary.statistics is not None
+            assert summary.statistics.message_count > 0

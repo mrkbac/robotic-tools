@@ -17,6 +17,7 @@ from pymcap_cli.cmd import (
     process_cmd,
     rechunk_cmd,
     recover_cmd,
+    recover_inplace_cmd,
     tftree_cmd,
 )
 
@@ -74,6 +75,7 @@ app.command(name="cat")(cat_cmd.cat)
 app.command(name="info")(info_cmd.info)
 app.command(name="info-json")(info_json_cmd.info_json)
 app.command(name="recover")(recover_cmd.recover)
+app.command(name="recover-inplace")(recover_inplace_cmd.recover_inplace)
 app.command(name="du")(du_cmd.du)
 app.command(name="process")(process_cmd.process)
 app.command(name="rechunk")(rechunk_cmd.rechunk)
