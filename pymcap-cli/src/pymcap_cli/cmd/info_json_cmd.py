@@ -6,7 +6,6 @@ import statistics
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from itertools import pairwise
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -66,10 +65,12 @@ class ChannelStatistics:
     """Collected statistics for a single channel from a single-pass iteration."""
 
     channel_id: int
-    timestamps: list[int] = field(default_factory=list)
     first_time: int = sys.maxsize
     last_time: int = 0
     message_count: int = 0
+    # For interval calculation: track last timestamp and collect intervals directly
+    chunk_last_timestamp: int = -1  # Last timestamp from previous chunk for this channel
+    intervals: list[int] = field(default_factory=list)
 
 
 def _collect_channel_statistics(
@@ -83,6 +84,10 @@ def _collect_channel_statistics(
     dict[int, int],  # message_end_time
 ]:
     """Single-pass collection of all channel statistics and distributions.
+
+    Computes intervals on-the-fly within each chunk (messages within chunks are
+    already sorted by log_time in MCAP format). This avoids collecting all
+    timestamps and sorting, providing O(n) performance instead of O(n log n).
 
     Returns:
         Tuple of (
@@ -106,7 +111,8 @@ def _collect_channel_statistics(
     # Single pass over all chunk information
     for msg_idx_list in info.chunk_information.values():
         for msg_idx in msg_idx_list:
-            if not msg_idx.records:
+            records = msg_idx.records
+            if not records:
                 continue
 
             channel_id = msg_idx.channel_id
@@ -120,14 +126,22 @@ def _collect_channel_statistics(
             stats = channel_stats[channel_id]
             channel_dist = per_channel_distributions[channel_id]
 
-            # Process all records in this chunk
-            for timestamp, _ in msg_idx.records:
-                # Update min/max times with manual comparisons (faster than builtin)
-                stats.first_time = min(stats.first_time, timestamp)
+            # Process first record separately
+            first_timestamp = records[0][0]
+            stats.first_time = min(stats.first_time, first_timestamp)
+
+            # Compute intervals within this chunk (records are already sorted by log_time)
+            # Using pairwise on records directly avoids storing timestamps
+            prev_timestamp = first_timestamp
+            for timestamp, _ in records:
+                # Update last_time (will end up with the max)
                 stats.last_time = max(stats.last_time, timestamp)
 
-                # Collect timestamp for interval calculation
-                stats.timestamps.append(timestamp)
+                # Compute interval from previous message in this chunk
+                if timestamp > prev_timestamp:
+                    stats.intervals.append(timestamp - prev_timestamp)
+                prev_timestamp = timestamp
+
                 stats.message_count += 1
 
                 # Update distributions
@@ -143,27 +157,15 @@ def _collect_channel_statistics(
     channel_durations = {
         channel_id: int(stats.last_time - stats.first_time)
         for channel_id, stats in channel_stats.items()
-        if stats.first_time != float("inf")
+        if stats.first_time != sys.maxsize
     }
 
-    # Calculate intervals
-    channel_intervals: dict[int, list[int]] = {}
-    for channel_id, stats in channel_stats.items():
-        if len(stats.timestamps) < 2:
-            continue
-
-        # Sort timestamps once
-        sorted_timestamps = sorted(stats.timestamps)
-
-        # Calculate intervals between consecutive messages and filter in one pass
-        intervals = [
-            interval
-            for prev, curr in pairwise(sorted_timestamps)
-            if (interval := int(curr - prev)) > 0
-        ]
-
-        if intervals:
-            channel_intervals[channel_id] = intervals
+    # Collect intervals (already computed on-the-fly)
+    channel_intervals: dict[int, list[int]] = {
+        channel_id: stats.intervals
+        for channel_id, stats in channel_stats.items()
+        if stats.intervals
+    }
 
     # Collect first and last times
     message_start_time = {
