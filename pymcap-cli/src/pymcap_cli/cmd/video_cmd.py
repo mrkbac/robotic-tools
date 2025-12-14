@@ -176,10 +176,10 @@ def _raw_image_to_array(message: Any) -> NDArray[np.uint8]:
     data = bytes(message.data)
     if encoding in {"rgb", "rgb8"}:
         array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array.copy()  # type: ignore[no-any-return]
+        return array.copy()  # type: ignore[no-any-return,unused-ignore]
     if encoding in {"bgr", "bgr8"}:
         array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array[..., ::-1].copy()  # type: ignore[no-any-return]
+        return array[..., ::-1].copy()  # type: ignore[no-any-return,unused-ignore]
     if encoding in {"mono", "mono8", "8uc1"}:
         mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
         return np.repeat(mono_array[:, :, None], 3, axis=2)

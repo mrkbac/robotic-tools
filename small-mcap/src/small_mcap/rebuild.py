@@ -64,22 +64,28 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
         total += chunk_size - records[-1][1] - MESSAGE_RECORD_OVERHEAD  # last message
         return {idx.channel_id: total}
 
-    # Multi-channel: collect and sort
-    all_msgs: list[tuple[int, int]] = []
+    # Multi-channel: collect all (offset, channel_id) pairs and sort by offset
+    # Pre-calculate total size to avoid list resizing
+    total_records = sum(len(idx.records) for idx in indexes)
+    all_msgs: list[tuple[int, int]] = [(0, 0)] * total_records
+
+    i = 0
     for idx in indexes:
         ch = idx.channel_id
-        all_msgs.extend((offset, ch) for _, offset in idx.records)
+        for _, offset in idx.records:
+            all_msgs[i] = (offset, ch)
+            i += 1
 
     all_msgs.sort()  # Sort by offset (first element)
 
     if not all_msgs:
         return {}
 
-    # Calculate sizes
+    # Calculate sizes in a single pass
     sizes: dict[int, int] = {}
-    for i in range(len(all_msgs) - 1):
-        offset, ch = all_msgs[i]
-        next_offset = all_msgs[i + 1][0]
+    for j in range(len(all_msgs) - 1):
+        offset, ch = all_msgs[j]
+        next_offset = all_msgs[j + 1][0]
         sizes[ch] = sizes.get(ch, 0) + (next_offset - offset - MESSAGE_RECORD_OVERHEAD)
 
     # Last message extends to chunk_size
