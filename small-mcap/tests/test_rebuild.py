@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from small_mcap import get_summary, rebuild_summary
+from small_mcap.rebuild import MESSAGE_RECORD_OVERHEAD, _estimate_size_from_indexes
+from small_mcap.records import MessageIndex
 
 # Path to conformance test data
 CONFORMANCE_DIR = Path(__file__).parent.parent.parent / "data" / "conformance"
@@ -206,3 +208,94 @@ def test_rebuild_matches_original_summary():
 
     # Compare chunk indexes count
     assert len(rebuilt_summary.chunk_indexes) == len(original_summary.chunk_indexes)
+
+
+# Tests for _estimate_size_from_indexes
+
+
+def test_estimate_size_single_channel_single_message():
+    """Test estimation with a single channel and single message."""
+    indexes = [MessageIndex(channel_id=1, records=[(1000, 0)])]
+    chunk_size = 100
+
+    result = _estimate_size_from_indexes(indexes, chunk_size)
+
+    assert result == {1: chunk_size - MESSAGE_RECORD_OVERHEAD}
+
+
+def test_estimate_size_single_channel_multiple_messages():
+    """Test estimation with a single channel and multiple messages."""
+    # 3 messages at offsets 0, 100, 200 in a 300-byte chunk
+    indexes = [MessageIndex(channel_id=1, records=[(1000, 0), (2000, 100), (3000, 200)])]
+    chunk_size = 300
+
+    result = _estimate_size_from_indexes(indexes, chunk_size)
+
+    # Each message: gap - overhead = 100 - 31 = 69
+    expected_size = 3 * (100 - MESSAGE_RECORD_OVERHEAD)
+    assert result == {1: expected_size}
+
+
+def test_estimate_size_multi_channel_all_channels_present():
+    """Test multi-channel estimation includes ALL channels (regression test for closure bug)."""
+    # 2 channels with interleaved messages
+    indexes = [
+        MessageIndex(channel_id=1, records=[(100, 0), (300, 200)]),  # ch1 at offsets 0, 200
+        MessageIndex(channel_id=2, records=[(200, 100), (400, 300)]),  # ch2 at offsets 100, 300
+    ]
+    chunk_size = 400
+
+    result = _estimate_size_from_indexes(indexes, chunk_size)
+
+    # CRITICAL: Both channels must be present in result
+    assert 1 in result, "Channel 1 missing from result (closure bug regression)"
+    assert 2 in result, "Channel 2 missing from result"
+
+
+def test_estimate_size_multi_channel_correct_sizes():
+    """Test that multi-channel estimation computes correct sizes per channel."""
+    # 2 channels with interleaved messages at equal spacing
+    indexes = [
+        MessageIndex(channel_id=1, records=[(100, 0), (300, 200)]),
+        MessageIndex(channel_id=2, records=[(200, 100), (400, 300)]),
+    ]
+    chunk_size = 400
+
+    result = _estimate_size_from_indexes(indexes, chunk_size)
+
+    # Sorted by offset: (0,ch1), (100,ch2), (200,ch1), (300,ch2), end=400
+    # ch1: (100-0-31) + (300-200-31) = 69 + 69 = 138
+    # ch2: (200-100-31) + (400-300-31) = 69 + 69 = 138
+    assert result[1] == 138
+    assert result[2] == 138
+
+
+def test_estimate_size_multi_channel_uneven_distribution():
+    """Test multi-channel with uneven message distribution."""
+    indexes = [
+        MessageIndex(channel_id=1, records=[(100, 0)]),  # 1 message
+        MessageIndex(channel_id=2, records=[(200, 50), (300, 100), (400, 150)]),  # 3 messages
+    ]
+    chunk_size = 200
+
+    result = _estimate_size_from_indexes(indexes, chunk_size)
+
+    # Both channels must be present
+    assert 1 in result
+    assert 2 in result
+    # Total size should equal chunk_size minus overhead for all 4 messages
+    total = sum(result.values())
+    assert total == chunk_size - 4 * MESSAGE_RECORD_OVERHEAD
+
+
+def test_estimate_size_empty_indexes():
+    """Test with empty index list."""
+    result = _estimate_size_from_indexes([], 1000)
+    assert result == {}
+
+
+def test_estimate_size_empty_records():
+    """Test with index containing no records."""
+    indexes = [MessageIndex(channel_id=1, records=[])]
+    result = _estimate_size_from_indexes(indexes, 1000)
+    assert result == {}

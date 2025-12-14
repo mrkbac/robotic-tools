@@ -1,10 +1,7 @@
 """Rebuild MCAP summary section from data section."""
 
-import heapq
-import itertools
 from collections import defaultdict
 from dataclasses import dataclass
-from operator import itemgetter
 from typing import IO
 
 from small_mcap.exceptions import McapError
@@ -29,6 +26,9 @@ from small_mcap.records import (
     Summary,
 )
 
+# opcode + length + channel_id + sequence + log_time + publish_time
+MESSAGE_RECORD_OVERHEAD = 1 + 8 + 2 + 4 + 8 + 8
+
 
 def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) -> dict[int, int]:
     """Estimate message sizes from MessageIndex offsets without decompressing.
@@ -44,26 +44,43 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
     Returns:
         Dict mapping channel_id to total estimated bytes for that channel
     """
-    sizes_dd: dict[int, int] = defaultdict(int)
 
-    for cur, (_, end_offset) in itertools.pairwise(
-        heapq.merge(
-            *(
-                ((msg_idx.channel_id, record[1]) for record in msg_idx.records)
-                for msg_idx in indexes
-            ),
-            ((None, chunk_size),),
-            key=itemgetter(1),
+    # Fast path: single channel (common case)
+    if len(indexes) == 1:
+        idx = indexes[0]
+        records = idx.records
+        if not records:
+            return {}
+        total = sum(
+            records[i + 1][1] - records[i][1] - MESSAGE_RECORD_OVERHEAD
+            for i in range(len(records) - 1)
         )
-    ):
-        channel, start_offset = cur
-        assert channel is not None, "Channel ID should not be None"
-        # Estimate message data size from offset gap minus record overhead
-        size = (end_offset - start_offset) - (2 + 4 + 8 + 8)
-        assert size > 0, f"Invalid size for channel {channel}: {size}"
-        sizes_dd[channel] += size
+        total += chunk_size - records[-1][1] - MESSAGE_RECORD_OVERHEAD  # last message
+        return {idx.channel_id: total}
 
-    return dict(sizes_dd)
+    # Multi-channel: collect and sort
+    all_msgs: list[tuple[int, int]] = []
+    for idx in indexes:
+        ch = idx.channel_id
+        all_msgs.extend((offset, ch) for _, offset in idx.records)
+
+    all_msgs.sort()  # Sort by offset (first element)
+
+    if not all_msgs:
+        return {}
+
+    # Calculate sizes
+    sizes: dict[int, int] = {}
+    for i in range(len(all_msgs) - 1):
+        offset, ch = all_msgs[i]
+        next_offset = all_msgs[i + 1][0]
+        sizes[ch] = sizes.get(ch, 0) + (next_offset - offset - MESSAGE_RECORD_OVERHEAD)
+
+    # Last message extends to chunk_size
+    offset, ch = all_msgs[-1]
+    sizes[ch] = sizes.get(ch, 0) + (chunk_size - offset - MESSAGE_RECORD_OVERHEAD)
+
+    return sizes
 
 
 @dataclass(slots=True)
