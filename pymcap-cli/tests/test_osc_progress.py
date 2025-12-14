@@ -1,5 +1,7 @@
 """Tests for OSC 9;4 progress column."""
 
+import gc
+
 from pymcap_cli.osc_utils import Osc94States, OSCProgressColumn
 from rich.progress import Progress
 from rich.text import Text
@@ -7,6 +9,9 @@ from rich.text import Text
 
 def mock_set_progress(monkeypatch):
     """Mock set_progress and return list of (state, progress) calls."""
+    # Force garbage collection to clear any pending __del__ calls from previous tests
+    gc.collect()
+
     progress_calls = []
 
     def mock_progress(state, progress):
@@ -36,6 +41,9 @@ class TestOSCProgressColumn:
         # Check progress calls
         # Should contain state PROGRESS with 50%
         assert (Osc94States.PROGRESS, 50) in progress_calls
+
+        # Explicitly close to prevent __del__ interference with other tests
+        column.close()
 
     def test_no_osc_without_support(self, monkeypatch):
         """Test OSC sequences are NOT emitted when unsupported."""

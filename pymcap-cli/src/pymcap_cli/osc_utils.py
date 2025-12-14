@@ -171,6 +171,7 @@ class OSCProgressColumn(ProgressColumn):
         self._last_state: Osc94States = Osc94States.UNKNOWN
         self._last_percentage: int = -1  # Cache to avoid redundant updates
         self._title = title  # Store title for terminal updates
+        self._closed = False
 
     def render(self, task: "Task") -> Text:
         if not self._supports_osc_9_4:
@@ -212,14 +213,28 @@ class OSCProgressColumn(ProgressColumn):
 
         return Text("")
 
-    def __del__(self) -> None:
-        """Reset progress on cleanup."""
+    def close(self) -> None:
+        """Reset progress and clean up resources.
+
+        Call this explicitly when done with the progress column to ensure
+        proper cleanup. Also called automatically by __del__.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        if not self._supports_osc_9_4:
+            return
+
         with contextlib.suppress(Exception):
-            # Ignore anything during interpreter shutdown
-            if hasattr(self, "_supports_osc_9_4") and self._supports_osc_9_4:
-                with contextlib.suppress(Exception):
-                    set_progress(Osc94States.RESET, 0)
-                # Reset terminal title
-                if hasattr(self, "_title") and self._title:
-                    with contextlib.suppress(Exception):
-                        set_window_title("")
+            set_progress(Osc94States.RESET, 0)
+
+        if self._title:
+            with contextlib.suppress(Exception):
+                set_window_title("")
+
+    def __del__(self) -> None:
+        """Reset progress on garbage collection."""
+        with contextlib.suppress(Exception):
+            if hasattr(self, "_closed"):
+                self.close()
