@@ -4,19 +4,26 @@ import io
 import struct
 
 import pytest
+import small_mcap.reader as reader_module
 from small_mcap import (
     MAGIC,
+    ChannelNotFoundError,
     CompressionType,
     CRCValidationError,
     EndOfFileError,
+    InvalidHeaderError,
     InvalidMagicError,
     McapWriter,
     RecordLengthLimitExceededError,
+    SchemaNotFoundError,
     UnsupportedCompressionError,
+    get_header,
     get_summary,
+    read_message,
     stream_reader,
 )
-from small_mcap.records import Chunk, DataEnd, Footer, Header, Opcode, Schema
+from small_mcap.reader import _get_chunk_data_stream, _read_summary_from_iterable
+from small_mcap.records import Channel, Chunk, DataEnd, Footer, Header, Message, Opcode, Schema
 
 # Test constants
 WRONG_CRC_CHUNK = 12345
@@ -294,3 +301,129 @@ def test_get_summary_non_seekable():
     stream = NonSeekableStream()
     summary = get_summary(stream)
     assert summary is None
+
+
+def test_get_summary_oserror():
+    """Test get_summary returns None when OSError occurs during seek."""
+
+    class BadSeekStream(io.BytesIO):
+        def __init__(self):
+            super().__init__(b"x" * 100)
+
+        def seek(self, offset, whence=0):
+            if whence == io.SEEK_END:
+                raise OSError("Simulated seek error")
+            return super().seek(offset, whence)
+
+    stream = BadSeekStream()
+    result = get_summary(stream)
+    assert result is None
+
+
+def test_zstd_not_installed(monkeypatch):
+    """Test UnsupportedCompressionError when zstd module not installed."""
+    monkeypatch.setattr(reader_module, "ZstdDecompressor", None)
+
+    chunk = Chunk(
+        message_start_time=0,
+        message_end_time=0,
+        uncompressed_size=0,
+        uncompressed_crc=0,
+        compression="zstd",
+        data=b"",
+    )
+
+    with pytest.raises(UnsupportedCompressionError, match=r"zstd.*not installed"):
+        _get_chunk_data_stream(chunk)
+
+
+def test_lz4_not_installed(monkeypatch):
+    """Test UnsupportedCompressionError when lz4 module not installed."""
+    monkeypatch.setattr(reader_module, "lz4_decompress", None)
+
+    chunk = Chunk(
+        message_start_time=0,
+        message_end_time=0,
+        uncompressed_size=0,
+        uncompressed_crc=0,
+        compression="lz4",
+        data=b"",
+    )
+
+    with pytest.raises(UnsupportedCompressionError, match=r"lz4.*not installed"):
+        _get_chunk_data_stream(chunk)
+
+
+def test_get_header_not_header():
+    """Test get_header raises when first record isn't Header."""
+    # Write a Footer instead of Header after the magic
+    buffer = io.BytesIO()
+    buffer.write(MAGIC)  # Valid magic
+    # Write Footer record instead of Header
+    footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
+    footer.write_record_to(buffer)
+    buffer.write(MAGIC)
+    buffer.seek(0)
+
+    with pytest.raises(InvalidHeaderError):
+        get_header(buffer)
+
+
+def test_read_summary_from_iterable_no_footer():
+    """_read_summary_from_iterable returns summary when no Footer found."""
+    # Pass an iterable with just a Schema (no Footer)
+    schema = Schema(id=1, name="test", encoding="raw", data=b"")
+    result = _read_summary_from_iterable([schema])
+
+    # Should return the summary (with schema added)
+    assert result is not None
+    assert 1 in result.schemas
+
+
+def test_read_summary_from_iterable_footer_no_summary():
+    """_read_summary_from_iterable returns None when footer has summary_start=0."""
+    footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
+    result = _read_summary_from_iterable([footer])
+
+    assert result is None
+
+
+def test_message_references_unknown_channel():
+    """_read_inner should raise when message references unknown channel."""
+    # Create MCAP with message but no channel
+    buffer = io.BytesIO()
+    buffer.write(MAGIC)
+    header = Header(profile="", library="")
+    header.write_record_to(buffer)
+
+    # Write a message for a channel that doesn't exist
+    msg = Message(channel_id=99, sequence=0, log_time=0, publish_time=0, data=b"data")
+    msg.write_record_to(buffer)
+
+    footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
+    footer.write_record_to(buffer)
+    buffer.write(MAGIC)
+    buffer.seek(0)
+
+    with pytest.raises(ChannelNotFoundError, match="99"):
+        list(read_message(buffer))
+
+
+def test_channel_references_unknown_schema():
+    """_read_inner should raise when channel references unknown schema."""
+    buffer = io.BytesIO()
+    buffer.write(MAGIC)
+    header = Header(profile="", library="")
+    header.write_record_to(buffer)
+
+    # Write a channel referencing schema_id=99 that doesn't exist
+    channel = Channel(id=1, schema_id=99, topic="/test", message_encoding="raw", metadata={})
+    channel.write_record_to(buffer)
+
+    footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
+    footer.write_record_to(buffer)
+    buffer.write(MAGIC)
+    buffer.seek(0)
+
+    with pytest.raises(SchemaNotFoundError, match="99"):
+        list(read_message(buffer))

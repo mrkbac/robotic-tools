@@ -11,9 +11,12 @@ We use different MCAP configurations to trigger various code paths:
 
 import io
 
+import pytest
 import small_mcap.reader as reader_module
 from pytest_mock import MockerFixture
-from small_mcap import Channel, McapWriter, Schema, read_message
+from small_mcap import Channel, McapWriter, Schema, SeekRequiredError, read_message
+from small_mcap.reader import _filter_message_index_by_time
+from small_mcap.records import MessageIndex
 from small_mcap.writer import IndexType
 
 
@@ -695,3 +698,30 @@ def test_chunked_with_message_indexes_full_read(mocker: MockerFixture):
     assert len(results) == 3
     for i, (_schema, _channel, msg) in enumerate(results):
         assert msg.log_time == (i + 1) * 1_000_000
+
+
+# =============================================================================
+# Non-seeking edge cases
+# =============================================================================
+
+
+def test_non_seekable_reverse_raises():
+    """reverse=True on non-seekable stream should raise SeekRequiredError."""
+    mcap_data = _create_unchunked_mcap_with_timed_messages([(1_000_000, b"msg")])
+
+    class NonSeekableStream(io.BytesIO):
+        def seekable(self):
+            return False
+
+    stream = NonSeekableStream(mcap_data)
+
+    with pytest.raises(SeekRequiredError):
+        list(read_message(stream, reverse=True))
+
+
+def test_empty_message_index_filter():
+    """_filter_message_index_by_time should handle empty records."""
+    mi = MessageIndex(channel_id=1, records=[])
+    result = _filter_message_index_by_time(mi, 0, 1_000_000)
+
+    assert result is mi  # Same object returned for empty
