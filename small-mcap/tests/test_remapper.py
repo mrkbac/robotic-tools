@@ -1,7 +1,7 @@
 """Tests for the Remapper class."""
 
 import pytest
-from small_mcap import Channel, McapError, Remapper, Schema
+from small_mcap import Channel, McapError, Message, Remapper, Schema
 
 
 def test_schema_preserves_original_id():
@@ -217,3 +217,63 @@ def test_get_remapped_channel():
     assert result is not None
     assert result.id == 1
     assert result.topic == "/test"
+
+
+def test_message_returns_same_object_when_no_remap():
+    """Message should be returned unchanged when channel ID wasn't remapped."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+
+    channel = Channel(id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+    remapper.remap_channel(0, channel)
+
+    message = Message(channel_id=1, sequence=42, log_time=1000, publish_time=2000, data=b"test")
+    mapped = remapper.remap_message(0, message)
+
+    assert mapped is message  # Same object, no copy made
+
+
+def test_message_remaps_channel_id():
+    """Message channel_id should be remapped when channel ID was remapped."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)
+
+    channel1 = Channel(id=1, schema_id=1, topic="/topic1", message_encoding="proto", metadata={})
+    channel2 = Channel(id=1, schema_id=1, topic="/topic2", message_encoding="proto", metadata={})
+
+    remapper.remap_channel(0, channel1)
+    remapper.remap_channel(1, channel2)  # Gets remapped to id=2
+
+    message = Message(channel_id=1, sequence=42, log_time=1000, publish_time=2000, data=b"test")
+    mapped = remapper.remap_message(1, message)
+
+    assert mapped is not message  # New object created
+    assert mapped.channel_id == 2  # Remapped channel ID
+
+
+def test_message_preserves_other_fields():
+    """All message fields except channel_id should be preserved after remapping."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)
+
+    channel1 = Channel(id=1, schema_id=1, topic="/topic1", message_encoding="proto", metadata={})
+    channel2 = Channel(id=1, schema_id=1, topic="/topic2", message_encoding="proto", metadata={})
+
+    remapper.remap_channel(0, channel1)
+    remapper.remap_channel(1, channel2)  # Gets remapped to id=2
+
+    original_data = b"important payload data"
+    message = Message(
+        channel_id=1, sequence=123, log_time=999999, publish_time=888888, data=original_data
+    )
+    mapped = remapper.remap_message(1, message)
+
+    assert mapped.sequence == 123
+    assert mapped.log_time == 999999
+    assert mapped.publish_time == 888888
+    assert mapped.data == original_data

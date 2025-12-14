@@ -852,6 +852,20 @@ class Remapper:
         channel = self._channel_lookup_fast.get((stream_id, original_id))
         return channel.id if channel else original_id
 
+    def remap_message(self, stream_id: int, message: Message) -> Message:
+        """Remap a message's channel ID based on the remapped channel."""
+        mapped_channel_id = self.get_remapped_channel_id(stream_id, message.channel_id)
+        if mapped_channel_id == message.channel_id:
+            return message
+        # dataclass.replace is upto 4x slow then just creating a new instance
+        return Message(
+            channel_id=mapped_channel_id,
+            sequence=message.sequence,
+            log_time=message.log_time,
+            publish_time=message.publish_time,
+            data=message.data,
+        )
+
 
 def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
     return True
@@ -916,17 +930,11 @@ def read_message(
             for schema, channel, message in generator:
                 mapped_schema = remapper.remap_schema(stream_id, schema)
                 mapped_channel = remapper.remap_channel(stream_id, channel)
+                mapped_message = remapper.remap_message(stream_id, message)
                 yield (
                     mapped_schema,
                     mapped_channel,
-                    # dataclass.replace is upto 4x slow then just creating a new instance
-                    Message(
-                        channel_id=mapped_channel.id,
-                        sequence=message.sequence,
-                        log_time=message.log_time,
-                        publish_time=message.publish_time,
-                        data=message.data,
-                    ),
+                    mapped_message,
                 )
 
         return heapq.merge(
