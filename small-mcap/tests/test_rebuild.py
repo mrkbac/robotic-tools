@@ -1,9 +1,11 @@
 """Tests for rebuild.py - rebuilding MCAP summary sections from data."""
 
+import io
 from pathlib import Path
 
 import pytest
 from small_mcap import get_summary, rebuild_summary
+from small_mcap.exceptions import McapError
 from small_mcap.rebuild import MESSAGE_RECORD_OVERHEAD, _estimate_size_from_indexes
 from small_mcap.records import MessageIndex
 
@@ -213,17 +215,7 @@ def test_rebuild_matches_original_summary():
 # Tests for _estimate_size_from_indexes
 
 
-def test_estimate_size_single_channel_single_message():
-    """Test estimation with a single channel and single message."""
-    indexes = [MessageIndex(channel_id=1, records=[(1000, 0)])]
-    chunk_size = 100
-
-    result = _estimate_size_from_indexes(indexes, chunk_size)
-
-    assert result == {1: chunk_size - MESSAGE_RECORD_OVERHEAD}
-
-
-def test_estimate_size_single_channel_multiple_messages():
+def test_estimate_size_single_channel():
     """Test estimation with a single channel and multiple messages."""
     # 3 messages at offsets 0, 100, 200 in a 300-byte chunk
     indexes = [MessageIndex(channel_id=1, records=[(1000, 0), (2000, 100), (3000, 200)])]
@@ -236,9 +228,9 @@ def test_estimate_size_single_channel_multiple_messages():
     assert result == {1: expected_size}
 
 
-def test_estimate_size_multi_channel_all_channels_present():
-    """Test multi-channel estimation includes ALL channels (regression test for closure bug)."""
-    # 2 channels with interleaved messages
+def test_estimate_size_multi_channel():
+    """Test multi-channel estimation (regression test for closure bug)."""
+    # 2 channels with interleaved messages at equal spacing
     indexes = [
         MessageIndex(channel_id=1, records=[(100, 0), (300, 200)]),  # ch1 at offsets 0, 200
         MessageIndex(channel_id=2, records=[(200, 100), (400, 300)]),  # ch2 at offsets 100, 300
@@ -247,27 +239,10 @@ def test_estimate_size_multi_channel_all_channels_present():
 
     result = _estimate_size_from_indexes(indexes, chunk_size)
 
-    # CRITICAL: Both channels must be present in result
-    assert 1 in result, "Channel 1 missing from result (closure bug regression)"
-    assert 2 in result, "Channel 2 missing from result"
-
-
-def test_estimate_size_multi_channel_correct_sizes():
-    """Test that multi-channel estimation computes correct sizes per channel."""
-    # 2 channels with interleaved messages at equal spacing
-    indexes = [
-        MessageIndex(channel_id=1, records=[(100, 0), (300, 200)]),
-        MessageIndex(channel_id=2, records=[(200, 100), (400, 300)]),
-    ]
-    chunk_size = 400
-
-    result = _estimate_size_from_indexes(indexes, chunk_size)
-
     # Sorted by offset: (0,ch1), (100,ch2), (200,ch1), (300,ch2), end=400
     # ch1: (100-0-31) + (300-200-31) = 69 + 69 = 138
     # ch2: (200-100-31) + (400-300-31) = 69 + 69 = 138
-    assert result[1] == 138
-    assert result[2] == 138
+    assert result == {1: 138, 2: 138}
 
 
 def test_estimate_size_multi_channel_uneven_distribution():
@@ -299,3 +274,94 @@ def test_estimate_size_empty_records():
     indexes = [MessageIndex(channel_id=1, records=[])]
     result = _estimate_size_from_indexes(indexes, 1000)
     assert result == {}
+
+
+# Tests for rebuild_summary edge cases
+
+
+@pytest.mark.conformance
+def test_rebuild_with_initial_state_resumption():
+    """Test rebuilding with initial_state for resumption."""
+    test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch-chx-mx.mcap"
+
+    # First, do a partial read
+    with open(test_file, "rb") as f:
+        initial_info = rebuild_summary(
+            f, validate_crc=False, calculate_channel_sizes=True, exact_sizes=False
+        )
+
+    # Now resume from the initial state (simulating continuation)
+    with open(test_file, "rb") as f:
+        f.seek(initial_info.next_offset)
+        resumed_info = rebuild_summary(
+            f,
+            validate_crc=False,
+            calculate_channel_sizes=True,
+            exact_sizes=False,
+            initial_state=initial_info,
+            skip_magic=True,
+        )
+
+    # Should have valid results
+    assert resumed_info.header is not None
+    assert resumed_info.summary is not None
+    assert resumed_info.summary.statistics is not None
+
+
+@pytest.mark.conformance
+def test_rebuild_estimated_channel_sizes():
+    """Test rebuild with estimated channel sizes and time statistics."""
+    test_file = CONFORMANCE_DIR / "TenMessages" / "TenMessages-ch-chx-mx.mcap"
+
+    with open(test_file, "rb") as f:
+        rebuild_info = rebuild_summary(
+            f, validate_crc=False, calculate_channel_sizes=True, exact_sizes=False
+        )
+
+    # Should have estimated channel sizes
+    assert rebuild_info.channel_sizes is not None
+    assert rebuild_info.estimated_channel_sizes is True
+    assert all(size > 0 for size in rebuild_info.channel_sizes.values())
+
+    # Should have valid time statistics
+    stats = rebuild_info.summary.statistics
+    assert stats is not None
+    assert stats.message_start_time > 0
+    assert stats.message_end_time >= stats.message_start_time
+
+
+@pytest.mark.conformance
+def test_rebuild_unchunked_messages():
+    """Test rebuilding file with unchunked messages."""
+    # This file has messages outside of chunks
+    test_file = CONFORMANCE_DIR / "OneMessage" / "OneMessage.mcap"
+
+    with open(test_file, "rb") as f:
+        rebuild_info = rebuild_summary(
+            f, validate_crc=False, calculate_channel_sizes=True, exact_sizes=True
+        )
+
+    # Should still count the message
+    assert rebuild_info.summary.statistics is not None
+    assert rebuild_info.summary.statistics.message_count >= 1
+
+
+def test_rebuild_empty_stream_raises_error():
+    """Test that rebuilding empty stream raises McapError."""
+    empty_stream = io.BytesIO(b"")
+
+    with pytest.raises(McapError):
+        rebuild_summary(
+            empty_stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+        )
+
+
+def test_rebuild_invalid_magic_raises_error():
+    """Test that rebuilding stream with invalid magic raises error."""
+    # Invalid magic bytes
+    invalid_stream = io.BytesIO(b"not an mcap file")
+
+    with pytest.raises(McapError):
+        rebuild_summary(
+            invalid_stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+        )
