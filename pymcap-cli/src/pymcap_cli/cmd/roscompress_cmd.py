@@ -15,6 +15,7 @@ from av.video.frame import VideoFrame
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
+from numpy.typing import NDArray
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -30,12 +31,12 @@ from small_mcap import McapWriter, get_summary
 from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import confirm_output_overwrite
 from pymcap_cli.osc_utils import OSCProgressColumn
 from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
+from pymcap_cli.utils import confirm_output_overwrite
 
 if TYPE_CHECKING:
     from av.container import InputContainer
@@ -106,7 +107,7 @@ def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
     raise VideoEncoderError("Decoder produced no frames")
 
 
-def _raw_image_to_array(message: Any) -> np.ndarray:
+def _raw_image_to_array(message: Any) -> NDArray[np.uint8]:
     """Convert a ROS Image message to an RGB numpy array."""
     if not hasattr(message, "data") or not message.data:
         raise VideoEncoderError("Image has no data")

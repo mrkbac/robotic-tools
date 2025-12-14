@@ -1,4 +1,9 @@
 import io
+import re
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from re import Pattern
 from typing import IO, Any
 
 from rich import filesize
@@ -165,8 +170,7 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
 
     def flush(self) -> None:
         """Flush the stream (no-op for read-only)."""
-        if hasattr(self._stream, "flush"):
-            self._stream.flush()
+        self._stream.flush()
 
     def writable(self) -> bool:
         """Return whether the stream is writable (always False)."""
@@ -228,3 +232,80 @@ def read_info(f: IO[bytes]) -> RebuildInfo:
     summary = get_summary(f)
     assert summary is not None, "Summary should not be None"
     return RebuildInfo(header=header, summary=summary)
+
+
+# Maximum value for a signed 64-bit integer (used for unbounded time range)
+MAX_INT64 = 2**63 - 1
+
+
+class MetadataMode(str, Enum):
+    """Metadata inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
+class AttachmentsMode(str, Enum):
+    """Attachments inclusion mode."""
+
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
+def parse_time_arg(time_str: str) -> int:
+    """Parse time argument that can be nanoseconds or RFC3339 date."""
+    if not time_str:
+        return 0
+
+    # Try parsing as integer nanoseconds first
+    try:
+        return int(time_str)
+    except ValueError:
+        pass
+
+    # Try parsing as RFC3339 date
+    try:
+        dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1_000_000_000)
+    except ValueError:
+        raise ValueError(
+            f"Invalid time format: {time_str}. Use nanoseconds or RFC3339 format"
+        ) from None
+
+
+def compile_topic_patterns(patterns: list[str]) -> list[Pattern[str]]:
+    """Compile topic regex patterns."""
+    compiled = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+
+    return compiled
+
+
+def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
+    """Parse timestamp with precedence: date_or_nanos > nanoseconds > seconds."""
+    if date_or_nanos:
+        return parse_time_arg(date_or_nanos)
+    if nanoseconds != 0:
+        return nanoseconds
+    return seconds * 1_000_000_000
+
+
+def confirm_output_overwrite(output: Path, force: bool) -> None:
+    """Confirm overwrite if output exists and force=False.
+
+    Args:
+        output: Output file path
+        force: If True, skip confirmation
+
+    Raises:
+        SystemExit: If user declines to overwrite
+    """
+    if output.exists() and not force:
+        response = input(f"Output file '{output}' already exists. Overwrite? [y/N]: ")
+        if response.lower() not in ("y", "yes"):
+            print("Aborted.")  # noqa: T201
+            raise SystemExit(1)

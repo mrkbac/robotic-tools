@@ -4,10 +4,10 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
-    MAX_INT64,
+    InputOptions,
     McapProcessor,
+    OutputOptions,
     ProcessingOptions,
-    confirm_output_overwrite,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -17,6 +17,7 @@ from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
+from pymcap_cli.utils import confirm_output_overwrite
 
 console = Console()
 
@@ -55,29 +56,29 @@ def compress(
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
-    # Convert compress args to unified processing options (include everything)
-    processing_options = ProcessingOptions(
-        # Recovery mode with all content included
-        recovery_mode=True,
-        always_decode_chunk=True,
-        # No filtering - include everything
-        include_topics=[],
-        exclude_topics=[],
-        start_time=0,
-        end_time=MAX_INT64,
-        include_metadata=True,
-        include_attachments=True,
-        # Output options with specified compression
-        compression=compression.value,
-        chunk_size=chunk_size,
-    )
     console.print(f"[blue]Compressing '{file}' to '{output}'[/blue]")
 
-    processor = McapProcessor(processing_options)
-
     with open_input(file) as (f, file_size), output.open("wb") as output_stream:
+        # Build input options - include everything, force decode for re-compression
+        input_opts = InputOptions(
+            stream=f,
+            file_size=file_size,
+            always_decode_chunk=True,  # Force decode for compression change
+        )
+
+        # Build processing options
+        processing_options = ProcessingOptions(
+            inputs=[input_opts],
+            output=OutputOptions(
+                compression=compression.value,
+                chunk_size=chunk_size,
+            ),
+        )
+
+        processor = McapProcessor(processing_options)
+
         try:
-            stats = processor.process([f], output_stream, [file_size])
+            stats = processor.process(output_stream)
 
             console.print("[green]✓ Compression completed successfully![/green]")
             console.print(stats)

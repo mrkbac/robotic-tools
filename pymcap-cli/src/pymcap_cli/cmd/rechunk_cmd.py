@@ -8,11 +8,11 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputOptions,
     McapProcessor,
+    OutputOptions,
     ProcessingOptions,
     RechunkStrategy,
-    compile_topic_patterns,
-    confirm_output_overwrite,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -22,6 +22,7 @@ from pymcap_cli.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
+from pymcap_cli.utils import compile_topic_patterns, confirm_output_overwrite
 
 if TYPE_CHECKING:
     from re import Pattern
@@ -131,20 +132,27 @@ def rechunk(
                 "All messages will be in one group.[/yellow]"
             )
 
-    # Build processing options with rechunking enabled
-    options = ProcessingOptions(
-        rechunk_strategy=strategy,
-        rechunk_patterns=patterns,
-        compression=compression.value,
-        chunk_size=chunk_size,
-        recovery_mode=True,  # Always enable recovery mode
-    )
-
-    # Create processor and run
-    processor = McapProcessor(options)
-
     with open_input(file) as (input_stream, file_size), output_file.open("wb") as output_stream:
-        stats = processor.process([input_stream], output_stream, [file_size])
+        # Build input options - include everything with recovery mode
+        input_opts = InputOptions(
+            stream=input_stream,
+            file_size=file_size,
+        )
+
+        # Build processing options with rechunking enabled
+        options = ProcessingOptions(
+            inputs=[input_opts],
+            output=OutputOptions(
+                rechunk_strategy=strategy,
+                rechunk_patterns=patterns,
+                compression=compression.value,
+                chunk_size=chunk_size,
+            ),
+        )
+
+        # Create processor and run
+        processor = McapProcessor(options)
+        stats = processor.process(output_stream)
 
         # Report results
         console.print("[green]✓ Rechunking completed successfully![/green]")

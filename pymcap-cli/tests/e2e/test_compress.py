@@ -3,7 +3,12 @@
 from pathlib import Path
 
 import pytest
-from pymcap_cli.mcap_processor import McapProcessor, ProcessingOptions
+from pymcap_cli.mcap_processor import (
+    InputOptions,
+    McapProcessor,
+    OutputOptions,
+    ProcessingOptions,
+)
 
 
 @pytest.mark.e2e
@@ -12,18 +17,21 @@ class TestCompress:
 
     def test_compress_to_zstd(self, uncompressed_mcap: Path, output_file: Path):
         """Test compressing an uncompressed file to zstd."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = uncompressed_mcap.stat().st_size
 
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Verify compression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -33,18 +41,21 @@ class TestCompress:
 
     def test_compress_to_lz4(self, uncompressed_mcap: Path, output_file: Path):
         """Test compressing an uncompressed file to lz4."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="lz4",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = uncompressed_mcap.stat().st_size
 
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Verify compression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -54,18 +65,21 @@ class TestCompress:
 
     def test_decompress_to_none(self, simple_mcap: Path, output_file: Path):
         """Test decompressing a compressed file."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="none",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="none", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Verify decompression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -75,18 +89,21 @@ class TestCompress:
 
     def test_recompress_zstd_to_lz4(self, simple_mcap: Path, output_file: Path):
         """Test recompressing from zstd to lz4."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="lz4",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Verify recompression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -94,18 +111,21 @@ class TestCompress:
 
     def test_recompress_lz4_to_zstd(self, lz4_mcap: Path, output_file: Path):
         """Test recompressing from lz4 to zstd."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = lz4_mcap.stat().st_size
 
         with lz4_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Verify recompression succeeded
         assert stats.writer_statistics.message_count > 0
@@ -125,36 +145,42 @@ class TestCompress:
     ):
         """Test compression with different chunk sizes."""
         output_file = tmp_path / f"output_{chunk_size}.mcap"
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="zstd",
-            chunk_size=chunk_size,
-        )
-
-        processor = McapProcessor(options)
         file_size = uncompressed_mcap.stat().st_size
 
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=chunk_size),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         assert stats.writer_statistics.message_count > 0
         assert output_file.exists()
 
     def test_compress_multi_topic_file(self, multi_topic_mcap: Path, output_file: Path):
         """Test compressing a multi-topic file."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="lz4",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = multi_topic_mcap.stat().st_size
 
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Should preserve all messages
         assert stats.writer_statistics.message_count > 0
@@ -163,20 +189,21 @@ class TestCompress:
 
     def test_compress_preserves_all_content(self, simple_mcap: Path, output_file: Path):
         """Test that compression preserves all content."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            include_metadata=True,
-            include_attachments=True,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = simple_mcap.stat().st_size
 
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # All content should be preserved
         assert stats.writer_statistics.message_count > 0
@@ -186,18 +213,21 @@ class TestCompress:
 
     def test_compress_large_file(self, large_1mb_mcap: Path, output_file: Path):
         """Test compressing a large file."""
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-
-        processor = McapProcessor(options)
         file_size = large_1mb_mcap.stat().st_size
 
         with large_1mb_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            stats = processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
 
         # Should process all messages
         assert stats.writer_statistics.message_count > 0
@@ -212,20 +242,23 @@ class TestCompress:
 
         for compression in compressions:
             output_file = tmp_path / f"output_{compression}.mcap"
-            options = ProcessingOptions(
-                recovery_mode=True,
-                always_decode_chunk=False,
-                compression=compression,
-                chunk_size=4 * 1024 * 1024,
-            )
-
-            processor = McapProcessor(options)
 
             with (
                 uncompressed_mcap.open("rb") as input_stream,
                 output_file.open("wb") as output_stream,
             ):
-                stats = processor.process([input_stream], output_stream, [uncompressed_size])
+                options = ProcessingOptions(
+                    inputs=[
+                        InputOptions(
+                            stream=input_stream,
+                            file_size=uncompressed_size,
+                        )
+                    ],
+                    output=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
+                )
+
+                processor = McapProcessor(options)
+                stats = processor.process(output_stream)
 
             compressed_size = output_file.stat().st_size
             ratios[compression] = compressed_size / uncompressed_size

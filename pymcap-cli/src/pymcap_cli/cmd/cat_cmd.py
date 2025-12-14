@@ -19,7 +19,7 @@ from small_mcap.reader import read_message_decoded
 from small_mcap.records import Channel
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import MAX_INT64, parse_timestamp_args
+from pymcap_cli.utils import MAX_INT64, parse_timestamp_args
 
 console_err = Console(stderr=True)  # Use stderr for errors
 console_out = Console()  # Use stdout for data output

@@ -9,11 +9,10 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
-    AttachmentsMode,
+    InputOptions,
     McapProcessor,
-    MetadataMode,
-    build_processing_options,
-    confirm_output_overwrite,
+    OutputOptions,
+    ProcessingOptions,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -22,6 +21,11 @@ from pymcap_cli.types_manual import (
     CompressionOption,
     ForceOverwriteOption,
     OutputPathOption,
+)
+from pymcap_cli.utils import (
+    AttachmentsMode,
+    MetadataMode,
+    confirm_output_overwrite,
 )
 
 console = Console()
@@ -89,30 +93,37 @@ def merge(
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
-    # Build processing options (no topic/time filtering for merge)
-    processing_options = build_processing_options(
-        metadata_mode=metadata_mode,
-        attachments_mode=attachments_mode,
-        compression=compression.value,
-        chunk_size=chunk_size,
-    )
-    # Create processor and run
-    processor = McapProcessor(processing_options)
-
     # Use ExitStack to manage multiple file handles
     with contextlib.ExitStack() as stack:
-        input_streams = []
-        file_sizes = []
+        input_options: list[InputOptions] = []
 
         for f in files:
             stream, size = stack.enter_context(open_input(f))
-            input_streams.append(stream)
-            file_sizes.append(size)
+            input_options.append(
+                InputOptions(
+                    stream=stream,
+                    file_size=size,
+                    include_metadata=metadata_mode == MetadataMode.INCLUDE,
+                    include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                )
+            )
 
         output_stream = stack.enter_context(output.open("wb"))
 
+        # Build processing options
+        processing_options = ProcessingOptions(
+            inputs=input_options,
+            output=OutputOptions(
+                compression=compression.value,
+                chunk_size=chunk_size,
+            ),
+        )
+
+        # Create processor and run
+        processor = McapProcessor(processing_options)
+
         try:
-            stats = processor.process(input_streams, output_stream, file_sizes)
+            stats = processor.process(output_stream)
 
             console.print(f"[green]✓ Successfully merged {len(files)} files![/green]")
             console.print(stats)

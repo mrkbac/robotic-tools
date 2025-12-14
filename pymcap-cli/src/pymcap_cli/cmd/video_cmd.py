@@ -16,6 +16,7 @@ import numpy as np
 from av import VideoFrame
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
+from numpy.typing import NDArray
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -30,8 +31,8 @@ from rich.progress import (
 from small_mcap import get_summary, include_topics, read_message_decoded
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import confirm_output_overwrite
 from pymcap_cli.osc_utils import OSCProgressColumn
+from pymcap_cli.utils import confirm_output_overwrite
 
 if TYPE_CHECKING:
     from av.container import InputContainer, OutputContainer
@@ -127,18 +128,18 @@ QUALITY_PRESETS = {
 
 def _decode_and_resize_image(
     message: Any, message_type: ImageType, target_width: int, target_height: int
-) -> np.ndarray:
+) -> NDArray[np.uint8]:
     """Decode a ROS image message and resize to target dimensions."""
     if message_type is ImageType.COMPRESSED:
         compressed = _process_compressed_image(message)
         frame = _decode_compressed_frame(compressed)
         frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
-        return frame.to_ndarray(format="rgb24")
+        return frame.to_ndarray(format="rgb24")  # type: ignore[return-value]
 
     rgb_array = _raw_image_to_array(message)
     frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
     frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
-    return frame.to_ndarray(format="rgb24")
+    return frame.to_ndarray(format="rgb24")  # type: ignore[return-value]
 
 
 def _process_compressed_image(message: Any) -> bytes:
@@ -161,7 +162,7 @@ def _decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
     raise VideoEncoderError("Decoder produced no frames")
 
 
-def _raw_image_to_array(message: Any) -> np.ndarray:
+def _raw_image_to_array(message: Any) -> NDArray[np.uint8]:
     if not hasattr(message, "data") or not message.data:
         raise VideoEncoderError("Image has no data")
     if not hasattr(message, "width") or not hasattr(message, "height"):
@@ -274,8 +275,8 @@ def _get_encoder_options(codec: VideoCodec, encoder_name: str) -> dict[str, str]
 
 
 def _compose_grid(
-    tile_frames: Sequence[np.ndarray], layout: tuple[int, int], tile_size: tuple[int, int]
-) -> np.ndarray:
+    tile_frames: Sequence[NDArray[np.uint8]], layout: tuple[int, int], tile_size: tuple[int, int]
+) -> NDArray[np.uint8]:
     rows, cols = layout
     tile_height, tile_width = tile_size
     grid = np.zeros((rows * tile_height, cols * tile_width, 3), dtype=np.uint8)
@@ -364,7 +365,7 @@ def encode_video(
 
     # State for streaming
     topic_infos: dict[str, TopicInfo] = {}  # Discovered metadata per topic
-    last_frames: dict[str, np.ndarray] = {}  # Cache of last decoded frame per topic
+    last_frames: dict[str, NDArray[np.uint8]] = {}  # Cache of last decoded frame per topic
     container: OutputContainer | None = None
     stream: Any = None
     frame_idx = 0

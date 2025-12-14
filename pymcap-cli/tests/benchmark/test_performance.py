@@ -4,9 +4,10 @@ import subprocess
 from pathlib import Path
 
 from pymcap_cli.mcap_processor import (
+    InputOptions,
     McapProcessor,
+    OutputOptions,
     ProcessingOptions,
-    compile_topic_patterns,
 )
 
 
@@ -16,17 +17,19 @@ def test_benchmark_recover_nuscenes_pymcap(benchmark, nuscenes_mcap: Path, tmp_p
     output_file = tmp_path / "output.mcap"
 
     def run_recover():
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-        processor = McapProcessor(options)
         file_size = nuscenes_mcap.stat().st_size
-
         with nuscenes_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+            )
+            processor = McapProcessor(options)
+            processor.process(output_stream)
 
         # Clean up for next iteration
         if output_file.exists():
@@ -67,19 +70,21 @@ def test_benchmark_filter_nuscenes_pymcap(benchmark, nuscenes_mcap: Path, tmp_pa
     output_file = tmp_path / "output.mcap"
 
     def run_filter():
-        include_patterns = compile_topic_patterns(["/CAM_.*"])
-        options = ProcessingOptions(
-            recovery_mode=True,
-            always_decode_chunk=False,
-            include_topics=include_patterns,
-            compression="zstd",
-            chunk_size=4 * 1024 * 1024,
-        )
-        processor = McapProcessor(options)
         file_size = nuscenes_mcap.stat().st_size
 
         with nuscenes_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            processor.process([input_stream], output_stream, [file_size])
+            options = ProcessingOptions(
+                inputs=[
+                    InputOptions(
+                        stream=input_stream,
+                        file_size=file_size,
+                        include_topic_regex=["/CAM_.*"],
+                    )
+                ],
+                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+            )
+            processor = McapProcessor(options)
+            processor.process(output_stream)
 
         # Clean up for next iteration
         if output_file.exists():

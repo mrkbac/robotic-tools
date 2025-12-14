@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Group, Parameter
+from small_mcap import CompressionType as SmallMcapCompressionType
 
 
 class CompressionType(str, Enum):
@@ -15,6 +16,18 @@ class CompressionType(str, Enum):
     ZSTD = "zstd"
     LZ4 = "lz4"
     NONE = "none"
+
+
+def str_to_compression_type(compression: str) -> SmallMcapCompressionType:
+    """Convert compression string to small_mcap CompressionType enum."""
+    compression_lower = compression.lower()
+    if compression_lower in ("none", "", "off"):
+        return SmallMcapCompressionType.NONE
+    if compression_lower == "lz4":
+        return SmallMcapCompressionType.LZ4
+    if compression_lower == "zstd":
+        return SmallMcapCompressionType.ZSTD
+    raise ValueError(f"Unknown compression type: {compression}")
 
 
 # MCAP processing constants

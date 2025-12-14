@@ -7,11 +7,10 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
-    AttachmentsMode,
+    InputOptions,
     McapProcessor,
-    MetadataMode,
-    build_processing_options,
-    confirm_output_overwrite,
+    OutputOptions,
+    ProcessingOptions,
 )
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -20,6 +19,11 @@ from pymcap_cli.types_manual import (
     CompressionOption,
     ForceOverwriteOption,
     OutputPathOption,
+)
+from pymcap_cli.utils import (
+    AttachmentsMode,
+    MetadataMode,
+    confirm_output_overwrite,
 )
 
 console = Console()
@@ -156,32 +160,41 @@ def filter_cmd(
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
-    # Build processing options
-    try:
-        processing_options = build_processing_options(
-            include_topic_regex=include_topic_regex,
-            exclude_topic_regex=exclude_topic_regex,
-            start=start,
-            start_nsecs=start_nsecs,
-            start_secs=start_secs,
-            end=end,
-            end_nsecs=end_nsecs,
-            end_secs=end_secs,
-            metadata_mode=metadata_mode,
-            attachments_mode=attachments_mode,
-            compression=compression.value,
-            chunk_size=chunk_size,
-        )
-    except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        return 1
-
-    # Create processor and run
-    processor = McapProcessor(processing_options)
-
     with open_input(file) as (f, file_size), output.open("wb") as output_stream:
+        # Build input options directly with raw CLI args
         try:
-            stats = processor.process([f], output_stream, [file_size])
+            input_opts = InputOptions(
+                stream=f,
+                file_size=file_size,
+                include_topic_regex=include_topic_regex,
+                exclude_topic_regex=exclude_topic_regex,
+                start=start,
+                start_nsecs=start_nsecs,
+                start_secs=start_secs,
+                end=end,
+                end_nsecs=end_nsecs,
+                end_secs=end_secs,
+                include_metadata=metadata_mode == MetadataMode.INCLUDE,
+                include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+            )
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return 1
+
+        # Build processing options
+        processing_options = ProcessingOptions(
+            inputs=[input_opts],
+            output=OutputOptions(
+                compression=compression.value,
+                chunk_size=chunk_size,
+            ),
+        )
+
+        # Create processor and run
+        processor = McapProcessor(processing_options)
+
+        try:
+            stats = processor.process(output_stream)
 
             console.print("[green]✓ Filter completed successfully![/green]")
             console.print(stats)

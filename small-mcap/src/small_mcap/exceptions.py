@@ -73,9 +73,7 @@ class ChannelNotFoundError(McapError):
 
 class InvalidHeaderError(McapError):
     def __init__(self, found_type: type) -> None:
-        super().__init__(
-            f"expected header at beginning of MCAP file, found {found_type}"
-        )
+        super().__init__(f"expected header at beginning of MCAP file, found {found_type}")
 
 
 class SeekRequiredError(McapError):
