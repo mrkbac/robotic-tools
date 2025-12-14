@@ -26,6 +26,9 @@ jobs:
           lfs: true
           submodules: true
 
+      - name: Fetch LFS files from submodules
+        run: git submodule foreach --recursive 'git lfs pull'
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:

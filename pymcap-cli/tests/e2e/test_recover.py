@@ -3,9 +3,6 @@
 from pathlib import Path
 
 import pytest
-from small_mcap import get_summary
-from small_mcap.rebuild import rebuild_summary
-
 from pymcap_cli.cmd.recover_inplace_cmd import recover_inplace
 from pymcap_cli.mcap_processor import (
     InputOptions,
@@ -13,6 +10,8 @@ from pymcap_cli.mcap_processor import (
     OutputOptions,
     ProcessingOptions,
 )
+from small_mcap import get_summary
+from small_mcap.rebuild import rebuild_summary
 
 
 @pytest.mark.e2e
