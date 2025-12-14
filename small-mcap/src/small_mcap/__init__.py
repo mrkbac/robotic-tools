@@ -5,18 +5,24 @@ a container format designed for storing timestamped multimodal data.
 """
 
 # Record types and core data structures
-# Reader classes and functions
-from small_mcap.json_decoder import JSONDecoderFactory, JSONEncoderFactory
-from small_mcap.reader import (
+from small_mcap.exceptions import (
+    ChannelNotFoundError,
     CRCValidationError,
-    DecodedMessage,
-    DecoderFactoryProtocol,
     EndOfFileError,
+    InvalidHeaderError,
     InvalidMagicError,
     McapError,
     RecordLengthLimitExceededError,
-    Remapper,
+    SchemaNotFoundError,
+    SeekRequiredError,
     UnsupportedCompressionError,
+)
+
+# Reader classes and functions
+from small_mcap.json_decoder import JSONDecoderFactory, JSONEncoderFactory
+from small_mcap.reader import (
+    DecodedMessage,
+    DecoderFactoryProtocol,
     breakup_chunk,
     get_header,
     get_summary,
@@ -51,6 +57,7 @@ from small_mcap.records import (
     SummaryOffset,
     WritableBuffer,
 )
+from small_mcap.remapper import Remapper
 
 # Well-known constants
 from small_mcap.well_known import MessageEncoding, Profile, SchemaEncoding
@@ -72,6 +79,7 @@ __all__ = [
     "AttachmentIndex",
     "CRCValidationError",
     "Channel",
+    "ChannelNotFoundError",
     "Chunk",
     "ChunkIndex",
     "CompressionType",
@@ -83,6 +91,7 @@ __all__ = [
     "Footer",
     "Header",
     "IndexType",
+    "InvalidHeaderError",
     "InvalidMagicError",
     "JSONDecoderFactory",
     "JSONEncoderFactory",
@@ -103,6 +112,8 @@ __all__ = [
     "Remapper",
     "Schema",
     "SchemaEncoding",
+    "SchemaNotFoundError",
+    "SeekRequiredError",
     "Statistics",
     "Summary",
     "SummaryOffset",

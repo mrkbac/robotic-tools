@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from operator import itemgetter
 from typing import IO
 
+from small_mcap.exceptions import McapError
 from small_mcap.reader import (
-    McapError,
     breakup_chunk,
     stream_reader,
 )

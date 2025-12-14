@@ -1,16 +1,26 @@
 import bisect
-import contextlib
 import heapq
 import io
 import itertools
 import sys
 import zlib
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 from operator import attrgetter, itemgetter
 from typing import IO, TYPE_CHECKING, Any, Literal, Protocol, cast, overload
 
+from small_mcap.exceptions import (
+    ChannelNotFoundError,
+    CRCValidationError,
+    EndOfFileError,
+    InvalidHeaderError,
+    InvalidMagicError,
+    RecordLengthLimitExceededError,
+    SchemaNotFoundError,
+    SeekRequiredError,
+    UnsupportedCompressionError,
+)
 from small_mcap.records import (
     MAGIC,
     MAGIC_SIZE,
@@ -36,6 +46,7 @@ from small_mcap.records import (
     Summary,
     SummaryOffset,
 )
+from small_mcap.remapper import Remapper
 
 if TYPE_CHECKING:
     from lz4.frame import decompress as lz4_decompress  # type: ignore[import-untyped]
@@ -82,44 +93,6 @@ NonChunkRecord = (
 
 _ReaderReturnType = Iterable[tuple[Schema | None, Channel, Message]]
 _ShouldIncludeType = Callable[[Channel, Schema | None], bool]
-
-
-class McapError(Exception):
-    pass
-
-
-class InvalidMagicError(McapError):
-    def __init__(self, bad_magic: bytes | memoryview) -> None:
-        super().__init__(
-            f"not a valid MCAP file, invalid magic: {bytes(bad_magic).decode('utf-8', 'replace')}"
-        )
-
-
-class EndOfFileError(McapError):
-    pass
-
-
-class CRCValidationError(McapError):
-    def __init__(self, expected: int, actual: int, record: McapRecord) -> None:
-        super().__init__(
-            f"crc validation failed in {type(record).__name__}, "
-            f"expected: {expected}, calculated: {actual}"
-        )
-
-
-class RecordLengthLimitExceededError(McapError):
-    def __init__(self, opcode: int, length: int, limit: int) -> None:
-        opcode_name = f"unknown (opcode {opcode})"
-        with contextlib.suppress(ValueError):
-            opcode_name = Opcode(opcode).name
-        super().__init__(
-            f"{opcode_name} record has length {length} that exceeds limit {limit}",
-        )
-
-
-class UnsupportedCompressionError(McapError):
-    def __init__(self, compression: str) -> None:
-        super().__init__(f"unsupported compression type {compression}")
 
 
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | memoryview:
@@ -427,7 +400,7 @@ def get_header(stream: IO[bytes]) -> Header:
 
     header = next(iter(stream_reader(stream, skip_magic=False)))
     if not isinstance(header, Header):
-        raise McapError(f"expected header at beginning of MCAP file, found {type(header)}")
+        raise InvalidHeaderError(type(header))
     return header
 
 
@@ -446,7 +419,7 @@ def _read_inner(
     for record in reader:
         if isinstance(record, Message):
             if record.channel_id not in _channels:
-                raise McapError(f"no channel record found with id {record.channel_id}")
+                raise ChannelNotFoundError(record.channel_id)
             if (
                 (record.channel_id in exclude_channels)
                 or (record.log_time < start_time_ns)
@@ -460,7 +433,7 @@ def _read_inner(
             _schemas[record.id] = record
         elif isinstance(record, Channel) and record.id not in _channels:  # New channel
             if record.schema_id != 0 and record.schema_id not in _schemas:
-                raise McapError(f"no schema record found with id {record.schema_id}")
+                raise SchemaNotFoundError(record.schema_id)
             _channels[record.id] = record
             if not should_include(_channels[record.id], _schemas.get(record.schema_id)):
                 exclude_channels.add(record.id)
@@ -647,7 +620,7 @@ def _read_message_non_seeking(
     reverse: bool,
 ) -> _ReaderReturnType:
     if reverse:
-        raise McapError("reverse=True is not supported for non-seekable streams.")
+        raise SeekRequiredError("reverse=True")
 
     exclude_channels: set[int] = set()
     seen_channels: set[int] = set()
@@ -718,153 +691,6 @@ def _read_message_non_seeking(
         start_time_ns,
         end_time_ns,
     )
-
-
-def _allocate_id(used_ids: set[int], preferred_id: int) -> tuple[int, bool]:
-    """Allocate an ID, preferring the given ID if available."""
-    if preferred_id not in used_ids:
-        used_ids.add(preferred_id)
-        return preferred_id, False
-
-    new_id = preferred_id
-    while new_id in used_ids:
-        new_id += 1
-    used_ids.add(new_id)
-    return new_id, True
-
-
-class Remapper:
-    """Smart ID remapper that minimizes remapping by preserving original IDs when possible.
-
-    Tracks schema and channel IDs across multiple streams, only remapping when conflicts occur.
-    Deduplicates identical schemas/channels by content to avoid duplicates.
-    """
-
-    def __init__(self) -> None:
-        self._used_schema_ids: set[int] = set()
-        self._used_channel_ids: set[int] = set()
-
-        self._schema_lookup_fast: dict[tuple[int, int], Schema | None] = {}
-        self._channel_lookup_fast: dict[tuple[int, int], Channel] = {}
-        self._schema_lookup_slow: dict[tuple[str, bytes], Schema | None] = {}
-        self._channel_lookup_slow: dict[tuple[str, str], Channel] = {}
-
-        # Track which IDs were actually remapped for fast-copy optimization
-        self._remapped_schemas: set[tuple[int, int]] = set()  # (stream_id, original_id)
-        self._remapped_channels: set[tuple[int, int]] = set()  # (stream_id, original_id)
-
-    @overload
-    def remap_schema(self, stream_id: int, schema: None) -> None: ...
-    @overload
-    def remap_schema(self, stream_id: int, schema: Schema) -> Schema: ...
-    def remap_schema(self, stream_id: int, schema: Schema | None) -> Schema | None:
-        if schema is None:
-            return None
-
-        # Fast path: lookup by stream_id + schema.id
-        fast_key = (stream_id, schema.id)
-        mapped_schema = self._schema_lookup_fast.get(fast_key)
-        if mapped_schema is not None:
-            return mapped_schema
-
-        # Slow path: lookup by schema content (deduplication)
-        slow_key = (schema.name, schema.data)
-        mapped_schema = self._schema_lookup_slow.get(slow_key)
-        if mapped_schema:
-            # Cache in fast lookup for future access
-            self._schema_lookup_fast[fast_key] = mapped_schema
-            # Track if ID changed
-            if mapped_schema.id != schema.id:
-                self._remapped_schemas.add(fast_key)
-            return mapped_schema
-
-        # Allocate ID, preserving original if possible
-        new_id, was_remapped = _allocate_id(self._used_schema_ids, schema.id)
-        if was_remapped:
-            self._remapped_schemas.add(fast_key)
-
-        mapped_schema = replace(schema, id=new_id)
-        self._schema_lookup_slow[slow_key] = mapped_schema
-        self._schema_lookup_fast[fast_key] = mapped_schema
-        return mapped_schema
-
-    def remap_channel(self, stream_id: int, channel: Channel) -> Channel:
-        # Fast path: lookup by stream_id + channel.id
-        fast_key = (stream_id, channel.id)
-        mapped_channel = self._channel_lookup_fast.get(fast_key)
-        if mapped_channel is not None:
-            return mapped_channel
-
-        # Slow path: lookup by channel content (deduplication)
-        slow_key = (
-            channel.topic,
-            channel.message_encoding,
-        )  # TODO: include metadata
-        mapped_channel = self._channel_lookup_slow.get(slow_key)
-        if mapped_channel is not None:
-            # Cache in fast lookup for future access
-            self._channel_lookup_fast[fast_key] = mapped_channel
-            # Track if ID changed
-            if mapped_channel.id != channel.id:
-                self._remapped_channels.add(fast_key)
-            return mapped_channel
-
-        # Allocate ID, preserving original if possible
-        new_id, was_remapped = _allocate_id(self._used_channel_ids, channel.id)
-        if was_remapped:
-            self._remapped_channels.add(fast_key)
-
-        # Map schema_id to the remapped value
-        # schema_id=0 means no schema (valid per MCAP spec)
-        new_schema_id = 0
-        if channel.schema_id != 0:
-            mapped_schema = self._schema_lookup_fast.get((stream_id, channel.schema_id))
-            if mapped_schema is None:
-                raise McapError(
-                    f"Channel '{channel.topic}' references schema_id={channel.schema_id} "
-                    f"which has not been seen yet (stream_id={stream_id})"
-                )
-            new_schema_id = mapped_schema.id
-
-        mapped_channel = replace(channel, id=new_id, schema_id=new_schema_id)
-        self._channel_lookup_slow[slow_key] = mapped_channel
-        self._channel_lookup_fast[fast_key] = mapped_channel
-        return mapped_channel
-
-    def was_schema_remapped(self, stream_id: int, original_id: int) -> bool:
-        """Check if a schema ID was changed during remapping."""
-        return (stream_id, original_id) in self._remapped_schemas
-
-    def was_channel_remapped(self, stream_id: int, original_id: int) -> bool:
-        """Check if a channel ID was changed during remapping."""
-        return (stream_id, original_id) in self._remapped_channels
-
-    def has_channel(self, stream_id: int, original_id: int) -> bool:
-        """Check if a channel has been seen and mapped."""
-        return (stream_id, original_id) in self._channel_lookup_fast
-
-    def get_remapped_channel(self, stream_id: int, original_id: int) -> Channel | None:
-        """Get the remapped channel for a given stream and original ID."""
-        return self._channel_lookup_fast.get((stream_id, original_id))
-
-    def get_remapped_channel_id(self, stream_id: int, original_id: int) -> int:
-        """Get the remapped channel ID, or the original ID if not remapped."""
-        channel = self._channel_lookup_fast.get((stream_id, original_id))
-        return channel.id if channel else original_id
-
-    def remap_message(self, stream_id: int, message: Message) -> Message:
-        """Remap a message's channel ID based on the remapped channel."""
-        mapped_channel_id = self.get_remapped_channel_id(stream_id, message.channel_id)
-        if mapped_channel_id == message.channel_id:
-            return message
-        # dataclass.replace is upto 4x slow then just creating a new instance
-        return Message(
-            channel_id=mapped_channel_id,
-            sequence=message.sequence,
-            log_time=message.log_time,
-            publish_time=message.publish_time,
-            data=message.data,
-        )
 
 
 def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
