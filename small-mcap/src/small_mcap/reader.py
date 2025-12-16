@@ -728,9 +728,10 @@ def read_message(
         McapError: If reverse=True on a non-seekable stream
     """
     if isinstance(stream, io.IOBase):
+        io_stream = cast("IO[bytes]", stream)
         if stream.seekable():
             return _read_message_seeking(
-                stream,
+                io_stream,
                 should_include,
                 start_time_ns,
                 end_time_ns,
@@ -738,7 +739,7 @@ def read_message(
                 reverse,
             )
         return _read_message_non_seeking(
-            stream,
+            io_stream,
             should_include,
             start_time_ns,
             end_time_ns,
@@ -778,7 +779,7 @@ def read_message(
             key=lambda x: x[2].log_time,
             reverse=reverse,
         )
-    return None
+    raise TypeError(f"Unsupported stream type: {type(stream)}")
 
 
 class _SchemaProtocol(Protocol):
