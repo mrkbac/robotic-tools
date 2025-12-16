@@ -52,10 +52,10 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          uv run pytest small-mcap/tests -v --cov=small_mcap
-          uv run pytest pymcap-cli/tests -v --cov=pymcap_cli --cov-append
-          uv run pytest mcap-ros2-support-fast/tests -v --cov=mcap_ros2_support_fast --cov-append
-          uv run pytest ros-parser/tests -v --cov=ros_parser --cov-append
+          uv run pytest small-mcap/tests -v --cov=small_mcap -m "not benchmark"
+          uv run pytest pymcap-cli/tests -v --cov=pymcap_cli --cov-append -m "not benchmark"
+          uv run pytest mcap-ros2-support-fast/tests -v --cov=mcap_ros2_support_fast --cov-append -m "not benchmark"
+          uv run pytest ros-parser/tests -v --cov=ros_parser --cov-append -m "not benchmark"
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
