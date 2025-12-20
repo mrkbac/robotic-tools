@@ -9,6 +9,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -95,16 +96,18 @@ def merge(
 
     # Use ExitStack to manage multiple file handles
     with contextlib.ExitStack() as stack:
-        input_options: list[InputOptions] = []
+        input_files: list[InputFile] = []
 
         for f in files:
             stream, size = stack.enter_context(open_input(f))
-            input_options.append(
-                InputOptions(
+            input_files.append(
+                InputFile(
                     stream=stream,
-                    file_size=size,
-                    include_metadata=metadata_mode == MetadataMode.INCLUDE,
-                    include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                    size=size,
+                    options=InputOptions.from_args(
+                        include_metadata=metadata_mode == MetadataMode.INCLUDE,
+                        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                    ),
                 )
             )
 
@@ -112,8 +115,9 @@ def merge(
 
         # Build processing options
         processing_options = ProcessingOptions(
-            inputs=input_options,
-            output=OutputOptions(
+            inputs=input_files,
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),

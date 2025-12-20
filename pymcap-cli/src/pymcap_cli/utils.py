@@ -311,13 +311,18 @@ def compile_topic_patterns(patterns: list[str]) -> list[Pattern[str]]:
     return compiled
 
 
-def parse_timestamp_args(date_or_nanos: str, nanoseconds: int, seconds: int) -> int:
-    """Parse timestamp with precedence: date_or_nanos > nanoseconds > seconds."""
+def parse_timestamp_args(date_or_nanos: str, seconds: int, nanoseconds: int) -> int | None:
+    """Parse timestamp with precedence: date_or_nanos > seconds > nanoseconds.
+
+    Returns None if no time filter is specified (all args are empty/zero).
+    """
     if date_or_nanos:
         return parse_time_arg(date_or_nanos)
+    if seconds != 0:
+        return seconds * 1_000_000_000
     if nanoseconds != 0:
         return nanoseconds
-    return seconds * 1_000_000_000
+    return None
 
 
 def confirm_output_overwrite(output: Path, force: bool) -> None:

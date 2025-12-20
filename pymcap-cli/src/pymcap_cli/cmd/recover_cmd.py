@@ -5,6 +5,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -70,17 +71,18 @@ def recover(
     confirm_output_overwrite(output, force)
 
     with open_input(file) as (f, file_size), output.open("wb") as output_stream:
-        # Build input options - recovery mode with all content included
-        input_opts = InputOptions(
+        # Build input file - recovery mode with all content included
+        input_file = InputFile(
             stream=f,
-            file_size=file_size,
-            always_decode_chunk=always_decode_chunk,
+            size=file_size,
+            options=InputOptions.from_args(always_decode_chunk=always_decode_chunk),
         )
 
         # Build processing options
         processing_options = ProcessingOptions(
-            inputs=[input_opts],
-            output=OutputOptions(
+            inputs=[input_file],
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),

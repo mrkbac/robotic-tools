@@ -7,6 +7,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -161,21 +162,23 @@ def filter_cmd(
     confirm_output_overwrite(output, force)
 
     with open_input(file) as (f, file_size), output.open("wb") as output_stream:
-        # Build input options directly with raw CLI args
+        # Build input file with options from CLI args
         try:
-            input_opts = InputOptions(
+            input_file = InputFile(
                 stream=f,
-                file_size=file_size,
-                include_topic_regex=include_topic_regex,
-                exclude_topic_regex=exclude_topic_regex,
-                start=start,
-                start_nsecs=start_nsecs,
-                start_secs=start_secs,
-                end=end,
-                end_nsecs=end_nsecs,
-                end_secs=end_secs,
-                include_metadata=metadata_mode == MetadataMode.INCLUDE,
-                include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                size=file_size,
+                options=InputOptions.from_args(
+                    include_topic_regex=include_topic_regex,
+                    exclude_topic_regex=exclude_topic_regex,
+                    start=start,
+                    start_nsecs=start_nsecs,
+                    start_secs=start_secs,
+                    end=end,
+                    end_nsecs=end_nsecs,
+                    end_secs=end_secs,
+                    include_metadata=metadata_mode == MetadataMode.INCLUDE,
+                    include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                ),
             )
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
@@ -183,8 +186,9 @@ def filter_cmd(
 
         # Build processing options
         processing_options = ProcessingOptions(
-            inputs=[input_opts],
-            output=OutputOptions(
+            inputs=[input_file],
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),

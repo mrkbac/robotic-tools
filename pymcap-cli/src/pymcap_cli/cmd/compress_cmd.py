@@ -4,6 +4,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -59,17 +60,18 @@ def compress(
     console.print(f"[blue]Compressing '{file}' to '{output}'[/blue]")
 
     with open_input(file) as (f, file_size), output.open("wb") as output_stream:
-        # Build input options - include everything, force decode for re-compression
-        input_opts = InputOptions(
+        # Build input file with options - force decode for re-compression
+        input_file = InputFile(
             stream=f,
-            file_size=file_size,
-            always_decode_chunk=True,  # Force decode for compression change
+            size=file_size,
+            options=InputOptions.from_args(always_decode_chunk=True),
         )
 
         # Build processing options
         processing_options = ProcessingOptions(
-            inputs=[input_opts],
-            output=OutputOptions(
+            inputs=[input_file],
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),

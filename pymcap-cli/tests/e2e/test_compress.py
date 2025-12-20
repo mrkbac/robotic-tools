@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -22,12 +23,14 @@ class TestCompress:
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -46,12 +49,14 @@ class TestCompress:
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -70,12 +75,14 @@ class TestCompress:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="none", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="none", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -94,12 +101,14 @@ class TestCompress:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -116,12 +125,14 @@ class TestCompress:
         with lz4_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -150,12 +161,14 @@ class TestCompress:
         with uncompressed_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=chunk_size),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=chunk_size),
             )
 
             processor = McapProcessor(options)
@@ -171,12 +184,14 @@ class TestCompress:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="lz4", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -194,12 +209,14 @@ class TestCompress:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -218,12 +235,14 @@ class TestCompress:
         with large_1mb_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -249,12 +268,14 @@ class TestCompress:
             ):
                 options = ProcessingOptions(
                     inputs=[
-                        InputOptions(
+                        InputFile(
                             stream=input_stream,
-                            file_size=uncompressed_size,
+                            size=uncompressed_size,
+                            options=InputOptions.from_args(),
                         )
                     ],
-                    output=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
+                    input_options=InputOptions.from_args(),
+                    output_options=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
                 )
 
                 processor = McapProcessor(options)

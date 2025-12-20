@@ -9,6 +9,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -193,27 +194,29 @@ def process(
 
     # Use ExitStack to manage multiple file handles
     with contextlib.ExitStack() as stack:
-        input_options: list[InputOptions] = []
+        input_file_list: list[InputFile] = []
 
         for f in input_files:
             stream, size = stack.enter_context(open_input(f))
             try:
-                input_opts = InputOptions(
+                input_file = InputFile(
                     stream=stream,
-                    file_size=size,
-                    include_topic_regex=include_topic_regex,
-                    exclude_topic_regex=exclude_topic_regex,
-                    start=start,
-                    start_nsecs=start_nsecs,
-                    start_secs=start_secs,
-                    end=end,
-                    end_nsecs=end_nsecs,
-                    end_secs=end_secs,
-                    include_metadata=metadata_mode == MetadataMode.INCLUDE,
-                    include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
-                    always_decode_chunk=always_decode_chunk,
+                    size=size,
+                    options=InputOptions.from_args(
+                        include_topic_regex=include_topic_regex,
+                        exclude_topic_regex=exclude_topic_regex,
+                        start=start,
+                        start_nsecs=start_nsecs,
+                        start_secs=start_secs,
+                        end=end,
+                        end_nsecs=end_nsecs,
+                        end_secs=end_secs,
+                        include_metadata=metadata_mode == MetadataMode.INCLUDE,
+                        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                        always_decode_chunk=always_decode_chunk,
+                    ),
                 )
-                input_options.append(input_opts)
+                input_file_list.append(input_file)
             except ValueError as e:
                 console.print(f"[red]Error: {e}[/red]")
                 return 1
@@ -222,8 +225,9 @@ def process(
 
         # Build processing options
         processing_options = ProcessingOptions(
-            inputs=input_options,
-            output=OutputOptions(
+            inputs=input_file_list,
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),

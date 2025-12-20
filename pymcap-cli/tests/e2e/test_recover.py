@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pymcap_cli.cmd.recover_inplace_cmd import recover_inplace
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -25,12 +26,14 @@ class TestRecover:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -49,12 +52,14 @@ class TestRecover:
         with truncated_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -72,13 +77,14 @@ class TestRecover:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        always_decode_chunk=True,  # Force chunk decoding
+                        size=file_size,
+                        options=InputOptions.from_args(always_decode_chunk=True),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -96,12 +102,14 @@ class TestRecover:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -124,12 +132,14 @@ class TestRecover:
             with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
                 options = ProcessingOptions(
                     inputs=[
-                        InputOptions(
+                        InputFile(
                             stream=input_stream,
-                            file_size=file_size,
+                            size=file_size,
+                            options=InputOptions.from_args(),
                         )
                     ],
-                    output=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
+                    input_options=InputOptions.from_args(),
+                    output_options=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
                 )
 
                 processor = McapProcessor(options)
@@ -146,12 +156,14 @@ class TestRecover:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -168,13 +180,14 @@ class TestRecover:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        always_decode_chunk=False,  # Enable fast chunk copying
+                        size=file_size,
+                        options=InputOptions.from_args(always_decode_chunk=False),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -204,12 +217,14 @@ class TestRecover:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=chunk_size),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=chunk_size),
             )
 
             processor = McapProcessor(options)

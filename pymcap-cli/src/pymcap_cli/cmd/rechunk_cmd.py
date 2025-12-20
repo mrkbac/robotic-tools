@@ -8,6 +8,7 @@ from rich.console import Console
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -133,16 +134,18 @@ def rechunk(
             )
 
     with open_input(file) as (input_stream, file_size), output_file.open("wb") as output_stream:
-        # Build input options - include everything with recovery mode
-        input_opts = InputOptions(
+        # Build input file - include everything
+        input_file = InputFile(
             stream=input_stream,
-            file_size=file_size,
+            size=file_size,
+            options=InputOptions.from_args(),
         )
 
         # Build processing options with rechunking enabled
         options = ProcessingOptions(
-            inputs=[input_opts],
-            output=OutputOptions(
+            inputs=[input_file],
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
                 rechunk_strategy=strategy,
                 rechunk_patterns=patterns,
                 compression=compression.value,

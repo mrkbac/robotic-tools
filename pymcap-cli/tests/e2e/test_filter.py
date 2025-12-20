@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -22,13 +23,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["/camera/.*"],
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_regex=["/camera/.*"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -46,13 +48,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        exclude_topic_regex=["/debug/.*"],
+                        size=file_size,
+                        options=InputOptions.from_args(exclude_topic_regex=["/debug/.*"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -69,13 +72,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["/camera/.*", "/lidar/.*"],
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_regex=["/camera/.*", "/lidar/.*"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -95,14 +99,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        start_nsecs=0,
-                        end_nsecs=50_000_000,  # 50ms in nanoseconds
+                        size=file_size,
+                        options=InputOptions.from_args(start_nsecs=0, end_nsecs=50_000_000),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -119,15 +123,18 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["/camera/.*"],
-                        start_nsecs=0,
-                        end_nsecs=50_000_000,  # 50ms
+                        size=file_size,
+                        options=InputOptions.from_args(
+                            include_topic_regex=["/camera/.*"],
+                            start_nsecs=0,
+                            end_nsecs=50_000_000,
+                        ),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -145,13 +152,14 @@ class TestFilter:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_metadata=False,
+                        size=file_size,
+                        options=InputOptions.from_args(include_metadata=False),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -167,13 +175,14 @@ class TestFilter:
         with simple_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_attachments=False,
+                        size=file_size,
+                        options=InputOptions.from_args(include_attachments=False),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -189,13 +198,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["/nonexistent/.*"],
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_regex=["/nonexistent/.*"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -212,13 +222,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["^/camera/front$"],
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_regex=["^/camera/front$"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)
@@ -242,13 +253,14 @@ class TestFilter:
             ):
                 options = ProcessingOptions(
                     inputs=[
-                        InputOptions(
+                        InputFile(
                             stream=input_stream,
-                            file_size=file_size,
-                            include_topic_regex=["/camera/.*"],
+                            size=file_size,
+                            options=InputOptions.from_args(include_topic_regex=["/camera/.*"]),
                         )
                     ],
-                    output=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
+                    input_options=InputOptions.from_args(),
+                    output_options=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
                 )
 
                 processor = McapProcessor(options)
@@ -264,13 +276,14 @@ class TestFilter:
         with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["/camera/.*"],
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_regex=["/camera/.*"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
 
             processor = McapProcessor(options)

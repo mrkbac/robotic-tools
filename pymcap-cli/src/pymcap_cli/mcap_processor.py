@@ -4,7 +4,6 @@ import heapq
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from functools import cached_property
 from re import Pattern
 from typing import IO, BinaryIO
 
@@ -80,73 +79,73 @@ class ShouldDecode(Enum):
     """Chunk must be decoded to change channels or filter on message level"""
 
 
-@dataclass  # No slots=True - needed for @cached_property
+@dataclass
 class InputOptions:
     """Input file with its filtering options.
 
     Accepts raw CLI arguments and lazily computes derived values via cached_property.
     """
 
-    # The input stream
-    stream: IO[bytes]
-    file_size: int  # For progress tracking
+    always_decode_chunk: bool
 
-    always_decode_chunk: bool = False
+    start_time_ns: int | None
+    end_time_ns: int | None
 
-    # Raw CLI args for time (accept any combination)
-    start: str = ""
-    start_nsecs: int = 0
-    start_secs: int = 0
-    end: str = ""
-    end_nsecs: int = 0
-    end_secs: int = 0
-
-    # Raw CLI args for topics (regex strings, not compiled)
-    include_topic_regex: list[str] | None = None
-    exclude_topic_regex: list[str] | None = None
+    include_topics: list[Pattern]
+    exclude_topics: list[Pattern]
 
     # Content filtering
-    include_metadata: bool = True
-    include_attachments: bool = True
+    include_metadata: bool
+    include_attachments: bool
 
-    def __post_init__(self) -> None:
-        """Normalize None to empty list and validate mutually exclusive options."""
-        if self.include_topic_regex and self.exclude_topic_regex:
-            raise ValueError("Cannot use both include and exclude topic filters")
+    @classmethod
+    def from_args(
+        cls,
+        always_decode_chunk: bool = False,
+        # Raw CLI args for time (accept any combination)
+        start: str = "",
+        start_nsecs: int = 0,
+        start_secs: int = 0,
+        end: str = "",
+        end_nsecs: int = 0,
+        end_secs: int = 0,
+        # Raw CLI args for topics (regex strings, not compiled)
+        include_topic_regex: list[str] | None = None,
+        exclude_topic_regex: list[str] | None = None,
+        # Content filtering
+        include_metadata: bool = True,
+        include_attachments: bool = True,
+    ) -> "InputOptions":
+        return cls(
+            always_decode_chunk=always_decode_chunk,
+            start_time_ns=parse_timestamp_args(start, start_secs, start_nsecs),
+            end_time_ns=parse_timestamp_args(end, end_secs, end_nsecs),
+            include_topics=compile_topic_patterns(include_topic_regex or []),
+            exclude_topics=compile_topic_patterns(exclude_topic_regex or []),
+            include_metadata=include_metadata,
+            include_attachments=include_attachments,
+        )
 
-    @cached_property
-    def start_time(self) -> int:
-        """Compute start time in nanoseconds from CLI args."""
-        return parse_timestamp_args(self.start, self.start_nsecs, self.start_secs)
+    # merge
+    def __or__(self, other: "InputOptions") -> "InputOptions":
+        return InputOptions(
+            always_decode_chunk=self.always_decode_chunk or other.always_decode_chunk,
+            start_time_ns=self.start_time_ns or other.start_time_ns,
+            end_time_ns=self.end_time_ns or other.end_time_ns,
+            include_topics=self.include_topics or other.include_topics,
+            exclude_topics=self.exclude_topics or other.exclude_topics,
+            include_metadata=self.include_metadata and other.include_metadata,
+            include_attachments=self.include_attachments and other.include_attachments,
+        )
 
-    @cached_property
-    def end_time(self) -> int:
-        """Compute end time in nanoseconds from CLI args."""
-        parsed = parse_timestamp_args(self.end, self.end_nsecs, self.end_secs)
-        result = MAX_INT64 if parsed == 0 else parsed
-        if result < self.start_time:
-            raise ValueError("End time cannot be before start time")
-        return result
 
-    @cached_property
-    def include_topics(self) -> list[Pattern[str]]:
-        """Compile include topic regex patterns."""
-        return compile_topic_patterns(self.include_topic_regex or [])
+@dataclass(slots=True)
+class InputFile:
+    """Input file stream with its size and options."""
 
-    @cached_property
-    def exclude_topics(self) -> list[Pattern[str]]:
-        """Compile exclude topic regex patterns."""
-        return compile_topic_patterns(self.exclude_topic_regex or [])
-
-    @property
-    def has_time_filter(self) -> bool:
-        """Check if time filtering is active."""
-        return self.start_time > 0 or self.end_time < MAX_INT64
-
-    @property
-    def has_topic_filter(self) -> bool:
-        """Check if topic filtering is active."""
-        return bool(self.include_topics or self.exclude_topics)
+    stream: IO[bytes]
+    size: int
+    options: InputOptions
 
 
 @dataclass(slots=True)
@@ -171,17 +170,26 @@ class OutputOptions:
         return self.rechunk_strategy != RechunkStrategy.NONE
 
 
-@dataclass(slots=True)
 class ProcessingOptions:
     """Complete processing configuration."""
 
-    inputs: list[InputOptions]
-    output: OutputOptions = field(default_factory=OutputOptions)
+    def __init__(
+        self,
+        # stream, size, input_options
+        inputs: list[InputFile],
+        input_options: InputOptions,
+        output_options: OutputOptions,
+    ) -> None:
+        # self.input_options = input_options
+        self.output_options = output_options
 
-    @property
-    def total_size(self) -> int:
-        """Total size of all input files for progress tracking."""
-        return sum(inp.file_size for inp in self.inputs)
+        # merge input_options with local options
+        self.inputs: list[InputFile] = []
+        for input_file in inputs:
+            merged_opts = input_options | input_file.options
+            self.inputs.append(InputFile(input_file.stream, input_file.size, merged_opts))
+
+        self.total_size = sum(input_file.size for input_file in inputs)
 
 
 @dataclass(slots=True)
@@ -353,7 +361,7 @@ class McapProcessor:
 
     def _get_input(self, stream_id: int) -> InputOptions:
         """Get InputOptions for a stream."""
-        return self.options.inputs[stream_id]
+        return self.options.inputs[stream_id].options
 
     def _compute_channel_filter_decision(self, stream_id: int, topic: str) -> bool:
         """Compute whether a channel with given topic should be included for a stream.
@@ -459,14 +467,14 @@ class McapProcessor:
 
     def _find_matching_pattern_index(self, topic: str) -> int | None:
         """Find first pattern that matches topic. Returns pattern index or None."""
-        for i, pattern in enumerate(self.options.output.rechunk_patterns):
+        for i, pattern in enumerate(self.options.output_options.rechunk_patterns):
             if pattern.search(topic):
                 return i
         return None
 
     def _create_message_group(self, writer: McapWriter) -> MessageGroup:
         """Create a new MessageGroup with output options."""
-        opts = self.options.output
+        opts = self.options.output_options
         group = MessageGroup(writer, opts.chunk_size, opts.compression_type)
         self.rechunk_groups.append(group)
         return group
@@ -478,7 +486,7 @@ class McapProcessor:
         if channel_id in self.channel_to_group:
             return self.channel_to_group[channel_id]
 
-        strategy = self.options.output.rechunk_strategy
+        strategy = self.options.output_options.rechunk_strategy
         group: MessageGroup | None = None
 
         if strategy == RechunkStrategy.ALL:
@@ -522,8 +530,10 @@ class McapProcessor:
         self.stats.messages_processed += 1
         input_opts = self._get_input(stream_id)
 
-        # Time filtering (per-input)
-        if not (input_opts.start_time <= message.log_time < input_opts.end_time):
+        # Time filtering (per-input): None means no filter for that bound
+        start = input_opts.start_time_ns if input_opts.start_time_ns is not None else 0
+        end = input_opts.end_time_ns if input_opts.end_time_ns is not None else MAX_INT64
+        if not (start <= message.log_time < end):
             return
 
         # Topic filtering using cached decision (avoid repeated regex matching)
@@ -532,7 +542,7 @@ class McapProcessor:
             return
 
         # Route to appropriate destination based on rechunking mode
-        if self.options.output.is_rechunking:
+        if self.options.output_options.is_rechunking:
             # Get channel for this message
             channel = self.channels.get(message.channel_id)
             if not channel:
@@ -591,9 +601,12 @@ class McapProcessor:
         """Handle an attachment record from the stream."""
         self.stats.attachments_processed += 1
         input_opts = self._get_input(stream_id)
-        if input_opts.include_attachments and (
-            input_opts.start_time <= attachment.log_time < input_opts.end_time
-        ):
+        if not input_opts.include_attachments:
+            return
+        # Time filtering: None means no filter for that bound
+        start = input_opts.start_time_ns if input_opts.start_time_ns is not None else 0
+        end = input_opts.end_time_ns if input_opts.end_time_ns is not None else MAX_INT64
+        if start <= attachment.log_time < end:
             writer.add_attachment(
                 log_time=attachment.log_time,
                 create_time=attachment.create_time,
@@ -667,7 +680,7 @@ class McapProcessor:
         Returns:
             Processing statistics
         """
-        output_opts = self.options.output
+        output_opts = self.options.output_options
 
         # Initialize writer and share schema/channel dicts for auto-ensure
         writer = McapWriter(
@@ -764,15 +777,14 @@ class McapProcessor:
             - DECODE: Chunk must be decoded to change channels or filter messages
         """
         input_opts = self._get_input(stream_id)
-        output_opts = self.options.output
+        output_opts = self.options.output_options
 
         if input_opts.always_decode_chunk:
             return ShouldDecode.DECODE
 
         # Chunk time outside of limits - skip entirely (per-input time filter)
-        if (
-            chunk.message_end_time < input_opts.start_time
-            or chunk.message_start_time >= input_opts.end_time
+        if (input_opts.start_time_ns and chunk.message_end_time < input_opts.start_time_ns) or (
+            input_opts.end_time_ns and chunk.message_start_time >= input_opts.end_time_ns
         ):
             return ShouldDecode.SKIP
 
@@ -785,10 +797,10 @@ class McapProcessor:
             return ShouldDecode.DECODE
 
         # Check if time filtering requires per-message filtering
-        if input_opts.has_time_filter and not (
-            chunk.message_start_time >= input_opts.start_time
-            and chunk.message_end_time < input_opts.end_time
-        ):
+        # (chunk partially overlaps the time range - extends outside filter bounds)
+        if (
+            input_opts.start_time_ns and chunk.message_start_time < input_opts.start_time_ns
+        ) or (input_opts.end_time_ns and chunk.message_end_time >= input_opts.end_time_ns):
             return ShouldDecode.DECODE
 
         # Check if any channel was remapped - must decode to fix channel IDs
@@ -803,7 +815,7 @@ class McapProcessor:
                 return ShouldDecode.DECODE
 
         # Check topic filtering in a single pass over indexes (per-input topic filter)
-        if input_opts.has_topic_filter:
+        if input_opts.include_topics or input_opts.exclude_topics:
             has_include = False
             has_exclude = False
 
