@@ -1,4 +1,5 @@
 import io
+import os
 import struct
 import zlib
 from abc import ABC, abstractmethod
@@ -997,7 +998,9 @@ class LazyChunk:
     data_len: int  # Length of the compressed data
 
     @classmethod
-    def read_from_stream(cls, stream: IO[bytes], record_start: int) -> "LazyChunk":
+    def read_from_stream(
+        cls, stream: IO[bytes], record_start: int, record_length: int
+    ) -> "LazyChunk":
         """Read chunk metadata from stream without loading the compressed data."""
         data = stream.read(8 + 8 + 8 + 4 + 4)
         message_start_time, message_end_time, uncompressed_size, uncompressed_crc, str_len = (
@@ -1005,7 +1008,9 @@ class LazyChunk:
         )
         compression = stream.read(str_len).decode("utf-8")
         data_len = struct.unpack("<Q", stream.read(8))[0]
-        stream.seek(data_len, 1)  # Skip the data for now
+        # message_start_time + message_end_time + uncompressed_size + uncompressed_crc +
+        # str_len + compression + data_len
+        stream.seek(record_length - (8 + 8 + 8 + 4 + 4 + str_len + 8), os.SEEK_CUR)
         return cls(
             message_start_time,
             message_end_time,

@@ -301,7 +301,7 @@ def stream_reader(
         # Handle lazy chunk loading when requested
         record: McapRecord | LazyChunk | None
         if opcode == Opcode.CHUNK and emit_chunks and lazy_chunks:
-            record = LazyChunk.read_from_stream(stream, record_start)
+            record = LazyChunk.read_from_stream(stream, record_start, length)
             cached_pos = stream.tell()
         else:
             cached_pos += length
@@ -323,13 +323,6 @@ def stream_reader(
                 actual=checksum_before_read,
                 record=record,
             )
-
-        # Handle padding (only needed when not using lazy chunks, as lazy read seeks past data)
-        if not (opcode == Opcode.CHUNK and emit_chunks and lazy_chunks):
-            padding = length - (cached_pos - record_start)
-            if padding > 0:
-                read(padding)
-                cached_pos += padding
 
         if isinstance(record, Chunk) and not emit_chunks:
             chunk_records = breakup_chunk(record, validate_crc)
