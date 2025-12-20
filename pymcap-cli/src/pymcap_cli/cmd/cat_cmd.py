@@ -149,10 +149,10 @@ def cat(
       pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
     """
 
-    start_time_ns = parse_timestamp_args(start, 0, start_secs)
+    start_time_ns = parse_timestamp_args(start, 0, start_secs) or 0
     end_time_ns = parse_timestamp_args(end, 0, end_secs)
     # Default end time to max if not specified
-    if end_time_ns == 0:
+    if end_time_ns is None:
         end_time_ns = MAX_INT64
 
     # Parse message path query if provided

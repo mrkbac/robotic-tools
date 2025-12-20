@@ -275,7 +275,9 @@ class TestCompress:
                         )
                     ],
                     input_options=InputOptions.from_args(),
-                    output_options=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
+                    output_options=OutputOptions(
+                        compression=compression, chunk_size=4 * 1024 * 1024
+                    ),
                 )
 
                 processor = McapProcessor(options)

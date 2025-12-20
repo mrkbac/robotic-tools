@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from pymcap_cli.mcap_processor import (
+    InputFile,
     InputOptions,
     McapProcessor,
     OutputOptions,
@@ -21,12 +22,14 @@ def test_benchmark_recover_nuscenes_pymcap(benchmark, nuscenes_mcap: Path, tmp_p
         with nuscenes_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
+                        size=file_size,
+                        options=InputOptions.from_args(),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
             processor = McapProcessor(options)
             processor.process(output_stream)
@@ -75,13 +78,14 @@ def test_benchmark_filter_nuscenes_pymcap(benchmark, nuscenes_mcap: Path, tmp_pa
         with nuscenes_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
             options = ProcessingOptions(
                 inputs=[
-                    InputOptions(
+                    InputFile(
                         stream=input_stream,
-                        file_size=file_size,
-                        include_topic_regex=["/CAM_.*"],
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_regex=["/CAM_.*"]),
                     )
                 ],
-                output=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
             )
             processor = McapProcessor(options)
             processor.process(output_stream)

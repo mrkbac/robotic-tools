@@ -3,7 +3,8 @@
 import heapq
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import Enum
+from functools import cached_property
 from re import Pattern
 from typing import IO, BinaryIO
 
@@ -18,6 +19,7 @@ from small_mcap import (
     DataEnd,
     Footer,
     Header,
+    LazyChunk,
     McapError,
     McapWriter,
     Message,
@@ -33,15 +35,24 @@ from small_mcap import (
 from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
+from pymcap_cli.processors import (
+    Action,
+    AlwaysDecodeProcessor,
+    AttachmentFilterProcessor,
+    ChunkDecision,
+    Context,
+    MetadataFilterProcessor,
+    Processor,
+    TimeFilterProcessor,
+    TopicFilterProcessor,
+)
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     str_to_compression_type,
 )
 from pymcap_cli.utils import (
-    MAX_INT64,
     ProgressTrackingIO,
-    compile_topic_patterns,
     file_progress,
     parse_timestamp_args,
 )
@@ -51,13 +62,20 @@ console = Console()
 
 @dataclass(slots=True)
 class PendingChunk:
-    chunk: Chunk
+    chunk: Chunk | LazyChunk
     indexes: list[MessageIndex]
     stream_id: int
+    stream: IO[bytes]  # For converting LazyChunk to Chunk
     timestamp: int  # message_start_time for ordering
 
     def __lt__(self, other: "PendingChunk") -> bool:
         return self.timestamp < other.timestamp
+
+    def get_chunk(self) -> Chunk:
+        """Get full Chunk, converting from LazyChunk if needed."""
+        if isinstance(self.chunk, LazyChunk):
+            self.chunk = self.chunk.to_chunk(self.stream)
+        return self.chunk
 
 
 # Rechunking strategy enum
@@ -70,31 +88,18 @@ class RechunkStrategy(str, Enum):
     AUTO = "auto"  # Auto-group based on size (>15% threshold)
 
 
-class ShouldDecode(Enum):
-    SKIP = auto()
-    """Chunk does not contain anything new, everything is filtered out"""
-    COPY = auto()
-    """Chunk does not contain anything new, everything is copied"""
-    DECODE = auto()
-    """Chunk must be decoded to change channels or filter on message level"""
-
-
 @dataclass
 class InputOptions:
-    """Input file with its filtering options.
+    """Input file filtering options.
 
-    Accepts raw CLI arguments and lazily computes derived values via cached_property.
+    Stores explicit fields for proper merging. Processors are built lazily via build_processors().
     """
 
     always_decode_chunk: bool
-
     start_time_ns: int | None
     end_time_ns: int | None
-
-    include_topics: list[Pattern]
-    exclude_topics: list[Pattern]
-
-    # Content filtering
+    include_topics: list[str]
+    exclude_topics: list[str]
     include_metadata: bool
     include_attachments: bool
 
@@ -120,20 +125,44 @@ class InputOptions:
             always_decode_chunk=always_decode_chunk,
             start_time_ns=parse_timestamp_args(start, start_secs, start_nsecs),
             end_time_ns=parse_timestamp_args(end, end_secs, end_nsecs),
-            include_topics=compile_topic_patterns(include_topic_regex or []),
-            exclude_topics=compile_topic_patterns(exclude_topic_regex or []),
+            include_topics=include_topic_regex or [],
+            exclude_topics=exclude_topic_regex or [],
             include_metadata=include_metadata,
             include_attachments=include_attachments,
         )
 
-    # merge
+    @cached_property
+    def processors(self) -> list[Processor]:
+        """Build processor list from options. Cached on first access."""
+        procs: list[Processor] = []
+
+        if self.always_decode_chunk:
+            procs.append(AlwaysDecodeProcessor())
+
+        if self.start_time_ns is not None or self.end_time_ns is not None:
+            procs.append(TimeFilterProcessor(self.start_time_ns, self.end_time_ns))
+
+        if self.include_topics or self.exclude_topics:
+            procs.append(TopicFilterProcessor(self.include_topics, self.exclude_topics))
+
+        if not self.include_metadata:
+            procs.append(MetadataFilterProcessor(include=False))
+
+        if not self.include_attachments:
+            procs.append(AttachmentFilterProcessor(include=False))
+
+        return procs
+
     def __or__(self, other: "InputOptions") -> "InputOptions":
+        """Merge options - other (per-file) overrides self (global) for non-default values."""
         return InputOptions(
             always_decode_chunk=self.always_decode_chunk or other.always_decode_chunk,
-            start_time_ns=self.start_time_ns or other.start_time_ns,
-            end_time_ns=self.end_time_ns or other.end_time_ns,
-            include_topics=self.include_topics or other.include_topics,
-            exclude_topics=self.exclude_topics or other.exclude_topics,
+            start_time_ns=other.start_time_ns
+            if other.start_time_ns is not None
+            else self.start_time_ns,
+            end_time_ns=other.end_time_ns if other.end_time_ns is not None else self.end_time_ns,
+            include_topics=other.include_topics if other.include_topics else self.include_topics,
+            exclude_topics=other.exclude_topics if other.exclude_topics else self.exclude_topics,
             include_metadata=self.include_metadata and other.include_metadata,
             include_attachments=self.include_attachments and other.include_attachments,
         )
@@ -360,51 +389,39 @@ class McapProcessor:
         self.written_channels: set[int] = set()
 
     def _get_input(self, stream_id: int) -> InputOptions:
-        """Get InputOptions for a stream."""
         return self.options.inputs[stream_id].options
 
-    def _compute_channel_filter_decision(self, stream_id: int, topic: str) -> bool:
-        """Compute whether a channel with given topic should be included for a stream.
-
-        Returns True if the channel should be included, False otherwise.
-        """
-        input_opts = self._get_input(stream_id)
-        if input_opts.include_topics:
-            return any(p.search(topic) for p in input_opts.include_topics)
-        if input_opts.exclude_topics:
-            return not any(p.search(topic) for p in input_opts.exclude_topics)
-        return True
-
     def _is_channel_included(self, stream_id: int, channel_id: int) -> bool:
-        """Check if a channel is included for a specific stream, using cache."""
         cache_key = (stream_id, channel_id)
         if cache_key in self.channel_filter_cache:
             return self.channel_filter_cache[cache_key]
-
-        # Compute and cache
         channel = self.channels.get(channel_id)
-        topic = channel.topic if channel else ""
-        result = self._compute_channel_filter_decision(stream_id, topic)
-        self.channel_filter_cache[cache_key] = result
-        return result
+        if not channel:
+            return False
+        input_opts = self._get_input(stream_id)
+        if not input_opts.processors:
+            return True
+        ctx = Context(stream_id=stream_id)
+        for p in input_opts.processors:
+            if p.on_channel(ctx, channel, self.schemas.get(channel.schema_id)) == Action.SKIP:
+                self.channel_filter_cache[cache_key] = False
+                return False
+        self.channel_filter_cache[cache_key] = True
+        return True
 
     def _ensure_channel_written(self, channel_id: int, writer: McapWriter) -> None:
         """Ensure channel and its schema are written to the main file (not in chunks)."""
         if channel_id in self.written_channels:
             return
-
-        channel = self.channels.get(channel_id)
-        if not channel:
+        if not (channel := self.channels.get(channel_id)):
             return
-
-        # Write schema first if needed
-        if channel.schema_id != 0 and channel.schema_id not in self.written_schemas:
-            schema = self.schemas.get(channel.schema_id)
-            if schema:
-                writer.add_schema(schema.id, schema.name, schema.encoding, schema.data)
-                self.written_schemas.add(schema.id)
-
-        # Write channel
+        if (
+            channel.schema_id != 0
+            and channel.schema_id not in self.written_schemas
+            and (schema := self.schemas.get(channel.schema_id))
+        ):
+            writer.add_schema(schema.id, schema.name, schema.encoding, schema.data)
+            self.written_schemas.add(schema.id)
         writer.add_channel(
             channel.id, channel.topic, channel.message_encoding, channel.schema_id, channel.metadata
         )
@@ -528,16 +545,18 @@ class McapProcessor:
     ) -> None:
         """Process a message record."""
         self.stats.messages_processed += 1
-        input_opts = self._get_input(stream_id)
-
-        # Time filtering (per-input): None means no filter for that bound
-        start = input_opts.start_time_ns if input_opts.start_time_ns is not None else 0
-        end = input_opts.end_time_ns if input_opts.end_time_ns is not None else MAX_INT64
-        if not (start <= message.log_time < end):
-            return
 
         # Topic filtering using cached decision (avoid repeated regex matching)
         if not self._is_channel_included(stream_id, message.channel_id):
+            self.stats.filter_rejections += 1
+            return
+
+        # Time filtering and other message processors
+        input_opts = self._get_input(stream_id)
+        if any(
+            p.on_message(Context(stream_id=stream_id), message) == Action.SKIP
+            for p in input_opts.processors
+        ):
             self.stats.filter_rejections += 1
             return
 
@@ -579,16 +598,21 @@ class McapProcessor:
 
         if remapped_channel.id not in self.known_channels:
             self.known_channels.add(remapped_channel.id)
+            self.channels[remapped_channel.id] = remapped_channel
 
             # Pre-compute filtering decision for this stream (cache it)
-            should_include = self._compute_channel_filter_decision(
-                stream_id, remapped_channel.topic
-            )
+            input_opts = self._get_input(stream_id)
+            should_include = True
+            if input_opts.processors:
+                ctx = Context(stream_id=stream_id)
+                for p in input_opts.processors:
+                    if p.on_channel(ctx, remapped_channel, self.schemas.get(remapped_channel.schema_id)) == Action.SKIP:
+                        should_include = False
+                        break
             self.channel_filter_cache[(stream_id, remapped_channel.id)] = should_include
 
-            # Only add channel to output if it passes the filter
-            if should_include:
-                self.channels[remapped_channel.id] = remapped_channel
+            if not should_include:
+                del self.channels[remapped_channel.id]
 
     def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
         """Handle a message record from the stream."""
@@ -600,20 +624,22 @@ class McapProcessor:
     ) -> None:
         """Handle an attachment record from the stream."""
         self.stats.attachments_processed += 1
+
+        # Check all processors (includes AttachmentFilterProcessor and TimeFilterProcessor)
         input_opts = self._get_input(stream_id)
-        if not input_opts.include_attachments:
+        if any(
+            p.on_attachment(Context(stream_id=stream_id), attachment) == Action.SKIP
+            for p in input_opts.processors
+        ):
             return
-        # Time filtering: None means no filter for that bound
-        start = input_opts.start_time_ns if input_opts.start_time_ns is not None else 0
-        end = input_opts.end_time_ns if input_opts.end_time_ns is not None else MAX_INT64
-        if start <= attachment.log_time < end:
-            writer.add_attachment(
-                log_time=attachment.log_time,
-                create_time=attachment.create_time,
-                name=attachment.name,
-                media_type=attachment.media_type,
-                data=attachment.data,
-            )
+
+        writer.add_attachment(
+            log_time=attachment.log_time,
+            create_time=attachment.create_time,
+            name=attachment.name,
+            media_type=attachment.media_type,
+            data=attachment.data,
+        )
 
     def _generate_chunks_from_stream(
         self, input_stream: IO[bytes], stream_id: int, writer: McapWriter
@@ -622,14 +648,12 @@ class McapProcessor:
 
         Yields PendingChunk objects with timestamp for ordered merging.
         Non-chunk records (Schema, Channel, Message, Attachment, Metadata) are processed directly.
+        Uses lazy_chunks=True for efficiency - chunk data is only read when needed.
         """
         pending: PendingChunk | None = None
 
-        def make_pending(chunk: Chunk, indexes: list[MessageIndex]) -> PendingChunk:
-            return PendingChunk(chunk, indexes, stream_id, chunk.message_start_time)
-
         try:
-            records = stream_reader(input_stream, emit_chunks=True)
+            records = stream_reader(input_stream, emit_chunks=True)  # lazy_chunks=True
             indexes: list[MessageIndex] = []
 
             for record in records:
@@ -640,9 +664,11 @@ class McapProcessor:
 
                 if isinstance(record, Header):
                     pass  # Header handled separately
-                elif isinstance(record, Chunk):
+                elif isinstance(record, (Chunk, LazyChunk)):
                     self.stats.chunks_processed += 1
-                    pending = make_pending(record, indexes := [])
+                    pending = PendingChunk(
+                        record, indexes := [], stream_id, input_stream, record.message_start_time
+                    )
                 elif isinstance(record, MessageIndex):
                     indexes.append(record)
                 elif isinstance(record, Schema):
@@ -655,7 +681,11 @@ class McapProcessor:
                     self._handle_attachment_record(record, writer, stream_id)
                 elif isinstance(record, Metadata):
                     self.stats.metadata_processed += 1
-                    if self._get_input(stream_id).include_metadata:
+                    input_opts = self._get_input(stream_id)
+                    if not input_opts.processors or all(
+                        p.on_metadata(Context(stream_id=stream_id), record) != Action.SKIP
+                        for p in input_opts.processors
+                    ):
                         writer.add_metadata(name=record.name, metadata=record.metadata)
                 elif isinstance(record, (DataEnd, Footer)):
                     break
@@ -742,12 +772,7 @@ class McapProcessor:
                 # Process chunks in timestamp order using heapq.merge
                 # PendingChunk is ordered by timestamp, so no key function needed
                 for pending_chunk in heapq.merge(*chunk_generators):
-                    self._process_chunk_smart(
-                        pending_chunk.chunk,
-                        pending_chunk.indexes,
-                        writer,
-                        pending_chunk.stream_id,
-                    )
+                    self._process_chunk_smart(pending_chunk, writer)
 
                 # Complete progress
                 progress.update(task, completed=total_size)
@@ -766,42 +791,37 @@ class McapProcessor:
         return self.stats
 
     def _should_decode_chunk(
-        self, chunk: Chunk, indexes: list[MessageIndex], stream_id: int
-    ) -> ShouldDecode:
+        self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex], stream_id: int
+    ) -> ChunkDecision:
         """Determine if chunk should be decoded or can be fast-copied.
 
         Returns:
-            ShouldDecode enum:
+            ChunkDecision:
             - SKIP: Chunk should be skipped entirely (filtered out)
-            - COPY: Chunk can be fast-copied without decoding
+            - CONTINUE: Chunk can be fast-copied without decoding
             - DECODE: Chunk must be decoded to change channels or filter messages
         """
         input_opts = self._get_input(stream_id)
         output_opts = self.options.output_options
 
-        if input_opts.always_decode_chunk:
-            return ShouldDecode.DECODE
+        # Ask processors for chunk-level decision (time filtering, always_decode, etc.)
+        ctx = Context(stream_id=stream_id)
 
-        # Chunk time outside of limits - skip entirely (per-input time filter)
-        if (input_opts.start_time_ns and chunk.message_end_time < input_opts.start_time_ns) or (
-            input_opts.end_time_ns and chunk.message_start_time >= input_opts.end_time_ns
-        ):
-            return ShouldDecode.SKIP
+        for proc in input_opts.processors:
+            decision = proc.on_chunk(ctx, chunk, indexes)
+            if decision == ChunkDecision.SKIP:
+                return ChunkDecision.SKIP
+            if decision == ChunkDecision.DECODE:
+                # Track that we need to decode, but keep checking for SKIP
+                return ChunkDecision.DECODE
 
         # Force decode if rechunking is active (must reorganize messages)
         if output_opts.is_rechunking:
-            return ShouldDecode.DECODE
+            return ChunkDecision.DECODE
 
         # Check if compression matches - must decode to re-compress
         if chunk.compression != output_opts.compression_type.value:
-            return ShouldDecode.DECODE
-
-        # Check if time filtering requires per-message filtering
-        # (chunk partially overlaps the time range - extends outside filter bounds)
-        if (
-            input_opts.start_time_ns and chunk.message_start_time < input_opts.start_time_ns
-        ) or (input_opts.end_time_ns and chunk.message_end_time >= input_opts.end_time_ns):
-            return ShouldDecode.DECODE
+            return ChunkDecision.DECODE
 
         # Check if any channel was remapped - must decode to fix channel IDs
         # Also check if we have metadata for all channels (they might not be loaded yet)
@@ -809,13 +829,13 @@ class McapProcessor:
             # Check if channel metadata is available
             if not self.remapper.has_channel(stream_id, idx.channel_id):
                 # Channel not yet seen - must decode to discover it
-                return ShouldDecode.DECODE
+                return ChunkDecision.DECODE
             # If channel id was remapped, must decode
             if self.remapper.was_channel_remapped(stream_id, idx.channel_id):
-                return ShouldDecode.DECODE
+                return ChunkDecision.DECODE
 
-        # Check topic filtering in a single pass over indexes (per-input topic filter)
-        if input_opts.include_topics or input_opts.exclude_topics:
+        # Check channel filtering in a single pass over indexes
+        if input_opts.processors:
             has_include = False
             has_exclude = False
 
@@ -824,42 +844,50 @@ class McapProcessor:
                 # Check if channel filter decision is cached
                 if cache_key not in self.channel_filter_cache:
                     # Unknown channel - must decode to discover it
-                    return ShouldDecode.DECODE
+                    return ChunkDecision.DECODE
                 if self.channel_filter_cache[cache_key]:
                     has_include = True
                 else:
                     has_exclude = True
                 # Early exit if we have both - must decode
                 if has_include and has_exclude:
-                    return ShouldDecode.DECODE
+                    return ChunkDecision.DECODE
 
             # If chunk has ONLY excluded channels, skip it entirely
             if has_exclude and not has_include:
-                return ShouldDecode.SKIP
+                return ChunkDecision.SKIP
 
         # No reason to decode - can fast-copy
-        return ShouldDecode.COPY
+        return ChunkDecision.CONTINUE
 
-    def _process_chunk_smart(
-        self, chunk: Chunk, indexes: list[MessageIndex], writer: McapWriter, stream_id: int
-    ) -> None:
+    def _process_chunk_smart(self, pending: PendingChunk, writer: McapWriter) -> None:
         """Smart chunk processing with fast copying when possible."""
-        should_decode = self._should_decode_chunk(chunk, indexes, stream_id)
+        decision = self._should_decode_chunk(pending.chunk, pending.indexes, pending.stream_id)
 
-        if should_decode == ShouldDecode.SKIP:
+        if decision == ChunkDecision.SKIP:
             return
 
-        if should_decode == ShouldDecode.DECODE:
-            self._process_chunk_fallback(chunk, writer, stream_id)
+        # Now we need the full chunk data
+        try:
+            chunk = pending.get_chunk()
+        except (EOFError, McapError) as e:
+            console.print(
+                f"[yellow]Warning (stream {pending.stream_id}): Failed to read chunk: {e}[/yellow]"
+            )
+            self.stats.errors_encountered += 1
+            return
+
+        if decision == ChunkDecision.DECODE:
+            self._process_chunk_fallback(chunk, writer, pending.stream_id)
         else:
-            # Fast-copy path -> nothing about the chunks must be changed
+            # Fast-copy path (CONTINUE) -> nothing about the chunk must be changed
             # ensure all channels are written before copying chunk
-            for idx in indexes:
+            for idx in pending.indexes:
                 # Check if channel should be included (per-input)
-                if self._is_channel_included(stream_id, idx.channel_id):
+                if self._is_channel_included(pending.stream_id, idx.channel_id):
                     self._ensure_channel_written(idx.channel_id, writer)
             # Fast-copy the chunk with its indexes
-            writer.add_chunk(chunk, {idx.channel_id: idx for idx in indexes})
+            writer.add_chunk(chunk, {idx.channel_id: idx for idx in pending.indexes})
             self.stats.chunks_copied += 1
 
     def _process_chunk_fallback(

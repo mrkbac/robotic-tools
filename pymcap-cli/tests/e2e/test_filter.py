@@ -75,7 +75,9 @@ class TestFilter:
                     InputFile(
                         stream=input_stream,
                         size=file_size,
-                        options=InputOptions.from_args(include_topic_regex=["/camera/.*", "/lidar/.*"]),
+                        options=InputOptions.from_args(
+                            include_topic_regex=["/camera/.*", "/lidar/.*"]
+                        ),
                     )
                 ],
                 input_options=InputOptions.from_args(),
@@ -260,7 +262,9 @@ class TestFilter:
                         )
                     ],
                     input_options=InputOptions.from_args(),
-                    output_options=OutputOptions(compression=compression, chunk_size=4 * 1024 * 1024),
+                    output_options=OutputOptions(
+                        compression=compression, chunk_size=4 * 1024 * 1024
+                    ),
                 )
 
                 processor = McapProcessor(options)
