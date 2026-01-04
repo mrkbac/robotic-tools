@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+# ruff: noqa: ARG002
 from enum import Enum, IntFlag, auto
 
 from small_mcap import (
@@ -31,47 +31,27 @@ class ChunkDecision(Enum):
     DECODE = auto()  # Must decode to filter at message level
 
 
-@dataclass(slots=True, frozen=True)
-class Context:
-    """Shared context passed to processors."""
-
-    stream_id: int
-
-
 class Processor:
     """Base processor - override methods as needed."""
 
     def on_chunk(
         self,
-        _ctx: Context,
-        _chunk: Chunk | LazyChunk,
-        _indexes: list[MessageIndex],
+        chunk: Chunk | LazyChunk,
+        indexes: list[MessageIndex],
     ) -> ChunkDecision:
-        """Decide how to handle a chunk. Called before message-level processing.
-
-        Receives LazyChunk for efficiency - only metadata is read until needed.
-        """
+        """Decide how to handle a chunk. Called before message-level processing."""
         return ChunkDecision.CONTINUE
 
-    def on_channel(
-        self,
-        _ctx: Context,
-        _channel: Channel,
-        _schema: Schema | None,
-    ) -> Action:
-        """Handle channel registration stage."""
+    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
         return Action.CONTINUE
 
-    def on_message(self, _ctx: Context, _message: Message) -> Action:
-        """Handle message record."""
+    def on_message(self, message: Message) -> Action:
         return Action.CONTINUE
 
-    def on_metadata(self, _ctx: Context, _metadata: Metadata) -> Action:
-        """Handle metadata record."""
+    def on_metadata(self, metadata: Metadata) -> Action:
         return Action.CONTINUE
 
-    def on_attachment(self, _ctx: Context, _attachment: Attachment) -> Action:
-        """Handle attachment record."""
+    def on_attachment(self, attachment: Attachment) -> Action:
         return Action.CONTINUE
 
 
@@ -89,12 +69,7 @@ class TopicFilterProcessor(Processor):
         self.include = compile_topic_patterns(include or [])
         self.exclude = compile_topic_patterns(exclude or [])
 
-    def on_channel(
-        self,
-        _ctx: Context,
-        channel: Channel,
-        _schema: Schema | None,
-    ) -> Action:
+    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
         # Include filter: if patterns exist, topic must match at least one
         if self.include:
             if any(p.search(channel.topic) for p in self.include):
@@ -114,7 +89,7 @@ class MetadataFilterProcessor(Processor):
     def __init__(self, include: bool = True) -> None:
         self.include = include
 
-    def on_metadata(self, _ctx: Context, _metadata: Metadata) -> Action:
+    def on_metadata(self, metadata: Metadata) -> Action:
         return Action.CONTINUE if self.include else Action.SKIP
 
 
@@ -124,19 +99,14 @@ class AttachmentFilterProcessor(Processor):
     def __init__(self, include: bool = True) -> None:
         self.include = include
 
-    def on_attachment(self, _ctx: Context, _attachment: Attachment) -> Action:
+    def on_attachment(self, attachment: Attachment) -> Action:
         return Action.CONTINUE if self.include else Action.SKIP
 
 
 class AlwaysDecodeProcessor(Processor):
     """Forces all chunks to be decoded."""
 
-    def on_chunk(
-        self,
-        _ctx: Context,
-        _chunk: Chunk | LazyChunk,
-        _indexes: list[MessageIndex],
-    ) -> ChunkDecision:
+    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
         return ChunkDecision.DECODE
 
 
@@ -155,12 +125,7 @@ class TimeFilterProcessor(Processor):
         self._has_start = start_ns is not None
         self._has_end = end_ns is not None
 
-    def on_chunk(
-        self,
-        _ctx: Context,
-        chunk: Chunk | LazyChunk,
-        _indexes: list[MessageIndex],
-    ) -> ChunkDecision:
+    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
         # Chunk entirely outside time range - skip it
         if self._has_start and chunk.message_end_time < self.start:
             return ChunkDecision.SKIP
@@ -176,12 +141,12 @@ class TimeFilterProcessor(Processor):
         # Chunk entirely within range - no filtering needed
         return ChunkDecision.CONTINUE
 
-    def on_message(self, _ctx: Context, message: Message) -> Action:
+    def on_message(self, message: Message) -> Action:
         if self.start <= message.log_time < self.end:
             return Action.CONTINUE
         return Action.SKIP
 
-    def on_attachment(self, _ctx: Context, attachment: Attachment) -> Action:
+    def on_attachment(self, attachment: Attachment) -> Action:
         if self.start <= attachment.log_time < self.end:
             return Action.CONTINUE
         return Action.SKIP

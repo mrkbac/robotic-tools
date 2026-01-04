@@ -40,7 +40,6 @@ from pymcap_cli.processors import (
     AlwaysDecodeProcessor,
     AttachmentFilterProcessor,
     ChunkDecision,
-    Context,
     MetadataFilterProcessor,
     Processor,
     TimeFilterProcessor,
@@ -190,12 +189,10 @@ class OutputOptions:
 
     @property
     def compression_type(self) -> CompressionType:
-        """Get the CompressionType enum value for the compression string."""
         return str_to_compression_type(self.compression)
 
     @property
     def is_rechunking(self) -> bool:
-        """Check if rechunking is active."""
         return self.rechunk_strategy != RechunkStrategy.NONE
 
 
@@ -253,54 +250,44 @@ class ProcessingStats:
         )
     )
 
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        """Render processing statistics as a styled Rich Panel."""
+    def __rich_console__(self, _console: Console, _options: ConsoleOptions) -> RenderResult:
         lines = Text()
         ws = self.writer_statistics
 
-        # Messages line - show written count, and decoded count only if different
-        lines.append(f"Messages:     {ws.message_count:,} written")
-        if self.messages_processed > 0 and self.messages_processed != ws.message_count:
-            lines.append(f" ({self.messages_processed:,} decoded)")
-        lines.append("\n")
+        # Messages (show decoded count only if different from written)
+        decoded = (
+            f" ({self.messages_processed:,} decoded)"
+            if (self.messages_processed > 0 and self.messages_processed != ws.message_count)
+            else ""
+        )
+        lines.append(f"Messages:     {ws.message_count:,} written{decoded}\n")
 
-        # Attachments (only if any were processed)
         if self.attachments_processed > 0:
-            lines.append(f"Attachments:  {ws.attachment_count} written")
-            lines.append(f" ({self.attachments_processed} processed)\n")
-
-        # Metadata (only if any were processed)
+            lines.append(
+                f"Attachments:  {ws.attachment_count} written "
+                f"({self.attachments_processed} processed)\n"
+            )
         if self.metadata_processed > 0:
-            lines.append(f"Metadata:     {ws.metadata_count} written")
-            lines.append(f" ({self.metadata_processed} processed)\n")
+            lines.append(
+                f"Metadata:     {ws.metadata_count} written ({self.metadata_processed} processed)\n"
+            )
 
-        # Schemas and channels
         lines.append(f"Schemas:      {ws.schema_count} written\n")
         lines.append(f"Channels:     {ws.channel_count} written\n")
 
-        # Chunks (only if any were processed)
         if self.chunks_processed > 0:
-            lines.append(f"Chunks:       {self.chunks_processed} ")
-            lines.append(f"({self.chunks_copied} fast copied, ")
-            lines.append(f"{self.chunks_decoded} decoded)\n")
-
-        # Errors (yellow if any)
+            lines.append(
+                f"Chunks:       {self.chunks_processed} "
+                f"({self.chunks_copied} fast copied, {self.chunks_decoded} decoded)\n"
+            )
         if self.errors_encountered > 0:
-            lines.append("Errors:       ", style="yellow")
-            lines.append(f"{self.errors_encountered}\n", style="yellow")
-
-        # Validation errors (yellow if any)
+            lines.append(f"Errors:       {self.errors_encountered}\n", style="yellow")
         if self.validation_errors > 0:
-            lines.append("Validation:   ", style="yellow")
-            lines.append(f"{self.validation_errors} errors\n", style="yellow")
-
-        # Filter rejections (if any)
+            lines.append(f"Validation:   {self.validation_errors} errors\n", style="yellow")
         if self.filter_rejections > 0:
             lines.append(f"Filtered:     {self.filter_rejections} records\n")
 
-        # Remove trailing newline
         lines.rstrip()
-
         yield Panel(lines, title="Processing Statistics", border_style="dim")
 
 
@@ -326,7 +313,6 @@ class MessageGroup:
         )
 
     def add_message(self, message: Message) -> None:
-        """Add message to this group's chunk builder."""
         # ChunkBuilder auto-ensures channel and schema
         self.chunk_builder.add(message)
 
@@ -346,7 +332,6 @@ class MessageGroup:
         self.message_count += 1
 
     def flush(self) -> None:
-        """Flush any remaining messages in this group's chunk builder."""
         result = self.chunk_builder.finalize()
         if result is not None:
             chunk, message_indexes = result
@@ -401,9 +386,8 @@ class McapProcessor:
         input_opts = self._get_input(stream_id)
         if not input_opts.processors:
             return True
-        ctx = Context(stream_id=stream_id)
         for p in input_opts.processors:
-            if p.on_channel(ctx, channel, self.schemas.get(channel.schema_id)) == Action.SKIP:
+            if p.on_channel(channel, self.schemas.get(channel.schema_id)) == Action.SKIP:
                 self.channel_filter_cache[cache_key] = False
                 return False
         self.channel_filter_cache[cache_key] = True
@@ -490,7 +474,6 @@ class McapProcessor:
         return None
 
     def _create_message_group(self, writer: McapWriter) -> MessageGroup:
-        """Create a new MessageGroup with output options."""
         opts = self.options.output_options
         group = MessageGroup(writer, opts.chunk_size, opts.compression_type)
         self.rechunk_groups.append(group)
@@ -537,13 +520,7 @@ class McapProcessor:
         self.channel_to_group[channel_id] = group
         return group
 
-    def process_message(
-        self,
-        message: Message,
-        writer: McapWriter,
-        stream_id: int,
-    ) -> None:
-        """Process a message record."""
+    def process_message(self, message: Message, writer: McapWriter, stream_id: int) -> None:
         self.stats.messages_processed += 1
 
         # Topic filtering using cached decision (avoid repeated regex matching)
@@ -553,10 +530,7 @@ class McapProcessor:
 
         # Time filtering and other message processors
         input_opts = self._get_input(stream_id)
-        if any(
-            p.on_message(Context(stream_id=stream_id), message) == Action.SKIP
-            for p in input_opts.processors
-        ):
+        if any(p.on_message(message) == Action.SKIP for p in input_opts.processors):
             self.stats.filter_rejections += 1
             return
 
@@ -587,13 +561,11 @@ class McapProcessor:
             )
 
     def _handle_schema_record(self, schema: Schema, stream_id: int) -> None:
-        """Handle a schema record from the stream."""
         remapped_schema = self.remapper.remap_schema(stream_id, schema)
         if remapped_schema:
             self.schemas[remapped_schema.id] = remapped_schema
 
     def _handle_channel_record(self, channel: Channel, stream_id: int) -> None:
-        """Handle a channel record from the stream."""
         remapped_channel = self.remapper.remap_channel(stream_id, channel)
 
         if remapped_channel.id not in self.known_channels:
@@ -604,9 +576,9 @@ class McapProcessor:
             input_opts = self._get_input(stream_id)
             should_include = True
             if input_opts.processors:
-                ctx = Context(stream_id=stream_id)
+                schema = self.schemas.get(remapped_channel.schema_id)
                 for p in input_opts.processors:
-                    if p.on_channel(ctx, remapped_channel, self.schemas.get(remapped_channel.schema_id)) == Action.SKIP:
+                    if p.on_channel(remapped_channel, schema) == Action.SKIP:
                         should_include = False
                         break
             self.channel_filter_cache[(stream_id, remapped_channel.id)] = should_include
@@ -615,22 +587,17 @@ class McapProcessor:
                 del self.channels[remapped_channel.id]
 
     def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
-        """Handle a message record from the stream."""
         message_to_process = self.remapper.remap_message(stream_id, message)
         self.process_message(message_to_process, writer, stream_id)
 
     def _handle_attachment_record(
         self, attachment: Attachment, writer: McapWriter, stream_id: int
     ) -> None:
-        """Handle an attachment record from the stream."""
         self.stats.attachments_processed += 1
 
         # Check all processors (includes AttachmentFilterProcessor and TimeFilterProcessor)
         input_opts = self._get_input(stream_id)
-        if any(
-            p.on_attachment(Context(stream_id=stream_id), attachment) == Action.SKIP
-            for p in input_opts.processors
-        ):
+        if any(p.on_attachment(attachment) == Action.SKIP for p in input_opts.processors):
             return
 
         writer.add_attachment(
@@ -683,8 +650,7 @@ class McapProcessor:
                     self.stats.metadata_processed += 1
                     input_opts = self._get_input(stream_id)
                     if not input_opts.processors or all(
-                        p.on_metadata(Context(stream_id=stream_id), record) != Action.SKIP
-                        for p in input_opts.processors
+                        p.on_metadata(record) != Action.SKIP for p in input_opts.processors
                     ):
                         writer.add_metadata(name=record.name, metadata=record.metadata)
                 elif isinstance(record, (DataEnd, Footer)):
@@ -805,10 +771,8 @@ class McapProcessor:
         output_opts = self.options.output_options
 
         # Ask processors for chunk-level decision (time filtering, always_decode, etc.)
-        ctx = Context(stream_id=stream_id)
-
         for proc in input_opts.processors:
-            decision = proc.on_chunk(ctx, chunk, indexes)
+            decision = proc.on_chunk(chunk, indexes)
             if decision == ChunkDecision.SKIP:
                 return ChunkDecision.SKIP
             if decision == ChunkDecision.DECODE:
@@ -823,39 +787,32 @@ class McapProcessor:
         if chunk.compression != output_opts.compression_type.value:
             return ChunkDecision.DECODE
 
-        # Check if any channel was remapped - must decode to fix channel IDs
-        # Also check if we have metadata for all channels (they might not be loaded yet)
+        # Single pass: check remapping, channel availability, and filtering
+        has_include = False
+        has_exclude = False
+
         for idx in indexes:
+            ch_id = idx.channel_id
             # Check if channel metadata is available
-            if not self.remapper.has_channel(stream_id, idx.channel_id):
-                # Channel not yet seen - must decode to discover it
+            if not self.remapper.has_channel(stream_id, ch_id):
                 return ChunkDecision.DECODE
             # If channel id was remapped, must decode
-            if self.remapper.was_channel_remapped(stream_id, idx.channel_id):
+            if self.remapper.was_channel_remapped(stream_id, ch_id):
                 return ChunkDecision.DECODE
 
-        # Check channel filtering in a single pass over indexes
-        if input_opts.processors:
-            has_include = False
-            has_exclude = False
+            cache_key = (stream_id, ch_id)
+            if cache_key not in self.channel_filter_cache:
+                return ChunkDecision.DECODE
+            if self.channel_filter_cache[cache_key]:
+                has_include = True
+            else:
+                has_exclude = True
+            if has_include and has_exclude:
+                return ChunkDecision.DECODE
 
-            for idx in indexes:
-                cache_key = (stream_id, idx.channel_id)
-                # Check if channel filter decision is cached
-                if cache_key not in self.channel_filter_cache:
-                    # Unknown channel - must decode to discover it
-                    return ChunkDecision.DECODE
-                if self.channel_filter_cache[cache_key]:
-                    has_include = True
-                else:
-                    has_exclude = True
-                # Early exit if we have both - must decode
-                if has_include and has_exclude:
-                    return ChunkDecision.DECODE
-
-            # If chunk has ONLY excluded channels, skip it entirely
-            if has_exclude and not has_include:
-                return ChunkDecision.SKIP
+        # If chunk has ONLY excluded channels, skip it entirely
+        if has_exclude and not has_include:
+            return ChunkDecision.SKIP
 
         # No reason to decode - can fast-copy
         return ChunkDecision.CONTINUE
