@@ -1,10 +1,35 @@
 [project]
 name = "ros-parser"
 version = "0.1.0"
-description = "Add your description here"
+description = "Python parser for ROS message definitions and Foxglove message path syntax"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "GPL-3.0"}
+authors = [
+    {name = "Marko Bausch"}
+]
+keywords = ["ros", "ros1", "ros2", "parser", "message", "robotics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Compilers",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/mrkbac/robotic-tools"
+Repository = "https://github.com/mrkbac/robotic-tools"
+Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

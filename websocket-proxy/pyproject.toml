@@ -4,6 +4,26 @@ version = "0.1.0"
 description = "Foxglove WebSocket proxy with message transformations"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "GPL-3.0"}
+authors = [
+    {name = "Marko Bausch"}
+]
+keywords = ["websocket", "foxglove", "robotics", "ros", "ros2", "proxy", "compression"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
+]
 dependencies = [
     "numpy>=2.0.0",
     "pointcloud2>=0.2.3",
@@ -14,6 +34,11 @@ dependencies = [
     "rich>=14.2.0",
     "av>=12.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mrkbac/robotic-tools"
+Repository = "https://github.com/mrkbac/robotic-tools"
+Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [project.scripts]
 bridge = "websocket_proxy.__main__:main"

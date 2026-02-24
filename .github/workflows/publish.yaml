@@ -1,0 +1,128 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to publish (or "all" for all packages)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - digitalis
+          - mcap-ros2-support-fast
+          - pymcap-cli
+          - ros-parser
+          - small-mcap
+          - websocket-bridge
+          - websocket-proxy
+      dry_run:
+        description: 'Dry run (build but do not publish)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - digitalis
+          - mcap-ros2-support-fast
+          - pymcap-cli
+          - ros-parser
+          - small-mcap
+          - websocket-bridge
+          - websocket-proxy
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+          submodules: true
+
+      - name: Check if package should be built
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.package }}" == "all" ]] || [[ "${{ inputs.package }}" == "${{ matrix.package }}" ]]; then
+              echo "should_build=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_build=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install uv
+        if: steps.check.outputs.should_build == 'true'
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+
+      - name: Build package
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          cd ${{ matrix.package }}
+          uv build
+
+      - name: Upload artifacts
+        if: steps.check.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.package }}
+          path: ${{ matrix.package }}/dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.dry_run }}
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ matrix.package }}/
+    permissions:
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - digitalis
+          - mcap-ros2-support-fast
+          - pymcap-cli
+          - ros-parser
+          - small-mcap
+          - websocket-bridge
+          - websocket-proxy
+
+    steps:
+      - name: Check if package should be published
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.package }}" == "all" ]] || [[ "${{ inputs.package }}" == "${{ matrix.package }}" ]]; then
+              echo "should_publish=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_publish=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download artifacts
+        if: steps.check.outputs.should_publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.package }}
+          path: dist/
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.should_publish == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true

@@ -5,12 +5,12 @@ Lightweight Python library for reading and writing MCAP files.
 ## Installation
 
 ```bash
-pip install small-mcap
+uv add small-mcap
 
 # With compression support
-pip install small-mcap[compression]  # ZSTD + LZ4
-pip install small-mcap[zstd]         # ZSTD only
-pip install small-mcap[lz4]          # LZ4 only
+uv add small-mcap[compression]  # ZSTD + LZ4
+uv add small-mcap[zstd]         # ZSTD only
+uv add small-mcap[lz4]          # LZ4 only
 ```
 
 ## Reader
@@ -195,14 +195,14 @@ with open("output.mcap", "wb") as f:
 
 **Comparison with other libraries:**
 
-| Feature              | small-mcap | mcap (official) | rosbags | pybag       |
-| -------------------- | ---------- | --------------- | ------- | ----------- |
-| Performance          | ⚡ Fastest | ⚡ Fast         | ⚡ Fast | 🐌 Moderate |
-| Zero dependencies    | ✅         | ❌              | ❌      | ❌          |
-| Non-seekable streams | ✅         | ✅              | ❌      | ❌          |
-| Multi-file reading   | ✅         | ❌              | ✅      | ✅          |
-| ROS1 support         | ❌         | ❌              | ✅      | ❌          |
-| SQLite3 backend      | ❌         | ❌              | ✅      | ❌          |
+| Feature              | small-mcap | mcap (official) | rosbags  | pybag    |
+| -------------------- | ---------- | --------------- | -------- | -------- |
+| Performance          | Fastest    | Fast            | Fast     | Moderate |
+| Zero dependencies    | Yes        | No              | No       | No       |
+| Non-seekable streams | Yes        | Yes             | No       | No       |
+| Multi-file reading   | Yes        | No              | Yes      | Yes      |
+| ROS1 support         | No         | No              | Yes      | No       |
+| SQLite3 backend      | No         | No              | Yes      | No       |
 
 ## Benchmarks
 

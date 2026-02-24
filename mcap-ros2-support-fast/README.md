@@ -1,7 +1,54 @@
-# Python MCAP ROS2 support fast
+# mcap-ros2-support-fast
 
-This package provides fast ROS2 support for the Python MCAP file format reader.
-It has no dependencies on ROS2 itself or a ROS2 environment, and can be used in any Python project.
+High-performance pure Python ROS2 message serialization and deserialization for MCAP files.
+
+No dependencies on ROS2 or a ROS2 environment.
+
+## Installation
+
+```bash
+uv add mcap-ros2-support-fast
+```
+
+## Usage
+
+### Decoding Messages
+
+```python
+from small_mcap import read_message_decoded
+from mcap_ros2_support_fast.decoder import DecoderFactory
+
+decoder_factory = DecoderFactory()
+
+with open("recording.mcap", "rb") as f:
+    for msg in read_message_decoded(f, decoder_factories=[decoder_factory]):
+        print(f"{msg.channel.topic}: {msg.decoded_message}")
+```
+
+### Encoding Messages
+
+```python
+from small_mcap import McapWriter
+from mcap_ros2_support_fast import ROS2EncoderFactory
+
+encoder_factory = ROS2EncoderFactory()
+
+with open("output.mcap", "wb") as f:
+    writer = McapWriter(f, encoder_factory=encoder_factory)
+    writer.start(profile="ros2")
+
+    schema_id = writer.add_schema(
+        name="geometry_msgs/msg/Point",
+        encoding="ros2msg",
+        data=b"float64 x\nfloat64 y\nfloat64 z"
+    )
+    channel_id = writer.add_channel("/point", "cdr", schema_id=schema_id)
+
+    point = {"x": 1.0, "y": 2.0, "z": 3.0}
+    writer.add_message_encode(channel_id, log_time=0, data=point)
+
+    writer.finish()
+```
 
 ## Benchmarks
 

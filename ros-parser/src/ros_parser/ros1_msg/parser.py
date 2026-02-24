@@ -1,7 +1,7 @@
 """ROS1 message parser using Lark."""
 
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, cast
 
 # Import from standalone parser (pre-compiled grammar)
 from .._lark_standalone_runtime import Token, Transformer
@@ -14,10 +14,6 @@ from ._standalone_parser import Lark_StandAlone
 
 class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
     """Transforms Lark parse tree into ROS1 message data structures."""
-
-    # ROS1 type normalization is NOT done at parse time (same as ROS2)
-    # The reference parser keeps the original type names (byte, char) as-is
-    _TYPE_ALIASES: ClassVar[dict[str, str]] = {}
 
     def __init__(self, context_package_name: str | None = None) -> None:
         """
@@ -114,8 +110,7 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
             )
         else:
             # Primitive type
-            type_name = self._normalize_type(str(base_type))
-            type_obj = Type(type_name=type_name)
+            type_obj = Type(type_name=str(base_type))
 
         # Apply array specification if present
         if array_spec:
@@ -231,13 +226,6 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         string_content = str(items[0]).strip()
         # Handle escape sequences even in unquoted strings
         return unescape_string(string_content)
-
-    # Helper methods
-
-    @staticmethod
-    def _normalize_type(type_name: str) -> str:
-        """Normalize type aliases to standard types."""
-        return Ros1MessageTransformer._TYPE_ALIASES.get(type_name, type_name)
 
     # Line filtering - return None for lines we want to filter out
     def line(self, items: list[Any]) -> Field | Constant | str | None:

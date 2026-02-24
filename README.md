@@ -1,34 +1,66 @@
 # Robotic Tools
 
-## Digitalis
+A collection of Python tools for working with robotics data, MCAP files, and ROS messages.
 
-Digitalis is a visualization tool for robotics development in your terminal.
+## Packages
+
+### Digitalis
+
+Terminal-based visualization tool for robotics development. Supports MCAP files and WebSocket streams.
 
 ```sh
-uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=digitalis" digitalis
+uvx digitalis recording.mcap
 ```
 
 ![Digitalis](./digitalis/screenshot.svg)
 
-## mcap-ros2-support-fast
+### pymcap-cli
 
-`mcap-ros2-support-fast` is a python only, high-performance implementation ROS2 message serialization and deserialization.
-
-## pymcap-cli
+A pure Python CLI for processing MCAP files with recovery, filtering, and compression.
 
 ```sh
-uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=pymcap-cli" pymcap-cli
+uvx pymcap-cli info data.mcap
 ```
 
-`pymcap-cli` is pure python a command-line interface for working with MCAP files.
+### small-mcap
 
-## websocket-proxy
+Lightweight Python library for reading and writing MCAP files. Zero dependencies, high performance.
 
 ```sh
-uvx --from "git+https://github.com/mrkbac/robotic-tools.git#subdirectory=websocket-proxy" bridge
+uv add small-mcap
 ```
 
-`websocket-proxy` is a simple proxy of [Foxglove Bridge](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge) which converts messages just in time and forwards via Foxglove Bridge compatible protocol.
+### mcap-ros2-support-fast
+
+High-performance pure Python ROS2 message serialization and deserialization. 30-60x faster than the reference implementation.
+
+```sh
+uv add mcap-ros2-support-fast
+```
+
+### ros-parser
+
+Parser for ROS1 and ROS2 message definitions and Foxglove message path syntax.
+
+```sh
+uv add ros-parser
+```
+
+### websocket-bridge
+
+Python library implementing the Foxglove WebSocket protocol for streaming robotics data.
+
+```sh
+uv add websocket-bridge
+```
+
+### websocket-proxy
+
+Proxy for [Foxglove Bridge](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge) with just-in-time message conversion, image compression, and point cloud compression.
+
+```sh
+uvx --from websocket-proxy bridge ws://localhost:8765
+```
 
 ## License
 
