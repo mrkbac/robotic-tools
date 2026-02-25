@@ -1,8 +1,23 @@
 import { useState, useMemo } from "react";
-import { Table, Title, Paper, Text } from "@mantine/core";
-import type { ChannelInfo } from "../mcap/types.ts";
-import { formatBytes, formatHz, formatNumber } from "../format.ts";
-import { InlineDistributionBar } from "./DistributionBar.tsx";
+import {
+  Table,
+  Title,
+  Paper,
+  Text,
+  HoverCard,
+  Stack,
+  Group,
+  Collapse,
+} from "@mantine/core";
+import type { ChannelInfo, PartialStats } from "../mcap/types.ts";
+import {
+  formatBytes,
+  formatHz,
+  formatNumber,
+  formatDuration,
+  formatTimestamp,
+} from "../format.ts";
+import { InlineDistributionBar, DistributionBar } from "./DistributionBar.tsx";
 
 type SortField =
   | "topic"
@@ -21,11 +36,18 @@ interface ChannelsTableProps {
 export function ChannelsTable({ channels }: ChannelsTableProps) {
   const [sortField, setSortField] = useState<SortField>("topic");
   const [sortReverse, setSortReverse] = useState(false);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
 
   const hasSizeData = channels.some((ch) => ch.sizeBytes !== null);
   const hasDistribution = channels.some(
     (ch) => ch.messageDistribution.length > 0,
   );
+
+  const totalColumns =
+    4 + // ID, Topic, Schema, Msgs
+    1 + // Hz
+    (hasSizeData ? 3 : 0) + // Size, B/s, B/msg
+    (hasDistribution ? 1 : 0); // Distribution
 
   const sorted = useMemo(() => {
     const arr = [...channels];
@@ -76,6 +98,18 @@ export function ChannelsTable({ channels }: ChannelsTableProps) {
   const sortIndicator = (field: SortField) => {
     if (sortField !== field) return "";
     return sortReverse ? " \u25BC" : " \u25B2";
+  };
+
+  const toggleExpanded = (id: number) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   };
 
   const headerStyle = { cursor: "pointer", userSelect: "none" as const };
@@ -152,60 +186,137 @@ export function ChannelsTable({ channels }: ChannelsTableProps) {
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {sorted.map((ch) => (
-                <Table.Tr key={ch.id}>
-                  <Table.Td>
-                    <Text size="sm" c="dimmed">
-                      {ch.id}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <TopicDisplay topic={ch.topic} />
-                  </Table.Td>
-                  <Table.Td>
-                    <SchemaDisplay name={ch.schemaName} />
-                  </Table.Td>
-                  <Table.Td style={{ textAlign: "right" }}>
-                    {formatNumber(ch.messageCount)}
-                  </Table.Td>
-                  <Table.Td style={{ textAlign: "right" }}>
-                    <HzDisplay stats={ch.hzStats} />
-                  </Table.Td>
-                  {hasSizeData && (
-                    <>
-                      <Table.Td style={{ textAlign: "right" }}>
-                        {ch.sizeBytes !== null
-                          ? formatBytes(ch.sizeBytes)
-                          : "-"}
+              {sorted.map((ch) => {
+                const expanded = expandedIds.has(ch.id);
+                return (
+                  <>
+                    <Table.Tr
+                      key={ch.id}
+                      onClick={() => toggleExpanded(ch.id)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <Table.Td>
+                        <Group gap={4}>
+                          <Text
+                            size="xs"
+                            c="dimmed"
+                            style={{
+                              transition: "transform 150ms",
+                              transform: expanded
+                                ? "rotate(90deg)"
+                                : "rotate(0deg)",
+                            }}
+                          >
+                            ▶
+                          </Text>
+                          <Text size="sm" c="dimmed">
+                            {ch.id}
+                          </Text>
+                        </Group>
+                      </Table.Td>
+                      <Table.Td>
+                        <TopicDisplay topic={ch.topic} />
+                      </Table.Td>
+                      <Table.Td>
+                        <SchemaDisplay name={ch.schemaName} />
                       </Table.Td>
                       <Table.Td style={{ textAlign: "right" }}>
-                        {ch.bytesPerSecondStats
-                          ? formatBytes(ch.bytesPerSecondStats.average)
-                          : "-"}
+                        {formatNumber(ch.messageCount)}
                       </Table.Td>
                       <Table.Td style={{ textAlign: "right" }}>
-                        {ch.bytesPerMessage !== null
-                          ? formatBytes(ch.bytesPerMessage)
-                          : "-"}
-                      </Table.Td>
-                    </>
-                  )}
-                  {hasDistribution && (
-                    <Table.Td>
-                      {ch.messageDistribution.length > 0 ? (
-                        <InlineDistributionBar
-                          counts={ch.messageDistribution}
+                        <HzDisplay
+                          stats={ch.hzStats}
+                          hzChannel={ch.hzChannel}
                         />
-                      ) : null}
-                    </Table.Td>
-                  )}
-                </Table.Tr>
-              ))}
+                      </Table.Td>
+                      {hasSizeData && (
+                        <>
+                          <Table.Td style={{ textAlign: "right" }}>
+                            {ch.sizeBytes !== null
+                              ? formatBytes(ch.sizeBytes)
+                              : "-"}
+                          </Table.Td>
+                          <Table.Td style={{ textAlign: "right" }}>
+                            <BpsDisplay stats={ch.bytesPerSecondStats} />
+                          </Table.Td>
+                          <Table.Td style={{ textAlign: "right" }}>
+                            {ch.bytesPerMessage !== null
+                              ? formatBytes(ch.bytesPerMessage)
+                              : "-"}
+                          </Table.Td>
+                        </>
+                      )}
+                      {hasDistribution && (
+                        <Table.Td>
+                          {ch.messageDistribution.length > 0 ? (
+                            <InlineDistributionBar
+                              counts={ch.messageDistribution}
+                            />
+                          ) : null}
+                        </Table.Td>
+                      )}
+                    </Table.Tr>
+                    <Table.Tr
+                      key={`${ch.id}-detail`}
+                      style={{ backgroundColor: "transparent" }}
+                    >
+                      <Table.Td
+                        colSpan={totalColumns}
+                        style={{ padding: 0, border: expanded ? undefined : "none" }}
+                      >
+                        <Collapse in={expanded}>
+                          <ChannelDetail channel={ch} />
+                        </Collapse>
+                      </Table.Td>
+                    </Table.Tr>
+                  </>
+                );
+              })}
             </Table.Tbody>
           </Table>
         </div>
       )}
     </Paper>
+  );
+}
+
+// ── Detail panel ──
+
+function ChannelDetail({ channel }: { channel: ChannelInfo }) {
+  return (
+    <div style={{ padding: "12px 16px" }}>
+      <Group gap="xl" align="flex-start">
+        <Stack gap={4}>
+          <Text size="sm" fw={600}>
+            Duration
+          </Text>
+          <Text size="sm" c="dimmed">
+            {channel.durationNs !== null
+              ? formatDuration(Number(channel.durationNs))
+              : "-"}
+          </Text>
+        </Stack>
+        <Stack gap={4}>
+          <Text size="sm" fw={600}>
+            Time range
+          </Text>
+          <Text size="sm" c="dimmed">
+            {channel.messageStartTime !== null &&
+            channel.messageEndTime !== null
+              ? `${formatTimestamp(channel.messageStartTime)} → ${formatTimestamp(channel.messageEndTime)}`
+              : "-"}
+          </Text>
+        </Stack>
+      </Group>
+      {channel.messageDistribution.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <Text size="sm" fw={600} mb={4}>
+            Message distribution
+          </Text>
+          <DistributionBar counts={channel.messageDistribution} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -259,17 +370,120 @@ function SchemaDisplay({ name }: { name: string | null }) {
   return <Text size="sm">{name}</Text>;
 }
 
+function StatsRow({
+  label,
+  value,
+  bold,
+}: {
+  label: string;
+  value: string;
+  bold?: boolean;
+}) {
+  return (
+    <Group justify="space-between" gap="lg">
+      <Text size="xs" c="dimmed">
+        {label}
+      </Text>
+      <Text size="xs" fw={bold ? 600 : 400}>
+        {value}
+      </Text>
+    </Group>
+  );
+}
+
 function HzDisplay({
   stats,
+  hzChannel,
 }: {
-  stats: { average: number; minimum: number | null; maximum: number | null };
+  stats: PartialStats;
+  hzChannel: number | null;
 }) {
-  if (stats.minimum !== null && stats.maximum !== null) {
-    return (
-      <Text size="sm" title={`min: ${formatHz(stats.minimum)}, max: ${formatHz(stats.maximum)}`}>
-        {formatHz(stats.average)}
-      </Text>
-    );
+  const hasDetails =
+    stats.minimum !== null || stats.maximum !== null || hzChannel !== null;
+
+  if (!hasDetails) {
+    return <Text size="sm">{formatHz(stats.average)}</Text>;
   }
-  return <Text size="sm">{formatHz(stats.average)}</Text>;
+
+  return (
+    <HoverCard openDelay={200} position="top" withArrow shadow="sm">
+      <HoverCard.Target>
+        <Text
+          size="sm"
+          style={{ textDecoration: "underline dotted", cursor: "default" }}
+        >
+          {formatHz(stats.average)}
+        </Text>
+      </HoverCard.Target>
+      <HoverCard.Dropdown>
+        <Stack gap={2} style={{ minWidth: 140 }}>
+          <StatsRow label="Average" value={formatHz(stats.average)} bold />
+          {stats.minimum !== null && (
+            <StatsRow label="Min" value={formatHz(stats.minimum)} />
+          )}
+          {stats.maximum !== null && (
+            <StatsRow label="Max" value={formatHz(stats.maximum)} />
+          )}
+          {stats.median !== null && (
+            <StatsRow label="Median" value={formatHz(stats.median)} />
+          )}
+          {hzChannel !== null && (
+            <StatsRow label="Channel Hz" value={formatHz(hzChannel)} />
+          )}
+        </Stack>
+      </HoverCard.Dropdown>
+    </HoverCard>
+  );
+}
+
+function BpsDisplay({ stats }: { stats: PartialStats | null }) {
+  if (!stats) {
+    return <Text size="sm">-</Text>;
+  }
+
+  const hasDetails = stats.minimum !== null || stats.maximum !== null;
+
+  if (!hasDetails) {
+    return <Text size="sm">{formatBytes(stats.average)}</Text>;
+  }
+
+  return (
+    <HoverCard openDelay={200} position="top" withArrow shadow="sm">
+      <HoverCard.Target>
+        <Text
+          size="sm"
+          style={{ textDecoration: "underline dotted", cursor: "default" }}
+        >
+          {formatBytes(stats.average)}
+        </Text>
+      </HoverCard.Target>
+      <HoverCard.Dropdown>
+        <Stack gap={2} style={{ minWidth: 140 }}>
+          <StatsRow
+            label="Average"
+            value={`${formatBytes(stats.average)}/s`}
+            bold
+          />
+          {stats.minimum !== null && (
+            <StatsRow
+              label="Min"
+              value={`${formatBytes(stats.minimum)}/s`}
+            />
+          )}
+          {stats.maximum !== null && (
+            <StatsRow
+              label="Max"
+              value={`${formatBytes(stats.maximum)}/s`}
+            />
+          )}
+          {stats.median !== null && (
+            <StatsRow
+              label="Median"
+              value={`${formatBytes(stats.median)}/s`}
+            />
+          )}
+        </Stack>
+      </HoverCard.Dropdown>
+    </HoverCard>
+  );
 }

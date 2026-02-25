@@ -16,6 +16,7 @@ import { FileDropzone } from "./components/FileDropzone.tsx";
 import { FileInfo } from "./components/FileInfo.tsx";
 import { CompressionTable } from "./components/CompressionTable.tsx";
 import { ChannelsTable } from "./components/ChannelsTable.tsx";
+import { SchemasTable } from "./components/SchemasTable.tsx";
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -117,6 +118,7 @@ export default function App() {
           <Stack gap="lg">
             <FileInfo data={data} />
             <CompressionTable data={data} />
+            <SchemasTable schemas={data.schemas} />
             <ChannelsTable channels={data.channels} />
           </Stack>
         )}
