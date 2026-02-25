@@ -8,23 +8,23 @@ import type {
   Schema,
   ChunkIndex,
   Header,
+  Metadata,
+  AttachmentIndex,
 } from "@mcap/core";
-import { init as initZstd, decompress as zstdDecompress } from "@bokuweb/zstd-wasm";
+import { ZSTDDecoder } from "zstddec";
 import lz4 from "lz4js";
 import type { ScanMode } from "./types.ts";
 
-let zstdInitialized = false;
+const zstdDecoder = new ZSTDDecoder();
+const zstdReady = zstdDecoder.init();
 
 async function ensureZstdInit(): Promise<void> {
-  if (!zstdInitialized) {
-    await initZstd();
-    zstdInitialized = true;
-  }
+  await zstdReady;
 }
 
 const decompressHandlers: DecompressHandlers = {
-  zstd: (buffer: Uint8Array, _decompressedSize: bigint) =>
-    zstdDecompress(buffer),
+  zstd: (buffer: Uint8Array, decompressedSize: bigint) =>
+    zstdDecoder.decode(buffer, Number(decompressedSize)),
   lz4: (buffer: Uint8Array, decompressedSize: bigint) =>
     new Uint8Array(lz4.decompress(buffer, Number(decompressedSize))),
 };
@@ -62,6 +62,10 @@ export interface McapRawData {
     bigint,
     { channelId: number; records: [bigint, number][] }[]
   > | null;
+  /** Metadata records collected from the file. */
+  metadata: (Metadata & { type: "Metadata" })[];
+  /** Attachment indexes (lightweight — no binary data). */
+  attachmentIndexes: (AttachmentIndex & { type: "AttachmentIndex" })[];
 }
 
 export type ProgressCallback = (bytesRead: number, totalBytes: number) => void;
@@ -75,6 +79,12 @@ async function readIndexed(file: File): Promise<McapRawData> {
     throw new Error("MCAP file has no statistics in summary section");
   }
 
+  // Collect metadata records
+  const metadata: (Metadata & { type: "Metadata" })[] = [];
+  for await (const record of reader.readMetadata()) {
+    metadata.push(record);
+  }
+
   return {
     header: reader.header,
     statistics: reader.statistics,
@@ -83,6 +93,8 @@ async function readIndexed(file: File): Promise<McapRawData> {
     chunkIndexes: reader.chunkIndexes,
     channelSizes: null,
     chunkInformation: null,
+    metadata,
+    attachmentIndexes: [...reader.attachmentIndexes],
   };
 }
 
@@ -113,6 +125,8 @@ async function readStream(
   >();
   const chunkIndexes: TypedMcapRecords["ChunkIndex"][] = [];
   const channelSizes = new Map<number, number>();
+  const metadata: TypedMcapRecords["Metadata"][] = [];
+  const attachmentIndexes: TypedMcapRecords["AttachmentIndex"][] = [];
 
   // Track chunk information for interval stats
   // Map from chunk start offset -> list of message indexes
@@ -194,6 +208,12 @@ async function readStream(
         case "ChunkIndex":
           chunkIndexes.push(record);
           break;
+        case "Metadata":
+          metadata.push(record);
+          break;
+        case "AttachmentIndex":
+          attachmentIndexes.push(record);
+          break;
         case "Statistics":
           statistics = record;
           break;
@@ -246,8 +266,8 @@ async function readStream(
       messageCount,
       schemaCount: schemasById.size,
       channelCount: channelsById.size,
-      attachmentCount: 0,
-      metadataCount: 0,
+      attachmentCount: attachmentIndexes.length,
+      metadataCount: metadata.length,
       chunkCount: chunkIndexes.length,
       messageStartTime,
       messageEndTime,
@@ -267,6 +287,8 @@ async function readStream(
     chunkIndexes,
     channelSizes: exactSizes ? channelSizes : null,
     chunkInformation: chunkInformation.size > 0 ? chunkInformation : null,
+    metadata,
+    attachmentIndexes,
   };
 }
 
@@ -288,4 +310,56 @@ export async function readMcapFile(
   }
 
   return await readStream(file, mode === "exact", onProgress);
+}
+
+/**
+ * Read a single attachment's binary data from an MCAP file on demand.
+ * Uses the offset/length from the AttachmentIndex to read only the
+ * attachment record, then parses out the data payload.
+ */
+export async function readAttachment(
+  file: File,
+  offset: bigint,
+  length: bigint,
+): Promise<{ name: string; mediaType: string; data: Uint8Array }> {
+  await ensureZstdInit();
+  const readable = new BlobReadable(file);
+  const reader = await McapIndexedReader.Initialize({ readable, decompressHandlers });
+
+  for await (const attachment of reader.readAttachments()) {
+    // Match by checking if the attachment index at the given offset matches
+    // We iterate all and return the one we need since readAttachments doesn't take offset
+    // Instead, use raw read approach
+    void attachment;
+    break;
+  }
+
+  // Direct read approach: read the raw bytes and parse the attachment record
+  const blob = file.slice(Number(offset), Number(offset + length));
+  const buffer = new Uint8Array(await blob.arrayBuffer());
+
+  // MCAP attachment record layout:
+  // [1 byte opcode] [8 bytes record length] [record content]
+  // Record content: [4 bytes name length] [name] [8 bytes logTime] [8 bytes createTime]
+  //                 [4 bytes mediaType length] [mediaType] [8 bytes data length] [data] [4 bytes CRC]
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let pos = 1 + 8; // skip opcode + record length
+
+  const nameLen = view.getUint32(pos, true);
+  pos += 4;
+  const name = new TextDecoder().decode(buffer.slice(pos, pos + nameLen));
+  pos += nameLen;
+
+  pos += 8 + 8; // skip logTime + createTime
+
+  const mediaTypeLen = view.getUint32(pos, true);
+  pos += 4;
+  const mediaType = new TextDecoder().decode(buffer.slice(pos, pos + mediaTypeLen));
+  pos += mediaTypeLen;
+
+  const dataLen = Number(view.getBigUint64(pos, true));
+  pos += 8;
+  const data = buffer.slice(pos, pos + dataLen);
+
+  return { name, mediaType, data };
 }

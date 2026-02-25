@@ -1,16 +1,28 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   Table,
   Title,
   Paper,
   Text,
   Accordion,
-  Collapse,
   Group,
-  Code,
-  ScrollArea,
 } from "@mantine/core";
+import { CodeHighlight } from "@mantine/code-highlight";
 import type { SchemaInfo } from "../mcap/types.ts";
+
+function encodingToLanguage(encoding: string): string | undefined {
+  switch (encoding.toLowerCase()) {
+    case "jsonschema":
+    case "json":
+      return "json";
+    case "protobuf":
+      return "protobuf";
+    case "flatbuffer":
+      return "cpp";
+    default:
+      return undefined;
+  }
+}
 
 interface SchemasTableProps {
   schemas: SchemaInfo[];
@@ -54,9 +66,8 @@ export function SchemasTable({ schemas }: SchemasTableProps) {
                   const expanded = expandedIds.has(s.id);
                   const hasData = s.data.length > 0;
                   return (
-                    <>
+                    <Fragment key={s.id}>
                       <Table.Tr
-                        key={s.id}
                         onClick={hasData ? () => toggleExpanded(s.id) : undefined}
                         style={hasData ? { cursor: "pointer" } : undefined}
                       >
@@ -94,32 +105,20 @@ export function SchemasTable({ schemas }: SchemasTableProps) {
                           </Text>
                         </Table.Td>
                       </Table.Tr>
-                      {hasData && (
-                        <Table.Tr
-                          key={`${s.id}-detail`}
-                          style={{ backgroundColor: "transparent" }}
-                        >
-                          <Table.Td
-                            colSpan={3}
-                            style={{
-                              padding: 0,
-                              border: expanded ? undefined : "none",
-                            }}
-                          >
-                            <Collapse in={expanded}>
-                              <ScrollArea
-                                mah={400}
-                                style={{ padding: "8px 16px 12px" }}
-                              >
-                                <Code block style={{ whiteSpace: "pre" }}>
-                                  {s.data}
-                                </Code>
-                              </ScrollArea>
-                            </Collapse>
+                      {hasData && expanded && (
+                        <Table.Tr style={{ backgroundColor: "transparent" }}>
+                          <Table.Td colSpan={3} style={{ padding: 0 }}>
+                            <CodeHighlight
+                              code={s.data}
+                              language={encodingToLanguage(s.encoding)}
+                              withExpandButton
+                              defaultExpanded={false}
+                              maxCollapsedHeight="400px"
+                            />
                           </Table.Td>
                         </Table.Tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </Table.Tbody>

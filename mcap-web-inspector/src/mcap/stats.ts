@@ -6,9 +6,23 @@ import type {
   CompressionStats,
   ChannelInfo,
   MessageDistribution,
+  MetadataInfo,
+  AttachmentInfo,
 } from "./types.ts";
 
 // ── Helpers ──
+
+function minOf(values: number[]): number {
+  let m = Infinity;
+  for (let i = 0; i < values.length; i++) if (values[i]! < m) m = values[i]!;
+  return m;
+}
+
+function maxOf(values: number[]): number {
+  let m = -Infinity;
+  for (let i = 0; i < values.length; i++) if (values[i]! > m) m = values[i]!;
+  return m;
+}
 
 function median(values: number[]): number {
   if (values.length === 0) return 0;
@@ -23,8 +37,8 @@ function calculateStats(values: number[]): Stats {
   if (values.length === 0) {
     return { minimum: 0, maximum: 0, average: 0, median: 0 };
   }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = minOf(values);
+  const max = maxOf(values);
   const avg = values.reduce((a, b) => a + b, 0) / values.length;
   return { minimum: min, maximum: max, average: avg, median: median(values) };
 }
@@ -224,6 +238,10 @@ function collectChannelStatistics(
 interface IntervalStatsResult {
   hzStats: { minimum: number; maximum: number; average: number; median: number };
   bpsStats?: { minimum: number; maximum: number; average: number; median: number };
+  /** Standard deviation of inter-message intervals in nanoseconds. */
+  jitterNs: number;
+  /** Coefficient of variation (stddev / mean interval). */
+  jitterCv: number;
 }
 
 function calculateIntervalStats(
@@ -239,13 +257,21 @@ function calculateIntervalStats(
     const hzValues = intervals.map((interval) => 1_000_000_000 / interval);
 
     const hzStats = {
-      minimum: Math.min(...hzValues),
-      maximum: Math.max(...hzValues),
+      minimum: minOf(hzValues),
+      maximum: maxOf(hzValues),
       average: hzValues.reduce((a, b) => a + b, 0) / hzValues.length,
       median: median(hzValues),
     };
 
-    const entry: IntervalStatsResult = { hzStats };
+    // Compute jitter: stddev and CV of inter-message intervals
+    const meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance =
+      intervals.reduce((sum, iv) => sum + (iv - meanInterval) ** 2, 0) /
+      intervals.length;
+    const jitterNs = Math.sqrt(variance);
+    const jitterCv = meanInterval > 0 ? jitterNs / meanInterval : 0;
+
+    const entry: IntervalStatsResult = { hzStats, jitterNs, jitterCv };
 
     if (channelSizes?.has(channelId)) {
       const channelSize = channelSizes.get(channelId)!;
@@ -360,7 +386,7 @@ export function computeStats(
     );
   }
 
-  const maxCount = Math.max(0, ...globalMessageCounts);
+  const maxCount = Math.max(0, maxOf(globalMessageCounts));
   const messageDistribution: MessageDistribution = {
     bucketCount,
     bucketDurationNs,
@@ -422,6 +448,23 @@ export function computeStats(
     data: new TextDecoder().decode(s.data),
   }));
 
+  // Build metadata info
+  const metadata: MetadataInfo[] = raw.metadata.map((m) => ({
+    name: m.name,
+    metadata: Object.fromEntries(m.metadata),
+  }));
+
+  // Build attachment info
+  const attachments: AttachmentInfo[] = raw.attachmentIndexes.map((a) => ({
+    name: a.name,
+    mediaType: a.mediaType,
+    dataSize: Number(a.dataSize),
+    logTime: a.logTime,
+    createTime: a.createTime,
+    offset: a.offset,
+    length: a.length,
+  }));
+
   // Count message indexes
   let messageIndexCount: number | null = null;
   if (raw.chunkInformation) {
@@ -448,6 +491,8 @@ export function computeStats(
     chunks: { byCompression, overlaps },
     channels,
     schemas,
+    metadata,
+    attachments,
     messageDistribution,
   };
 }
@@ -511,5 +556,7 @@ function buildChannelInfo(
     messageDistribution,
     messageStartTime,
     messageEndTime,
+    jitterNs: intervalStats?.jitterNs ?? null,
+    jitterCv: intervalStats?.jitterCv ?? null,
   };
 }

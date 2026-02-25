@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, Fragment } from "react";
 import {
   Table,
   Title,
@@ -11,6 +11,8 @@ import {
   Progress,
   SimpleGrid,
   ScrollArea,
+  SegmentedControl,
+  Box,
 } from "@mantine/core";
 import type { ChannelInfo, PartialStats } from "../mcap/types.ts";
 import {
@@ -30,9 +32,12 @@ type SortField =
   | "schema"
   | "msgs"
   | "hz"
+  | "jitter"
   | "size"
   | "bps"
   | "bPerMsg";
+
+type ViewMode = "flat" | "tree";
 
 function channelToDistribution(channel: ChannelInfo, bucketDurationNs: number): MessageDistribution {
   const counts = channel.messageDistribution;
@@ -40,7 +45,7 @@ function channelToDistribution(channel: ChannelInfo, bucketDurationNs: number): 
     bucketCount: counts.length,
     bucketDurationNs,
     messageCounts: counts,
-    maxCount: Math.max(0, ...counts),
+    maxCount: counts.reduce((m, v) => (v > m ? v : m), 0),
   };
 }
 
@@ -53,6 +58,85 @@ function nsToDate(ns: bigint): Date {
   return new Date(Number(ns / 1_000_000n));
 }
 
+/** Format nanoseconds jitter to human-readable units. */
+function formatJitterNs(ns: number): string {
+  if (ns < 1_000) return `${ns.toFixed(0)} ns`;
+  if (ns < 1_000_000) return `${(ns / 1_000).toFixed(1)} \u00B5s`;
+  if (ns < 1_000_000_000) return `${(ns / 1_000_000).toFixed(1)} ms`;
+  return `${(ns / 1_000_000_000).toFixed(2)} s`;
+}
+
+/** Get jitter severity color based on CV percentage. */
+function jitterColor(cv: number): string {
+  if (cv < 0.05) return "green";
+  if (cv < 0.15) return "yellow";
+  return "red";
+}
+
+// ── Topic Tree ──
+
+interface TopicTreeNode {
+  segment: string;
+  fullPath: string;
+  children: Map<string, TopicTreeNode>;
+  channels: ChannelInfo[];
+}
+
+function buildTopicTree(channels: ChannelInfo[]): TopicTreeNode {
+  const root: TopicTreeNode = {
+    segment: "",
+    fullPath: "",
+    children: new Map(),
+    channels: [],
+  };
+
+  for (const ch of channels) {
+    const parts = ch.topic.split("/").filter(Boolean);
+    let node = root;
+
+    for (let i = 0; i < parts.length; i++) {
+      const segment = parts[i]!;
+      const path = "/" + parts.slice(0, i + 1).join("/");
+
+      if (!node.children.has(segment)) {
+        node.children.set(segment, {
+          segment,
+          fullPath: path,
+          children: new Map(),
+          channels: [],
+        });
+      }
+      node = node.children.get(segment)!;
+    }
+
+    node.channels.push(ch);
+  }
+
+  return root;
+}
+
+/** Collect aggregate stats for a tree node and all descendants. */
+function aggregateNode(node: TopicTreeNode): { totalMessages: number; minHz: number; maxHz: number } {
+  let totalMessages = 0;
+  let minHz = Infinity;
+  let maxHz = -Infinity;
+
+  for (const ch of node.channels) {
+    totalMessages += ch.messageCount;
+    minHz = Math.min(minHz, ch.hzStats.average);
+    maxHz = Math.max(maxHz, ch.hzStats.average);
+  }
+
+  for (const child of node.children.values()) {
+    const agg = aggregateNode(child);
+    totalMessages += agg.totalMessages;
+    minHz = Math.min(minHz, agg.minHz);
+    maxHz = Math.max(maxHz, agg.maxHz);
+  }
+
+  return { totalMessages, minHz: minHz === Infinity ? 0 : minHz, maxHz: maxHz === -Infinity ? 0 : maxHz };
+}
+
 interface ChannelsTableProps {
   channels: ChannelInfo[];
   bucketDurationNs: number;
@@ -63,15 +147,19 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
   const [sortField, setSortField] = useState<SortField>("topic");
   const [sortReverse, setSortReverse] = useState(false);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [viewMode, setViewMode] = useState<ViewMode>("flat");
+  const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
 
   const hasSizeData = channels.some((ch) => ch.sizeBytes !== null);
   const hasDistribution = channels.some(
     (ch) => ch.messageDistribution.length > 0,
   );
+  const hasJitter = channels.some((ch) => ch.jitterCv !== null);
 
   const totalColumns =
     4 + // ID, Topic, Schema, Msgs
     1 + // Hz
+    (hasJitter ? 1 : 0) + // Jitter
     (hasSizeData ? 3 : 0) + // Size, B/s, B/msg
     (hasDistribution ? 1 : 0); // Distribution
 
@@ -95,6 +183,9 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
         case "hz":
           cmp = a.hzStats.average - b.hzStats.average;
           break;
+        case "jitter":
+          cmp = (a.jitterCv ?? 0) - (b.jitterCv ?? 0);
+          break;
         case "size":
           cmp = (a.sizeBytes ?? 0) - (b.sizeBytes ?? 0);
           break;
@@ -111,6 +202,8 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
     });
     return arr;
   }, [channels, sortField, sortReverse]);
+
+  const topicTree = useMemo(() => buildTopicTree(sorted), [sorted]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -138,17 +231,222 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
     });
   };
 
+  const toggleCollapsed = (path: string) => {
+    setCollapsedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
   const headerStyle = { cursor: "pointer", userSelect: "none" as const };
   const rightAligned = {
     ...headerStyle,
     textAlign: "right" as const,
   };
 
+  const renderChannelRow = (ch: ChannelInfo, indent = 0) => {
+    const expanded = expandedIds.has(ch.id);
+    return (
+      <Fragment key={ch.id}>
+        <Table.Tr
+          onClick={() => toggleExpanded(ch.id)}
+          style={{ cursor: "pointer" }}
+        >
+          <Table.Td>
+            <Group gap={4} style={indent > 0 ? { paddingLeft: indent * 16 } : undefined}>
+              <Text
+                size="xs"
+                c="dimmed"
+                style={{
+                  transition: "transform 150ms",
+                  transform: expanded
+                    ? "rotate(90deg)"
+                    : "rotate(0deg)",
+                }}
+              >
+                ▶
+              </Text>
+              <Text size="sm" c="dimmed">
+                {ch.id}
+              </Text>
+            </Group>
+          </Table.Td>
+          <Table.Td>
+            <TopicDisplay topic={ch.topic} />
+          </Table.Td>
+          <Table.Td>
+            <SchemaDisplay name={ch.schemaName} />
+          </Table.Td>
+          <Table.Td style={{ textAlign: "right" }}>
+            {formatNumber(ch.messageCount)}
+          </Table.Td>
+          <Table.Td style={{ textAlign: "right" }}>
+            <HzDisplay
+              stats={ch.hzStats}
+              hzChannel={ch.hzChannel}
+            />
+          </Table.Td>
+          {hasJitter && (
+            <Table.Td style={{ textAlign: "right" }}>
+              <JitterDisplay jitterNs={ch.jitterNs} jitterCv={ch.jitterCv} />
+            </Table.Td>
+          )}
+          {hasSizeData && (
+            <>
+              <Table.Td style={{ textAlign: "right" }}>
+                {ch.sizeBytes !== null ? (
+                  <Text size="sm">
+                    {formatBytes(ch.sizeBytes)}{" "}
+                    <Text span size="xs" c="dimmed">
+                      ({formatPercent(ch.sizeBytes, fileSize)})
+                    </Text>
+                  </Text>
+                ) : (
+                  "-"
+                )}
+              </Table.Td>
+              <Table.Td style={{ textAlign: "right" }}>
+                <BpsDisplay stats={ch.bytesPerSecondStats} />
+              </Table.Td>
+              <Table.Td style={{ textAlign: "right" }}>
+                {ch.bytesPerMessage !== null
+                  ? formatBytes(ch.bytesPerMessage)
+                  : "-"}
+              </Table.Td>
+            </>
+          )}
+          {hasDistribution && (
+            <Table.Td>
+              {ch.messageDistribution.length > 0 ? (
+                <Sparkline
+                  w={120}
+                  h={20}
+                  data={ch.messageDistribution}
+                  curveType="monotone"
+                  color="blue"
+                  fillOpacity={0.2}
+                  strokeWidth={1.5}
+                />
+              ) : null}
+            </Table.Td>
+          )}
+        </Table.Tr>
+        <Table.Tr
+          key={`${ch.id}-detail`}
+          style={{ backgroundColor: "transparent" }}
+        >
+          <Table.Td
+            colSpan={totalColumns}
+            style={{ padding: 0, border: expanded ? undefined : "none" }}
+          >
+            <Collapse in={expanded}>
+              {expanded && (
+                <ChannelDetail
+                  channel={ch}
+                  bucketDurationNs={bucketDurationNs}
+                  fileSize={fileSize}
+                />
+              )}
+            </Collapse>
+          </Table.Td>
+        </Table.Tr>
+      </Fragment>
+    );
+  };
+
+  const renderTreeNode = (node: TopicTreeNode, depth: number): React.ReactNode[] => {
+    const rows: React.ReactNode[] = [];
+    const isCollapsed = collapsedPaths.has(node.fullPath);
+
+    // Render group header for non-root nodes that have children
+    if (depth > 0 && (node.children.size > 0 || node.channels.length === 0)) {
+      const agg = aggregateNode(node);
+      rows.push(
+        <Table.Tr
+          key={`group-${node.fullPath}`}
+          onClick={() => toggleCollapsed(node.fullPath)}
+          style={{ cursor: "pointer", backgroundColor: "var(--mantine-color-default-hover)" }}
+        >
+          <Table.Td colSpan={2}>
+            <Group gap={4} style={{ paddingLeft: (depth - 1) * 16 }}>
+              <Text
+                size="xs"
+                c="dimmed"
+                style={{
+                  transition: "transform 150ms",
+                  transform: isCollapsed ? "rotate(0deg)" : "rotate(90deg)",
+                }}
+              >
+                ▶
+              </Text>
+              <Text size="sm" fw={600} style={{ color: stringToColor(node.segment) }}>
+                /{node.segment}
+              </Text>
+            </Group>
+          </Table.Td>
+          <Table.Td />
+          <Table.Td style={{ textAlign: "right" }}>
+            <Text size="sm" c="dimmed">{formatNumber(agg.totalMessages)}</Text>
+          </Table.Td>
+          <Table.Td style={{ textAlign: "right" }}>
+            <Text size="sm" c="dimmed">
+              {agg.minHz === agg.maxHz
+                ? formatHz(agg.minHz)
+                : `${formatHz(agg.minHz)}-${formatHz(agg.maxHz)}`}
+            </Text>
+          </Table.Td>
+          {hasJitter && <Table.Td />}
+          {hasSizeData && (
+            <>
+              <Table.Td />
+              <Table.Td />
+              <Table.Td />
+            </>
+          )}
+          {hasDistribution && <Table.Td />}
+        </Table.Tr>,
+      );
+    }
+
+    if (depth > 0 && isCollapsed) return rows;
+
+    // Render leaf channels at this node
+    for (const ch of node.channels) {
+      rows.push(renderChannelRow(ch, viewMode === "tree" ? depth : 0));
+    }
+
+    // Render child nodes
+    const sortedChildren = [...node.children.values()].sort((a, b) =>
+      a.segment.localeCompare(b.segment),
+    );
+    for (const child of sortedChildren) {
+      rows.push(...renderTreeNode(child, depth + 1));
+    }
+
+    return rows;
+  };
+
   return (
     <Paper p="md" withBorder>
-      <Title order={4} mb="md">
-        Channels
-      </Title>
+      <Group justify="space-between" mb="md">
+        <Title order={4}>Channels</Title>
+        {channels.length > 0 && (
+          <SegmentedControl
+            size="xs"
+            value={viewMode}
+            onChange={(v) => setViewMode(v as ViewMode)}
+            data={[
+              { label: "Flat", value: "flat" },
+              { label: "Tree", value: "tree" },
+            ]}
+          />
+        )}
+      </Group>
       {channels.length === 0 ? (
         <Text c="dimmed">No channels found</Text>
       ) : (
@@ -186,6 +484,14 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
                 >
                   Hz{sortIndicator("hz")}
                 </Table.Th>
+                {hasJitter && (
+                  <Table.Th
+                    style={rightAligned}
+                    onClick={() => handleSort("jitter")}
+                  >
+                    Jitter{sortIndicator("jitter")}
+                  </Table.Th>
+                )}
                 {hasSizeData && (
                   <>
                     <Table.Th
@@ -212,109 +518,9 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {sorted.map((ch) => {
-                const expanded = expandedIds.has(ch.id);
-                return (
-                  <>
-                    <Table.Tr
-                      key={ch.id}
-                      onClick={() => toggleExpanded(ch.id)}
-                      style={{ cursor: "pointer" }}
-                    >
-                      <Table.Td>
-                        <Group gap={4}>
-                          <Text
-                            size="xs"
-                            c="dimmed"
-                            style={{
-                              transition: "transform 150ms",
-                              transform: expanded
-                                ? "rotate(90deg)"
-                                : "rotate(0deg)",
-                            }}
-                          >
-                            ▶
-                          </Text>
-                          <Text size="sm" c="dimmed">
-                            {ch.id}
-                          </Text>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>
-                        <TopicDisplay topic={ch.topic} />
-                      </Table.Td>
-                      <Table.Td>
-                        <SchemaDisplay name={ch.schemaName} />
-                      </Table.Td>
-                      <Table.Td style={{ textAlign: "right" }}>
-                        {formatNumber(ch.messageCount)}
-                      </Table.Td>
-                      <Table.Td style={{ textAlign: "right" }}>
-                        <HzDisplay
-                          stats={ch.hzStats}
-                          hzChannel={ch.hzChannel}
-                        />
-                      </Table.Td>
-                      {hasSizeData && (
-                        <>
-                          <Table.Td style={{ textAlign: "right" }}>
-                            {ch.sizeBytes !== null ? (
-                              <Text size="sm">
-                                {formatBytes(ch.sizeBytes)}{" "}
-                                <Text span size="xs" c="dimmed">
-                                  ({formatPercent(ch.sizeBytes, fileSize)})
-                                </Text>
-                              </Text>
-                            ) : (
-                              "-"
-                            )}
-                          </Table.Td>
-                          <Table.Td style={{ textAlign: "right" }}>
-                            <BpsDisplay stats={ch.bytesPerSecondStats} />
-                          </Table.Td>
-                          <Table.Td style={{ textAlign: "right" }}>
-                            {ch.bytesPerMessage !== null
-                              ? formatBytes(ch.bytesPerMessage)
-                              : "-"}
-                          </Table.Td>
-                        </>
-                      )}
-                      {hasDistribution && (
-                        <Table.Td>
-                          {ch.messageDistribution.length > 0 ? (
-                            <Sparkline
-                              w={120}
-                              h={20}
-                              data={ch.messageDistribution}
-                              curveType="monotone"
-                              color="blue"
-                              fillOpacity={0.2}
-                              strokeWidth={1.5}
-                            />
-                          ) : null}
-                        </Table.Td>
-                      )}
-                    </Table.Tr>
-                    <Table.Tr
-                      key={`${ch.id}-detail`}
-                      style={{ backgroundColor: "transparent" }}
-                    >
-                      <Table.Td
-                        colSpan={totalColumns}
-                        style={{ padding: 0, border: expanded ? undefined : "none" }}
-                      >
-                        <Collapse in={expanded}>
-                          <ChannelDetail
-                            channel={ch}
-                            bucketDurationNs={bucketDurationNs}
-                            fileSize={fileSize}
-                          />
-                        </Collapse>
-                      </Table.Td>
-                    </Table.Tr>
-                  </>
-                );
-              })}
+              {viewMode === "flat"
+                ? sorted.map((ch) => renderChannelRow(ch))
+                : renderTreeNode(topicTree, 0)}
             </Table.Tbody>
           </Table>
         </ScrollArea>
@@ -411,6 +617,23 @@ function ChannelDetail({
               label="Channel Hz"
               value={formatHz(channel.hzChannel)}
             />
+          )}
+          {channel.jitterCv !== null && channel.jitterNs !== null && (
+            <>
+              <Box mt={4}>
+                <Text size="xs" fw={600} c="dimmed">
+                  Jitter
+                </Text>
+              </Box>
+              <StatsRow
+                label="CV"
+                value={`${(channel.jitterCv * 100).toFixed(1)}%`}
+              />
+              <StatsRow
+                label="Stddev"
+                value={formatJitterNs(channel.jitterNs)}
+              />
+            </>
           )}
         </Stack>
 
@@ -612,6 +835,48 @@ function HzDisplay({
           {hzChannel !== null && (
             <StatsRow label="Channel Hz" value={formatHz(hzChannel)} />
           )}
+        </Stack>
+      </HoverCard.Dropdown>
+    </HoverCard>
+  );
+}
+
+function JitterDisplay({
+  jitterNs,
+  jitterCv,
+}: {
+  jitterNs: number | null;
+  jitterCv: number | null;
+}) {
+  if (jitterCv === null || jitterNs === null) {
+    return <Text size="sm">-</Text>;
+  }
+
+  const cvPercent = (jitterCv * 100).toFixed(1);
+  const color = jitterColor(jitterCv);
+
+  return (
+    <HoverCard openDelay={200} position="top" withArrow shadow="sm">
+      <HoverCard.Target>
+        <Text
+          size="sm"
+          c={color}
+          style={{ textDecoration: "underline dotted", cursor: "default" }}
+        >
+          {cvPercent}%
+        </Text>
+      </HoverCard.Target>
+      <HoverCard.Dropdown>
+        <Stack gap={2} style={{ minWidth: 160 }}>
+          <StatsRow label="CV" value={`${cvPercent}%`} bold />
+          <StatsRow label="Stddev" value={formatJitterNs(jitterNs)} />
+          <Text size="xs" c="dimmed" mt={4}>
+            {jitterCv < 0.05
+              ? "Stable timing"
+              : jitterCv < 0.15
+                ? "Moderate jitter"
+                : "High jitter"}
+          </Text>
         </Stack>
       </HoverCard.Dropdown>
     </HoverCard>

@@ -71,6 +71,10 @@ export interface ChannelInfo {
   messageDistribution: number[];
   messageStartTime: bigint | null;
   messageEndTime: bigint | null;
+  /** Standard deviation of inter-message intervals in nanoseconds. */
+  jitterNs: number | null;
+  /** Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable. */
+  jitterCv: number | null;
 }
 
 export interface SchemaInfo {
@@ -87,6 +91,21 @@ export interface MessageDistribution {
   maxCount: number;
 }
 
+export interface MetadataInfo {
+  name: string;
+  metadata: Record<string, string>;
+}
+
+export interface AttachmentInfo {
+  name: string;
+  mediaType: string;
+  dataSize: number;
+  logTime: bigint;
+  createTime: bigint;
+  offset: bigint;
+  length: bigint;
+}
+
 export interface McapInfoOutput {
   file: FileInfo;
   header: HeaderInfo;
@@ -94,6 +113,8 @@ export interface McapInfoOutput {
   chunks: ChunksInfo;
   channels: ChannelInfo[];
   schemas: SchemaInfo[];
+  metadata: MetadataInfo[];
+  attachments: AttachmentInfo[];
   messageDistribution: MessageDistribution;
 }
 

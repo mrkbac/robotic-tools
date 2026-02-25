@@ -1,4 +1,5 @@
 import { useRef, useCallback } from "react";
+import { openDB, type IDBPDatabase } from "idb";
 import type { McapRawData, ProgressCallback } from "../mcap/reader.ts";
 import { readMcapFile } from "../mcap/reader.ts";
 import type { ScanMode } from "../mcap/types.ts";
@@ -6,18 +7,16 @@ import type { ScanMode } from "../mcap/types.ts";
 interface FileIdentity {
   name: string;
   size: number;
-  lastModified: number;
 }
 
 function isSameFile(file: File, identity: FileIdentity): boolean {
   return (
     file.name === identity.name &&
-    file.size === identity.size &&
-    file.lastModified === identity.lastModified
+    file.size === identity.size
   );
 }
 
-const MODE_LEVEL: Record<ScanMode, number> = {
+export const MODE_LEVEL: Record<ScanMode, number> = {
   summary: 0,
   rebuild: 1,
   exact: 2,
@@ -43,7 +42,7 @@ function deriveRawData(raw: McapRawData, from: ScanMode, to: ScanMode): McapRawD
     return { ...raw, chunkInformation: null };
   }
 
-  return raw;
+  throw new Error(`Unhandled: ${from} → ${to}`);
 }
 
 interface CacheEntry {
@@ -52,21 +51,91 @@ interface CacheEntry {
   rawData: McapRawData;
 }
 
+// ---------------------------------------------------------------------------
+// IndexedDB helpers (best-effort, failures are silent)
+// ---------------------------------------------------------------------------
+
+const DB_NAME = "mcap-inspector-cache";
+const STORE_NAME = "raw-data";
+const DB_VERSION = 2;
+
+interface IDBCacheEntry extends CacheEntry {
+  key: string;
+}
+
+function getDB(): Promise<IDBPDatabase> {
+  return openDB(DB_NAME, DB_VERSION, {
+    upgrade(db) {
+      if (db.objectStoreNames.contains(STORE_NAME)) {
+        db.deleteObjectStore(STORE_NAME);
+      }
+      db.createObjectStore(STORE_NAME, { keyPath: "key" });
+    },
+  });
+}
+
+function cacheKey(identity: FileIdentity): string {
+  return `${identity.name}:${identity.size}`;
+}
+
+async function loadFromIDB(identity: FileIdentity): Promise<CacheEntry | null> {
+  try {
+    const db = await getDB();
+    const stored = await db.get(STORE_NAME, cacheKey(identity)) as IDBCacheEntry | undefined;
+    return stored ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveToIDB(entry: CacheEntry): Promise<void> {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    await tx.store.clear();
+    await tx.store.put({ ...entry, key: cacheKey(entry.fileIdentity) });
+    await tx.done;
+  } catch {
+    // persistence is best-effort
+  }
+}
+
+async function clearIDB(): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.clear(STORE_NAME);
+  } catch {
+    // best-effort
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
 export function useMcapCache() {
   const cacheRef = useRef<CacheEntry | null>(null);
 
+  /** Check in-memory cache then IDB; hydrate in-memory on IDB hit. */
+  const getOrHydrate = async (file: File): Promise<CacheEntry | null> => {
+    const entry = cacheRef.current;
+    if (entry && isSameFile(file, entry.fileIdentity)) return entry;
+
+    const idbEntry = await loadFromIDB({ name: file.name, size: file.size });
+    if (idbEntry) {
+      cacheRef.current = idbEntry;
+      return idbEntry;
+    }
+    return null;
+  };
+
   const tryGetCachedRaw = useCallback(
-    (file: File, mode: ScanMode): McapRawData | null => {
-      const entry = cacheRef.current;
-      if (!entry) return null;
-      if (!isSameFile(file, entry.fileIdentity)) return null;
-
-      const cachedLevel = MODE_LEVEL[entry.mode];
-      const requestedLevel = MODE_LEVEL[mode];
-
-      if (cachedLevel < requestedLevel) return null;
-
-      return deriveRawData(entry.rawData, entry.mode, mode);
+    async (file: File, mode: ScanMode): Promise<McapRawData | null> => {
+      const entry = await getOrHydrate(file);
+      if (entry && MODE_LEVEL[entry.mode] >= MODE_LEVEL[mode]) {
+        return deriveRawData(entry.rawData, entry.mode, mode);
+      }
+      return null;
     },
     [],
   );
@@ -79,24 +148,34 @@ export function useMcapCache() {
     ): Promise<McapRawData> => {
       const raw = await readMcapFile(file, mode, onProgress);
 
-      cacheRef.current = {
+      const entry: CacheEntry = {
         fileIdentity: {
           name: file.name,
           size: file.size,
-          lastModified: file.lastModified,
         },
         mode,
         rawData: raw,
       };
+
+      cacheRef.current = entry;
+
+      // Fire-and-forget persist to IndexedDB
+      saveToIDB(entry);
 
       return raw;
     },
     [],
   );
 
-  const invalidate = useCallback(() => {
-    cacheRef.current = null;
+  const getCachedMode = useCallback(async (file: File): Promise<ScanMode | null> => {
+    const entry = await getOrHydrate(file);
+    return entry?.mode ?? null;
   }, []);
 
-  return { tryGetCachedRaw, readAndCache, invalidate };
+  const invalidate = useCallback(() => {
+    cacheRef.current = null;
+    clearIDB();
+  }, []);
+
+  return { tryGetCachedRaw, readAndCache, getCachedMode, invalidate };
 }
