@@ -10,13 +10,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@bokuweb/zstd-wasm": "^0.0.27",
     "@foxglove/wasm-bz2": "^0.3.0",
     "@foxglove/wasm-lz4": "^1.0.2",
     "@foxglove/wasm-zstd": "^1.0.1",
     "@mantine/core": "^8.3.15",
     "@mantine/hooks": "^8.3.15",
     "@mcap/core": "^2.2.0",
-    "fzstd": "^0.1.1",
     "lz4js": "^0.2.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

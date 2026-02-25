@@ -9,9 +9,18 @@ import type {
   ChunkIndex,
   Header,
 } from "@mcap/core";
-import { decompress as zstdDecompress } from "fzstd";
+import { init as initZstd, decompress as zstdDecompress } from "@bokuweb/zstd-wasm";
 import lz4 from "lz4js";
 import type { ScanMode } from "./types.ts";
+
+let zstdInitialized = false;
+
+async function ensureZstdInit(): Promise<void> {
+  if (!zstdInitialized) {
+    await initZstd();
+    zstdInitialized = true;
+  }
+}
 
 const decompressHandlers: DecompressHandlers = {
   zstd: (buffer: Uint8Array, _decompressedSize: bigint) =>
@@ -267,6 +276,8 @@ export async function readMcapFile(
   mode: ScanMode,
   onProgress?: ProgressCallback,
 ): Promise<McapRawData> {
+  await ensureZstdInit();
+
   if (mode === "summary") {
     try {
       return await readIndexed(file);
