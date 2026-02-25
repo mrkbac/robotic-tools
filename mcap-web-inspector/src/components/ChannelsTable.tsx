@@ -17,7 +17,9 @@ import {
   formatDuration,
   formatTimestamp,
 } from "../format.ts";
-import { InlineDistributionBar, DistributionBar } from "./DistributionBar.tsx";
+import { Sparkline } from "@mantine/charts";
+import { DistributionChart } from "./DistributionChart.tsx";
+import type { MessageDistribution } from "../mcap/types.ts";
 
 type SortField =
   | "topic"
@@ -29,11 +31,22 @@ type SortField =
   | "bps"
   | "bPerMsg";
 
-interface ChannelsTableProps {
-  channels: ChannelInfo[];
+function channelToDistribution(channel: ChannelInfo, bucketDurationNs: number): MessageDistribution {
+  const counts = channel.messageDistribution;
+  return {
+    bucketCount: counts.length,
+    bucketDurationNs,
+    messageCounts: counts,
+    maxCount: Math.max(0, ...counts),
+  };
 }
 
-export function ChannelsTable({ channels }: ChannelsTableProps) {
+interface ChannelsTableProps {
+  channels: ChannelInfo[];
+  bucketDurationNs: number;
+}
+
+export function ChannelsTable({ channels, bucketDurationNs }: ChannelsTableProps) {
   const [sortField, setSortField] = useState<SortField>("topic");
   const [sortReverse, setSortReverse] = useState(false);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -249,8 +262,14 @@ export function ChannelsTable({ channels }: ChannelsTableProps) {
                       {hasDistribution && (
                         <Table.Td>
                           {ch.messageDistribution.length > 0 ? (
-                            <InlineDistributionBar
-                              counts={ch.messageDistribution}
+                            <Sparkline
+                              w={120}
+                              h={20}
+                              data={ch.messageDistribution}
+                              curveType="monotone"
+                              color="blue"
+                              fillOpacity={0.2}
+                              strokeWidth={1.5}
                             />
                           ) : null}
                         </Table.Td>
@@ -265,7 +284,7 @@ export function ChannelsTable({ channels }: ChannelsTableProps) {
                         style={{ padding: 0, border: expanded ? undefined : "none" }}
                       >
                         <Collapse in={expanded}>
-                          <ChannelDetail channel={ch} />
+                          <ChannelDetail channel={ch} bucketDurationNs={bucketDurationNs} />
                         </Collapse>
                       </Table.Td>
                     </Table.Tr>
@@ -282,7 +301,7 @@ export function ChannelsTable({ channels }: ChannelsTableProps) {
 
 // ── Detail panel ──
 
-function ChannelDetail({ channel }: { channel: ChannelInfo }) {
+function ChannelDetail({ channel, bucketDurationNs }: { channel: ChannelInfo; bucketDurationNs: number }) {
   return (
     <div style={{ padding: "12px 16px" }}>
       <Group gap="xl" align="flex-start">
@@ -313,7 +332,10 @@ function ChannelDetail({ channel }: { channel: ChannelInfo }) {
           <Text size="sm" fw={600} mb={4}>
             Message distribution
           </Text>
-          <DistributionBar counts={channel.messageDistribution} />
+          <DistributionChart
+            distribution={channelToDistribution(channel, bucketDurationNs)}
+            height={200}
+          />
         </div>
       )}
     </div>

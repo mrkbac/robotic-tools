@@ -1,6 +1,7 @@
 import { Table, Title, Paper, Text, Group } from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
 import { formatBytes, formatDuration } from "../format.ts";
+import { CompressionPieChart } from "./CompressionPieChart.tsx";
 
 interface CompressionTableProps {
   data: McapInfoOutput;
@@ -22,6 +23,7 @@ export function CompressionTable({ data }: CompressionTableProps) {
       <Title order={4} mb="md">
         Compression
       </Title>
+      <CompressionPieChart chunks={data.chunks} />
       <Table striped highlightOnHover>
         <Table.Thead>
           <Table.Tr>

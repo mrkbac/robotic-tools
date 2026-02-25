@@ -1,7 +1,7 @@
 import { Grid, Text, Title, Paper, Badge, Group } from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
 import { formatBytes, formatDuration, formatTimestamp } from "../format.ts";
-import { DistributionBar } from "./DistributionBar.tsx";
+import { DistributionChart } from "./DistributionChart.tsx";
 
 interface FileInfoProps {
   data: McapInfoOutput;
@@ -83,7 +83,7 @@ export function FileInfo({ data }: FileInfoProps) {
           <Title order={5} mt="lg" mb="xs">
             Message Distribution
           </Title>
-          <DistributionBar counts={messageDistribution.messageCounts} />
+          <DistributionChart distribution={messageDistribution} />
           <Text size="xs" c="dimmed" mt={4}>
             Max: {messageDistribution.maxCount.toLocaleString()} msgs/bucket |
             Bucket size: {formatDuration(messageDistribution.bucketDurationNs)}

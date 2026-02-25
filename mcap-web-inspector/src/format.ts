@@ -42,6 +42,17 @@ export function formatNumber(n: number): string {
   return n.toLocaleString();
 }
 
+/** Format a nanosecond offset into a short time label for chart axes. */
+export function formatBucketTime(ns: number): string {
+  const totalSec = ns / 1_000_000_000;
+  if (totalSec < 1) return `${(totalSec * 1000).toFixed(0)}ms`;
+  if (totalSec < 60) return `${totalSec.toFixed(1)}s`;
+  const min = totalSec / 60;
+  if (min < 60) return `${min.toFixed(1)}m`;
+  const hr = min / 60;
+  return `${hr.toFixed(1)}h`;
+}
+
 /** Format Hz value. */
 export function formatHz(hz: number): string {
   if (hz >= 1000) return `${(hz / 1000).toFixed(1)}k`;

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import {
   Container,
   Title,
@@ -10,13 +10,14 @@ import {
   Text,
 } from "@mantine/core";
 import type { McapInfoOutput, ScanMode } from "./mcap/types.ts";
-import { readMcapFile } from "./mcap/reader.ts";
 import { computeStats } from "./mcap/stats.ts";
 import { FileDropzone } from "./components/FileDropzone.tsx";
 import { FileInfo } from "./components/FileInfo.tsx";
 import { CompressionTable } from "./components/CompressionTable.tsx";
 import { ChannelsTable } from "./components/ChannelsTable.tsx";
 import { SchemasTable } from "./components/SchemasTable.tsx";
+import { UnifiedDistributionChart } from "./components/UnifiedDistributionChart.tsx";
+import { useMcapCache } from "./hooks/useMcapCache.ts";
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -25,31 +26,47 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<McapInfoOutput | null>(null);
+  const generationRef = useRef(0);
+  const { tryGetCachedRaw, readAndCache } = useMcapCache();
 
   const processFile = useCallback(
     async (selectedFile: File, mode: ScanMode) => {
       setFile(selectedFile);
-      setLoading(true);
       setError(null);
+
+      const cachedRaw = tryGetCachedRaw(selectedFile, mode);
+      if (cachedRaw) {
+        const result = computeStats(cachedRaw, selectedFile.name, selectedFile.size);
+        setData(result);
+        return;
+      }
+
+      const gen = ++generationRef.current;
+      setLoading(true);
       setProgress(0);
       setData(null);
 
       try {
-        const raw = await readMcapFile(selectedFile, mode, (bytesRead, total) => {
+        const raw = await readAndCache(selectedFile, mode, (bytesRead, total) => {
           setProgress(Math.round((bytesRead / total) * 100));
         });
+
+        if (generationRef.current !== gen) return;
 
         const result = computeStats(raw, selectedFile.name, selectedFile.size);
         setData(result);
       } catch (err) {
+        if (generationRef.current !== gen) return;
         setError(
           err instanceof Error ? err.message : "Failed to read MCAP file",
         );
       } finally {
-        setLoading(false);
+        if (generationRef.current === gen) {
+          setLoading(false);
+        }
       }
     },
-    [],
+    [tryGetCachedRaw, readAndCache],
   );
 
   const handleModeChange = useCallback(
@@ -118,8 +135,12 @@ export default function App() {
           <Stack gap="lg">
             <FileInfo data={data} />
             <CompressionTable data={data} />
+            <UnifiedDistributionChart
+              channels={data.channels}
+              globalDistribution={data.messageDistribution}
+            />
             <SchemasTable schemas={data.schemas} />
-            <ChannelsTable channels={data.channels} />
+            <ChannelsTable channels={data.channels} bucketDurationNs={data.messageDistribution.bucketDurationNs} />
           </Stack>
         )}
       </Stack>
