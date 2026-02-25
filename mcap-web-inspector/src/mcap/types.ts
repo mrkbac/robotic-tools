@@ -76,6 +76,8 @@ export interface ChannelInfo {
 export interface SchemaInfo {
   id: number;
   name: string;
+  encoding: string;
+  data: string;
 }
 
 export interface MessageDistribution {

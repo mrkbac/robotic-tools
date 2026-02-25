@@ -16,6 +16,7 @@
     "@foxglove/wasm-zstd": "^1.0.1",
     "@mantine/charts": "^8.3.15",
     "@mantine/core": "^8.3.15",
+    "@mantine/dates": "^8.3.15",
     "@mantine/hooks": "^8.3.15",
     "@mcap/core": "^2.2.0",
     "lz4js": "^0.2.0",

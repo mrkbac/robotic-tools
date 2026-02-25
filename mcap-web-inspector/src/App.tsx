@@ -140,7 +140,7 @@ export default function App() {
               globalDistribution={data.messageDistribution}
             />
             <SchemasTable schemas={data.schemas} />
-            <ChannelsTable channels={data.channels} bucketDurationNs={data.messageDistribution.bucketDurationNs} />
+            <ChannelsTable channels={data.channels} bucketDurationNs={data.messageDistribution.bucketDurationNs} fileSize={data.file.sizeBytes} />
           </Stack>
         )}
       </Stack>

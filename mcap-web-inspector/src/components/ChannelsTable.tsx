@@ -8,6 +8,8 @@ import {
   Stack,
   Group,
   Collapse,
+  Progress,
+  SimpleGrid,
 } from "@mantine/core";
 import type { ChannelInfo, PartialStats } from "../mcap/types.ts";
 import {
@@ -15,9 +17,9 @@ import {
   formatHz,
   formatNumber,
   formatDuration,
-  formatTimestamp,
 } from "../format.ts";
 import { Sparkline } from "@mantine/charts";
+import { TimeValue } from "@mantine/dates";
 import { DistributionChart } from "./DistributionChart.tsx";
 import type { MessageDistribution } from "../mcap/types.ts";
 
@@ -41,12 +43,22 @@ function channelToDistribution(channel: ChannelInfo, bucketDurationNs: number): 
   };
 }
 
+function formatPercent(part: number, total: number): string {
+  if (total <= 0) return "0%";
+  return `${((part / total) * 100).toFixed(1)}%`;
+}
+
+function nsToDate(ns: bigint): Date {
+  return new Date(Number(ns / 1_000_000n));
+}
+
 interface ChannelsTableProps {
   channels: ChannelInfo[];
   bucketDurationNs: number;
+  fileSize: number;
 }
 
-export function ChannelsTable({ channels, bucketDurationNs }: ChannelsTableProps) {
+export function ChannelsTable({ channels, bucketDurationNs, fileSize }: ChannelsTableProps) {
   const [sortField, setSortField] = useState<SortField>("topic");
   const [sortReverse, setSortReverse] = useState(false);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -245,9 +257,16 @@ export function ChannelsTable({ channels, bucketDurationNs }: ChannelsTableProps
                       {hasSizeData && (
                         <>
                           <Table.Td style={{ textAlign: "right" }}>
-                            {ch.sizeBytes !== null
-                              ? formatBytes(ch.sizeBytes)
-                              : "-"}
+                            {ch.sizeBytes !== null ? (
+                              <Text size="sm">
+                                {formatBytes(ch.sizeBytes)}{" "}
+                                <Text span size="xs" c="dimmed">
+                                  ({formatPercent(ch.sizeBytes, fileSize)})
+                                </Text>
+                              </Text>
+                            ) : (
+                              "-"
+                            )}
                           </Table.Td>
                           <Table.Td style={{ textAlign: "right" }}>
                             <BpsDisplay stats={ch.bytesPerSecondStats} />
@@ -284,7 +303,11 @@ export function ChannelsTable({ channels, bucketDurationNs }: ChannelsTableProps
                         style={{ padding: 0, border: expanded ? undefined : "none" }}
                       >
                         <Collapse in={expanded}>
-                          <ChannelDetail channel={ch} bucketDurationNs={bucketDurationNs} />
+                          <ChannelDetail
+                            channel={ch}
+                            bucketDurationNs={bucketDurationNs}
+                            fileSize={fileSize}
+                          />
                         </Collapse>
                       </Table.Td>
                     </Table.Tr>
@@ -301,32 +324,156 @@ export function ChannelsTable({ channels, bucketDurationNs }: ChannelsTableProps
 
 // ── Detail panel ──
 
-function ChannelDetail({ channel, bucketDurationNs }: { channel: ChannelInfo; bucketDurationNs: number }) {
+function ChannelDetail({
+  channel,
+  bucketDurationNs,
+  fileSize,
+}: {
+  channel: ChannelInfo;
+  bucketDurationNs: number;
+  fileSize: number;
+}) {
+  const hasTime =
+    channel.messageStartTime !== null && channel.messageEndTime !== null;
+  const hasSize = channel.sizeBytes !== null;
+  const hasHz =
+    channel.hzStats.minimum !== null || channel.hzStats.maximum !== null;
+
   return (
     <div style={{ padding: "12px 16px" }}>
-      <Group gap="xl" align="flex-start">
+      <SimpleGrid cols={3} spacing="xl">
+        {/* Time section */}
         <Stack gap={4}>
           <Text size="sm" fw={600}>
-            Duration
+            Time
           </Text>
-          <Text size="sm" c="dimmed">
-            {channel.durationNs !== null
-              ? formatDuration(Number(channel.durationNs))
-              : "-"}
-          </Text>
+          <StatsRow
+            label="Duration"
+            value={
+              channel.durationNs !== null
+                ? formatDuration(Number(channel.durationNs))
+                : "-"
+            }
+          />
+          {hasTime && (
+            <>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">
+                  Start
+                </Text>
+                <TimestampDisplay ns={channel.messageStartTime!} />
+              </Group>
+              <Group gap={4}>
+                <Text size="xs" c="dimmed">
+                  End
+                </Text>
+                <TimestampDisplay ns={channel.messageEndTime!} />
+              </Group>
+            </>
+          )}
         </Stack>
+
+        {/* Frequency section */}
         <Stack gap={4}>
           <Text size="sm" fw={600}>
-            Time range
+            Frequency
           </Text>
-          <Text size="sm" c="dimmed">
-            {channel.messageStartTime !== null &&
-            channel.messageEndTime !== null
-              ? `${formatTimestamp(channel.messageStartTime)} → ${formatTimestamp(channel.messageEndTime)}`
-              : "-"}
-          </Text>
+          <StatsRow
+            label="Average Hz"
+            value={formatHz(channel.hzStats.average)}
+            bold
+          />
+          {hasHz && (
+            <>
+              {channel.hzStats.minimum !== null && (
+                <StatsRow
+                  label="Min Hz"
+                  value={formatHz(channel.hzStats.minimum)}
+                />
+              )}
+              {channel.hzStats.maximum !== null && (
+                <StatsRow
+                  label="Max Hz"
+                  value={formatHz(channel.hzStats.maximum)}
+                />
+              )}
+              {channel.hzStats.median !== null && (
+                <StatsRow
+                  label="Median Hz"
+                  value={formatHz(channel.hzStats.median)}
+                />
+              )}
+            </>
+          )}
+          {channel.hzChannel !== null && (
+            <StatsRow
+              label="Channel Hz"
+              value={formatHz(channel.hzChannel)}
+            />
+          )}
         </Stack>
-      </Group>
+
+        {/* Size section */}
+        <Stack gap={4}>
+          <Text size="sm" fw={600}>
+            Size
+          </Text>
+          {hasSize && (
+            <>
+              <StatsRow
+                label="Total"
+                value={`${formatBytes(channel.sizeBytes!)} (${formatPercent(channel.sizeBytes!, fileSize)})`}
+                bold
+              />
+              <Progress
+                value={(channel.sizeBytes! / fileSize) * 100}
+                size="sm"
+                mt={2}
+                mb={2}
+              />
+              {channel.bytesPerSecondStats && (
+                <>
+                  <StatsRow
+                    label="Avg B/s"
+                    value={`${formatBytes(channel.bytesPerSecondStats.average)}/s`}
+                  />
+                  {channel.bytesPerSecondStats.minimum !== null && (
+                    <StatsRow
+                      label="Min B/s"
+                      value={`${formatBytes(channel.bytesPerSecondStats.minimum)}/s`}
+                    />
+                  )}
+                  {channel.bytesPerSecondStats.maximum !== null && (
+                    <StatsRow
+                      label="Max B/s"
+                      value={`${formatBytes(channel.bytesPerSecondStats.maximum)}/s`}
+                    />
+                  )}
+                  {channel.bytesPerSecondStats.median !== null && (
+                    <StatsRow
+                      label="Median B/s"
+                      value={`${formatBytes(channel.bytesPerSecondStats.median)}/s`}
+                    />
+                  )}
+                </>
+              )}
+              {channel.bytesPerMessage !== null && (
+                <StatsRow
+                  label="B/msg"
+                  value={formatBytes(channel.bytesPerMessage)}
+                />
+              )}
+            </>
+          )}
+          {!hasSize && (
+            <Text size="xs" c="dimmed">
+              -
+            </Text>
+          )}
+        </Stack>
+      </SimpleGrid>
+
+      {/* Distribution chart */}
       {channel.messageDistribution.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <Text size="sm" fw={600} mb={4}>
@@ -339,6 +486,18 @@ function ChannelDetail({ channel, bucketDurationNs }: { channel: ChannelInfo; bu
         </div>
       )}
     </div>
+  );
+}
+
+// ── Timestamp with TimeValue ──
+
+function TimestampDisplay({ ns }: { ns: bigint }) {
+  const date = nsToDate(ns);
+  return (
+    <Text size="xs">
+      {date.toLocaleDateString()}{" "}
+      <TimeValue value={date} withSeconds />
+    </Text>
   );
 }
 

@@ -418,6 +418,8 @@ export function computeStats(
   const schemas = [...raw.schemasById.values()].map((s) => ({
     id: s.id,
     name: s.name,
+    encoding: s.encoding,
+    data: new TextDecoder().decode(s.data),
   }));
 
   // Count message indexes
