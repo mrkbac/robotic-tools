@@ -10,6 +10,7 @@ import {
   Collapse,
   Progress,
   SimpleGrid,
+  ScrollArea,
 } from "@mantine/core";
 import type { ChannelInfo, PartialStats } from "../mcap/types.ts";
 import {
@@ -151,7 +152,7 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
       {channels.length === 0 ? (
         <Text c="dimmed">No channels found</Text>
       ) : (
-        <div style={{ overflowX: "auto" }}>
+        <ScrollArea scrollbars="x">
           <Table striped highlightOnHover>
             <Table.Thead>
               <Table.Tr>
@@ -316,7 +317,7 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
               })}
             </Table.Tbody>
           </Table>
-        </div>
+        </ScrollArea>
       )}
     </Paper>
   );

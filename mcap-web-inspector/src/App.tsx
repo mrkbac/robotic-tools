@@ -8,7 +8,12 @@ import {
   Alert,
   Group,
   Text,
+  ActionIcon,
+  Skeleton,
+  useMantineColorScheme,
+  useComputedColorScheme,
 } from "@mantine/core";
+import { IconSun, IconMoon } from "@tabler/icons-react";
 import type { McapInfoOutput, ScanMode } from "./mcap/types.ts";
 import { computeStats } from "./mcap/stats.ts";
 import { FileDropzone } from "./components/FileDropzone.tsx";
@@ -18,6 +23,21 @@ import { ChannelsTable } from "./components/ChannelsTable.tsx";
 import { SchemasTable } from "./components/SchemasTable.tsx";
 import { UnifiedDistributionChart } from "./components/UnifiedDistributionChart.tsx";
 import { useMcapCache } from "./hooks/useMcapCache.ts";
+
+function ColorSchemeToggle() {
+  const { setColorScheme } = useMantineColorScheme();
+  const computed = useComputedColorScheme("light");
+  return (
+    <ActionIcon
+      variant="default"
+      size="lg"
+      onClick={() => setColorScheme(computed === "light" ? "dark" : "light")}
+      aria-label="Toggle color scheme"
+    >
+      {computed === "light" ? <IconMoon size={18} /> : <IconSun size={18} />}
+    </ActionIcon>
+  );
+}
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -85,24 +105,27 @@ export default function App() {
       <Stack gap="lg">
         <Group justify="space-between" align="flex-end">
           <Title order={2}>MCAP Web Inspector</Title>
-          <SegmentedControl
-            value={scanMode}
-            onChange={handleModeChange}
-            data={[
-              {
-                value: "summary",
-                label: "Summary (fast)",
-              },
-              {
-                value: "rebuild",
-                label: "Rebuild (scan)",
-              },
-              {
-                value: "exact",
-                label: "Exact (slow)",
-              },
-            ]}
-          />
+          <Group gap="sm">
+            <ColorSchemeToggle />
+            <SegmentedControl
+              value={scanMode}
+              onChange={handleModeChange}
+              data={[
+                {
+                  value: "summary",
+                  label: "Summary (fast)",
+                },
+                {
+                  value: "rebuild",
+                  label: "Rebuild (scan)",
+                },
+                {
+                  value: "exact",
+                  label: "Exact (slow)",
+                },
+              ]}
+            />
+          </Group>
         </Group>
 
         <FileDropzone
@@ -129,6 +152,15 @@ export default function App() {
           <Alert color="red" title="Error">
             {error}
           </Alert>
+        )}
+
+        {loading && !data && (
+          <Stack gap="lg">
+            <Skeleton height={300} radius="md" />
+            <Skeleton height={200} radius="md" />
+            <Skeleton height={250} radius="md" />
+            <Skeleton height={150} radius="md" />
+          </Stack>
         )}
 
         {data && (

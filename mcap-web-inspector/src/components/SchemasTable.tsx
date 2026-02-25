@@ -4,6 +4,7 @@ import {
   Title,
   Paper,
   Text,
+  Accordion,
   Collapse,
   Group,
   Code,
@@ -16,7 +17,6 @@ interface SchemasTableProps {
 }
 
 export function SchemasTable({ schemas }: SchemasTableProps) {
-  const [opened, setOpened] = useState(false);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
 
   if (schemas.length === 0) return null;
@@ -35,108 +35,98 @@ export function SchemasTable({ schemas }: SchemasTableProps) {
 
   return (
     <Paper p="md" withBorder>
-      <Group
-        onClick={() => setOpened((o) => !o)}
-        style={{ cursor: "pointer", userSelect: "none" }}
-        gap="xs"
-      >
-        <Text
-          size="sm"
-          c="dimmed"
-          style={{
-            transition: "transform 150ms",
-            transform: opened ? "rotate(90deg)" : "rotate(0deg)",
-          }}
-        >
-          ▶
-        </Text>
-        <Title order={4}>Schemas ({schemas.length})</Title>
-      </Group>
-      <Collapse in={opened}>
-        <Table striped highlightOnHover mt="md">
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>ID</Table.Th>
-              <Table.Th>Name</Table.Th>
-              <Table.Th>Encoding</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {schemas.map((s) => {
-              const expanded = expandedIds.has(s.id);
-              const hasData = s.data.length > 0;
-              return (
-                <>
-                  <Table.Tr
-                    key={s.id}
-                    onClick={hasData ? () => toggleExpanded(s.id) : undefined}
-                    style={hasData ? { cursor: "pointer" } : undefined}
-                  >
-                    <Table.Td>
-                      <Group gap={4}>
-                        {hasData ? (
-                          <Text
-                            size="xs"
-                            c="dimmed"
+      <Accordion variant="default" chevronPosition="left">
+        <Accordion.Item value="schemas">
+          <Accordion.Control>
+            <Title order={4}>Schemas ({schemas.length})</Title>
+          </Accordion.Control>
+          <Accordion.Panel>
+            <Table striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>ID</Table.Th>
+                  <Table.Th>Name</Table.Th>
+                  <Table.Th>Encoding</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {schemas.map((s) => {
+                  const expanded = expandedIds.has(s.id);
+                  const hasData = s.data.length > 0;
+                  return (
+                    <>
+                      <Table.Tr
+                        key={s.id}
+                        onClick={hasData ? () => toggleExpanded(s.id) : undefined}
+                        style={hasData ? { cursor: "pointer" } : undefined}
+                      >
+                        <Table.Td>
+                          <Group gap={4}>
+                            {hasData ? (
+                              <Text
+                                size="xs"
+                                c="dimmed"
+                                style={{
+                                  transition: "transform 150ms",
+                                  transform: expanded
+                                    ? "rotate(90deg)"
+                                    : "rotate(0deg)",
+                                }}
+                              >
+                                ▶
+                              </Text>
+                            ) : (
+                              <Text size="xs" c="dimmed" style={{ width: 10 }}>
+                                {" "}
+                              </Text>
+                            )}
+                            <Text size="sm" c="dimmed">
+                              {s.id}
+                            </Text>
+                          </Group>
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="sm">{s.name}</Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="sm" c="dimmed">
+                            {s.encoding || "-"}
+                          </Text>
+                        </Table.Td>
+                      </Table.Tr>
+                      {hasData && (
+                        <Table.Tr
+                          key={`${s.id}-detail`}
+                          style={{ backgroundColor: "transparent" }}
+                        >
+                          <Table.Td
+                            colSpan={3}
                             style={{
-                              transition: "transform 150ms",
-                              transform: expanded
-                                ? "rotate(90deg)"
-                                : "rotate(0deg)",
+                              padding: 0,
+                              border: expanded ? undefined : "none",
                             }}
                           >
-                            ▶
-                          </Text>
-                        ) : (
-                          <Text size="xs" c="dimmed" style={{ width: 10 }}>
-                            {" "}
-                          </Text>
-                        )}
-                        <Text size="sm" c="dimmed">
-                          {s.id}
-                        </Text>
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{s.name}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm" c="dimmed">
-                        {s.encoding || "-"}
-                      </Text>
-                    </Table.Td>
-                  </Table.Tr>
-                  {hasData && (
-                    <Table.Tr
-                      key={`${s.id}-detail`}
-                      style={{ backgroundColor: "transparent" }}
-                    >
-                      <Table.Td
-                        colSpan={3}
-                        style={{
-                          padding: 0,
-                          border: expanded ? undefined : "none",
-                        }}
-                      >
-                        <Collapse in={expanded}>
-                          <ScrollArea
-                            mah={400}
-                            style={{ padding: "8px 16px 12px" }}
-                          >
-                            <Code block style={{ whiteSpace: "pre" }}>
-                              {s.data}
-                            </Code>
-                          </ScrollArea>
-                        </Collapse>
-                      </Table.Td>
-                    </Table.Tr>
-                  )}
-                </>
-              );
-            })}
-          </Table.Tbody>
-        </Table>
-      </Collapse>
+                            <Collapse in={expanded}>
+                              <ScrollArea
+                                mah={400}
+                                style={{ padding: "8px 16px 12px" }}
+                              >
+                                <Code block style={{ whiteSpace: "pre" }}>
+                                  {s.data}
+                                </Code>
+                              </ScrollArea>
+                            </Collapse>
+                          </Table.Td>
+                        </Table.Tr>
+                      )}
+                    </>
+                  );
+                })}
+              </Table.Tbody>
+            </Table>
+          </Accordion.Panel>
+        </Accordion.Item>
+      </Accordion>
     </Paper>
   );
 }
