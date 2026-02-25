@@ -3,7 +3,6 @@ import {
   Container,
   Title,
   Stack,
-  SegmentedControl,
   Progress,
   Alert,
   Group,
@@ -22,6 +21,7 @@ import { CompressionTable } from "./components/CompressionTable.tsx";
 import { ChannelsTable } from "./components/ChannelsTable.tsx";
 import { SchemasTable } from "./components/SchemasTable.tsx";
 import { UnifiedDistributionChart } from "./components/UnifiedDistributionChart.tsx";
+import { ScanUpgradeBar } from "./components/ScanUpgradeBar.tsx";
 import { useMcapCache } from "./hooks/useMcapCache.ts";
 
 function ColorSchemeToggle() {
@@ -41,7 +41,7 @@ function ColorSchemeToggle() {
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
-  const [scanMode, setScanMode] = useState<ScanMode>("summary");
+  const [scannedMode, setScannedMode] = useState<ScanMode>("summary");
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -58,13 +58,13 @@ export default function App() {
       if (cachedRaw) {
         const result = computeStats(cachedRaw, selectedFile.name, selectedFile.size);
         setData(result);
+        setScannedMode(mode);
         return;
       }
 
       const gen = ++generationRef.current;
       setLoading(true);
       setProgress(0);
-      setData(null);
 
       try {
         const raw = await readAndCache(selectedFile, mode, (bytesRead, total) => {
@@ -75,6 +75,7 @@ export default function App() {
 
         const result = computeStats(raw, selectedFile.name, selectedFile.size);
         setData(result);
+        setScannedMode(mode);
       } catch (err) {
         if (generationRef.current !== gen) return;
         setError(
@@ -89,47 +90,31 @@ export default function App() {
     [tryGetCachedRaw, readAndCache],
   );
 
-  const handleModeChange = useCallback(
-    (value: string) => {
-      const mode = value as ScanMode;
-      setScanMode(mode);
-      if (file) {
-        processFile(file, mode);
-      }
+  const handleFileSelect = useCallback(
+    (selectedFile: File) => {
+      setScannedMode("summary");
+      processFile(selectedFile, "summary");
     },
-    [file, processFile],
+    [processFile],
   );
+
+  const nextMode: Record<string, ScanMode> = { summary: "rebuild", rebuild: "exact" };
+
+  const handleUpgrade = useCallback(() => {
+    if (!file || scannedMode === "exact") return;
+    processFile(file, nextMode[scannedMode]!);
+  }, [file, scannedMode, processFile]);
 
   return (
     <Container size="xl" py="xl">
       <Stack gap="lg">
         <Group justify="space-between" align="flex-end">
           <Title order={2}>MCAP Web Inspector</Title>
-          <Group gap="sm">
-            <ColorSchemeToggle />
-            <SegmentedControl
-              value={scanMode}
-              onChange={handleModeChange}
-              data={[
-                {
-                  value: "summary",
-                  label: "Summary (fast)",
-                },
-                {
-                  value: "rebuild",
-                  label: "Rebuild (scan)",
-                },
-                {
-                  value: "exact",
-                  label: "Exact (slow)",
-                },
-              ]}
-            />
-          </Group>
+          <ColorSchemeToggle />
         </Group>
 
         <FileDropzone
-          onFileSelect={processFile}
+          onFileSelect={handleFileSelect}
           loading={loading}
           currentFile={file}
         />
@@ -137,13 +122,13 @@ export default function App() {
         {loading && (
           <Stack gap="xs">
             <Text size="sm" c="dimmed">
-              {scanMode === "summary"
+              {scannedMode === "summary" && progress === 0
                 ? "Reading summary..."
                 : `Scanning file... ${progress}%`}
             </Text>
             <Progress
-              value={scanMode === "summary" ? 100 : progress}
-              animated={scanMode === "summary"}
+              value={scannedMode === "summary" && progress === 0 ? 100 : progress}
+              animated={scannedMode === "summary" && progress === 0}
             />
           </Stack>
         )}
@@ -152,6 +137,14 @@ export default function App() {
           <Alert color="red" title="Error">
             {error}
           </Alert>
+        )}
+
+        {data && (
+          <ScanUpgradeBar
+            scannedMode={scannedMode}
+            loading={loading}
+            onUpgrade={handleUpgrade}
+          />
         )}
 
         {loading && !data && (
