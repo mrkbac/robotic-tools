@@ -149,8 +149,10 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [viewMode, setViewMode] = useState<ViewMode>("flat");
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
+  const estimatePrefix = (ch: ChannelInfo) => ch.estimatedSizes ? "~" : "";
 
   const hasSizeData = channels.some((ch) => ch.sizeBytes !== null);
+  const hasEstimatedSizes = channels.some((ch) => ch.estimatedSizes && ch.sizeBytes !== null);
   const hasDistribution = channels.some(
     (ch) => ch.messageDistribution.length > 0,
   );
@@ -301,9 +303,9 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
               <Table.Td style={{ textAlign: "right" }}>
                 {ch.sizeBytes !== null ? (
                   <Text size="sm">
-                    {formatBytes(ch.sizeBytes)}{" "}
+                    {estimatePrefix(ch)}{formatBytes(ch.sizeBytes)}{" "}
                     <Text span size="xs" c="dimmed">
-                      ({formatPercent(ch.sizeBytes, fileSize)})
+                      ({estimatePrefix(ch)}{formatPercent(ch.sizeBytes, fileSize)})
                     </Text>
                   </Text>
                 ) : (
@@ -311,11 +313,11 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
                 )}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                <BpsDisplay stats={ch.bytesPerSecondStats} />
+                <BpsDisplay stats={ch.bytesPerSecondStats} estimated={ch.estimatedSizes} />
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
                 {ch.bytesPerMessage !== null
-                  ? formatBytes(ch.bytesPerMessage)
+                  ? `${estimatePrefix(ch)}${formatBytes(ch.bytesPerMessage)}`
                   : "-"}
               </Table.Td>
             </>
@@ -497,20 +499,23 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
                     <Table.Th
                       style={rightAligned}
                       onClick={() => handleSort("size")}
+                      title={hasEstimatedSizes ? "Estimated from message index offsets" : undefined}
                     >
-                      Size{sortIndicator("size")}
+                      {hasEstimatedSizes ? "~" : ""}Size{sortIndicator("size")}
                     </Table.Th>
                     <Table.Th
                       style={rightAligned}
                       onClick={() => handleSort("bps")}
+                      title={hasEstimatedSizes ? "Estimated from message index offsets" : undefined}
                     >
-                      B/s{sortIndicator("bps")}
+                      {hasEstimatedSizes ? "~" : ""}B/s{sortIndicator("bps")}
                     </Table.Th>
                     <Table.Th
                       style={rightAligned}
                       onClick={() => handleSort("bPerMsg")}
+                      title={hasEstimatedSizes ? "Estimated from message index offsets" : undefined}
                     >
-                      B/msg{sortIndicator("bPerMsg")}
+                      {hasEstimatedSizes ? "~" : ""}B/msg{sortIndicator("bPerMsg")}
                     </Table.Th>
                   </>
                 )}
@@ -640,13 +645,13 @@ function ChannelDetail({
         {/* Size section */}
         <Stack gap={4}>
           <Text size="sm" fw={600}>
-            Size
+            Size{channel.estimatedSizes ? " (estimated)" : ""}
           </Text>
           {hasSize && (
             <>
               <StatsRow
                 label="Total"
-                value={`${formatBytes(channel.sizeBytes!)} (${formatPercent(channel.sizeBytes!, fileSize)})`}
+                value={`${channel.estimatedSizes ? "~" : ""}${formatBytes(channel.sizeBytes!)} (${channel.estimatedSizes ? "~" : ""}${formatPercent(channel.sizeBytes!, fileSize)})`}
                 bold
               />
               <Progress
@@ -883,15 +888,16 @@ function JitterDisplay({
   );
 }
 
-function BpsDisplay({ stats }: { stats: PartialStats | null }) {
+function BpsDisplay({ stats, estimated }: { stats: PartialStats | null; estimated?: boolean }) {
   if (!stats) {
     return <Text size="sm">-</Text>;
   }
 
+  const prefix = estimated ? "~" : "";
   const hasDetails = stats.minimum !== null || stats.maximum !== null;
 
   if (!hasDetails) {
-    return <Text size="sm">{formatBytes(stats.average)}</Text>;
+    return <Text size="sm">{prefix}{formatBytes(stats.average)}</Text>;
   }
 
   return (
@@ -901,32 +907,32 @@ function BpsDisplay({ stats }: { stats: PartialStats | null }) {
           size="sm"
           style={{ textDecoration: "underline dotted", cursor: "default" }}
         >
-          {formatBytes(stats.average)}
+          {prefix}{formatBytes(stats.average)}
         </Text>
       </HoverCard.Target>
       <HoverCard.Dropdown>
         <Stack gap={2} style={{ minWidth: 140 }}>
           <StatsRow
             label="Average"
-            value={`${formatBytes(stats.average)}/s`}
+            value={`${prefix}${formatBytes(stats.average)}/s`}
             bold
           />
           {stats.minimum !== null && (
             <StatsRow
               label="Min"
-              value={`${formatBytes(stats.minimum)}/s`}
+              value={`${prefix}${formatBytes(stats.minimum)}/s`}
             />
           )}
           {stats.maximum !== null && (
             <StatsRow
               label="Max"
-              value={`${formatBytes(stats.maximum)}/s`}
+              value={`${prefix}${formatBytes(stats.maximum)}/s`}
             />
           )}
           {stats.median !== null && (
             <StatsRow
               label="Median"
-              value={`${formatBytes(stats.median)}/s`}
+              value={`${prefix}${formatBytes(stats.median)}/s`}
             />
           )}
         </Stack>

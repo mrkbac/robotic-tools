@@ -63,6 +63,8 @@ export interface ChannelInfo {
   schemaName: string | null;
   messageCount: number;
   sizeBytes: number | null;
+  /** Whether sizeBytes is estimated from MessageIndex offsets (true) or measured from actual data (false). */
+  estimatedSizes: boolean;
   durationNs: bigint | null;
   hzStats: PartialStats;
   hzChannel: number | null;

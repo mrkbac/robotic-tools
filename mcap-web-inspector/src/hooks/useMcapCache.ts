@@ -32,13 +32,13 @@ function deriveRawData(raw: McapRawData, from: ScanMode, to: ScanMode): McapRawD
     throw new Error(`Cannot derive ${to} from ${from}`);
   }
 
+  // Both rebuild and exact produce identical data now (both always have channelSizes).
+  // Summary only lacks chunkInformation. We keep channelSizes when deriving down
+  // since exact/rebuild sizes are strictly better than estimated.
   if (from === "exact" && to === "rebuild") {
-    return { ...raw, channelSizes: null };
+    return raw;
   }
-  if (from === "exact" && to === "summary") {
-    return { ...raw, channelSizes: null, chunkInformation: null };
-  }
-  if (from === "rebuild" && to === "summary") {
+  if ((from === "exact" || from === "rebuild") && to === "summary") {
     return { ...raw, chunkInformation: null };
   }
 

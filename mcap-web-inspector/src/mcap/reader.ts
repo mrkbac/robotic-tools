@@ -18,11 +18,11 @@ import type { ScanMode } from "./types.ts";
 const zstdDecoder = new ZSTDDecoder();
 const zstdReady = zstdDecoder.init();
 
-async function ensureZstdInit(): Promise<void> {
+export async function ensureZstdInit(): Promise<void> {
   await zstdReady;
 }
 
-const decompressHandlers: DecompressHandlers = {
+export const decompressHandlers: DecompressHandlers = {
   zstd: (buffer: Uint8Array, decompressedSize: bigint) =>
     zstdDecoder.decode(buffer, Number(decompressedSize)),
   lz4: (buffer: Uint8Array, decompressedSize: bigint) =>
@@ -30,7 +30,7 @@ const decompressHandlers: DecompressHandlers = {
 };
 
 /** IReadable implementation for browser File/Blob objects. */
-class BlobReadable implements IReadable {
+export class BlobReadable implements IReadable {
   private blob: Blob;
 
   constructor(blob: Blob) {
@@ -55,8 +55,10 @@ export interface McapRawData {
   channelsById: ReadonlyMap<number, Channel & { type: "Channel" }>;
   schemasById: ReadonlyMap<number, Schema & { type: "Schema" }>;
   chunkIndexes: readonly (ChunkIndex & { type: "ChunkIndex" })[];
-  /** Per-channel message sizes (only available in rebuild mode with exact sizes). */
+  /** Per-channel message data sizes. Available in all modes (estimated in summary, exact in rebuild/exact). */
   channelSizes: Map<number, number> | null;
+  /** Whether channelSizes are estimated from MessageIndex offsets (true) or measured from actual data (false). */
+  estimatedSizes: boolean;
   /** Chunk information: chunkStartOffset -> list of message indexes per chunk. */
   chunkInformation: Map<
     bigint,
@@ -69,6 +71,98 @@ export interface McapRawData {
 }
 
 export type ProgressCallback = (bytesRead: number, totalBytes: number) => void;
+
+/**
+ * Message record overhead in bytes within uncompressed chunk data:
+ * 1 (opcode) + 8 (record length) + 2 (channelId) + 4 (sequence) + 8 (logTime) + 8 (publishTime) = 31
+ */
+const MESSAGE_RECORD_OVERHEAD = 31;
+
+/**
+ * Estimate per-channel message data sizes from MessageIndex offsets.
+ *
+ * For each chunk, reads the MessageIndex records (small targeted read using
+ * offsets from ChunkIndex), then estimates message data sizes from gaps
+ * between consecutive offsets within the uncompressed chunk.
+ */
+async function estimateSizesFromIndexes(
+  readable: BlobReadable,
+  chunkIndexes: readonly ChunkIndex[],
+): Promise<Map<number, number>> {
+  const channelSizes = new Map<number, number>();
+
+  for (const chunkIndex of chunkIndexes) {
+    if (chunkIndex.messageIndexOffsets.size === 0) continue;
+
+    // Find the start of the MessageIndex region (earliest offset among all channels)
+    let startOffset = 0xffff_ffff_ffff_ffffn;
+    for (const offset of chunkIndex.messageIndexOffsets.values()) {
+      if (offset < startOffset) startOffset = offset;
+    }
+
+    const length = chunkIndex.messageIndexLength;
+    if (length === 0n) continue;
+
+    // Read the MessageIndex records for this chunk
+    const data = await readable.read(startOffset, length);
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+    // Parse MessageIndex records and collect all (offset, channelId) pairs
+    const allOffsets: { channelId: number; offset: bigint }[] = [];
+    let pos = 0;
+
+    while (pos + 9 <= data.byteLength) {
+      const opcode = data[pos]!;
+      if (pos + 9 > data.byteLength) break;
+      const recordLen = Number(view.getBigUint64(pos + 1, true));
+      const recordStart = pos + 9;
+      const recordEnd = recordStart + recordLen;
+
+      if (recordEnd > data.byteLength) break;
+
+      // MessageIndex opcode = 0x07
+      if (opcode === 0x07 && recordLen >= 6) {
+        const channelId = view.getUint16(recordStart, true);
+        const recordsLen = view.getUint32(recordStart + 2, true);
+        let rPos = recordStart + 6;
+        const rEnd = recordStart + 6 + recordsLen;
+
+        while (rPos + 16 <= rEnd && rPos + 16 <= data.byteLength) {
+          // Each entry: logTime (8 bytes) + offset (8 bytes)
+          const offset = view.getBigUint64(rPos + 8, true);
+          allOffsets.push({ channelId, offset });
+          rPos += 16;
+        }
+      }
+
+      pos = recordEnd;
+    }
+
+    if (allOffsets.length === 0) continue;
+
+    // Sort by offset within uncompressed chunk data
+    allOffsets.sort((a, b) => (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0));
+
+    // Compute data sizes from gaps between consecutive offsets
+    const uncompressedSize = chunkIndex.uncompressedSize;
+    for (let i = 0; i < allOffsets.length; i++) {
+      const entry = allOffsets[i]!;
+      const nextOffset = i + 1 < allOffsets.length
+        ? allOffsets[i + 1]!.offset
+        : uncompressedSize;
+
+      const recordSize = Number(nextOffset - entry.offset);
+      const dataSize = Math.max(0, recordSize - MESSAGE_RECORD_OVERHEAD);
+
+      channelSizes.set(
+        entry.channelId,
+        (channelSizes.get(entry.channelId) ?? 0) + dataSize,
+      );
+    }
+  }
+
+  return channelSizes;
+}
 
 /** Read MCAP file using the indexed reader (fast path - reads footer/summary). */
 async function readIndexed(file: File): Promise<McapRawData> {
@@ -85,13 +179,19 @@ async function readIndexed(file: File): Promise<McapRawData> {
     metadata.push(record);
   }
 
+  // Estimate channel sizes from MessageIndex offsets (no decompression needed)
+  const channelSizes = reader.chunkIndexes.length > 0
+    ? await estimateSizesFromIndexes(readable, reader.chunkIndexes)
+    : null;
+
   return {
     header: reader.header,
     statistics: reader.statistics,
     channelsById: reader.channelsById,
     schemasById: reader.schemasById,
     chunkIndexes: reader.chunkIndexes,
-    channelSizes: null,
+    channelSizes,
+    estimatedSizes: true,
     chunkInformation: null,
     metadata,
     attachmentIndexes: [...reader.attachmentIndexes],
@@ -101,7 +201,6 @@ async function readIndexed(file: File): Promise<McapRawData> {
 /** Read MCAP file using streaming reader (rebuild path - full file scan). */
 async function readStream(
   file: File,
-  exactSizes: boolean,
   onProgress?: ProgressCallback,
 ): Promise<McapRawData> {
   const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
@@ -169,13 +268,11 @@ async function readStream(
           currentChunkMessages = new Map();
           break;
         case "Message": {
-          const msgSize = exactSizes ? record.data.byteLength : 0;
-          if (exactSizes) {
-            channelSizes.set(
-              record.channelId,
-              (channelSizes.get(record.channelId) ?? 0) + msgSize,
-            );
-          }
+          const msgSize = record.data.byteLength;
+          channelSizes.set(
+            record.channelId,
+            (channelSizes.get(record.channelId) ?? 0) + msgSize,
+          );
           // Track message in current chunk context
           if (!currentChunkMessages.has(record.channelId)) {
             currentChunkMessages.set(record.channelId, []);
@@ -285,7 +382,8 @@ async function readStream(
     channelsById,
     schemasById,
     chunkIndexes,
-    channelSizes: exactSizes ? channelSizes : null,
+    channelSizes: channelSizes.size > 0 ? channelSizes : null,
+    estimatedSizes: false,
     chunkInformation: chunkInformation.size > 0 ? chunkInformation : null,
     metadata,
     attachmentIndexes,
@@ -305,11 +403,11 @@ export async function readMcapFile(
       return await readIndexed(file);
     } catch {
       // Fallback to stream reading if indexed reading fails
-      return await readStream(file, false, onProgress);
+      return await readStream(file, onProgress);
     }
   }
 
-  return await readStream(file, mode === "exact", onProgress);
+  return await readStream(file, onProgress);
 }
 
 /**
