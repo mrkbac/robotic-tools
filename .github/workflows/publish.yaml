@@ -18,7 +18,7 @@ on:
           - ros-parser
           - small-mcap
           - websocket-bridge
-          - websocket-proxy
+          # - websocket-proxy
       dry_run:
         description: "Dry run (build but do not publish)"
         required: false
@@ -43,7 +43,7 @@ jobs:
           - ros-parser
           - small-mcap
           - websocket-bridge
-          - websocket-proxy
+          # - websocket-proxy
 
     steps:
       - uses: actions/checkout@v5
