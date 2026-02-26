@@ -1,14 +1,14 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       package:
         description: 'Package to publish (or "all" for all packages)'
         required: true
-        default: 'all'
+        default: "all"
         type: choice
         options:
           - all
@@ -20,7 +20,7 @@ on:
           - websocket-bridge
           - websocket-proxy
       dry_run:
-        description: 'Dry run (build but do not publish)'
+        description: "Dry run (build but do not publish)"
         required: false
         default: false
         type: boolean
@@ -47,33 +47,48 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          lfs: true
-          submodules: true
 
-      - name: Check if package should be published
+      - name: Check if version needs publishing
         id: check
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ "${{ inputs.package }}" == "all" ]] || [[ "${{ inputs.package }}" == "${{ matrix.package }}" ]]; then
-              echo "should_run=true" >> $GITHUB_OUTPUT
-            else
-              echo "should_run=false" >> $GITHUB_OUTPUT
+            if [[ "${{ inputs.package }}" != "all" ]] && [[ "${{ inputs.package }}" != "${{ matrix.package }}" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "reason=not selected" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-          else
-            echo "should_run=true" >> $GITHUB_OUTPUT
           fi
 
+          version=$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('${{ matrix.package }}/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/${{ matrix.package }}/${version}/json")
+
+          if [[ "$http_code" == "200" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=${{ matrix.package }}==${version} already on PyPI" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log skip reason
+        if: steps.check.outputs.skip == 'true'
+        run: echo "Skipping — ${{ steps.check.outputs.reason }}"
+
       - name: Install uv
-        if: steps.check.outputs.should_run == 'true'
+        if: steps.check.outputs.skip != 'true'
         uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.10"
 
       - name: Build package
-        if: steps.check.outputs.should_run == 'true'
+        if: steps.check.outputs.skip != 'true'
         run: uv build --package ${{ matrix.package }}
 
       - name: Publish to PyPI
-        if: steps.check.outputs.should_run == 'true' && !inputs.dry_run
+        if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
         run: uv publish dist/*
