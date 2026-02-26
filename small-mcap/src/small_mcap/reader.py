@@ -236,6 +236,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: Literal[True] = ...,
     lazy_chunks: Literal[True] = ...,
+    allow_incomplete: bool = False,
 ) -> Iterable[NonChunkRecord | LazyChunk | MessageIndex]: ...
 
 
@@ -247,6 +248,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: Literal[True] = ...,
     lazy_chunks: Literal[False] = ...,
+    allow_incomplete: bool = False,
 ) -> Iterable[NonChunkRecord | Chunk | MessageIndex]: ...
 
 
@@ -258,6 +260,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: Literal[False] = ...,
     lazy_chunks: Literal[False] = ...,
+    allow_incomplete: bool = False,
 ) -> Iterable[NonChunkRecord | ChunkContentRecord]: ...
 
 
@@ -268,6 +271,7 @@ def stream_reader(
     validate_crc: bool = False,
     emit_chunks: bool = False,
     lazy_chunks: bool = False,
+    allow_incomplete: bool = False,
 ) -> Iterable[McapRecord] | Iterable[McapRecord | LazyChunk]:
     record_size_limit = _RECORD_SIZE_LIMIT
     checksum = 0
@@ -290,8 +294,14 @@ def stream_reader(
         cached_pos += MAGIC_SIZE
 
     while True:
-        checksum_before_read = checksum
-        opcode, length = OPCODE_AND_LEN_STRUCT.unpack(read(_RECORD_HEADER_SIZE))
+        try:
+            checksum_before_read = checksum
+            opcode, length = OPCODE_AND_LEN_STRUCT.unpack(read(_RECORD_HEADER_SIZE))
+        except EndOfFileError:
+            if allow_incomplete:
+                return
+            raise
+
         if record_size_limit is not None and length > record_size_limit:
             raise RecordLengthLimitExceededError(opcode, length, record_size_limit)
 
@@ -304,8 +314,13 @@ def stream_reader(
             record = LazyChunk.read_from_stream(stream, record_start, length)
             cached_pos = stream.tell()
         else:
-            cached_pos += length
-            record_data = read(length)
+            try:
+                cached_pos += length
+                record_data = read(length)
+            except EndOfFileError:
+                if allow_incomplete:
+                    return
+                raise
 
             if record_cls := OPCODE_TO_RECORD.get(opcode):
                 record = record_cls.read(record_data)
@@ -383,7 +398,7 @@ def get_summary(stream: IO[bytes]) -> Summary | None:
             return None
         stream.seek(footer.summary_start, io.SEEK_SET)
         return _read_summary_from_iterable(stream_reader(stream, skip_magic=True))
-    except (OSError, StopIteration, EndOfFileError):
+    except (OSError, StopIteration, EndOfFileError, InvalidMagicError):
         return None
 
 
@@ -622,7 +637,11 @@ def _read_message_non_seeking(
         pending_chunk: Chunk | None = None
         pending_message_indexes: list[MessageIndex] = []
         for record in stream_reader(
-            stream, emit_chunks=True, validate_crc=validate_crc, lazy_chunks=False
+            stream,
+            emit_chunks=True,
+            validate_crc=validate_crc,
+            lazy_chunks=False,
+            allow_incomplete=True,
         ):
             if not isinstance(record, MessageIndex) and pending_chunk:
                 in_time_range = (

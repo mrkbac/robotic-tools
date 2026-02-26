@@ -277,7 +277,7 @@ def test_record_with_padding(mcap_buffer):
 
 
 def test_get_summary_invalid_magic(mcap_buffer):
-    """Test get_summary with invalid ending magic bytes."""
+    """Test get_summary returns None with invalid ending magic bytes."""
     # Write footer using record class
     footer = Footer(summary_start=0, summary_offset_start=0, summary_crc=0)
     footer.write_record_to(mcap_buffer)
@@ -286,9 +286,8 @@ def test_get_summary_invalid_magic(mcap_buffer):
     mcap_buffer.write(b"BADMAGIC")
     mcap_buffer.seek(0)
 
-    # Should raise InvalidMagicError
-    with pytest.raises(InvalidMagicError):
-        get_summary(mcap_buffer)
+    # Should return None (falls back to non-seeking path)
+    assert get_summary(mcap_buffer) is None
 
 
 def test_get_summary_non_seekable():
@@ -427,3 +426,106 @@ def test_channel_references_unknown_schema():
 
     with pytest.raises(SchemaNotFoundError, match="99"):
         list(read_message(buffer))
+
+
+# --- Tests for incomplete MCAP files (still being written) ---
+
+
+def _build_incomplete_mcap() -> bytes:
+    """Build an MCAP file without footer or trailing magic (simulates a file still being written)."""
+    buffer = io.BytesIO()
+    writer = McapWriter(buffer)
+    writer.start()
+    writer.add_schema(schema_id=1, name="test", encoding="raw", data=b"")
+    writer.add_channel(channel_id=1, topic="/test", message_encoding="raw", schema_id=1)
+    writer.add_message(channel_id=1, log_time=1000, publish_time=1000, sequence=0, data=b"hello")
+    writer.add_message(channel_id=1, log_time=2000, publish_time=2000, sequence=1, data=b"world")
+    writer.finish()
+
+    # Strip footer and trailing magic to simulate incomplete file
+    full_data = buffer.getvalue()
+    # Find the footer opcode (0x02) by scanning from end
+    # Footer record: opcode(1) + length(8) + summary_start(8) + summary_offset_start(8) + summary_crc(4)
+    # Trailing magic: 8 bytes
+    # Strip from DataEnd onward by finding DataEnd opcode
+    # Simpler: just strip everything after data section
+    # The data section ends before the DataEnd record. Let's find it.
+    from small_mcap.records import Opcode
+
+    # Scan for DataEnd opcode to find where to truncate
+    pos = len(MAGIC)  # skip leading magic
+    view = memoryview(full_data)
+    while pos < len(view):
+        opcode = view[pos]
+        length = int.from_bytes(view[pos + 1 : pos + 9], "little")
+        if opcode == Opcode.DATA_END:
+            # Truncate here — no DataEnd, no footer, no trailing magic
+            return bytes(full_data[:pos])
+        pos += 9 + length
+
+    # Fallback: strip last 50 bytes (footer + magic)
+    return full_data[:-50]
+
+
+def test_read_messages_from_incomplete_mcap():
+    """Reading messages from an incomplete MCAP (no footer/trailing magic) should work."""
+    data = _build_incomplete_mcap()
+    stream = io.BytesIO(data)
+
+    messages = list(read_message(stream))
+    assert len(messages) == 2
+    assert messages[0][2].log_time == 1000
+    assert messages[1][2].log_time == 2000
+
+
+def test_get_summary_returns_none_for_incomplete_mcap():
+    """get_summary should return None for an incomplete MCAP file."""
+    data = _build_incomplete_mcap()
+    stream = io.BytesIO(data)
+
+    summary = get_summary(stream)
+    assert summary is None
+
+
+def test_stream_reader_allow_incomplete_true():
+    """stream_reader(allow_incomplete=True) should yield complete records and stop at truncation."""
+    data = _build_incomplete_mcap()
+    stream = io.BytesIO(data)
+
+    records = list(stream_reader(stream, allow_incomplete=True))
+    # Should have at least Header + records from chunks, no crash
+    record_types = [type(r).__name__ for r in records]
+    assert "Header" in record_types
+    # Should NOT have Footer (file is incomplete)
+    assert "Footer" not in record_types
+
+
+def test_stream_reader_allow_incomplete_false_raises():
+    """stream_reader(allow_incomplete=False) should raise EndOfFileError on truncated file."""
+    data = _build_incomplete_mcap()
+    stream = io.BytesIO(data)
+
+    with pytest.raises(EndOfFileError):
+        list(stream_reader(stream, allow_incomplete=False))
+
+
+def test_stream_reader_mid_record_truncation():
+    """stream_reader(allow_incomplete=True) handles truncation mid-record."""
+    # Build a valid MCAP, then truncate in the middle of a record
+    buffer = io.BytesIO()
+    buffer.write(MAGIC)
+    header = Header(profile="", library="")
+    header.write_record_to(buffer)
+
+    # Write a schema record header claiming 100 bytes, but only write 10
+    buffer.write(Opcode.SCHEMA.to_bytes(1, "little"))
+    buffer.write((100).to_bytes(8, "little"))
+    buffer.write(b"0123456789")  # Only 10 bytes of the 100
+
+    data = buffer.getvalue()
+    stream = io.BytesIO(data)
+
+    records = list(stream_reader(stream, allow_incomplete=True))
+    # Should have Header only, truncated record is skipped
+    assert len(records) == 1
+    assert isinstance(records[0], Header)
