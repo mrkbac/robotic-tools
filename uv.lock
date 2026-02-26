@@ -2328,7 +2328,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]

@@ -196,10 +196,6 @@ class McapWriterRaw:
         self.schemas: dict[int, Schema] = {}
         self.channels: dict[int, Channel] = {}
 
-        # Track which schemas/channels have been written to main file (not in chunks)
-        self._main_written_schemas: set[int] = set()
-        self._main_written_channels: set[int] = set()
-
         # Indexes
         self.chunk_indices: list[ChunkIndex] = []
         self.attachment_indexes: list[AttachmentIndex] = []
@@ -314,6 +310,15 @@ class McapWriterRaw:
         )
 
         self._write_record(message)
+
+        # Update statistics (needed for unchunked mode where add_chunk is never called)
+        if self.statistics.message_count == 0:
+            self.statistics.message_start_time = log_time
+        else:
+            self.statistics.message_start_time = min(log_time, self.statistics.message_start_time)
+        self.statistics.message_end_time = max(log_time, self.statistics.message_end_time)
+        self.statistics.message_count += 1
+        self.statistics.channel_message_counts[channel_id] += 1
 
     def add_attachment(
         self,

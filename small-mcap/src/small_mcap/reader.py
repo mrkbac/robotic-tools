@@ -313,7 +313,6 @@ def stream_reader(
     Yields:
         McapRecord instances in file order.
     """
-    record_size_limit = _RECORD_SIZE_LIMIT
     checksum = 0
 
     def read(n: int) -> memoryview:
@@ -342,8 +341,8 @@ def stream_reader(
                 return
             raise
 
-        if record_size_limit is not None and length > record_size_limit:
-            raise RecordLengthLimitExceededError(opcode, length, record_size_limit)
+        if length > _RECORD_SIZE_LIMIT:
+            raise RecordLengthLimitExceededError(opcode, length, _RECORD_SIZE_LIMIT)
 
         record_start = cached_pos
         cached_pos += _RECORD_HEADER_SIZE
@@ -367,6 +366,9 @@ def stream_reader(
             else:
                 record = None  # Unknown record type, skip it.
 
+        if record is None:
+            continue
+
         if (
             validate_crc
             and not skip_magic
@@ -380,21 +382,18 @@ def stream_reader(
             )
 
         if isinstance(record, Chunk) and not emit_chunks:
-            chunk_records = breakup_chunk(record, validate_crc)
-            yield from chunk_records
-        elif record:
-            # When breaking up chunks (emit_chunks=False), skip MessageIndex records
-            # as they are metadata about messages in chunks that we're already yielding directly
-            if not emit_chunks and isinstance(record, MessageIndex):
-                continue
+            yield from breakup_chunk(record, validate_crc)
+        elif not emit_chunks and isinstance(record, MessageIndex):
+            pass  # skip when breaking up chunks
+        elif isinstance(record, Footer):
             yield record
-
-        if isinstance(record, Footer):
             if not skip_magic:
                 magic = read(MAGIC_SIZE)
                 if magic != MAGIC:
                     raise InvalidMagicError(magic)
             break
+        else:
+            yield record
 
 
 def _read_summary_from_iterable(stream_reader: Iterable[McapRecord | LazyChunk]) -> Summary | None:
@@ -621,6 +620,9 @@ def _read_message_seeking(
         else:
             yield from breakup_chunk(chunk, validate_crc=validate_crc)
 
+    def in_time_range(chunk_start: int, chunk_end: int) -> bool:
+        return chunk_start < end_time_ns and chunk_end >= start_time_ns
+
     # Filter and sort chunks that overlap with the time range
     sorted_chunks = sorted(
         (
@@ -630,8 +632,7 @@ def _read_message_seeking(
                 cidx.message_index_offsets
                 and exclude_channels.issuperset(cidx.message_index_offsets)
             )
-            and cidx.message_end_time >= start_time_ns
-            and cidx.message_start_time < end_time_ns
+            and in_time_range(cidx.message_start_time, cidx.message_end_time)
         ),
         key=attrgetter("message_end_time") if reverse else attrgetter("message_start_time"),
         reverse=reverse,
@@ -656,12 +657,9 @@ def _read_message_seeking(
 
     def _lazy_sort(item: McapRecord) -> int:
         if isinstance(item, Message):
-            return -item.log_time if reverse else item.log_time
+            return item.log_time
         if isinstance(item, ChunkIndex):
-            # Use message_end_time for reverse (last message time)
-            # Use message_start_time for forward (first message time)
-            time = item.message_end_time if reverse else item.message_start_time
-            return -time if reverse else time
+            return item.message_end_time if reverse else item.message_start_time
         return 0  # Schema and Channel records should come before messages
 
     lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
@@ -674,7 +672,7 @@ def _read_message_seeking(
         reader = itertools.chain.from_iterable(lazy_iterables)
     else:
         # Chunks overlap, use heap merge to maintain time order
-        reader = heapq.merge(*lazy_iterables, key=_lazy_sort)
+        reader = heapq.merge(*lazy_iterables, key=_lazy_sort, reverse=reverse)
 
     yield from _read_inner(
         reader,
@@ -701,6 +699,46 @@ def _read_message_non_seeking(
     exclude_channels: set[int] = set()
     seen_channels: set[int] = set()
 
+    def in_time_range(chunk_start: int, chunk_end: int) -> bool:
+        return chunk_start < end_time_ns and chunk_end >= start_time_ns
+
+    def _flush_pending_chunk(
+        chunk: Chunk,
+        message_indexes: list[MessageIndex],
+        *,
+        force_full: bool = False,
+    ) -> Iterable[McapRecord]:
+        """Decompress and yield records from a pending chunk.
+
+        Args:
+            chunk: The chunk to flush.
+            message_indexes: Associated message indexes (may be empty).
+            force_full: If True, always use full decompression (for final chunks
+                where we can't guarantee all indexes were received).
+        """
+        if not in_time_range(chunk.message_start_time, chunk.message_end_time):
+            return
+
+        if force_full or not message_indexes:
+            yield from breakup_chunk(chunk, validate_crc=validate_crc)
+            return
+
+        channel_ids = {mi.channel_id for mi in message_indexes}
+        new_channels = bool(channel_ids - seen_channels)
+
+        if new_channels:
+            # Chunk may contain Schema/Channel records for unseen channels.
+            # Use full decompression to yield them.
+            yield from breakup_chunk(chunk, validate_crc=validate_crc)
+        elif not channel_ids.issubset(exclude_channels):
+            # All channels known — safe to use indexed message lookup.
+            filtered = _filter_message_indices_by_time(
+                (mi for mi in message_indexes if mi.channel_id not in exclude_channels),
+                start_time_ns,
+                end_time_ns,
+            )
+            yield from _breakup_chunk_with_indexes(chunk, filtered, validate_crc)
+
     def _inner() -> Iterable[McapRecord]:
         pending_chunk: Chunk | None = None
         pending_message_indexes: list[MessageIndex] = []
@@ -712,39 +750,7 @@ def _read_message_non_seeking(
             allow_incomplete=True,
         ):
             if not isinstance(record, MessageIndex) and pending_chunk:
-                in_time_range = (
-                    pending_chunk.message_start_time < end_time_ns
-                    and pending_chunk.message_end_time >= start_time_ns
-                )
-                if in_time_range:
-                    if pending_message_indexes:
-                        channel_ids = {msg_idx.channel_id for msg_idx in pending_message_indexes}
-                        new_channels = bool(channel_ids - seen_channels)
-                        all_excluded = channel_ids.issubset(exclude_channels)
-                        if new_channels or not all_excluded:
-                            if new_channels:
-                                # Chunk may contain Schema/Channel records for unseen channels.
-                                # Use full decompression to yield them.
-                                yield from breakup_chunk(
-                                    pending_chunk, validate_crc=validate_crc
-                                )
-                            else:
-                                # All channels known — safe to use indexed message lookup.
-                                filtered_message_indexes: Iterable[MessageIndex] = (
-                                    mi
-                                    for mi in pending_message_indexes
-                                    if mi.channel_id not in exclude_channels
-                                )
-
-                                filtered_message_indexes = _filter_message_indices_by_time(
-                                    filtered_message_indexes, start_time_ns, end_time_ns
-                                )
-
-                                yield from _breakup_chunk_with_indexes(
-                                    pending_chunk, filtered_message_indexes, validate_crc
-                                )
-                    else:
-                        yield from breakup_chunk(pending_chunk, validate_crc=validate_crc)
+                yield from _flush_pending_chunk(pending_chunk, pending_message_indexes)
                 pending_chunk = None
                 pending_message_indexes.clear()
 
@@ -758,14 +764,9 @@ def _read_message_non_seeking(
                 yield record
 
         if pending_chunk:
-            in_time_range = (
-                pending_chunk.message_start_time < end_time_ns
-                and pending_chunk.message_end_time >= start_time_ns
-            )
-            if in_time_range:
-                # Final chunks must always be decompressed fully since we can't ensure we
-                # got all message indexes
-                yield from breakup_chunk(pending_chunk, validate_crc=validate_crc)
+            # Final chunk: always decompress fully since we can't ensure we
+            # got all message indexes
+            yield from _flush_pending_chunk(pending_chunk, pending_message_indexes, force_full=True)
 
     def _should_include_wrapper(channel: Channel, schema: Schema | None) -> bool:
         seen_channels.add(channel.id)

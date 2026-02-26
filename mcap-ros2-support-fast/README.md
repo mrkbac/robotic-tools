@@ -37,15 +37,18 @@ with open("output.mcap", "wb") as f:
     writer = McapWriter(f, encoder_factory=encoder_factory)
     writer.start(profile="ros2")
 
-    schema_id = writer.add_schema(
-        name="geometry_msgs/msg/Point",
-        encoding="ros2msg",
-        data=b"float64 x\nfloat64 y\nfloat64 z"
+    schema_id = 1
+    writer.add_schema(
+        schema_id,
+        "geometry_msgs/msg/Point",
+        "ros2msg",
+        b"float64 x\nfloat64 y\nfloat64 z",
     )
-    channel_id = writer.add_channel("/point", "cdr", schema_id=schema_id)
+    channel_id = 1
+    writer.add_channel(channel_id, "/point", "cdr", schema_id)
 
     point = {"x": 1.0, "y": 2.0, "z": 3.0}
-    writer.add_message_encode(channel_id, log_time=0, data=point)
+    writer.add_message_encode(channel_id, log_time=0, data=point, publish_time=0)
 
     writer.finish()
 ```

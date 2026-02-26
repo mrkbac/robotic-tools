@@ -185,6 +185,44 @@ class TestMcapWriterChunking:
             assert stats.message_end_time == 1000
             assert stats.channel_message_counts == {1: 1}
 
+    def test_unchunked_mode_statistics(self, temp_mcap_file: Path):
+        """Test that statistics are correct in true unchunked mode (use_chunking=False)."""
+        with open(temp_mcap_file, "wb") as f:
+            writer = McapWriter(f, use_chunking=False)
+            writer.start()
+
+            writer.add_schema(schema_id=1, name="Test", encoding="json", data=b"{}")
+            writer.add_channel(
+                channel_id=1,
+                topic="/test",
+                message_encoding="json",
+                schema_id=1,
+            )
+            writer.add_channel(
+                channel_id=2,
+                topic="/test2",
+                message_encoding="json",
+                schema_id=1,
+            )
+
+            writer.add_message(channel_id=1, log_time=1000, data=b"a", publish_time=1000)
+            writer.add_message(channel_id=1, log_time=3000, data=b"b", publish_time=3000)
+            writer.add_message(channel_id=2, log_time=2000, data=b"c", publish_time=2000)
+
+            writer.finish()
+
+        with open(temp_mcap_file, "rb") as f:
+            summary = get_summary(f)
+            assert summary.statistics
+            stats = summary.statistics
+            assert stats.message_count == 3
+            assert stats.schema_count == 1
+            assert stats.channel_count == 2
+            assert stats.chunk_count == 0
+            assert stats.message_start_time == 1000
+            assert stats.message_end_time == 3000
+            assert stats.channel_message_counts == {1: 2, 2: 1}
+
 
 class TestMcapWriterCompression:
     """Test compression functionality."""

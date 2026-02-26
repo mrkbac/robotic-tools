@@ -597,9 +597,7 @@ class TestSchemasInChunks:
             offset = buf.tell()
             record.write_record_to(buf)
             if isinstance(record, Message):
-                msg_offsets.setdefault(record.channel_id, []).append(
-                    (record.log_time, offset)
-                )
+                msg_offsets.setdefault(record.channel_id, []).append((record.log_time, offset))
 
         message_indexes = [
             MessageIndex(channel_id=ch_id, records=entries)

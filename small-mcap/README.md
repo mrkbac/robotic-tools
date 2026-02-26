@@ -103,10 +103,12 @@ with open("output.mcap", "wb") as f:
     writer.start(profile="", library="my-app")
 
     # Add schema
-    schema_id = writer.add_schema("MySchema", "json", b'{"type": "object"}')
+    schema_id = 1
+    writer.add_schema(schema_id, "MySchema", "json", b'{"type": "object"}')
 
     # Add channel
-    channel_id = writer.add_channel("/my/topic", "json", schema_id=schema_id)
+    channel_id = 1
+    writer.add_channel(channel_id, "/my/topic", "json", schema_id)
 
     # Add messages
     for i in range(100):
@@ -133,8 +135,10 @@ with open("output.mcap", "wb") as f:
     )
     writer.start(profile="", library="my-app")
 
-    schema_id = writer.add_schema("MySchema", "json", b"{}")
-    channel_id = writer.add_channel("/topic", "json", schema_id=schema_id)
+    schema_id = 1
+    writer.add_schema(schema_id, "MySchema", "json", b"{}")
+    channel_id = 1
+    writer.add_channel(channel_id, "/topic", "json", schema_id)
 
     for i in range(1000):
         writer.add_message(channel_id, log_time=i*1000, data=b"data", publish_time=i*1000)
@@ -145,29 +149,31 @@ with open("output.mcap", "wb") as f:
 ### Write with encoder factory
 
 ```python
-from small_mcap import McapWriter, EncoderFactory
+from small_mcap import McapWriter
 import json
 
-class JsonEncoder(EncoderFactory):
-    def get_schema_encoding(self, schema_name):
-        return "json", b'{"type": "object"}'
+class JsonEncoderFactory:
+    """Implements EncoderFactoryProtocol for JSON messages."""
+    profile = ""
+    encoding = "jsonschema"
+    message_encoding = "json"
 
-    def get_channel_encoding(self, topic):
-        return "json"
-
-    def encode(self, topic, msg):
-        return json.dumps(msg).encode()
+    def encoder_for(self, schema):
+        return lambda msg: json.dumps(msg).encode()
 
 with open("output.mcap", "wb") as f:
-    writer = McapWriter(f)
+    writer = McapWriter(f, encoder_factory=JsonEncoderFactory())
     writer.start(profile="", library="my-app")
 
-    encoder = JsonEncoder()
+    schema_id = 1
+    writer.add_schema(schema_id, "SensorData", "jsonschema", b'{"type": "object"}')
 
-    # Encoder automatically registers schemas and channels
+    channel_id = 1
+    writer.add_channel(channel_id, "/sensor/data", "json", schema_id)
+
     for i in range(100):
         msg = {"timestamp": i, "value": i * 2}
-        writer.add_message_encoded("/sensor/data", i * 1000, msg, encoder, publish_time=i * 1000)
+        writer.add_message_encode(channel_id, i * 1000, msg, publish_time=i * 1000)
 
     writer.finish()
 ```

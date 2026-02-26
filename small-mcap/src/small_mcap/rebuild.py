@@ -1,5 +1,6 @@
 """Rebuild MCAP summary section from data section."""
 
+import logging
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ from small_mcap.records import (
     Statistics,
     Summary,
 )
+
+logger = logging.getLogger(__name__)
 
 # opcode + length + channel_id + sequence + log_time + publish_time
 MESSAGE_RECORD_OVERHEAD = 1 + 8 + 2 + 4 + 8 + 8
@@ -382,7 +385,7 @@ def rebuild_summary(
             elif isinstance(record, MetadataIndex):
                 summary.metadata_indexes.append(record)
     except Exception as e:  # noqa: BLE001
-        print(f"Warning: Error while rebuilding summary at offset {next_offset}: {e}")  # noqa: T201
+        logger.warning("Error while rebuilding summary at offset %d: %s", next_offset, e)
 
     if pending_chunk is not None:
         message_index_length = last_message_index_end_offset - message_index_start_offset
@@ -403,7 +406,7 @@ def rebuild_summary(
         # TODO: we should only rebuild if other chunks have message indexes
         finish_chunk(force=True, rebuild_indexes=True)
     except Exception as e:  # noqa: BLE001
-        print(f"Warning: Could not process final chunk: {e}")  # noqa: T201
+        logger.warning("Could not process final chunk: %s", e)
 
     # Finalize statistics
     statistics.schema_count = len(summary.schemas)

@@ -20,27 +20,28 @@ uv add websocket-bridge
 
 ```python
 import asyncio
-from websocket_bridge import WebSocketBridgeServer, Channel
+from websocket_bridge.server import Channel
+from websocket_bridge import WebSocketBridgeServer
 
 async def main():
-    server = WebSocketBridgeServer(name="my-server")
+    server = WebSocketBridgeServer(host="0.0.0.0", port=8765, name="my-server")
 
-    # Define a channel
+    # Define and advertise a channel
     channel = Channel(
         id=1,
         topic="/sensor/data",
         encoding="json",
         schema_name="SensorData",
-        schema='{"type": "object"}'
+        schema='{"type": "object"}',
     )
 
-    # Start server and advertise channel
-    await server.start("0.0.0.0", 8765)
-    server.set_channels([channel])
+    await server.start()
+    await server.advertise_channel(channel)
 
     # Publish messages
     while True:
-        await server.send_message(channel.id, timestamp_ns, data)
+        data = b'{"temperature": 22.5}'
+        await server.publish_message(channel.id, data)
         await asyncio.sleep(0.1)
 
 asyncio.run(main())
@@ -55,16 +56,23 @@ from websocket_bridge import WebSocketBridgeClient
 async def main():
     client = WebSocketBridgeClient("ws://localhost:8765")
 
-    @client.on_message
     async def handle_message(channel, timestamp, data):
         print(f"{channel['topic']}: {data}")
 
-    @client.on_advertise
     async def handle_advertise(channel):
-        await client.subscribe(channel["id"])
+        await client.subscribe(channel["topic"])
+
+    client.on_message(handle_message)
+    client.on_advertised_channel(handle_advertise)
 
     await client.connect()
-    await client.run_forever()
+
+    # Keep running until interrupted
+    try:
+        while True:
+            await asyncio.sleep(1)
+    finally:
+        await client.disconnect()
 
 asyncio.run(main())
 ```
