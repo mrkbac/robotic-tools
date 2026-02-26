@@ -37,6 +37,7 @@ from small_mcap.records import (
     Metadata,
     Opcode,
     Schema,
+    Statistics,
 )
 
 # Test constants
@@ -446,7 +447,10 @@ def test_channel_references_unknown_schema():
 
 
 def _build_incomplete_mcap() -> bytes:
-    """Build an MCAP file without footer or trailing magic (simulates a file still being written)."""
+    """Build an MCAP file without footer or trailing magic.
+
+    Simulates a file still being written.
+    """
     buffer = io.BytesIO()
     writer = McapWriter(buffer)
     writer.start()
@@ -459,13 +463,12 @@ def _build_incomplete_mcap() -> bytes:
     # Strip footer and trailing magic to simulate incomplete file
     full_data = buffer.getvalue()
     # Find the footer opcode (0x02) by scanning from end
-    # Footer record: opcode(1) + length(8) + summary_start(8) + summary_offset_start(8) + summary_crc(4)
+    # Footer record: opcode(1) + length(8) + summary_start(8)
+    # + summary_offset_start(8) + summary_crc(4)
     # Trailing magic: 8 bytes
     # Strip from DataEnd onward by finding DataEnd opcode
     # Simpler: just strip everything after data section
     # The data section ends before the DataEnd record. Let's find it.
-    from small_mcap.records import Opcode
-
     # Scan for DataEnd opcode to find where to truncate
     pos = len(MAGIC)  # skip leading magic
     view = memoryview(full_data)
@@ -582,8 +585,6 @@ def test_illegal_opcode_in_chunk_breakup():
 def test_illegal_opcode_in_chunk_via_stream_reader(mcap_buffer):
     """stream_reader with emit_chunks=False raises IllegalOpcodeInChunkError for illegal opcodes."""
     # Build chunk data with a Statistics record (illegal inside chunk)
-    from small_mcap.records import Statistics
-
     inner_buf = io.BytesIO()
     Statistics(
         message_count=0,

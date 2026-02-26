@@ -4,7 +4,7 @@ import io
 
 import small_mcap.reader as reader_module
 from pytest_mock import MockerFixture
-from small_mcap import Channel, McapWriter, Message, get_header, get_summary, read_message
+from small_mcap import McapWriter, get_header, get_summary, read_message
 from small_mcap.reader import stream_reader
 from small_mcap.records import (
     MAGIC,

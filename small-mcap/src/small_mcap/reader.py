@@ -428,7 +428,7 @@ def get_summary(stream: IO[bytes]) -> Summary | None:
         stream.seek(-MAGIC_SIZE, io.SEEK_END)
         magic = stream.read(MAGIC_SIZE)
         if magic != MAGIC:
-            raise InvalidMagicError(magic)
+            return None
         stream.seek(-(_FOOTER_SIZE + MAGIC_SIZE), io.SEEK_END)
         footer = next(iter(stream_reader(stream, skip_magic=True)))
         if not isinstance(footer, Footer):
