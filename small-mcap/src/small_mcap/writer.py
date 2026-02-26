@@ -402,20 +402,16 @@ class McapWriterRaw:
         chunk_start_offset = self.crc_writer.tell()
         chunk_len = chunk.write_record_to(self.crc_writer)
 
-        # Write message indexes
-        message_index_start_offset = self.crc_writer.tell()
+        # Write message indexes directly to crc_writer
         message_index_offsets: dict[int, int] = {}
-        index_buffer = io.BytesIO()
+        message_index_start_offset = self.crc_writer.tell()
 
         if self.index_types & IndexType.MESSAGE:
             for idx in message_indices.values():
-                message_index_offsets[idx.channel_id] = (
-                    message_index_start_offset + index_buffer.tell()
-                )
-                idx.write_record_to(index_buffer)
+                message_index_offsets[idx.channel_id] = self.crc_writer.tell()
+                idx.write_record_to(self.crc_writer)
 
-        index_data = index_buffer.getvalue()
-        self.crc_writer.write(index_data)
+        message_index_length = self.crc_writer.tell() - message_index_start_offset
 
         # Store chunk index
         self.chunk_indices.append(
@@ -425,7 +421,7 @@ class McapWriterRaw:
                 chunk_start_offset=chunk_start_offset,
                 chunk_length=chunk_len,
                 message_index_offsets=message_index_offsets,
-                message_index_length=len(index_data),
+                message_index_length=message_index_length,
                 compression=chunk.compression,
                 compressed_size=len(chunk.data),
                 uncompressed_size=chunk.uncompressed_size,
@@ -586,9 +582,10 @@ class _ChunkBuilder:
         # Update time tracking
         if self.num_messages == 0:
             self.message_start_time = record.log_time
+            self.message_end_time = record.log_time
         else:
             self.message_start_time = min(self.message_start_time, record.log_time)
-        self.message_end_time = max(self.message_end_time, record.log_time)
+            self.message_end_time = max(self.message_end_time, record.log_time)
 
         # Update message index (get position before writing)
         msg_idx = self.message_indices.get(record.channel_id)

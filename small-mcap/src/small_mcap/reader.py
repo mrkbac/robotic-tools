@@ -493,7 +493,8 @@ def _read_inner(
 
     for record in reader:
         if isinstance(record, Message):
-            if record.channel_id not in _channels:
+            channel = _channels.get(record.channel_id)
+            if channel is None:
                 raise ChannelNotFoundError(record.channel_id)
             if (
                 (record.channel_id in exclude_channels)
@@ -501,7 +502,6 @@ def _read_inner(
                 or (record.log_time >= end_time_ns)
             ):
                 continue
-            channel = _channels[record.channel_id]
             schema = _schemas.get(channel.schema_id)
             yield (schema, channel, record)
         elif isinstance(record, Schema):
@@ -921,12 +921,14 @@ def read_message_decoded(
         cache_key = schema.id if schema else 0
 
         if decoder := decoders.get(cache_key):
-            return decoder(bytes(message.data))
+            data = message.data if isinstance(message.data, bytes) else bytes(message.data)
+            return decoder(data)
 
         for factory in decoder_factories:
             if decoder := factory.decoder_for(channel.message_encoding, schema):
                 decoders[cache_key] = decoder
-                return decoder(bytes(message.data))
+                data = message.data if isinstance(message.data, bytes) else bytes(message.data)
+                return decoder(data)
 
         # No decoder found - return raw data for schemaless, raise for schema-based
         if schema is None:

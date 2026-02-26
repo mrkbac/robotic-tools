@@ -62,7 +62,7 @@ def _read_string(data: bytes | memoryview, offset: int) -> tuple[str, int]:
     string_len = struct.unpack_from("<I", data, offset)[0]
     offset += 4
     string_bytes = data[offset : offset + string_len]
-    string_val = bytes(string_bytes).decode("utf-8")
+    string_val = str(string_bytes, "utf-8")
     offset += string_len
     return string_val, offset
 
@@ -103,7 +103,10 @@ def _write_string(value: str) -> bytes:
         Serialized bytes with length prefix
     """
     encoded = value.encode("utf-8")
-    return struct.pack("<I", len(encoded)) + encoded
+    buf = bytearray(4 + len(encoded))
+    struct.pack_into("<I", buf, 0, len(encoded))
+    buf[4:] = encoded
+    return bytes(buf)
 
 
 def _write_map(value: dict[str, str]) -> bytes:
@@ -121,9 +124,11 @@ def _write_map(value: dict[str, str]) -> bytes:
     if not value:
         return struct.pack("<I", 0)
 
-    parts = [_write_string(k) + _write_string(v) for k, v in value.items()]
-    entries = b"".join(parts)
-    return struct.pack("<I", len(entries)) + entries
+    buf = bytearray()
+    for k, v in value.items():
+        buf += _write_string(k)
+        buf += _write_string(v)
+    return struct.pack("<I", len(buf)) + buf
 
 
 T = TypeVar("T", bound="McapRecord")
@@ -391,9 +396,10 @@ class Chunk(McapRecord):
             self.data if isinstance(self.data, bytes) else bytes(self.data),
         )
         content_len = sum(len(p) for p in parts)
-        record = b"".join((OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, content_len), *parts))
-        out.write(record)
-        return len(record)
+        out.write(OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, content_len))
+        for p in parts:
+            out.write(p)
+        return 9 + content_len
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "Chunk":
