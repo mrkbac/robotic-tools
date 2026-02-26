@@ -26,7 +26,15 @@ on:
         type: boolean
 
 jobs:
+  lint:
+    uses: ./.github/workflows/lint.yaml
+
+  test:
+    uses: ./.github/workflows/test.yaml
+    secrets: inherit
+
   publish:
+    needs: [lint, test]
     runs-on: ubuntu-latest
     environment:
       name: pypi
