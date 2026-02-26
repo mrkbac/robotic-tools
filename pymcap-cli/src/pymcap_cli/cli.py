@@ -16,6 +16,7 @@ from pymcap_cli.cmd import (
     merge_cmd,
     process_cmd,
     rechunk_cmd,
+    records_cmd,
     recover_cmd,
     recover_inplace_cmd,
     tftree_cmd,
@@ -85,6 +86,7 @@ app.command(name="filter")(filter_cmd.filter_cmd)
 app.command(name="merge")(merge_cmd.merge)
 app.command(name="compress")(compress_cmd.compress)
 app.command(name="convert")(convert_cmd.convert)
+app.command(name="records")(records_cmd.records)
 app.command(name="roscompress")(roscompress)
 
 # Command groups (list has 5 subcommands)
