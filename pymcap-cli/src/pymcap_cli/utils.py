@@ -20,7 +20,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 from rich.text import Text
-from small_mcap import RebuildInfo, get_header, get_summary, rebuild_summary
+from small_mcap import McapError, RebuildInfo, get_header, get_summary, rebuild_summary
 
 from pymcap_cli.osc_utils import OSCProgressColumn
 
@@ -256,7 +256,8 @@ def read_info(f: IO[bytes]) -> RebuildInfo:
     """
     header = get_header(f)
     summary = get_summary(f)
-    assert summary is not None, "Summary should not be None"
+    if summary is None:
+        raise McapError("No valid summary section found")
     return RebuildInfo(header=header, summary=summary)
 
 

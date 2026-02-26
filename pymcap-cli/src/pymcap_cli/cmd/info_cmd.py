@@ -7,7 +7,7 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 from rich.table import Table
-from small_mcap import InvalidMagicError
+from small_mcap import InvalidMagicError, McapError
 
 from pymcap_cli.cmd.info_json_cmd import info_to_dict
 from pymcap_cli.display_utils import (
@@ -329,7 +329,7 @@ def info(
             else:
                 try:
                     info_data = read_info(f_buffered)
-                except (InvalidMagicError, AssertionError):
+                except (InvalidMagicError, McapError, AssertionError):
                     console.print("[red]Invalid MCAP magic, rebuilding info.[/]")
                     f_buffered.seek(0)  # Reset to start
                     info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)

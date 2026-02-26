@@ -5,7 +5,7 @@ from datetime import datetime
 from cyclopts import App
 from rich.console import Console
 from rich.table import Table
-from small_mcap import InvalidMagicError, RebuildInfo
+from small_mcap import InvalidMagicError, McapError, RebuildInfo
 
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
@@ -21,7 +21,7 @@ def _read_mcap_info(file_path: str) -> RebuildInfo:
     with open_input(file_path) as (f_raw, file_size):
         try:
             info = read_info(f_raw)
-        except InvalidMagicError:
+        except (InvalidMagicError, McapError, AssertionError):
             console.print("[yellow]Invalid MCAP magic, rebuilding info...[/yellow]")
             f_raw.seek(0)  # Reset buffer to start
             info = rebuild_info(f_raw, file_size)

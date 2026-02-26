@@ -10,7 +10,7 @@ from typing import Annotated
 
 from cyclopts import Parameter
 from rich.console import Console
-from small_mcap import Channel, ChunkIndex, InvalidMagicError, RebuildInfo, Schema
+from small_mcap import Channel, ChunkIndex, InvalidMagicError, McapError, RebuildInfo, Schema
 
 from pymcap_cli.info_types import (
     ChannelInfo,
@@ -634,7 +634,7 @@ def info_json(
             else:
                 try:
                     info = read_info(f_buffered)
-                except InvalidMagicError:
+                except (InvalidMagicError, McapError, AssertionError):
                     f_buffered.seek(0)
                     info = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
 
