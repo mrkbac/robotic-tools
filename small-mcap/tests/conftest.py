@@ -44,7 +44,7 @@ def sample_schema() -> Schema:
     return Schema(
         id=1,
         name="test_schema",
-        encoding=SchemaEncoding.PROTOBUF,
+        encoding=SchemaEncoding.Protobuf,
         data=b"message Test { int32 value = 1; }",
     )
 
@@ -56,7 +56,7 @@ def sample_channel(sample_schema: Schema) -> Channel:
         id=1,
         schema_id=sample_schema.id,
         topic="/test/topic",
-        message_encoding=MessageEncoding.PROTOBUF,
+        message_encoding=MessageEncoding.Protobuf,
         metadata={"key": "value"},
     )
 

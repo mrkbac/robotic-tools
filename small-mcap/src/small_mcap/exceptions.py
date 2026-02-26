@@ -79,3 +79,14 @@ class InvalidHeaderError(McapError):
 class SeekRequiredError(McapError):
     def __init__(self, operation: str) -> None:
         super().__init__(f"{operation} is not supported for non-seekable streams.")
+
+
+class IllegalOpcodeInChunkError(McapError):
+    def __init__(self, opcode: int) -> None:
+        opcode_name = f"unknown (opcode 0x{opcode:02X})"
+        with contextlib.suppress(ValueError):
+            opcode_name = Opcode(opcode).name
+        super().__init__(
+            f"illegal opcode {opcode_name} in chunk; "
+            f"chunks may only contain Schema, Channel, and Message records"
+        )

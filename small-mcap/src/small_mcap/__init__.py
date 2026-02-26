@@ -9,6 +9,7 @@ from small_mcap.exceptions import (
     ChannelNotFoundError,
     CRCValidationError,
     EndOfFileError,
+    IllegalOpcodeInChunkError,
     InvalidHeaderError,
     InvalidMagicError,
     McapError,
@@ -27,8 +28,10 @@ from small_mcap.reader import (
     get_header,
     get_summary,
     include_topics,
+    read_attachment,
     read_message,
     read_message_decoded,
+    read_metadata,
     stream_reader,
 )
 from small_mcap.rebuild import RebuildInfo, rebuild_summary
@@ -89,6 +92,7 @@ __all__ = [
     "EncoderFactoryProtocol",
     "EndOfFileError",
     "Footer",
+    "IllegalOpcodeInChunkError",
     "Header",
     "IndexType",
     "InvalidHeaderError",
@@ -123,8 +127,10 @@ __all__ = [
     "get_header",
     "get_summary",
     "include_topics",
+    "read_attachment",
     "read_message",
     "read_message_decoded",
+    "read_metadata",
     "rebuild_summary",
     "stream_reader",
 ]

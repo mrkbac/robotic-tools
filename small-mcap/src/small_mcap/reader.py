@@ -14,6 +14,7 @@ from small_mcap.exceptions import (
     ChannelNotFoundError,
     CRCValidationError,
     EndOfFileError,
+    IllegalOpcodeInChunkError,
     InvalidHeaderError,
     InvalidMagicError,
     RecordLengthLimitExceededError,
@@ -141,6 +142,22 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | 
 
 
 def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapRecord]:
+    """Decompress a chunk and yield its individual records.
+
+    Chunks may only contain Schema, Channel, and Message records per the MCAP spec.
+
+    Args:
+        chunk: The chunk to decompress and iterate over.
+        validate_crc: Whether to validate the chunk's CRC32 checksum.
+
+    Yields:
+        Schema, Channel, and Message records from the chunk.
+
+    Raises:
+        IllegalOpcodeInChunkError: If a record with an illegal opcode is found in the chunk.
+        CRCValidationError: If validate_crc is True and the CRC doesn't match.
+        UnsupportedCompressionError: If the chunk uses an unsupported compression type.
+    """
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
     view = memoryview(data)
     pos = 0
@@ -156,7 +173,8 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapReco
             yield Channel.read(view[pos:record_data_end])
         elif opcode == Opcode.SCHEMA:
             yield Schema.read(view[pos:record_data_end])
-        # TODO: raise illegal opcode in chunk error
+        else:
+            raise IllegalOpcodeInChunkError(opcode)
 
         pos = record_data_end
 
@@ -200,7 +218,8 @@ def _breakup_chunk_with_indexes(
         record_data_end = pos + length
         if opcode == Opcode.MESSAGE:
             yield Message.read(view[pos:record_data_end])
-        # TODO: raise illegal opcode in chunk error
+        else:
+            raise IllegalOpcodeInChunkError(opcode)
 
 
 def _read_chunk_and_indexes(data: bytes) -> tuple[Chunk, list[MessageIndex]]:
@@ -273,6 +292,27 @@ def stream_reader(
     lazy_chunks: bool = False,
     allow_incomplete: bool = False,
 ) -> Iterable[McapRecord] | Iterable[McapRecord | LazyChunk]:
+    """Low-level iterator that yields every record from an MCAP byte stream.
+
+    Records are yielded in file order. When ``emit_chunks`` is False (default),
+    Chunk records are automatically decompressed and their inner Schema, Channel,
+    and Message records are yielded instead.
+
+    Args:
+        stream: A readable binary stream positioned at the start of the MCAP data
+            (or just after the magic bytes if ``skip_magic`` is True).
+        skip_magic: If True, skip validation of the leading magic bytes.
+        validate_crc: If True, validate CRC checksums on chunks and the data section.
+        emit_chunks: If True, yield Chunk (or LazyChunk) and MessageIndex records
+            directly instead of breaking them up into their contents.
+        lazy_chunks: If True (requires ``emit_chunks=True``), yield LazyChunk records
+            that defer decompression until explicitly requested.
+        allow_incomplete: If True, gracefully stop iteration when the stream is
+            truncated instead of raising EndOfFileError.
+
+    Yields:
+        McapRecord instances in file order.
+    """
     record_size_limit = _RECORD_SIZE_LIMIT
     checksum = 0
 
@@ -410,6 +450,34 @@ def get_header(stream: IO[bytes]) -> Header:
     if not isinstance(header, Header):
         raise InvalidHeaderError(type(header))
     return header
+
+
+def read_attachment(stream: IO[bytes], index: AttachmentIndex) -> Attachment:
+    """Read a full Attachment record given its index.
+
+    Args:
+        stream: A seekable binary stream containing the MCAP data.
+        index: The AttachmentIndex obtained from :func:`get_summary`.
+
+    Returns:
+        The deserialized Attachment record.
+    """
+    stream.seek(index.offset)
+    return Attachment.read_record(stream)
+
+
+def read_metadata(stream: IO[bytes], index: MetadataIndex) -> Metadata:
+    """Read a full Metadata record given its index.
+
+    Args:
+        stream: A seekable binary stream containing the MCAP data.
+        index: The MetadataIndex obtained from :func:`get_summary`.
+
+    Returns:
+        The deserialized Metadata record.
+    """
+    stream.seek(index.offset)
+    return Metadata.read_record(stream)
 
 
 def _read_inner(
@@ -654,20 +722,27 @@ def _read_message_non_seeking(
                         new_channels = bool(channel_ids - seen_channels)
                         all_excluded = channel_ids.issubset(exclude_channels)
                         if new_channels or not all_excluded:
-                            # Filter message indexes to only include non-excluded channels
-                            filtered_message_indexes: Iterable[MessageIndex] = (
-                                mi
-                                for mi in pending_message_indexes
-                                if mi.channel_id not in exclude_channels
-                            )
+                            if new_channels:
+                                # Chunk may contain Schema/Channel records for unseen channels.
+                                # Use full decompression to yield them.
+                                yield from breakup_chunk(
+                                    pending_chunk, validate_crc=validate_crc
+                                )
+                            else:
+                                # All channels known — safe to use indexed message lookup.
+                                filtered_message_indexes: Iterable[MessageIndex] = (
+                                    mi
+                                    for mi in pending_message_indexes
+                                    if mi.channel_id not in exclude_channels
+                                )
 
-                            filtered_message_indexes = _filter_message_indices_by_time(
-                                filtered_message_indexes, start_time_ns, end_time_ns
-                            )
+                                filtered_message_indexes = _filter_message_indices_by_time(
+                                    filtered_message_indexes, start_time_ns, end_time_ns
+                                )
 
-                            yield from _breakup_chunk_with_indexes(
-                                pending_chunk, filtered_message_indexes, validate_crc
-                            )
+                                yield from _breakup_chunk_with_indexes(
+                                    pending_chunk, filtered_message_indexes, validate_crc
+                                )
                     else:
                         yield from breakup_chunk(pending_chunk, validate_crc=validate_crc)
                 pending_chunk = None
@@ -710,6 +785,16 @@ def _should_include_all(_channel: Channel, _schema: Schema | None) -> bool:
 
 
 def include_topics(topics: str | Iterable[str]) -> Callable[[Channel, Schema | None], bool]:
+    """Create a filter function that accepts only channels matching the given topic(s).
+
+    Intended for use as the ``should_include`` argument to :func:`read_message`.
+
+    Args:
+        topics: A single topic string or an iterable of topic strings to include.
+
+    Returns:
+        A callable ``(Channel, Schema | None) -> bool`` that returns True for matching channels.
+    """
     topic_set = {topics} if isinstance(topics, str) else set(topics)
     return lambda channel, _schema: channel.topic in topic_set
 

@@ -6,7 +6,18 @@ import small_mcap.reader as reader_module
 from pytest_mock import MockerFixture
 from small_mcap import Channel, McapWriter, Message, get_header, get_summary, read_message
 from small_mcap.reader import stream_reader
-from small_mcap.records import MAGIC, Chunk, DataEnd, Footer, Header, LazyChunk, Schema
+from small_mcap.records import (
+    MAGIC,
+    Channel,
+    Chunk,
+    DataEnd,
+    Footer,
+    Header,
+    LazyChunk,
+    Message,
+    MessageIndex,
+    Schema,
+)
 from small_mcap.writer import IndexType
 
 
@@ -520,3 +531,179 @@ class TestLazyChunkPadding:
 
         assert len(lazy_chunks) == 1, "Should have one LazyChunk"
         assert len(footers) == 1, "Should have Footer (stream positioned correctly after padding)"
+
+
+class TestSchemasInChunks:
+    """Test reading MCAP files where Schema/Channel records are inside chunks.
+
+    ROS2 rosbags (created by libmcap) store Schema and Channel records inside
+    chunks rather than in the data section outside chunks. The non-seekable reader
+    must handle this by fully decompressing chunks that introduce new channels.
+    """
+
+    @staticmethod
+    def _build_chunk(records_data: bytes, msg_start: int, msg_end: int) -> Chunk:
+        """Build an uncompressed Chunk from raw record bytes."""
+        return Chunk(
+            message_start_time=msg_start,
+            message_end_time=msg_end,
+            uncompressed_size=len(records_data),
+            uncompressed_crc=0,
+            compression="",
+            data=records_data,
+        )
+
+    @staticmethod
+    def _build_mcap_with_chunks(
+        chunks: list[tuple[Chunk, list[MessageIndex]]],
+    ) -> bytes:
+        """Assemble a complete MCAP file from chunks and their message indexes.
+
+        Args:
+            chunks: List of (Chunk, [MessageIndex, ...]) pairs. Each chunk is
+                followed by its message indexes in the data section.
+
+        Returns:
+            Complete MCAP file bytes with summary_start=0 (forces non-seeking path).
+        """
+        buf = io.BytesIO()
+        buf.write(MAGIC)
+        Header(profile="test", library="test").write_record_to(buf)
+
+        for chunk, message_indexes in chunks:
+            chunk.write_record_to(buf)
+            for mi in message_indexes:
+                mi.write_record_to(buf)
+
+        DataEnd(data_section_crc=0).write_record_to(buf)
+        Footer(summary_start=0, summary_offset_start=0, summary_crc=0).write_record_to(buf)
+        buf.write(MAGIC)
+        return buf.getvalue()
+
+    @staticmethod
+    def _build_chunk_records(
+        records: list[Schema | Channel | Message],
+    ) -> tuple[bytes, list[MessageIndex]]:
+        """Serialize records into chunk data and build MessageIndex entries.
+
+        Returns:
+            (chunk_data_bytes, [MessageIndex, ...])
+        """
+        buf = io.BytesIO()
+        # channel_id -> [(log_time, offset)]
+        msg_offsets: dict[int, list[tuple[int, int]]] = {}
+
+        for record in records:
+            offset = buf.tell()
+            record.write_record_to(buf)
+            if isinstance(record, Message):
+                msg_offsets.setdefault(record.channel_id, []).append(
+                    (record.log_time, offset)
+                )
+
+        message_indexes = [
+            MessageIndex(channel_id=ch_id, records=entries)
+            for ch_id, entries in msg_offsets.items()
+        ]
+        return buf.getvalue(), message_indexes
+
+    def test_schemas_in_chunks_non_seekable(self):
+        """Single chunk with Schema+Channel+Messages, read via non-seekable stream."""
+        schema = Schema(id=1, name="TestMsg", encoding="raw", data=b"{}")
+        channel = Channel(id=1, schema_id=1, topic="/test", message_encoding="raw", metadata={})
+        msg1 = Message(channel_id=1, sequence=0, log_time=1000, publish_time=1000, data=b"hello")
+        msg2 = Message(channel_id=1, sequence=1, log_time=2000, publish_time=2000, data=b"world")
+
+        chunk_data, message_indexes = self._build_chunk_records([schema, channel, msg1, msg2])
+        chunk = self._build_chunk(chunk_data, msg_start=1000, msg_end=2000)
+        mcap_bytes = self._build_mcap_with_chunks([(chunk, message_indexes)])
+
+        class NonSeekableStream(io.BytesIO):
+            def seekable(self):
+                return False
+
+        results = list(read_message(NonSeekableStream(mcap_bytes)))
+        assert len(results) == 2
+        assert results[0][1].topic == "/test"
+        assert results[0][2].data == b"hello"
+        assert results[1][2].data == b"world"
+
+    def test_schemas_in_chunks_multiple_channels(self):
+        """Two chunks, each introducing a new channel."""
+        # Chunk 1: schema1 + channel1 + messages
+        s1 = Schema(id=1, name="Msg1", encoding="raw", data=b"")
+        ch1 = Channel(id=1, schema_id=1, topic="/topic1", message_encoding="raw", metadata={})
+        m1 = Message(channel_id=1, sequence=0, log_time=1000, publish_time=1000, data=b"a")
+
+        chunk1_data, mi1 = self._build_chunk_records([s1, ch1, m1])
+        chunk1 = self._build_chunk(chunk1_data, msg_start=1000, msg_end=1000)
+
+        # Chunk 2: schema2 + channel2 + messages
+        s2 = Schema(id=2, name="Msg2", encoding="raw", data=b"")
+        ch2 = Channel(id=2, schema_id=2, topic="/topic2", message_encoding="raw", metadata={})
+        m2 = Message(channel_id=2, sequence=0, log_time=2000, publish_time=2000, data=b"b")
+
+        chunk2_data, mi2 = self._build_chunk_records([s2, ch2, m2])
+        chunk2 = self._build_chunk(chunk2_data, msg_start=2000, msg_end=2000)
+
+        mcap_bytes = self._build_mcap_with_chunks([(chunk1, mi1), (chunk2, mi2)])
+
+        class NonSeekableStream(io.BytesIO):
+            def seekable(self):
+                return False
+
+        results = list(read_message(NonSeekableStream(mcap_bytes)))
+        assert len(results) == 2
+        assert results[0][1].topic == "/topic1"
+        assert results[0][2].data == b"a"
+        assert results[1][1].topic == "/topic2"
+        assert results[1][2].data == b"b"
+
+    def test_schemas_in_chunks_with_time_filtering(self):
+        """Time filtering still works when schemas are inside chunks."""
+        schema = Schema(id=1, name="T", encoding="raw", data=b"")
+        channel = Channel(id=1, schema_id=1, topic="/t", message_encoding="raw", metadata={})
+        m1 = Message(channel_id=1, sequence=0, log_time=1000, publish_time=1000, data=b"early")
+        m2 = Message(channel_id=1, sequence=1, log_time=5000, publish_time=5000, data=b"mid")
+        m3 = Message(channel_id=1, sequence=2, log_time=9000, publish_time=9000, data=b"late")
+
+        chunk_data, message_indexes = self._build_chunk_records([schema, channel, m1, m2, m3])
+        chunk = self._build_chunk(chunk_data, msg_start=1000, msg_end=9000)
+        mcap_bytes = self._build_mcap_with_chunks([(chunk, message_indexes)])
+
+        class NonSeekableStream(io.BytesIO):
+            def seekable(self):
+                return False
+
+        results = list(
+            read_message(NonSeekableStream(mcap_bytes), start_time_ns=4000, end_time_ns=6000)
+        )
+        assert len(results) == 1
+        assert results[0][2].data == b"mid"
+
+    def test_schemas_in_chunks_second_chunk_known_channel(self):
+        """Second chunk reuses known channel — should use optimized indexed path."""
+        # Chunk 1: introduces schema + channel
+        schema = Schema(id=1, name="T", encoding="raw", data=b"")
+        channel = Channel(id=1, schema_id=1, topic="/t", message_encoding="raw", metadata={})
+        m1 = Message(channel_id=1, sequence=0, log_time=1000, publish_time=1000, data=b"first")
+
+        chunk1_data, mi1 = self._build_chunk_records([schema, channel, m1])
+        chunk1 = self._build_chunk(chunk1_data, msg_start=1000, msg_end=1000)
+
+        # Chunk 2: only messages on already-known channel (no schema/channel records)
+        m2 = Message(channel_id=1, sequence=1, log_time=2000, publish_time=2000, data=b"second")
+        m3 = Message(channel_id=1, sequence=2, log_time=3000, publish_time=3000, data=b"third")
+
+        chunk2_data, mi2 = self._build_chunk_records([m2, m3])
+        chunk2 = self._build_chunk(chunk2_data, msg_start=2000, msg_end=3000)
+
+        mcap_bytes = self._build_mcap_with_chunks([(chunk1, mi1), (chunk2, mi2)])
+
+        class NonSeekableStream(io.BytesIO):
+            def seekable(self):
+                return False
+
+        results = list(read_message(NonSeekableStream(mcap_bytes)))
+        assert len(results) == 3
+        assert [r[2].data for r in results] == [b"first", b"second", b"third"]

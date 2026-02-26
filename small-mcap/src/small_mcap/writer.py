@@ -178,7 +178,6 @@ class McapWriterRaw:
         use_statistics: bool = True,
         use_summary_offsets: bool = True,
         enable_crcs: bool = True,
-        enable_data_crcs: bool = False,
     ) -> None:
         # Configuration
         self.output = output
@@ -188,7 +187,6 @@ class McapWriterRaw:
         self.use_statistics = use_statistics
         self.use_summary_offsets = use_summary_offsets
         self.enable_crcs = enable_crcs
-        self.enable_data_crcs = enable_data_crcs
 
         # Writer state
         self._started = False
@@ -229,7 +227,7 @@ class McapWriterRaw:
         # I/O components
         self.crc_writer = _CRCWriter(output, enable_crcs)
 
-    def start(self, profile: str = "", library: str = "pymcap-cli 0.1.0") -> None:
+    def start(self, profile: str = "", library: str = "small-mcap") -> None:
         """Start writing the MCAP file."""
         if self._started:
             raise RuntimeError("Writer already started")
@@ -646,7 +644,6 @@ class McapWriter(McapWriterRaw):
         use_statistics: bool = True,
         use_summary_offsets: bool = True,
         enable_crcs: bool = True,
-        enable_data_crcs: bool = False,
         use_chunking: bool = True,
         chunk_size: int = 1024 * 1024,
         compression: CompressionType = CompressionType.ZSTD,
@@ -660,7 +657,6 @@ class McapWriter(McapWriterRaw):
             use_statistics=use_statistics,
             use_summary_offsets=use_summary_offsets,
             enable_crcs=enable_crcs,
-            enable_data_crcs=enable_data_crcs,
         )
         self.use_chunking = use_chunking
         self.chunk_size = chunk_size

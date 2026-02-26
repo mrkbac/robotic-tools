@@ -11,6 +11,7 @@ from small_mcap import (
     CompressionType,
     CRCValidationError,
     EndOfFileError,
+    IllegalOpcodeInChunkError,
     InvalidHeaderError,
     InvalidMagicError,
     McapWriter,
@@ -19,11 +20,24 @@ from small_mcap import (
     UnsupportedCompressionError,
     get_header,
     get_summary,
+    read_attachment,
     read_message,
+    read_metadata,
     stream_reader,
 )
-from small_mcap.reader import _get_chunk_data_stream, _read_summary_from_iterable
-from small_mcap.records import Channel, Chunk, DataEnd, Footer, Header, Message, Opcode, Schema
+from small_mcap.reader import _get_chunk_data_stream, _read_summary_from_iterable, breakup_chunk
+from small_mcap.records import (
+    Attachment,
+    Channel,
+    Chunk,
+    DataEnd,
+    Footer,
+    Header,
+    Message,
+    Metadata,
+    Opcode,
+    Schema,
+)
 
 # Test constants
 WRONG_CRC_CHUNK = 12345
@@ -529,3 +543,121 @@ def test_stream_reader_mid_record_truncation():
     # Should have Header only, truncated record is skipped
     assert len(records) == 1
     assert isinstance(records[0], Header)
+
+
+# --- Tests for IllegalOpcodeInChunkError ---
+
+
+def test_illegal_opcode_in_chunk_breakup():
+    """breakup_chunk raises IllegalOpcodeInChunkError for non-Schema/Channel/Message opcodes."""
+    # Build chunk data containing an Attachment record (illegal inside chunks)
+    inner_buf = io.BytesIO()
+    # Write a valid message first
+    Message(channel_id=1, sequence=0, log_time=0, publish_time=0, data=b"ok").write_record_to(
+        inner_buf
+    )
+    # Write an illegal record (DataEnd opcode inside chunk)
+    DataEnd(data_section_crc=0).write_record_to(inner_buf)
+
+    chunk_data = inner_buf.getvalue()
+    chunk = Chunk(
+        message_start_time=0,
+        message_end_time=0,
+        uncompressed_size=len(chunk_data),
+        uncompressed_crc=0,
+        compression="",
+        data=chunk_data,
+    )
+
+    records = breakup_chunk(chunk)
+    # First record is the valid message
+    first = next(iter(records))
+    assert isinstance(first, Message)
+
+    # Second record has illegal opcode, should raise
+    with pytest.raises(IllegalOpcodeInChunkError, match="illegal opcode"):
+        list(records)
+
+
+def test_illegal_opcode_in_chunk_via_stream_reader(mcap_buffer):
+    """stream_reader with emit_chunks=False raises IllegalOpcodeInChunkError for illegal opcodes."""
+    # Build chunk data with a Statistics record (illegal inside chunk)
+    from small_mcap.records import Statistics
+
+    inner_buf = io.BytesIO()
+    Statistics(
+        message_count=0,
+        schema_count=0,
+        channel_count=0,
+        attachment_count=0,
+        metadata_count=0,
+        chunk_count=0,
+        message_start_time=0,
+        message_end_time=0,
+        channel_message_counts={},
+    ).write_record_to(inner_buf)
+
+    chunk_data = inner_buf.getvalue()
+    chunk = Chunk(
+        message_start_time=0,
+        message_end_time=0,
+        uncompressed_size=len(chunk_data),
+        uncompressed_crc=0,
+        compression="",
+        data=chunk_data,
+    )
+    chunk.write_record_to(mcap_buffer)
+    mcap_buffer.seek(0)
+
+    with pytest.raises(IllegalOpcodeInChunkError):
+        list(stream_reader(mcap_buffer))
+
+
+# --- Tests for read_attachment and read_metadata ---
+
+
+def test_read_attachment_from_index():
+    """read_attachment reads a full Attachment record given its AttachmentIndex."""
+    buffer = io.BytesIO()
+    writer = McapWriter(buffer)
+    writer.start()
+    writer.add_attachment(
+        log_time=1000,
+        create_time=2000,
+        name="test.txt",
+        media_type="text/plain",
+        data=b"hello world",
+    )
+    writer.finish()
+
+    buffer.seek(0)
+    summary = get_summary(buffer)
+    assert summary is not None
+    assert len(summary.attachment_indexes) == 1
+
+    attachment = read_attachment(buffer, summary.attachment_indexes[0])
+    assert isinstance(attachment, Attachment)
+    assert attachment.name == "test.txt"
+    assert attachment.media_type == "text/plain"
+    assert attachment.data == b"hello world"
+    assert attachment.log_time == 1000
+    assert attachment.create_time == 2000
+
+
+def test_read_metadata_from_index():
+    """read_metadata reads a full Metadata record given its MetadataIndex."""
+    buffer = io.BytesIO()
+    writer = McapWriter(buffer)
+    writer.start()
+    writer.add_metadata("hardware_info", {"serial": "ABC123", "board": "v2"})
+    writer.finish()
+
+    buffer.seek(0)
+    summary = get_summary(buffer)
+    assert summary is not None
+    assert len(summary.metadata_indexes) == 1
+
+    metadata = read_metadata(buffer, summary.metadata_indexes[0])
+    assert isinstance(metadata, Metadata)
+    assert metadata.name == "hardware_info"
+    assert metadata.metadata == {"serial": "ABC123", "board": "v2"}
