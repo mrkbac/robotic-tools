@@ -1,6 +1,8 @@
 from array import array
 from io import BytesIO
+from unittest.mock import Mock
 
+import mcap_ros2_support_fast.writer as writer_module
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap.reader import read_message_decoded
@@ -9,6 +11,41 @@ from small_mcap.writer import McapWriter
 
 def read_ros2_messages(stream: BytesIO):
     return read_message_decoded(stream, decoder_factories=[DecoderFactory()])
+
+
+def test_encoder_factory_caches_by_schema_identity(monkeypatch) -> None:
+    compile_encoder = Mock(
+        side_effect=[Mock(return_value=b"encoded"), Mock(return_value=b"encoded")]
+    )
+    monkeypatch.setattr(writer_module, "serialize_dynamic", compile_encoder)
+
+    class SchemaA:
+        id = 7
+        name = "test_msgs/TestData"
+        encoding = "ros2msg"
+        data = b"string a\nint32 b"
+
+    class SchemaB:
+        id = 99
+        name = "test_msgs/TestData"
+        encoding = "ros2msg"
+        data = b"string a\nint32 b"
+
+    class SchemaC:
+        id = 7
+        name = "test_msgs/TestData"
+        encoding = "ros2msg"
+        data = b"string a\nfloat64 b"
+
+    factory = ROS2EncoderFactory()
+
+    first = factory.encoder_for(SchemaA())
+    second = factory.encoder_for(SchemaB())
+    third = factory.encoder_for(SchemaC())
+
+    assert first is second
+    assert third is not first
+    assert compile_encoder.call_count == 2
 
 
 def test_write_messages() -> None:
