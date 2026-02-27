@@ -155,5 +155,3 @@ TYPE_INFO: dict[TypeId, str] = {
     TypeId.UINT64: "Q",
     TypeId.PADDING: "x",  # Padding bytes, no size
 }
-UTF8_DECODE_NAME = "_decode_utf8"
-UTF8_ENCODE_NAME = "_encode_utf8"

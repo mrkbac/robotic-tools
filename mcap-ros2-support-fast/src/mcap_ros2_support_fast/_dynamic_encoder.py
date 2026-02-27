@@ -1,5 +1,4 @@
 import array
-import codecs
 import struct
 from typing import Any, Literal, cast
 
@@ -8,7 +7,6 @@ from mcap_ros2_support_fast.code_writer import CodeWriter
 from ._cdr import CDR_HEADER_BIG_ENDIAN, CDR_HEADER_LITTLE_ENDIAN, CDR_HEADER_SIZE
 from ._plans import (
     TYPE_INFO,
-    UTF8_ENCODE_NAME,
     ActionType,
     EncoderFunction,
     PlanAction,
@@ -16,15 +14,17 @@ from ._plans import (
     TypeId,
 )
 
+_SENTINEL = object()
+
 
 def _get_field(obj: Any, f: str, default: Any) -> Any:
     """Get field from object (dict or attribute) with default."""
-    try:
-        value = getattr(obj, f)
-        return default if value is None else value  # noqa: TRY300
-    except AttributeError:
-        # Fallback to dict access for dict-like objects
+    if isinstance(obj, dict):
         return obj.get(f, default)
+    value = getattr(obj, f, _SENTINEL)
+    if value is _SENTINEL:
+        return default
+    return default if value is None else value
 
 
 def _default_value_from_type(type_id: TypeId) -> Any:
@@ -86,7 +86,7 @@ class EncoderGeneratorFactory:
             mask = size - 1
             # Align based on payload offset (subtract 4 for CDR header)
             self.code.append(f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}")
-            self.code.append("_buffer += b'\\x00' * _pad")
+            self.code.append("_buffer += _PADS[_pad]")
             self.code.append("_offset += _pad")
 
     def reset_alignment(self, initial: int = 0) -> None:
@@ -101,7 +101,7 @@ class EncoderGeneratorFactory:
             self.code.append("_offset += 1")
 
         elif type_id == TypeId.STRING:
-            self.code.append(f"_str_bytes, _ = {UTF8_ENCODE_NAME}({value_expr})")
+            self.code.append(f"_str_bytes = {value_expr}.encode()")
             self.code.append("_str_size = len(_str_bytes) + 1")  # +1 for null terminator
             self.generate_primitive_writer("_str_size", TypeId.UINT32)
             self.code.append("_buffer += _str_bytes")
@@ -150,7 +150,7 @@ class EncoderGeneratorFactory:
 
             self.reset_alignment()  # After string unknown position readjustment
             with self.code.indent(f"for {random_i} in {value_expr}:"):
-                self.code.append(f"_str_bytes, _ = {UTF8_ENCODE_NAME}({random_i})")
+                self.code.append(f"_str_bytes = {random_i}.encode()")
                 self.code.append("_str_size = len(_str_bytes) + 1")  # +1 for null terminator
                 self.generate_primitive_writer("_str_size", TypeId.UINT32)
                 self.code.append("_buffer += _str_bytes")
@@ -162,10 +162,7 @@ class EncoderGeneratorFactory:
         elif type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}:
             # Special case for byte arrays
             with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"):
-                with self.code.indent(f"if isinstance({value_expr}, memoryview):"):
-                    self.code.append(f"_buffer += bytes({value_expr})")
-                with self.code.indent("else:"):
-                    self.code.append(f"_buffer += {value_expr}")
+                self.code.append(f"_buffer += {value_expr}")
             with self.code.indent("else:"):
                 # Convert list/tuple to bytes
                 self.code.append(f"_buffer += bytes({value_expr})")
@@ -191,10 +188,10 @@ class EncoderGeneratorFactory:
                 self.code.append(f"{array_len_var} = len({value_expr})")
                 with self.code.indent(f"if {array_len_var} > 0:"):
                     # Type-check and optimize for different input types
-                    with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray)):"):
+                    with self.code.indent(
+                        f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"
+                    ):
                         self.code.append(f"_buffer += {value_expr}")
-                    with self.code.indent(f"elif isinstance({value_expr}, memoryview):"):
-                        self.code.append(f"_buffer += bytes({value_expr})")
                     with self.code.indent("else:"):
                         self.code.append(
                             f"_buffer += array.array('{struct_name}', {value_expr}).tobytes()"
@@ -275,7 +272,7 @@ class EncoderGeneratorFactory:
         elif step.type == ActionType.PRIMITIVE_ARRAY:
             field_var = self.generate_var_name()
             # Arrays default to empty list or provided default
-            array_default: list[bool | int | float | str] = (
+            array_default: list[bool | int | float | str] = (  # type: ignore[invalid-assignment]
                 step.default_value if step.default_value is not None else []
             )
             self.code.append(
@@ -338,8 +335,17 @@ class EncoderGeneratorFactory:
         """Create the execution namespace with all required functions and classes."""
 
         namespace: dict[str, Any] = {
-            UTF8_ENCODE_NAME: codecs.utf_8_encode,
             "_get_field": _get_field,
+            "_PADS": (
+                b"",
+                b"\x00",
+                b"\x00\x00",
+                b"\x00\x00\x00",
+                b"\x00\x00\x00\x00",
+                b"\x00\x00\x00\x00\x00",
+                b"\x00\x00\x00\x00\x00\x00",
+                b"\x00\x00\x00\x00\x00\x00\x00",
+            ),
             "struct": struct,  # Add struct module for vectorized array packing
             "array": array,  # Add array module for optimized array encoding
             # Limit builtins for security

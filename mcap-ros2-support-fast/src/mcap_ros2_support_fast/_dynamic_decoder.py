@@ -1,5 +1,4 @@
 import array
-import codecs
 import struct
 import sys
 from typing import Any, Literal, cast
@@ -9,7 +8,6 @@ from mcap_ros2_support_fast.code_writer import CodeWriter
 from ._cdr import CDR_BIG_ENDIAN, CDR_HEADER_SIZE, CDR_LITTLE_ENDIAN
 from ._plans import (
     TYPE_INFO,
-    UTF8_DECODE_NAME,
     ActionType,
     DecoderFunction,
     PlanAction,
@@ -79,10 +77,7 @@ class DecoderGeneratorFactory:
         elif type_id == TypeId.STRING:
             self.generate_primitive_reader("_str_size", TypeId.UINT32)
             with self.code.indent("if _str_size > 1:"):
-                self.code.append(
-                    f"{target}, _ = {UTF8_DECODE_NAME}"
-                    '(_data[_offset:_offset + _str_size - 1], "strict", True)'
-                )
+                self.code.append(f'{target} = str(_data[_offset:_offset + _str_size - 1], "utf-8")')
             with self.code.indent("else:"):
                 self.code.append(f'{target} = ""')
             self.code.append("_offset += _str_size")
@@ -122,8 +117,8 @@ class DecoderGeneratorFactory:
                 self.generate_primitive_reader("_array_size", TypeId.UINT32)
                 with self.code.indent("if _array_size > 1:"):
                     self.code.append(
-                        f"{target}[{random_i}], _ = {UTF8_DECODE_NAME}("
-                        f"_data[_offset : _offset + _array_size - 1], 'strict', True)"
+                        f"{target}[{random_i}] = str("
+                        f"_data[_offset : _offset + _array_size - 1], 'utf-8')"
                     )
                 self.code.append("_offset += _array_size")
             self.reset_alignment()  # After string unknown position readjustment
@@ -185,16 +180,16 @@ class DecoderGeneratorFactory:
         temp_var = self.generate_var_name()
         if array_size is None:
             self.generate_primitive_reader("_array_size", TypeId.UINT32)
-            self.code.append(f"{target} = []")
+            self.code.append(f"{target} = [None] * _array_size")
             self.code.append(f"for {random_i} in range(_array_size):")
         else:
-            self.code.append(f"{target} = []")
+            self.code.append(f"{target} = [None] * {array_size}")
             self.code.append(f"for {random_i} in range({array_size}):")
 
         self.reset_alignment()  # Need to reset alignment at the start of loops
         with self.code:
             self.generate_plan(temp_var, plan)
-            self.code.append(f"{target}.append({temp_var})")
+            self.code.append(f"{target}[{random_i}] = {temp_var}")
 
     def generate_primitive_group(self, targets: list[tuple[str, TypeId]]) -> None:
         """Generate code for a group of primitive fields."""
@@ -328,12 +323,12 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
 
     # Create combined namespace with both decoders
     namespace: dict[str, Any] = {
-        UTF8_DECODE_NAME: codecs.utf_8_decode,
         "array": array,
         "__builtins__": {
             "memoryview": memoryview,
             "list": list,
             "range": range,
+            "str": str,
             "NotImplementedError": NotImplementedError,
         },
     }

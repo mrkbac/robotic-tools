@@ -11,9 +11,9 @@ Run with:
 """
 
 import pytest
-from mcap_ros2_support_fast._planner import generate_plans, optimize_plan, serialize_dynamic
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
 from mcap_ros2_support_fast._dynamic_encoder import create_encoder
+from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
 
 # ---------------------------------------------------------------------------
 # Schema definitions
@@ -115,9 +115,7 @@ _string_dec, _string_enc = _build_codec("std_msgs/String", STRING_SCHEMA)
 _kv_dec, _kv_enc = _build_codec("custom/KeyValue", KEYVALUE_SCHEMA)
 _str_arr_dec, _str_arr_enc = _build_codec("custom/StringArray", STRING_ARRAY_SCHEMA)
 _tf_dec, _tf_enc = _build_codec("tf2_msgs/TFMessage", TF_MESSAGE_SCHEMA)
-_diag_dec, _diag_enc = _build_codec(
-    "diagnostic_msgs/DiagnosticArray", DIAGNOSTIC_ARRAY_SCHEMA
-)
+_diag_dec, _diag_enc = _build_codec("diagnostic_msgs/DiagnosticArray", DIAGNOSTIC_ARRAY_SCHEMA)
 
 
 # ---------------------------------------------------------------------------
@@ -203,30 +201,30 @@ _diag_10x10_msg = _make_diagnostic_array(10, 10)
 
 @pytest.mark.benchmark(group="decode-string")
 @pytest.mark.parametrize(
-    ("name", "decoder", "cdr"),
+    ("decoder", "cdr"),
     [
-        pytest.param("String", _string_dec, _string_cdr, id="String"),
-        pytest.param("KeyValue", _kv_dec, _kv_cdr, id="KeyValue"),
-        pytest.param("string[10]", _str_arr_dec, _str_arr_10_cdr, id="string_arr_10"),
-        pytest.param("string[100]", _str_arr_dec, _str_arr_100_cdr, id="string_arr_100"),
+        pytest.param(_string_dec, _string_cdr, id="String"),
+        pytest.param(_kv_dec, _kv_cdr, id="KeyValue"),
+        pytest.param(_str_arr_dec, _str_arr_10_cdr, id="string_arr_10"),
+        pytest.param(_str_arr_dec, _str_arr_100_cdr, id="string_arr_100"),
     ],
 )
-def test_decode_strings(benchmark, name, decoder, cdr):
+def test_decode_strings(benchmark, decoder, cdr):
     """Benchmark string decoding: str(buf, 'utf-8') vs codecs.utf_8_decode."""
     benchmark(decoder, cdr)
 
 
 @pytest.mark.benchmark(group="decode-complex-array")
 @pytest.mark.parametrize(
-    ("name", "decoder", "cdr"),
+    ("decoder", "cdr"),
     [
-        pytest.param("TF x5", _tf_dec, _tf_5_cdr, id="TF_5"),
-        pytest.param("TF x50", _tf_dec, _tf_50_cdr, id="TF_50"),
-        pytest.param("Diag 5x5", _diag_dec, _diag_5x5_cdr, id="Diag_5x5"),
-        pytest.param("Diag 10x10", _diag_dec, _diag_10x10_cdr, id="Diag_10x10"),
+        pytest.param(_tf_dec, _tf_5_cdr, id="TF_5"),
+        pytest.param(_tf_dec, _tf_50_cdr, id="TF_50"),
+        pytest.param(_diag_dec, _diag_5x5_cdr, id="Diag_5x5"),
+        pytest.param(_diag_dec, _diag_10x10_cdr, id="Diag_10x10"),
     ],
 )
-def test_decode_complex_arrays(benchmark, name, decoder, cdr):
+def test_decode_complex_arrays(benchmark, decoder, cdr):
     """Benchmark complex array decoding: [None]*N + index vs append."""
     benchmark(decoder, cdr)
 
@@ -238,30 +236,30 @@ def test_decode_complex_arrays(benchmark, name, decoder, cdr):
 
 @pytest.mark.benchmark(group="encode-string")
 @pytest.mark.parametrize(
-    ("name", "encoder", "msg"),
+    ("encoder", "msg"),
     [
-        pytest.param("String", _string_enc, _string_msg, id="String"),
-        pytest.param("KeyValue", _kv_enc, _kv_msg, id="KeyValue"),
-        pytest.param("string[10]", _str_arr_enc, _str_arr_10_msg, id="string_arr_10"),
-        pytest.param("string[100]", _str_arr_enc, _str_arr_100_msg, id="string_arr_100"),
+        pytest.param(_string_enc, _string_msg, id="String"),
+        pytest.param(_kv_enc, _kv_msg, id="KeyValue"),
+        pytest.param(_str_arr_enc, _str_arr_10_msg, id="string_arr_10"),
+        pytest.param(_str_arr_enc, _str_arr_100_msg, id="string_arr_100"),
     ],
 )
-def test_encode_strings(benchmark, name, encoder, msg):
+def test_encode_strings(benchmark, encoder, msg):
     """Benchmark string encoding: .encode() vs codecs.utf_8_encode."""
     benchmark(encoder, msg)
 
 
 @pytest.mark.benchmark(group="encode-complex-array")
 @pytest.mark.parametrize(
-    ("name", "encoder", "msg"),
+    ("encoder", "msg"),
     [
-        pytest.param("TF x5", _tf_enc, _tf_5_msg, id="TF_5"),
-        pytest.param("TF x50", _tf_enc, _tf_50_msg, id="TF_50"),
-        pytest.param("Diag 5x5", _diag_enc, _diag_5x5_msg, id="Diag_5x5"),
-        pytest.param("Diag 10x10", _diag_enc, _diag_10x10_msg, id="Diag_10x10"),
+        pytest.param(_tf_enc, _tf_5_msg, id="TF_5"),
+        pytest.param(_tf_enc, _tf_50_msg, id="TF_50"),
+        pytest.param(_diag_enc, _diag_5x5_msg, id="Diag_5x5"),
+        pytest.param(_diag_enc, _diag_10x10_msg, id="Diag_10x10"),
     ],
 )
-def test_encode_complex_arrays(benchmark, name, encoder, msg):
+def test_encode_complex_arrays(benchmark, encoder, msg):
     """Benchmark complex array encoding with dict inputs (_get_field sentinel)."""
     benchmark(encoder, msg)
 
@@ -283,18 +281,18 @@ _diag_10x10_dc = _diag_dec(_diag_10x10_cdr)
 
 @pytest.mark.benchmark(group="encode-dataclass")
 @pytest.mark.parametrize(
-    ("name", "encoder", "msg"),
+    ("encoder", "msg"),
     [
-        pytest.param("String", _string_enc, _string_dc, id="String"),
-        pytest.param("KeyValue", _kv_enc, _kv_dc, id="KeyValue"),
-        pytest.param("string[10]", _str_arr_enc, _str_arr_10_dc, id="string_arr_10"),
-        pytest.param("string[100]", _str_arr_enc, _str_arr_100_dc, id="string_arr_100"),
-        pytest.param("TF x5", _tf_enc, _tf_5_dc, id="TF_5"),
-        pytest.param("TF x50", _tf_enc, _tf_50_dc, id="TF_50"),
-        pytest.param("Diag 5x5", _diag_enc, _diag_5x5_dc, id="Diag_5x5"),
-        pytest.param("Diag 10x10", _diag_enc, _diag_10x10_dc, id="Diag_10x10"),
+        pytest.param(_string_enc, _string_dc, id="String"),
+        pytest.param(_kv_enc, _kv_dc, id="KeyValue"),
+        pytest.param(_str_arr_enc, _str_arr_10_dc, id="string_arr_10"),
+        pytest.param(_str_arr_enc, _str_arr_100_dc, id="string_arr_100"),
+        pytest.param(_tf_enc, _tf_5_dc, id="TF_5"),
+        pytest.param(_tf_enc, _tf_50_dc, id="TF_50"),
+        pytest.param(_diag_enc, _diag_5x5_dc, id="Diag_5x5"),
+        pytest.param(_diag_enc, _diag_10x10_dc, id="Diag_10x10"),
     ],
 )
-def test_encode_dataclass(benchmark, name, encoder, msg):
+def test_encode_dataclass(benchmark, encoder, msg):
     """Benchmark encoding from dataclass inputs (_get_field getattr path)."""
     benchmark(encoder, msg)

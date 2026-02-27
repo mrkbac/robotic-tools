@@ -401,21 +401,8 @@ def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
 
     :param schema_name: The name of the schema defined in `schema_text`.
     :param schema_text: The schema text to use for serializing the message payload.
-    :return: A dictionary mapping schema names to encoder functions.
+    :return: An encoder function for the primary schema type.
     """
-
-    # First collect all message definitions
-    msgdefs: dict[str, MessageDefinition] = {
-        **BUILTIN_TYPES,  # Include built-in types
-    }
-
-    def collect_msgdef(cur_schema_name: str, short_name: str, msgdef: MessageDefinition) -> None:
-        # Add the message definition to the dictionary
-        msgdefs[cur_schema_name] = msgdef
-        msgdefs[short_name] = msgdef
-
-    for_each_msgdef(schema_name, schema_text, collect_msgdef)
-
-    plan = _generate_plan(msgdefs[schema_name], msgdefs)
+    plan = generate_plans(schema_name, schema_text)
     optimized_plan = optimize_plan(plan)
     return create_encoder(optimized_plan)

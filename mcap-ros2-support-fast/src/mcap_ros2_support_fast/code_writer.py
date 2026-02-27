@@ -46,7 +46,7 @@ class CodeWriter:
         for line in lines.splitlines():
             self._lines.append(f"{self._indentation * self._level}# {line}")
 
-    def __enter__(self) -> "CodeWriter":
+    def __enter__(self) -> "CodeWriter":  # noqa: PYI034
         self._level += 1
         self._level_stack.append(len(self._lines))
         return self
