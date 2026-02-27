@@ -196,8 +196,28 @@ with open("output.mcap", "wb") as f:
 
 - **Zero-copy memory access**: Uses `memoryview` to avoid unnecessary data copies
 - **Lazy chunk loading**: Only decompresses chunks when needed
+- **Parallel chunk decompression**: `num_workers` threads decompress chunks ahead of the reader (zstd/lz4 release the GIL)
 - **Binary search**: Efficient time-range filtering using chunk indexes
 - **Heap-based merging**: Optimal multi-file reading with automatic ID remapping
+
+### Parallel Prefetch (`num_workers`)
+
+Pass `num_workers` to `read_message` to decompress chunks in parallel using a thread pool. The main thread reads raw bytes sequentially while worker threads decompress ahead.
+
+```python
+with open("large.mcap", "rb") as f:
+    for schema, channel, message in read_message(f, num_workers=4):
+        ...
+```
+
+Benchmarked on a 48 GB zstd-compressed MCAP file (17K chunks, 2M messages):
+
+| Workers | Time (s) | Msg/s   | Speedup |
+|---------|----------|---------|---------|
+| 0       | 40.18    | 51,795  | 1.00x   |
+| 2       | 17.74    | 117,313 | 2.26x   |
+| 4       | 10.38    | 200,526 | 3.87x   |
+| 14      | 7.90     | 263,327 | 5.08x   |
 
 **Comparison with other libraries:**
 

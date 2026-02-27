@@ -3,8 +3,10 @@ import heapq
 import io
 import itertools
 import sys
+import threading
 import zlib
 from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cached_property
 from operator import attrgetter, itemgetter
@@ -63,7 +65,12 @@ else:
     except ImportError:
         lz4_decompress = None
 
-_zstd_decompressor: "ZstdDecompressor | None" = None
+
+class _ThreadLocal(threading.local):
+    zstd_decompressor = None
+
+
+_thread_local = _ThreadLocal()
 
 _OPCODE_SIZE = 1
 _RECORD_LENGTH_SIZE = 8
@@ -97,37 +104,12 @@ _ShouldIncludeType = Callable[[Channel, Schema | None], bool]
 
 
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | memoryview:
-    # Validate compression string
     if not isinstance(chunk.compression, str):
         raise UnsupportedCompressionError(
             f"compression must be a string, got {type(chunk.compression).__name__}"
         )
 
-    data: bytes | memoryview
-    if chunk.compression == "zstd":
-        if ZstdDecompressor is None:
-            raise UnsupportedCompressionError(
-                "zstd compression used but zstandard module is not installed. "
-                "Install it with: pip install zstandard"
-            )
-        global _zstd_decompressor  # noqa: PLW0603
-        if _zstd_decompressor is None:
-            _zstd_decompressor = ZstdDecompressor()
-        data = _zstd_decompressor.decompress(chunk.data, max_output_size=chunk.uncompressed_size)
-    elif chunk.compression == "lz4":
-        if lz4_decompress is None:
-            raise UnsupportedCompressionError(
-                "lz4 compression used but lz4 module is not installed. "
-                "Install it with: pip install lz4"
-            )
-        data = lz4_decompress(chunk.data)
-    elif chunk.compression == "":
-        data = chunk.data
-    else:
-        raise UnsupportedCompressionError(
-            f"Unknown compression type '{chunk.compression}'. "
-            f"Supported types: 'zstd', 'lz4', '' (uncompressed)"
-        )
+    data = _decompress_data_threadsafe(chunk)
 
     if validate_crc and chunk.uncompressed_crc != 0:
         calculated_crc = zlib.crc32(data)
@@ -569,6 +551,124 @@ def _filter_message_indices_by_time(
             yield filtered_mi
 
 
+def _decompress_data_threadsafe(chunk: Chunk) -> bytes | memoryview:
+    """Decompress chunk data using a thread-local decompressor (thread-safe)."""
+    if chunk.compression == "zstd":
+        if ZstdDecompressor is None:
+            raise UnsupportedCompressionError(
+                "zstd compression used but zstandard module is not installed."
+            )
+        decompressor = _thread_local.zstd_decompressor
+        if decompressor is None:
+            decompressor = ZstdDecompressor()
+            _thread_local.zstd_decompressor = decompressor
+        return decompressor.decompress(chunk.data, max_output_size=chunk.uncompressed_size)
+    if chunk.compression == "lz4":
+        if lz4_decompress is None:
+            raise UnsupportedCompressionError(
+                "lz4 compression used but lz4 module is not installed."
+            )
+        return lz4_decompress(chunk.data)
+    if chunk.compression == "":
+        return chunk.data
+    raise UnsupportedCompressionError(f"Unknown compression type '{chunk.compression}'.")
+
+
+def _yield_chunk_messages(
+    chunk: Chunk,
+    message_indexes: list[MessageIndex],
+    exclude_channels: set[int],
+    start_time_ns: int,
+    end_time_ns: int,
+    validate_crc: bool,
+    reverse: bool,
+) -> Iterable[McapRecord]:
+    """Filter and yield records from a chunk using its message indexes."""
+    if message_indexes:
+        filtered: Iterable[MessageIndex] = (
+            mi for mi in message_indexes if mi.channel_id not in exclude_channels
+        )
+        filtered = _filter_message_indices_by_time(filtered, start_time_ns, end_time_ns)
+        yield from _breakup_chunk_with_indexes(chunk, filtered, validate_crc, reverse=reverse)
+    else:
+        yield from breakup_chunk(chunk, validate_crc=validate_crc)
+
+
+def _prefetch_chunks(
+    stream: IO[bytes],
+    sorted_chunks: list[ChunkIndex],
+    exclude_channels: set[int],
+    start_time_ns: int,
+    end_time_ns: int,
+    validate_crc: bool,
+    reverse: bool,
+    num_workers: int,
+) -> Iterable[McapRecord]:
+    """Read raw chunk bytes sequentially and decompress in parallel using a thread pool.
+
+    Main thread reads raw bytes from the shared file handle (sequential I/O).
+    Worker threads decompress chunks ahead in parallel (zstd/lz4 release the GIL).
+    At most num_workers futures are in-flight at once (bounded prefetch).
+    """
+
+    def _decompress_in_worker(
+        raw_data: bytes,
+    ) -> tuple[Chunk, list[MessageIndex]]:
+        chunk, message_indexes = _read_chunk_and_indexes(raw_data)
+        decompressed = _decompress_data_threadsafe(chunk)
+        if validate_crc and chunk.uncompressed_crc != 0:
+            calculated_crc = zlib.crc32(decompressed)
+            if calculated_crc != chunk.uncompressed_crc:
+                raise CRCValidationError(
+                    expected=chunk.uncompressed_crc,
+                    actual=calculated_crc,
+                    record=chunk,
+                )
+        return (
+            Chunk(
+                compression="",
+                data=decompressed,
+                message_start_time=chunk.message_start_time,
+                message_end_time=chunk.message_end_time,
+                uncompressed_crc=0,
+                uncompressed_size=chunk.uncompressed_size,
+            ),
+            message_indexes,
+        )
+
+    def _drain(
+        cidx: ChunkIndex,
+        future: Future[tuple[Chunk, list[MessageIndex]]],
+    ) -> Iterable[McapRecord]:
+        chunk, message_indexes = future.result()
+        yield cidx
+        if cidx.message_index_offsets and exclude_channels.issuperset(cidx.message_index_offsets):
+            return
+        yield from _yield_chunk_messages(
+            chunk,
+            message_indexes,
+            exclude_channels,
+            start_time_ns,
+            end_time_ns,
+            validate_crc=False,
+            reverse=reverse,
+        )
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        pending: list[tuple[ChunkIndex, Future[tuple[Chunk, list[MessageIndex]]]]] = []
+
+        for cidx in sorted_chunks:
+            stream.seek(cidx.chunk_start_offset)
+            raw_data = stream.read(cidx.chunk_length + cidx.message_index_length)
+            pending.append((cidx, pool.submit(_decompress_in_worker, raw_data)))
+
+            while len(pending) > num_workers:
+                yield from _drain(*pending.pop(0))
+
+        for drain_cidx, drain_future in pending:
+            yield from _drain(drain_cidx, drain_future)
+
+
 def _read_message_seeking(
     stream: IO[bytes],
     should_include: _ShouldIncludeType,
@@ -576,6 +676,7 @@ def _read_message_seeking(
     end_time_ns: int,
     validate_crc: bool,
     reverse: bool,
+    num_workers: int = 0,
 ) -> _ReaderReturnType:
     summary = get_summary(stream)
     # No summary or chunk indexes exists
@@ -593,32 +694,21 @@ def _read_message_seeking(
     }
 
     def _lazy_yield(stream: IO[bytes], index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
-        # Emit the chunk index first to enable lazy loading - this allows heapq.merge
-        # to initialize by looking at just metadata without loading all chunks into memory
         yield index
-
-        # late check for mcap with empty channel summary if this chunks is excluded entirely
         if index.message_index_offsets and exclude_channels.issuperset(index.message_index_offsets):
             return
-
         stream.seek(index.chunk_start_offset)
-        chunk_and_message_index = stream.read(index.chunk_length + index.message_index_length)
-        chunk, message_indexes = _read_chunk_and_indexes(chunk_and_message_index)
-
-        if message_indexes:
-            # Filter message indexes to only include non-excluded channels
-            filtered_message_indexes: Iterable[MessageIndex] = (
-                mi for mi in message_indexes if mi.channel_id not in exclude_channels
-            )
-            filtered_message_indexes = _filter_message_indices_by_time(
-                filtered_message_indexes, start_time_ns, end_time_ns
-            )
-
-            yield from _breakup_chunk_with_indexes(
-                chunk, filtered_message_indexes, validate_crc, reverse=reverse
-            )
-        else:
-            yield from breakup_chunk(chunk, validate_crc=validate_crc)
+        raw = stream.read(index.chunk_length + index.message_index_length)
+        chunk, message_indexes = _read_chunk_and_indexes(raw)
+        yield from _yield_chunk_messages(
+            chunk,
+            message_indexes,
+            exclude_channels,
+            start_time_ns,
+            end_time_ns,
+            validate_crc,
+            reverse,
+        )
 
     def in_time_range(chunk_start: int, chunk_end: int) -> bool:
         return chunk_start < end_time_ns and chunk_end >= start_time_ns
@@ -662,15 +752,27 @@ def _read_message_seeking(
             return item.message_end_time if reverse else item.message_start_time
         return 0  # Schema and Channel records should come before messages
 
-    lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
-
     # If chunks don't overlap, we can yield sequentially without heap merging
     # This is more efficient as it avoids the heap overhead
     reader: Iterable[McapRecord]
-    if chunks_non_overlapping:
+    if chunks_non_overlapping and num_workers > 0:
+        # Parallel prefetch: main thread reads raw bytes, workers decompress
+        reader = _prefetch_chunks(
+            stream,
+            sorted_chunks,
+            exclude_channels,
+            start_time_ns,
+            end_time_ns,
+            validate_crc,
+            reverse,
+            num_workers,
+        )
+    elif chunks_non_overlapping:
+        lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
         # Chunks are ordered, no need for heap merge
         reader = itertools.chain.from_iterable(lazy_iterables)
     else:
+        lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
         # Chunks overlap, use heap merge to maintain time order
         reader = heapq.merge(*lazy_iterables, key=_lazy_sort, reverse=reverse)
 
@@ -807,6 +909,7 @@ def read_message(
     end_time_ns: int = sys.maxsize,
     validate_crc: bool = False,
     reverse: bool = False,
+    num_workers: int = 0,
 ) -> _ReaderReturnType:
     """Read messages from MCAP stream(s).
 
@@ -818,6 +921,10 @@ def read_message(
         validate_crc: Whether to validate CRC checksums
         reverse: If True, yield messages in descending log_time order.
                 Only supported for seekable streams.
+        num_workers: Number of worker threads for parallel chunk decompression.
+                When > 0, uses a ThreadPoolExecutor to decompress chunks ahead
+                in parallel (zstd/lz4 release the GIL). Only effective for
+                seekable streams with non-overlapping chunks.
 
     Returns:
         Iterable of (schema, channel, message) tuples
@@ -835,6 +942,7 @@ def read_message(
                 end_time_ns,
                 validate_crc,
                 reverse,
+                num_workers,
             )
         return _read_message_non_seeking(
             io_stream,
@@ -913,6 +1021,7 @@ def read_message_decoded(
     decoder_factories: Iterable[DecoderFactoryProtocol] = (),
     reverse: bool = False,
     validate_crc: bool = False,
+    num_workers: int = 0,
 ) -> Iterable[DecodedMessage]:
     decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
 
@@ -946,5 +1055,6 @@ def read_message_decoded(
         end_time_ns,
         validate_crc=validate_crc,
         reverse=reverse,
+        num_workers=num_workers,
     ):
         yield DecodedMessage(schema, channel, message, decoded_message)
