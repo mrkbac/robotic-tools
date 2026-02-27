@@ -51,7 +51,7 @@
 - [Unsubscribe Parameter Update](#unsubscribe-parameter-update) (json)
 - [Service Call Request](#service-call-request) (binary)
 - [Subscribe connection graph updates](#subscribe-connection-graph-updates) (json)
-- [Unubscribe connection graph updates](#unsubscribe-connection-graph-updates) (json)
+- [Unsubscribe connection graph updates](#unsubscribe-connection-graph-updates) (json)
 - [Fetch asset](#fetch-asset) (json)
 
 ## JSON messages

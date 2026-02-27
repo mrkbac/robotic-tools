@@ -35,7 +35,7 @@ class DebugStreamWrapper(io.RawIOBase):
     def writable(self) -> bool:
         return self.stream.writable()
 
-    def readinto(self, b) -> int | None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    def readinto(self, b) -> int | None:  # noqa: ANN001
         self.read_into_calls += 1
         n = self.stream.readinto(b)
         if n is not None:

@@ -160,8 +160,8 @@ class InputOptions:
             if other.start_time_ns is not None
             else self.start_time_ns,
             end_time_ns=other.end_time_ns if other.end_time_ns is not None else self.end_time_ns,
-            include_topics=other.include_topics if other.include_topics else self.include_topics,
-            exclude_topics=other.exclude_topics if other.exclude_topics else self.exclude_topics,
+            include_topics=other.include_topics or self.include_topics,
+            exclude_topics=other.exclude_topics or self.exclude_topics,
             include_metadata=self.include_metadata and other.include_metadata,
             include_attachments=self.include_attachments and other.include_attachments,
         )

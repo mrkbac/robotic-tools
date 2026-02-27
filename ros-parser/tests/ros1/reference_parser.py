@@ -76,7 +76,7 @@ def is_builtin(msg_type_name: str) -> bool:
 
 def _strip_comments(line: str) -> str:
     """Strip comments from a line."""
-    return line.split(COMMENTCHAR)[0].strip()
+    return line.split(COMMENTCHAR, maxsplit=1)[0].strip()
 
 
 def _convert_constant_value(field_type: str, val: str) -> bool | int | float | str:

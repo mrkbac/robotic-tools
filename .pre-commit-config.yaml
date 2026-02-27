@@ -26,24 +26,24 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.14.1"
+    rev: "v0.15.4"
     hooks:
       - id: ruff-check
         args: ["--fix"]
       - id: ruff-format
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.38.1
+    rev: v1.43.5
     hooks:
       - id: typos
 
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.5
+    rev: 0.10.6
     hooks:
       - id: uv-lock
 
   - repo: https://github.com/sbrunner/jsonschema-gentypes
-    rev: 2.12.0
+    rev: 2.13.0
     hooks:
       - id: jsonschema-gentypes
         files: |
@@ -55,9 +55,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy-check
-        name: mypy type check
-        entry: bash scripts/check_types.sh
+      - id: ty-check
+        name: ty type check
+        entry: uv run --frozen ty check
         language: system
         pass_filenames: false
         always_run: true

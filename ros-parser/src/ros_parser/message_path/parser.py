@@ -159,4 +159,4 @@ def parse_message_path(path: str) -> MessagePath:
     Raises:
         LarkError: If the path syntax is invalid
     """
-    return _parser.parse(path)  # type: ignore[no-any-return]
+    return _parser.parse(path)

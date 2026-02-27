@@ -318,7 +318,7 @@ def parse_string(message_string: str, context_package_name: str | None = None) -
 
     # Create parser with context package name
     transformer: Any = MessageTransformer(context_package_name=context_package_name)
-    parser: Any = Lark_StandAlone(transformer=transformer)
+    parser: Any = Lark_StandAlone(transformer=transformer)  # type: ignore[invalid-argument-type]
     return cast("MessageDefinition", parser.parse(cleaned))
 
 

@@ -6,11 +6,11 @@ requires-python = ">=3.10"
 [dependency-groups]
 dev = [
     "jsonschema-gentypes>=2.12.0",
-    "mypy>=1.18.2",
     "pyinstrument>=5.1.1",
     "pytest>=8.4.2",
     "pytest-benchmark>=5.1.0",
     "pytest-cov>=7.0.0",
+    "ty>=0.0.19",
 ]
 
 
@@ -25,17 +25,34 @@ members = [
     "ros-parser",
 ]
 
-[tool.mypy]
-strict = true
-python_version = "3.10"
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
 exclude = [
-    "tests/",
-    "test_.*\\.py$",
-    ".venv/",
-    "build/",
-    ".*/_standalone.*\\.py$",
-    ".*/_lark_standalone.*\\.py$",
+    "**/tests/",
+    "**/example/",
+    "**/data/",
+    "**/_standalone*.py",
+    "**/_lark_standalone*.py",
 ]
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["lz4", "lz4.frame", "av", "pointcloud2", "foxglove"]
+
+[tool.ty.terminal]
+error-on-warning = true
+
+# ty can't narrow ClassVar-based discriminated unions (step.type == ActionType.X)
+[[tool.ty.overrides]]
+include = [
+    "mcap-ros2-support-fast/src/mcap_ros2_support_fast/_dynamic_decoder.py",
+    "mcap-ros2-support-fast/src/mcap_ros2_support_fast/_dynamic_encoder.py",
+    "mcap-ros2-support-fast/src/mcap_ros2_support_fast/_planner.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
 
 
 [tool.ruff]

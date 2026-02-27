@@ -30,17 +30,17 @@ from small_mcap.records import (
 
 if TYPE_CHECKING:
     import zstandard
-    from lz4.frame import compress as lz4_compress  # type: ignore[import-untyped]
+    from lz4.frame import compress as lz4_compress
 else:
     try:
         import zstandard
     except ImportError:
-        zstandard = None  # type: ignore[assignment]
+        zstandard = None
 
     try:
         from lz4.frame import compress as lz4_compress
     except ImportError:
-        lz4_compress = None  # type: ignore[assignment]
+        lz4_compress = None
 
 
 _zstd_compressor: "zstandard.ZstdCompressor | None" = None

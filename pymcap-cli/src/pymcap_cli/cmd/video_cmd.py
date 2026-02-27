@@ -176,10 +176,10 @@ def _raw_image_to_array(message: Any) -> NDArray[np.uint8]:
     data = bytes(message.data)
     if encoding in {"rgb", "rgb8"}:
         array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array.copy()  # type: ignore[no-any-return,unused-ignore]
+        return array.copy()
     if encoding in {"bgr", "bgr8"}:
         array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array[..., ::-1].copy()  # type: ignore[no-any-return,unused-ignore]
+        return array[..., ::-1].copy()
     if encoding in {"mono", "mono8", "8uc1"}:
         mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
         return np.repeat(mono_array[:, :, None], 3, axis=2)
@@ -452,6 +452,7 @@ def encode_video(
                             "Try --encoder software."
                         ) from exc
 
+                    assert isinstance(stream, av.VideoStream)
                     stream.width = grid_width
                     stream.height = grid_height
                     stream.pix_fmt = "yuv420p"
@@ -557,6 +558,7 @@ def encode_video(
             )
 
         # Flush encoder
+        assert stream is not None
         try:
             for packet in stream.encode(None):
                 container.mux(packet)

@@ -12,7 +12,6 @@ from mcap_ros2_support_fast._dynamic_decoder import (
 )
 from mcap_ros2_support_fast._dynamic_encoder import EncoderGeneratorFactory
 from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
-from mcap_ros2_support_fast._plans import UTF8_DECODE_NAME, UTF8_ENCODE_NAME
 from small_mcap.reader import get_summary
 
 
@@ -116,7 +115,6 @@ def main() -> None:
         "",
         "# Imports",
         "import array",
-        "import codecs",
         "import dataclasses",
         "import struct",
         "import typing",
@@ -128,14 +126,19 @@ def main() -> None:
     generated_lines.extend(
         [
             "# Utility functions",
-            f"{UTF8_DECODE_NAME} = codecs.utf_8_decode",
-            f"{UTF8_ENCODE_NAME} = codecs.utf_8_encode",
+            "_PADS = (b'', b'\\x00', b'\\x00\\x00', b'\\x00\\x00\\x00',",
+            "         b'\\x00\\x00\\x00\\x00', b'\\x00\\x00\\x00\\x00\\x00',",
+            "         b'\\x00\\x00\\x00\\x00\\x00\\x00', b'\\x00\\x00\\x00\\x00\\x00\\x00\\x00')",
+            "",
+            "_SENTINEL = object()",
             "",
             "def _get_field(obj, f, default):",
             "    '''Get field from object (dict or attribute) with default.'''",
-            "    if isinstance(obj, collections.abc.Mapping):",
+            "    if isinstance(obj, dict):",
             "        return obj.get(f, default)",
-            "    value = getattr(obj, f, default)",
+            "    value = getattr(obj, f, _SENTINEL)",
+            "    if value is _SENTINEL:",
+            "        return default",
             "    return default if value is None else value",
             "",
         ]

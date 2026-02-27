@@ -221,7 +221,7 @@ def build_parser_for_grammar(
     from lark import Lark
 
     return Lark.open(
-        grammar_file,
+        str(grammar_file),
         parser="lalr",
         lexer=lexer_type,
     )

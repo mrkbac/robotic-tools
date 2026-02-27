@@ -50,18 +50,18 @@ from small_mcap.records import (
 from small_mcap.remapper import Remapper
 
 if TYPE_CHECKING:
-    from lz4.frame import decompress as lz4_decompress  # type: ignore[import-untyped]
+    from lz4.frame import decompress as lz4_decompress
     from zstandard import ZstdDecompressor
 else:
     try:
         from zstandard import ZstdDecompressor
     except ImportError:
-        ZstdDecompressor = None  # type: ignore[assignment,misc]
+        ZstdDecompressor = None
 
     try:
         from lz4.frame import decompress as lz4_decompress
     except ImportError:
-        lz4_decompress = None  # type: ignore[assignment]
+        lz4_decompress = None
 
 _zstd_decompressor: "ZstdDecompressor | None" = None
 

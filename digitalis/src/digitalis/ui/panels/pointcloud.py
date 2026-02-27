@@ -3,7 +3,7 @@ from typing import ClassVar
 
 import numpy as np
 import numpy.typing as npt
-import pointcloud2  # type: ignore[import-untyped]
+import pointcloud2
 from textual import work
 from textual.binding import Binding, BindingType
 from textual.widgets import Static

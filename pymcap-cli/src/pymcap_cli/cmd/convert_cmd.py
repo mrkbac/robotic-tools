@@ -540,7 +540,7 @@ def convert(
     # Build conversion options
     options = ConvertOptions(
         distro=distro,
-        extra_paths=extra_path if extra_path else None,
+        extra_paths=extra_path or None,
         chunk_size=chunk_size,
         compression=writer_compression,
         enable_crcs=True,

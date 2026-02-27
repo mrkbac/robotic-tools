@@ -232,7 +232,7 @@ class CustomHeader(Widget):
         screen_sub_title = self.screen.sub_title
         return screen_sub_title if screen_sub_title is not None else self.app.sub_title
 
-    def _on_mount(self, _: Mount) -> None:
+    def _on_mount(self, _event: Mount) -> None:  # type: ignore[invalid-method-override]
         async def set_title() -> None:
             with contextlib.suppress(Exception):
                 self.query_one(CustomHeaderTitle).text = self.screen_title

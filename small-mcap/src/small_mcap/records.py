@@ -62,7 +62,7 @@ def _read_string(data: bytes | memoryview, offset: int) -> tuple[str, int]:
     string_len = struct.unpack_from("<I", data, offset)[0]
     offset += 4
     string_bytes = data[offset : offset + string_len]
-    string_val = str(string_bytes, "utf-8")
+    string_val = str(bytes(string_bytes), "utf-8")
     offset += string_len
     return string_val, offset
 

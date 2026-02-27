@@ -40,14 +40,6 @@ dev = [
     "lark>=1.3.0",
 ]
 
-[tool.mypy]
-strict = true
-python_version = "3.10"
-exclude = [
-    "^.*/_standalone.*\\.py$",
-    "^.*/_lark_standalone.*\\.py$",
-]
-
 [tool.ruff]
 extend = "../pyproject.toml"
 extend-exclude = [

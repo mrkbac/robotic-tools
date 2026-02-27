@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+from typing import Literal
 
 from mcap_ros2_support_fast._dynamic_decoder import DecoderGeneratorFactory
 from mcap_ros2_support_fast._dynamic_encoder import EncoderGeneratorFactory
@@ -14,7 +15,7 @@ from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
 
 
 # ruff: noqa: T201
-def show_code_for_endianness(plan: tuple, endianness: str, label: str) -> None:
+def show_code_for_endianness(plan: tuple, endianness: "Literal['<', '>']", label: str) -> None:
     """Generate and display code for a specific endianness."""
     print(f"\n{'=' * 80}")
     print(f"{label} ({endianness}-endian)")

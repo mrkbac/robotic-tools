@@ -421,6 +421,6 @@ def rebuild_summary(
         summary=summary,
         channel_sizes=channel_sizes if calculate_channel_sizes else None,
         estimated_channel_sizes=calculate_channel_sizes and not exact_sizes,
-        chunk_information=chunk_information if chunk_information else None,
+        chunk_information=chunk_information or None,
         next_offset=next_offset,
     )

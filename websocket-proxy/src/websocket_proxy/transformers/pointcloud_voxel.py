@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from pointcloud2 import (  # type: ignore[import-untyped]
+from pointcloud2 import (
     PointCloud2,
     PointField,
     dtype_from_fields,

@@ -23,10 +23,10 @@ from pymcap_cli.cmd import (
 )
 
 try:
-    from pymcap_cli.cmd.video_cmd import video  # type: ignore[unused-ignore]
+    from pymcap_cli.cmd.video_cmd import video
 except ImportError:
 
-    def video() -> int:  # type: ignore[misc]
+    def video() -> int:
         """Video command is unavailable because the 'av' and/or 'numpy' are not installed.
 
         To enable video functionality, please install pymcap-cli with the 'video' extra:
@@ -44,10 +44,10 @@ except ImportError:
 
 
 try:
-    from pymcap_cli.cmd.roscompress_cmd import roscompress  # type: ignore[unused-ignore]
+    from pymcap_cli.cmd.roscompress_cmd import roscompress
 except ImportError:
 
-    def roscompress() -> int:  # type: ignore[misc]
+    def roscompress() -> int:
         """ROS compress command is unavailable because the 'av' package is not installed.
 
         To enable roscompress functionality, please install pymcap-cli with the 'video' extra:

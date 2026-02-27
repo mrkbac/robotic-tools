@@ -242,7 +242,7 @@ class TreeView(Tree[str]):
                 obj_repr = repr(new_obj)
 
             # Extract name from path for label
-            name = path.split("/")[-1] if "/" in path else path
+            name = path.rsplit("/", maxsplit=1)[-1] if "/" in path else path
             if name and name != "root":
                 label = Text.assemble(Text.from_markup(f"[b]{name}[/b]="), highlighter(obj_repr))
             else:
@@ -256,7 +256,7 @@ class TreeView(Tree[str]):
             return
 
         # Object with slots - handle special cases first
-        name = path.split("/")[-1] if "/" in path else path
+        name = path.rsplit("/", maxsplit=1)[-1] if "/" in path else path
         if new_obj.__slots__ == ["sec", "nanosec"]:
             timestamp = iso_highlighter(
                 datetime.fromtimestamp(
