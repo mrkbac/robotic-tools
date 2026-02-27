@@ -1,12 +1,18 @@
 """List command for pymcap-cli - list various MCAP file records."""
 
+import re
 from datetime import datetime
+from typing import Annotated
 
-from cyclopts import App
+from cyclopts import App, Parameter
 from rich.console import Console
 from rich.table import Table
+from rich.tree import Tree
+from ros_parser import parse_schema_to_definitions
+from ros_parser.models import Constant, MessageDefinition
 from small_mcap import InvalidMagicError, McapError, RebuildInfo
 
+from pymcap_cli.display_utils import _create_ros_docs_url
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
 
@@ -264,9 +270,171 @@ def metadata(
     console.print(table)
 
 
+def _render_fields(
+    tree: Tree,
+    definition: MessageDefinition,
+    all_defs: dict[str, MessageDefinition],
+    ancestors: set[str],
+    expanded: set[str],
+) -> None:
+    """Recursively render message fields into a Rich Tree.
+
+    Uses uv-tree-style deduplication: complex types are fully expanded
+    on first occurrence, then shown with (*) on subsequent appearances.
+    ``ancestors`` tracks the current recursion stack (cycle prevention),
+    ``expanded`` tracks types already expanded anywhere in the tree.
+    """
+    for item in definition.fields_all:
+        if isinstance(item, Constant):
+            tree.add(f"[magenta]{item.type} {item.name}={item.value}[/magenta]")
+            continue
+
+        field_type = item.type
+
+        # Format array suffix with escaped brackets for Rich markup
+        array_suffix = ""
+        if field_type.is_array:
+            if field_type.array_size and not field_type.is_upper_bound:
+                array_suffix = f"[yellow]\\[{field_type.array_size}][/yellow]"
+            elif field_type.array_size and field_type.is_upper_bound:
+                array_suffix = f"[yellow]\\[<={field_type.array_size}][/yellow]"
+            else:
+                array_suffix = "[yellow]\\[][/yellow]"
+
+        if field_type.is_primitive:
+            tree.add(f"[green]{field_type.type_name}[/green]{array_suffix} {item.name}")
+        else:
+            # Complex type — try to recurse
+            # Build lookup key using base name (without array brackets)
+            base_type = (
+                f"{field_type.package_name}/{field_type.type_name}"
+                if field_type.package_name
+                else field_type.type_name
+            )
+            lookup_keys = [base_type]
+            if field_type.package_name:
+                lookup_keys.append(f"{field_type.package_name}/msg/{field_type.type_name}")
+
+            child_def = None
+            for key in lookup_keys:
+                if key in all_defs:
+                    child_def = all_defs[key]
+                    break
+
+            # Format label with link
+            docs_url = _create_ros_docs_url(base_type)
+            if docs_url:
+                type_markup = f"[link={docs_url}][cyan]{base_type}[/cyan][/link]"
+            else:
+                type_markup = f"[cyan]{base_type}[/cyan]"
+
+            if child_def and base_type not in ancestors:
+                if base_type in expanded:
+                    # Already expanded elsewhere — show (*) like uv tree
+                    tree.add(f"{type_markup}{array_suffix} {item.name} [dim](*)[/dim]")
+                else:
+                    branch = tree.add(f"{type_markup}{array_suffix} {item.name}")
+                    expanded.add(base_type)
+                    ancestors.add(base_type)
+                    _render_fields(branch, child_def, all_defs, ancestors, expanded)
+                    ancestors.discard(base_type)
+            else:
+                tree.add(f"{type_markup}{array_suffix} {item.name}")
+
+
+def schema(
+    file: str,
+    *,
+    name: Annotated[
+        str | None,
+        Parameter(name=["--name"]),
+    ] = None,
+) -> None:
+    """Inspect schema structure with nested field display.
+
+    Parse and display ROS2 message schemas as a tree, showing nested
+    field types recursively. Complex types are expanded inline.
+
+    Parameters
+    ----------
+    file
+        Path to the MCAP file (local file or HTTP/HTTPS URL).
+    name
+        Filter schemas by regex pattern on schema name.
+
+    Examples
+    --------
+    ```
+    # Show all schemas
+    pymcap-cli list schema recording.mcap
+
+    # Filter by name
+    pymcap-cli list schema recording.mcap --name Image
+    ```
+    """
+    info = _read_mcap_info(file)
+    summary = info.summary
+
+    if not summary.schemas:
+        console.print("[yellow]No schemas found[/yellow]")
+        return
+
+    matched = False
+    for schema_id in sorted(summary.schemas.keys()):
+        s = summary.schemas[schema_id]
+
+        if name and not re.search(name, s.name):
+            continue
+
+        # Try to parse schema data
+        if not s.data:
+            console.print(f"[yellow]Schema {s.name} (ID: {s.id}) has no data[/yellow]")
+            continue
+
+        try:
+            all_defs = parse_schema_to_definitions(s.name, s.data)
+        except Exception:  # noqa: BLE001
+            console.print(f"[yellow]Could not parse schema {s.name} (ID: {s.id})[/yellow]")
+            continue
+
+        # Find root definition
+        root_def = all_defs.get(s.name)
+        if root_def is None:
+            parts = s.name.split("/")
+            short_name = f"{parts[0]}/{parts[-1]}"
+            root_def = all_defs.get(short_name)
+
+        if root_def is None:
+            console.print(f"[yellow]No root definition found for {s.name}[/yellow]")
+            continue
+
+        matched = True
+
+        # Build tree
+        docs_url = _create_ros_docs_url(s.name)
+        if docs_url:
+            label = (
+                f"[link={docs_url}][bold cyan]{s.name}[/bold cyan][/link]  [dim](ID: {s.id})[/dim]"
+            )
+        else:
+            label = f"[bold cyan]{s.name}[/bold cyan]  [dim](ID: {s.id})[/dim]"
+
+        tree = Tree(label)
+        _render_fields(tree, root_def, all_defs, set(), set())
+        console.print(tree)
+        console.print()
+
+    if not matched:
+        if name:
+            console.print(f"[yellow]No schemas matching '{name}'[/yellow]")
+        else:
+            console.print("[yellow]No parseable schemas found[/yellow]")
+
+
 # Register commands with the app
 list_app.command(channels, name="channels")
 list_app.command(chunks, name="chunks")
 list_app.command(schemas, name="schemas")
+list_app.command(schema, name="schema")
 list_app.command(attachments, name="attachments")
 list_app.command(metadata, name="metadata")

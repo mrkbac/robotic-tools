@@ -580,7 +580,7 @@ def video(
     topics: Annotated[
         list[str],
         Parameter(
-            name=["-t", "--topic"],
+            name=["-t", "--topics", "--topic"],
             group=INPUT_GROUP,
         ),
     ],

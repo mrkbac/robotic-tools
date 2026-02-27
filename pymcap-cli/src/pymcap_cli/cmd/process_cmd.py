@@ -59,14 +59,14 @@ def process(
     include_topic_regex: Annotated[
         list[str] | None,
         Parameter(
-            name=["-y", "--include-topic-regex"],
+            name=["-t", "--topics", "--include-topic-regex", "-y"],
             group=FILTERING_GROUP,
         ),
     ] = None,
     exclude_topic_regex: Annotated[
         list[str] | None,
         Parameter(
-            name=["-n", "--exclude-topic-regex"],
+            name=["-x", "--exclude-topics", "--exclude-topic-regex", "-n"],
             group=FILTERING_GROUP,
         ),
     ] = None,
@@ -80,7 +80,7 @@ def process(
     start_secs: Annotated[
         int,
         Parameter(
-            name=["-s", "--start-secs"],
+            name=["--start-secs"],
             group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
@@ -101,7 +101,7 @@ def process(
     end_secs: Annotated[
         int,
         Parameter(
-            name=["-e", "--end-secs"],
+            name=["--end-secs"],
             group=TIME_FILTERING_GROUP,
         ),
     ] = 0,

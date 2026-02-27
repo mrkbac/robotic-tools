@@ -74,7 +74,7 @@ def cat(
     exclude_topics: Annotated[
         list[str] | None,
         Parameter(
-            name=["-n", "--exclude-topics"],
+            name=["-x", "--exclude-topics", "-n"],
             group=FILTERING_GROUP,
         ),
     ] = None,
