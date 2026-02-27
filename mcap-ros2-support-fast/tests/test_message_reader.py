@@ -551,6 +551,71 @@ def test_wstring_throws_exception(msg_def: str) -> None:
         decoder(buffer)
 
 
+COMMAND_MSG_SCHEMA = """\
+std_msgs/Header header
+float64 velocity
+float64 steering
+float64 arm
+float64 shovel
+bool handbreak
+bool safety
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+"""
+
+
+@pytest.mark.parametrize(
+    "frame_id",
+    [
+        "",
+        "a",
+        "base_link",
+        "very_long_frame_id_that_exercises_alignment_edge_cases_12345",
+    ],
+)
+def test_deserialize_header_plus_fixed_fields(frame_id: str) -> None:
+    """Test Header + fixed-fields pattern (static prefix + tail-from-end optimization)."""
+    # Build CDR payload manually
+    sec, nanosec = 1700000000, 500000
+    velocity, steering, arm, shovel = 1.5, -0.3, 0.0, 2.7
+    handbreak, safety = True, False
+
+    payload = bytearray()
+    # Time: sec (int32) + nanosec (uint32)
+    payload += struct.pack("<iI", sec, nanosec)
+    # frame_id: uint32 length (including null) + data + null
+    frame_bytes = frame_id.encode("utf-8")
+    payload += struct.pack("<I", len(frame_bytes) + 1)
+    payload += frame_bytes + b"\x00"
+    # Align to 8 bytes for float64
+    while len(payload) % 8 != 0:
+        payload += b"\x00"
+    # 4x float64 + 2x bool
+    payload += struct.pack("<4d2?", velocity, steering, arm, shovel, handbreak, safety)
+
+    buffer = bytes([0, 1, 0, 0]) + bytes(payload)
+    decoder = generate_dynamic(
+        "custom_type/CommandMsg", COMMAND_MSG_SCHEMA, parser=create_codegen_decoder
+    )
+    result = decoder(buffer)
+    result_dict = _convert_to_dict(result)
+
+    assert result_dict == {
+        "header": {
+            "stamp": {"sec": sec, "nanosec": nanosec},
+            "frame_id": frame_id,
+        },
+        "velocity": velocity,
+        "steering": steering,
+        "arm": arm,
+        "shovel": shovel,
+        "handbreak": handbreak,
+        "safety": safety,
+    }
+
+
 def _convert_to_dict(obj) -> dict:
     """Convert SimpleNamespace objects to dictionaries recursively."""
     # Handle bytes objects directly (they should not be converted)

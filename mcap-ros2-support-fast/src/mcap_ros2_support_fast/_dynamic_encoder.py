@@ -14,16 +14,15 @@ from ._plans import (
     TypeId,
 )
 
-_SENTINEL = object()
-
 
 def _get_field(obj: Any, f: str, default: Any) -> Any:
-    """Get field from object (dict or attribute) with default."""
+    """Get field from object (dict or attribute) with default.
+
+    Returns default when the attribute is missing or None.
+    """
     if isinstance(obj, dict):
         return obj.get(f, default)
-    value = getattr(obj, f, _SENTINEL)
-    if value is _SENTINEL:
-        return default
+    value = getattr(obj, f, default)
     return default if value is None else value
 
 
@@ -53,6 +52,9 @@ class EncoderGeneratorFactory:
         # Collect all required types and classes during generation
         self.message_classes: set[type] = set()
         self.current_alignment = 8  # perfect alignment at the start
+        # Opt 4: Static offset tracking — mirrors decoder pattern
+        # When not None, we know the exact byte position at compile time
+        self.static_offset: int | None = None
 
     def generate_var_name(self) -> str:
         """Generate a unique variable name."""
@@ -72,6 +74,12 @@ class EncoderGeneratorFactory:
             self.struct_patterns[pattern] = f"_e_{safe_name}"
         return self.struct_patterns[pattern]
 
+    def _ensure_dynamic(self) -> None:
+        """Transition from static to dynamic offset tracking if needed."""
+        if self.static_offset is not None:
+            self.code.append(f"_offset = {self.static_offset}")
+            self.static_offset = None
+
     def generate_alignment(self, size: int) -> None:
         """Generate optimized alignment code for a given size requirement.
 
@@ -84,10 +92,19 @@ class EncoderGeneratorFactory:
         self.current_alignment = size
         if size > 1 and size in (2, 4, 8):
             mask = size - 1
-            # Align based on payload offset (subtract 4 for CDR header)
-            self.code.append(f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}")
-            self.code.append("_buffer += _PADS[_pad]")
-            self.code.append("_offset += _pad")
+            if self.static_offset is not None:
+                # Compile-time alignment: compute padding, emit literal bytes
+                payload_offset = self.static_offset - CDR_HEADER_SIZE
+                pad = (size - (payload_offset & mask)) & mask
+                if pad > 0:
+                    pad_bytes = b"\x00" * pad
+                    self.code.append(f"_buffer += {pad_bytes!r}")
+                    self.static_offset += pad
+            else:
+                # Align based on payload offset (subtract 4 for CDR header)
+                self.code.append(f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}")
+                self.code.append("_buffer += _PADS[_pad]")
+                self.code.append("_offset += _pad")
 
     def reset_alignment(self, initial: int = 0) -> None:
         """Reset the current alignment to zero."""
@@ -98,9 +115,14 @@ class EncoderGeneratorFactory:
         if type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}:
             self.generate_alignment(1)
             self.code.append(f"_buffer.append({value_expr})")
-            self.code.append("_offset += 1")
+            if self.static_offset is not None:
+                self.static_offset += 1
+            else:
+                self.code.append("_offset += 1")
 
         elif type_id == TypeId.STRING:
+            # String is variable-length, must transition to dynamic
+            self._ensure_dynamic()
             self.code.append(f"_str_bytes = {value_expr}.encode()")
             self.code.append("_str_size = len(_str_bytes) + 1")  # +1 for null terminator
             self.generate_primitive_writer("_str_size", TypeId.UINT32)
@@ -109,6 +131,7 @@ class EncoderGeneratorFactory:
             self.code.append("_offset += _str_size")
             self.reset_alignment()  # After string unknown position readjustment
         elif type_id == TypeId.WSTRING:
+            self._ensure_dynamic()
             self.code.append("raise NotImplementedError('wstring not implemented')")
         # Standard struct-based types
         elif struct_name := TYPE_INFO.get(type_id):
@@ -118,7 +141,10 @@ class EncoderGeneratorFactory:
             pattern = f"{self.endianness}{struct_name}"
             pattern_var = self.get_struct_pattern_var_name(pattern)
             self.code.append(f"_buffer += {pattern_var}({value_expr})")
-            self.code.append(f"_offset += {struct_size}")
+            if self.static_offset is not None:
+                self.static_offset += struct_size
+            else:
+                self.code.append(f"_offset += {struct_size}")
         else:
             raise NotImplementedError(f"Unsupported type: {type_id}")
 
@@ -126,6 +152,16 @@ class EncoderGeneratorFactory:
         self, value_expr: str, type_id: TypeId, array_size: int | None, is_upper_bound: bool = False
     ) -> None:
         """Generate code for primitive array fields."""
+        # Determine if we need dynamic offset tracking
+        needs_dynamic = (
+            array_size is None  # dynamic array
+            or is_upper_bound  # bounded array
+            or type_id in {TypeId.STRING, TypeId.WSTRING}  # variable per-element
+            or type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}  # byte arrays use len()
+        )
+        if needs_dynamic:
+            self._ensure_dynamic()
+
         # For dynamic or bounded arrays, write length prefix
         if array_size is None or is_upper_bound:  # dynamic or bounded array
             # For bounded arrays, truncate to upper bound if needed
@@ -181,7 +217,10 @@ class EncoderGeneratorFactory:
                 pattern = f"{self.endianness}{array_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
                 self.code.append(f"_buffer += {pattern_var}(*{value_expr})")
-                self.code.append(f"_offset += {array_size * struct_size}")
+                if self.static_offset is not None:
+                    self.static_offset += array_size * struct_size
+                else:
+                    self.code.append(f"_offset += {array_size * struct_size}")
             else:
                 # Dynamic or bounded array - use array.tobytes()
                 array_len_var = self.generate_var_name()
@@ -202,6 +241,9 @@ class EncoderGeneratorFactory:
         self, array_var: str, plan: PlanList, array_size: int | None, is_upper_bound: bool = False
     ) -> None:
         """Generate code for complex array fields."""
+        # Complex arrays always need dynamic offset tracking
+        self._ensure_dynamic()
+
         # Bounded arrays (<=N) and dynamic arrays ([]) both write length prefix
         if array_size is None or is_upper_bound:
             # For bounded arrays, truncate to upper bound if needed
@@ -253,7 +295,10 @@ class EncoderGeneratorFactory:
 
         struct_var = self.get_struct_pattern_var_name(pattern)
         self.code.append(f"_buffer += {struct_var}({', '.join(field_values)})")
-        self.code.append(f"_offset += {struct_size}")
+        if self.static_offset is not None:
+            self.static_offset += struct_size
+        else:
+            self.code.append(f"_offset += {struct_size}")
 
         last_size = struct.calcsize(f"<{TYPE_INFO[targets[-1][1]]}")
         self.reset_alignment(last_size)
@@ -304,7 +349,10 @@ class EncoderGeneratorFactory:
         # Handle empty message case (ROS 2 structure_needs_at_least_one_member)
         if not fields:
             self.code.append("_buffer.append(0)  # structure_needs_at_least_one_member")
-            self.code.append("_offset += 1")
+            if self.static_offset is not None:
+                self.static_offset += 1
+            else:
+                self.code.append("_offset += 1")
             self.reset_alignment()
             return
 
@@ -314,15 +362,14 @@ class EncoderGeneratorFactory:
     def generate_encoder_code(self, func_name: str) -> str:
         """Generate Python source code for an encoder function"""
         with self.code.indent(f"def {func_name}(message):"):
-            self.code.append("_buffer = bytearray()")
-            self.code.append("_offset = 0")
-
-            # Add CDR header (4 bytes: endianness + padding)
+            # Add CDR header inline (4 bytes: endianness + padding)
             cdr_header = (
                 CDR_HEADER_LITTLE_ENDIAN if self.endianness == "<" else CDR_HEADER_BIG_ENDIAN
             )
-            self.code.append(f"_buffer += {cdr_header!r}  # CDR header")
-            self.code.append(f"_offset += {CDR_HEADER_SIZE}")
+            self.code.append(f"_buffer = bytearray({cdr_header!r})")
+
+            # Start in static offset mode at position 4 (after CDR header)
+            self.static_offset = CDR_HEADER_SIZE
 
             # Generate the main encoding code first to collect all types
             self.generate_plan_writer("message", self.plan)
@@ -377,6 +424,10 @@ def create_encoder(plan: PlanList, *, comments: bool = True) -> EncoderFunction:
 
     This generates optimized Python code for the specific plan, eliminating
     all dispatch overhead and function call overhead.
+
+    Optimizations applied:
+    - Opt 3: Simplified _get_field (no sentinel/None check)
+    - Opt 4: Static offset tracking (skip _offset/_pad for fixed-size prefix)
     """
     factory = EncoderGeneratorFactory(plan, comments=comments)
     target_type_name = f"encoder_{plan[0].__name__}_main"
