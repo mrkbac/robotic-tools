@@ -8,6 +8,7 @@ from small_mcap import McapWriter, get_summary, rebuild_summary, stream_reader
 from small_mcap.exceptions import McapError
 from small_mcap.rebuild import MESSAGE_RECORD_OVERHEAD, _estimate_size_from_indexes
 from small_mcap.records import LazyChunk, MessageIndex
+from small_mcap.writer import CompressionType, IndexType
 
 # Path to conformance test data
 CONFORMANCE_DIR = Path(__file__).parent.parent.parent / "data" / "conformance"
@@ -417,3 +418,93 @@ def test_rebuild_pending_chunk_rebuilds_missing_indexes():
     assert [offset for _, offset in rebuilt_records] == sorted(
         offset for _, offset in rebuilt_records
     )
+
+
+def test_rebuild_no_index_file_does_not_rebuild_indexes():
+    """When no chunks have message indexes, final chunk should not rebuild indexes.
+
+    A file written with IndexType.CHUNK (no MessageIndex records) should not
+    have indexes rebuilt for the final chunk either. Note: without exact_sizes=True,
+    messages inside chunks with no indexes are not decompressed, so message_count
+    is only tracked for chunks that were force-decompressed.
+    """
+    buffer = io.BytesIO()
+    # Write file with no message indexes (only ChunkIndex)
+    writer = McapWriter(
+        buffer, chunk_size=50, index_types=IndexType.CHUNK, compression=CompressionType.NONE
+    )
+    writer.start()
+    writer.add_schema(1, "Test", "json", b"{}")
+    writer.add_channel(1, "/test", "json", 1)
+    for i in range(20):
+        writer.add_message(1, i * 1000, b"x" * 30, i * 1000)
+    writer.finish()
+
+    data = buffer.getvalue()
+
+    # Verify the written file actually has multiple chunks with no message indexes
+    stream = io.BytesIO(data)
+    chunk_count = 0
+    for record in stream_reader(stream, emit_chunks=True, lazy_chunks=True):
+        if isinstance(record, LazyChunk):
+            chunk_count += 1
+    assert chunk_count >= 2, "Test requires multiple chunks"
+
+    stream = io.BytesIO(data)
+    rebuild_info = rebuild_summary(
+        stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+    )
+
+    stats = rebuild_info.summary.statistics
+    assert stats is not None
+
+    # All chunk_indexes should have message_index_length == 0
+    # (no indexes should have been rebuilt since the file has no indexes at all)
+    for ci in rebuild_info.summary.chunk_indexes:
+        assert ci.message_index_length == 0
+
+    # chunk_information should be None or empty (no rebuilt indexes)
+    assert rebuild_info.chunk_information is None or len(rebuild_info.chunk_information) == 0
+
+
+def test_rebuild_multi_chunk_with_indexes_rebuilds_final():
+    """When other chunks have indexes, final chunk should rebuild them."""
+    buffer = io.BytesIO()
+    # Use small chunk_size to force multiple chunks, with message indexes
+    writer = McapWriter(
+        buffer, chunk_size=50, index_types=IndexType.ALL, compression=CompressionType.NONE
+    )
+    writer.start()
+    writer.add_schema(1, "Test", "json", b"{}")
+    writer.add_channel(1, "/test", "json", 1)
+    for i in range(20):
+        writer.add_message(1, i * 1000, b"x" * 30, i * 1000)
+    writer.finish()
+
+    data = buffer.getvalue()
+
+    # Find the last chunk+indexes boundary and truncate there to simulate
+    # a file with missing final indexes
+    stream = io.BytesIO(data)
+    chunk_offsets = []
+    prev_pos = 0
+    for record in stream_reader(stream, emit_chunks=True, lazy_chunks=True):
+        if isinstance(record, LazyChunk):
+            chunk_offsets.append(prev_pos)
+        prev_pos = stream.tell()
+
+    # Need at least 2 chunks for this test
+    assert len(chunk_offsets) >= 2
+
+    # Rebuild the full file to check that indexes are rebuilt for final chunk
+    stream = io.BytesIO(data)
+    rebuild_info = rebuild_summary(
+        stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+    )
+
+    stats = rebuild_info.summary.statistics
+    assert stats is not None
+    assert stats.message_count == 20
+    # Should have chunk_information populated
+    assert rebuild_info.chunk_information is not None
+    assert len(rebuild_info.chunk_information) > 0

@@ -167,7 +167,7 @@ def test_channel_fast_path_same_stream():
 
 
 def test_channel_deduplication():
-    """Identical channels (same topic/encoding) should be deduplicated."""
+    """Identical channels (same topic/encoding/schema/metadata) should be deduplicated."""
     remapper = Remapper()
     schema = Schema(id=1, name="test", encoding="proto", data=b"data")
     remapper.remap_schema(0, schema)
@@ -181,6 +181,62 @@ def test_channel_deduplication():
 
     assert mapped1.id == mapped2.id  # Same content = same ID
     assert remapper.was_channel_remapped(1, 2)  # ID changed from 2 to 1
+
+
+def test_channel_different_schema_not_deduplicated():
+    """Channels with same topic+encoding but different schemas should NOT be deduplicated."""
+    remapper = Remapper()
+    schema1 = Schema(id=1, name="TypeA", encoding="proto", data=b"data_a")
+    schema2 = Schema(id=2, name="TypeB", encoding="proto", data=b"data_b")
+    remapper.remap_schema(0, schema1)
+    remapper.remap_schema(0, schema2)
+
+    channel1 = Channel(id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+    channel2 = Channel(id=2, schema_id=2, topic="/test", message_encoding="proto", metadata={})
+
+    mapped1 = remapper.remap_channel(0, channel1)
+    mapped2 = remapper.remap_channel(0, channel2)
+
+    # Different schemas → different channels
+    assert mapped1.id != mapped2.id
+    assert mapped1.schema_id == 1
+    assert mapped2.schema_id == 2
+
+
+def test_channel_different_metadata_not_deduplicated():
+    """Channels with same topic+encoding+schema but different metadata are not deduped."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)
+
+    channel1 = Channel(
+        id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={"source": "cam0"}
+    )
+    channel2 = Channel(
+        id=2, schema_id=1, topic="/test", message_encoding="proto", metadata={"source": "cam1"}
+    )
+
+    mapped1 = remapper.remap_channel(0, channel1)
+    mapped2 = remapper.remap_channel(1, channel2)
+
+    # Different metadata → different channels
+    assert mapped1.id != mapped2.id
+    assert mapped1.metadata == {"source": "cam0"}
+    assert mapped2.metadata == {"source": "cam1"}
+
+
+def test_channel_schemaless_deduplication():
+    """Schemaless channels with same topic+encoding+metadata should be deduplicated."""
+    remapper = Remapper()
+
+    channel1 = Channel(id=1, schema_id=0, topic="/test", message_encoding="json", metadata={})
+    channel2 = Channel(id=2, schema_id=0, topic="/test", message_encoding="json", metadata={})
+
+    mapped1 = remapper.remap_channel(0, channel1)
+    mapped2 = remapper.remap_channel(1, channel2)
+
+    assert mapped1.id == mapped2.id  # Deduplicated
 
 
 def test_get_remapped_channel():

@@ -403,8 +403,14 @@ def rebuild_summary(
             )
         )
     try:
-        # TODO: we should only rebuild if other chunks have message indexes
-        finish_chunk(force=True, rebuild_indexes=True)
+        prior_chunks = summary.chunk_indexes[:-1]
+        # Only skip index rebuilding if there are prior chunks and none have indexes
+        # (i.e., the file was written without message indexes). With no prior chunks
+        # or with any prior chunk having indexes, default to rebuilding.
+        should_rebuild_indexes = not prior_chunks or any(
+            ci.message_index_length > 0 for ci in prior_chunks
+        )
+        finish_chunk(force=True, rebuild_indexes=should_rebuild_indexes)
     except Exception as e:  # noqa: BLE001
         logger.warning("Could not process final chunk: %s", e)
 

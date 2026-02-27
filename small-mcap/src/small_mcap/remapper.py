@@ -46,7 +46,9 @@ class Remapper:
         self._channel_lookup_fast: dict[tuple[int, int], Channel] = {}
         # Slow path: content-based deduplication
         self._schema_lookup_slow: dict[tuple[str, bytes], Schema | None] = {}
-        self._channel_lookup_slow: dict[tuple[str, str], Channel] = {}
+        self._channel_lookup_slow: dict[
+            tuple[str, str, int, tuple[tuple[str, str], ...]], Channel
+        ] = {}
 
     @overload
     def remap_schema(self, stream_id: int, schema: None) -> None: ...
@@ -87,21 +89,7 @@ class Remapper:
         if mapped_channel is not None:
             return mapped_channel
 
-        # Slow path: lookup by channel content (deduplication)
-        slow_key = (
-            channel.topic,
-            channel.message_encoding,
-        )  # TODO: include metadata
-        mapped_channel = self._channel_lookup_slow.get(slow_key)
-        if mapped_channel is not None:
-            # Cache in fast lookup for future access
-            self._channel_lookup_fast[fast_key] = mapped_channel
-            return mapped_channel
-
-        # Allocate ID, preserving original if possible
-        new_id = _allocate_id(self._used_channel_ids, channel.id)
-
-        # Map schema_id to the remapped value
+        # Map schema_id to the remapped value first (needed for dedup key)
         # schema_id=0 means no schema (valid per MCAP spec)
         new_schema_id = 0
         if channel.schema_id != 0:
@@ -111,6 +99,18 @@ class Remapper:
                     channel.schema_id, topic=channel.topic, stream_id=stream_id
                 )
             new_schema_id = mapped_schema.id
+
+        # Slow path: lookup by channel content (deduplication)
+        metadata_key = tuple(sorted(channel.metadata.items())) if channel.metadata else ()
+        slow_key = (channel.topic, channel.message_encoding, new_schema_id, metadata_key)
+        mapped_channel = self._channel_lookup_slow.get(slow_key)
+        if mapped_channel is not None:
+            # Cache in fast lookup for future access
+            self._channel_lookup_fast[fast_key] = mapped_channel
+            return mapped_channel
+
+        # Allocate ID, preserving original if possible
+        new_id = _allocate_id(self._used_channel_ids, channel.id)
 
         # Direct construction is faster than dataclass.replace
         mapped_channel = Channel(
