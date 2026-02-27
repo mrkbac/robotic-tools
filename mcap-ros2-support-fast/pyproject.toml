@@ -1,6 +1,6 @@
 [project]
 name = "mcap-ros2-support-fast"
-version = "0.1.1"
+version = "0.1.2"
 description = "High-performance pure Python ROS2 message serialization and deserialization for MCAP files"
 readme = "README.md"
 requires-python = ">=3.10"
