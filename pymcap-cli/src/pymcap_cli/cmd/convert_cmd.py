@@ -2,7 +2,6 @@
 
 import logging
 import sqlite3
-import sys
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -468,7 +467,7 @@ def convert(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Convert ROS2 DB3 (SQLite) bag files to MCAP format.
 
     This command converts ROS2 bag files in DB3 (SQLite) format to MCAP format,
@@ -524,7 +523,7 @@ def convert(
     input_path = Path(file)
     if not input_path.exists():
         console.print(f"[red]Error: Input file '{file}' does not exist[/red]")
-        sys.exit(1)
+        return 1
 
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
@@ -578,4 +577,6 @@ def convert(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during conversion: {e}[/red]")
-            sys.exit(1)
+            return 1
+
+    return 0

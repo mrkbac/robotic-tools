@@ -22,7 +22,7 @@ def du(
             name=["-e", "--exact-sizes"],
         ),
     ] = False,
-) -> None:
+) -> int:
     """Report space usage within an MCAP file.
 
     This command reports space usage within an mcap file. Space usage for messages is
@@ -61,3 +61,5 @@ def du(
             responsive=False,
             index_duration=False,
         )
+
+    return 0

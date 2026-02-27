@@ -257,7 +257,7 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = False,
-) -> None:
+) -> int:
     """Report statistics about MCAP file(s).
 
     This command displays comprehensive statistics about MCAP files including:
@@ -316,7 +316,7 @@ def info(
     # Validate input
     if not files:
         console.print("[red]Error:[/] At least one file must be specified")
-        raise SystemExit(1)
+        return 1
 
     # Process all files and display each separately
     for i, file in enumerate(files):
@@ -375,3 +375,5 @@ def info(
         _display_message_distribution(data)
         _display_compression_table(data, has_chunk_info)
         _display_channels_table(data, sort.value, reverse, index_duration, median, tree)
+
+    return 0

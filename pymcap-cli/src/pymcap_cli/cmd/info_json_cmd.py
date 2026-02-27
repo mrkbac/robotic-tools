@@ -604,7 +604,7 @@ def info_json(
             name=["--compress"],
         ),
     ] = False,
-) -> None:
+) -> int:
     """Output MCAP file(s) statistics as JSON with all available data.
 
     Parameters
@@ -623,7 +623,7 @@ def info_json(
     # Validate input
     if not files:
         print('{"error": "At least one file must be specified"}', file=sys.stderr)  # noqa: T201
-        raise SystemExit(1)
+        return 1
 
     # Process all files and collect data
     all_outputs: list[McapInfoOutput] = []
@@ -652,3 +652,5 @@ def info_json(
         print(output_b64)  # noqa: T201
     else:
         print(output_json)  # noqa: T201
+
+    return 0

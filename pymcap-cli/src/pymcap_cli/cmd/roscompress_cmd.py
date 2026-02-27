@@ -1,21 +1,18 @@
 """Command to compress CompressedImage topics to CompressedVideo in MCAP files."""
 
-import io
 import logging
 import platform
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import av
 import av.error
-import numpy as np
 from av.video.frame import VideoFrame
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
-from numpy.typing import NDArray
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -30,6 +27,14 @@ from rich.progress import (
 from small_mcap import McapWriter, get_summary
 from small_mcap.reader import read_message_decoded
 
+from pymcap_cli.image_utils import (
+    COMPRESSED_SCHEMAS,
+    IMAGE_SCHEMAS,
+    VideoEncoderError,
+    decode_compressed_frame,
+    raw_image_to_array,
+    test_encoder,
+)
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.osc_utils import OSCProgressColumn
 from pymcap_cli.types_manual import (
@@ -39,7 +44,6 @@ from pymcap_cli.types_manual import (
 from pymcap_cli.utils import confirm_output_overwrite
 
 if TYPE_CHECKING:
-    from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
 
 
@@ -53,10 +57,6 @@ MSG: builtin_interfaces/Time
 int32 sec
 uint32 nanosec"""
 
-COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
-RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
-IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
-
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -64,30 +64,16 @@ logger = logging.getLogger(__name__)
 ENCODING_GROUP = Group("Encoding")
 
 
-class VideoEncoderError(Exception):
-    """Raised when video encoding fails."""
-
-
-def _test_encoder(encoder_name: str) -> bool:
-    """Test if an encoder is available on this system."""
-    try:
-        av.CodecContext.create(encoder_name, "w")
-    except (av.error.FFmpegError, ValueError):
-        return False
-    else:
-        return True
-
-
 def _detect_encoder() -> str:
     """Detect the best available H.264 encoder for this system."""
     # Try hardware encoders first
     system = platform.system()
     if system == "Darwin":
-        if _test_encoder("h264_videotoolbox"):
+        if test_encoder("h264_videotoolbox"):
             return "h264_videotoolbox"
     elif system == "Linux":
         for encoder in ["h264_nvenc", "h264_vaapi"]:
-            if _test_encoder(encoder):
+            if test_encoder(encoder):
                 return encoder
 
     # Fallback to software encoder
@@ -95,43 +81,8 @@ def _detect_encoder() -> str:
 
 
 def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
-    """Decode a compressed image (JPEG/PNG) to a VideoFrame."""
-    try:
-        container = cast("InputContainer", av.open(io.BytesIO(compressed_data), format="image2"))
-        for frame in container.decode(video=0):
-            container.close()
-            return frame.reformat(format="rgb24")
-    except Exception as exc:
-        raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
-
-    raise VideoEncoderError("Decoder produced no frames")
-
-
-def _raw_image_to_array(message: Any) -> NDArray[np.uint8]:
-    """Convert a ROS Image message to an RGB numpy array."""
-    if not hasattr(message, "data") or not message.data:
-        raise VideoEncoderError("Image has no data")
-    if not hasattr(message, "width") or not hasattr(message, "height"):
-        raise VideoEncoderError("Image missing width/height")
-    if not hasattr(message, "encoding"):
-        raise VideoEncoderError("Image missing encoding")
-
-    width = message.width
-    height = message.height
-    encoding = str(message.encoding).lower()
-    data = bytes(message.data)
-
-    if encoding in {"rgb", "rgb8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array.copy()
-    if encoding in {"bgr", "bgr8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array[..., ::-1].copy()
-    if encoding in {"mono", "mono8", "8uc1"}:
-        mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
-        return np.repeat(mono_array[:, :, None], 3, axis=2)
-
-    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
+    """Decode a compressed image (JPEG/PNG) to an rgb24 VideoFrame."""
+    return decode_compressed_frame(compressed_data).reformat(format="rgb24")
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +238,7 @@ def roscompress(
 
     # Detect encoder
     if encoder:
-        if not _test_encoder(encoder):
+        if not test_encoder(encoder):
             console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
             return 1
         encoder_name = encoder
@@ -365,7 +316,7 @@ def roscompress(
                             first_frame = _decode_compressed_image(compressed_data)
                             width, height = first_frame.width, first_frame.height
                         else:  # RAW_SCHEMAS
-                            rgb_array = _raw_image_to_array(msg.decoded_message)
+                            rgb_array = raw_image_to_array(msg.decoded_message)
                             height, width = rgb_array.shape[:2]
 
                         # Ensure even dimensions (required for yuv420p)
@@ -399,7 +350,7 @@ def roscompress(
                         compressed_data = bytes(msg.decoded_message.data)
                         frame = _decode_compressed_image(compressed_data)
                     else:  # RAW_SCHEMAS
-                        rgb_array = _raw_image_to_array(msg.decoded_message)
+                        rgb_array = raw_image_to_array(msg.decoded_message)
                         frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
 
                     # Encode to video

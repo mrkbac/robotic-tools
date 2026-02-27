@@ -1,6 +1,5 @@
 """Video encoding command for pymcap-cli using av with grid view."""
 
-import io
 import math
 import platform
 from collections.abc import Sequence
@@ -13,7 +12,6 @@ from typing import TYPE_CHECKING, Annotated, Any
 import av
 import av.error
 import numpy as np
-from av import VideoFrame
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from numpy.typing import NDArray
@@ -30,12 +28,21 @@ from rich.progress import (
 )
 from small_mcap import get_summary, include_topics, read_message_decoded
 
+from pymcap_cli.image_utils import (
+    COMPRESSED_SCHEMAS,
+    IMAGE_SCHEMAS,
+    RAW_SCHEMAS,
+    VideoEncoderError,
+    decode_compressed_frame,
+    raw_image_to_array,
+    test_encoder,
+)
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.osc_utils import OSCProgressColumn
 from pymcap_cli.utils import confirm_output_overwrite
 
 if TYPE_CHECKING:
-    from av.container import InputContainer, OutputContainer
+    from av.container import OutputContainer
 
 
 console = Console()
@@ -44,11 +51,6 @@ console = Console()
 INPUT_GROUP = Group("Input Options")
 OUTPUT_GROUP = Group("Output Options")
 ENCODING_GROUP = Group("Encoding Options")
-
-
-COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
-RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
-IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
 
 
 def _validate_topics(topics: list[str]) -> list[str]:
@@ -81,10 +83,6 @@ class EncoderBackend(str, Enum):
 class ImageType(Enum):
     COMPRESSED = auto()
     RAW = auto()
-
-
-class VideoEncoderError(Exception):
-    """Raised when encoding fails."""
 
 
 @dataclass
@@ -132,11 +130,11 @@ def _decode_and_resize_image(
     """Decode a ROS image message and resize to target dimensions."""
     if message_type is ImageType.COMPRESSED:
         compressed = _process_compressed_image(message)
-        frame = _decode_compressed_frame(compressed)
+        frame = decode_compressed_frame(compressed)
         frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
         return frame.to_ndarray(format="rgb24")  # type: ignore[return-value]
 
-    rgb_array = _raw_image_to_array(message)
+    rgb_array = raw_image_to_array(message)
     frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
     frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
     return frame.to_ndarray(format="rgb24")  # type: ignore[return-value]
@@ -148,56 +146,18 @@ def _process_compressed_image(message: Any) -> bytes:
     return bytes(message.data)
 
 
-def _decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
-    try:
-        container: InputContainer = av.open(  # type: ignore[assignment]
-            io.BytesIO(compressed_data), format="image2"
-        )
-        for frame in container.decode(video=0):
-            container.close()
-            return frame
-    except Exception as exc:  # pragma: no cover - depends on data
-        raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
-
-    raise VideoEncoderError("Decoder produced no frames")
-
-
-def _raw_image_to_array(message: Any) -> NDArray[np.uint8]:
-    if not hasattr(message, "data") or not message.data:
-        raise VideoEncoderError("Image has no data")
-    if not hasattr(message, "width") or not hasattr(message, "height"):
-        raise VideoEncoderError("Image missing width/height")
-    if not hasattr(message, "encoding"):
-        raise VideoEncoderError("Image missing encoding")
-
-    width = message.width
-    height = message.height
-    encoding = str(message.encoding).lower()
-    data = bytes(message.data)
-    if encoding in {"rgb", "rgb8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array.copy()
-    if encoding in {"bgr", "bgr8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array[..., ::-1].copy()
-    if encoding in {"mono", "mono8", "8uc1"}:
-        mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
-        return np.repeat(mono_array[:, :, None], 3, axis=2)
-    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
-
-
 def _discover_topic_info(message: Any, topic: str) -> TopicInfo:
     """Discover topic metadata from first message."""
     schema_name = message.schema.name if message.schema else ""
 
     if schema_name in COMPRESSED_SCHEMAS:
         message_type = ImageType.COMPRESSED
-        frame = _decode_compressed_frame(_process_compressed_image(message.decoded_message))
+        frame = decode_compressed_frame(_process_compressed_image(message.decoded_message))
         width = frame.width
         height = frame.height
     elif schema_name in RAW_SCHEMAS:
         message_type = ImageType.RAW
-        rgb = _raw_image_to_array(message.decoded_message)
+        rgb = raw_image_to_array(message.decoded_message)
         height, width = rgb.shape[:2]
     else:
         raise VideoEncoderError(f"Topic '{topic}' is not an image topic (schema: {schema_name})")
@@ -228,7 +188,7 @@ def _detect_encoder(codec: VideoCodec, encoder_backend: EncoderBackend) -> str:
             raise VideoEncoderError(
                 f"Hardware encoder '{encoder_backend.value}' not available for codec: {codec.value}"
             )
-        if not _test_encoder(encoder):
+        if not test_encoder(encoder):
             raise VideoEncoderError(
                 f"Hardware encoder '{encoder}' not available on this system. "
                 "Try --encoder software."
@@ -239,26 +199,17 @@ def _detect_encoder(codec: VideoCodec, encoder_backend: EncoderBackend) -> str:
         system = platform.system()
         if system == "Darwin" and "videotoolbox" in hw:
             encoder = hw["videotoolbox"]
-            if _test_encoder(encoder):
+            if test_encoder(encoder):
                 return encoder
         if system == "Linux":
             for backend in ("nvenc", "vaapi"):
-                if backend in hw and _test_encoder(hw[backend]):
+                if backend in hw and test_encoder(hw[backend]):
                     return hw[backend]
         encoder = SOFTWARE_ENCODERS.get(codec)
         if not encoder:
             raise VideoEncoderError(f"No encoder available for codec: {codec.value}")
         return encoder
     raise VideoEncoderError(f"Unknown encoder backend: {encoder_backend}")
-
-
-def _test_encoder(encoder_name: str) -> bool:
-    try:
-        av.CodecContext.create(encoder_name, "w")
-    except (av.error.FFmpegError, ValueError):
-        return False
-    else:
-        return True
 
 
 def _get_encoder_options(codec: VideoCodec, encoder_name: str) -> dict[str, str]:

@@ -1,7 +1,6 @@
 """Merge command for pymcap-cli."""
 
 import contextlib
-import sys
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -56,7 +55,7 @@ def merge(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-) -> None:
+) -> int:
     """Merge multiple MCAP files into one.
 
     Merge multiple MCAP files chronologically by timestamp into a single output file.
@@ -89,7 +88,7 @@ def merge(
     # Validate inputs (merge requires at least 2 files)
     if len(files) < 2:
         console.print("[red]Error: At least 2 input files are required for merging[/red]")
-        sys.exit(1)
+        return 1
 
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
@@ -134,4 +133,6 @@ def merge(
 
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]Error during merge: {e}[/red]")
-            sys.exit(1)
+            return 1
+
+    return 0

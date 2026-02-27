@@ -37,7 +37,7 @@ def _read_mcap_info(file_path: str) -> RebuildInfo:
 
 def channels(
     file: str,
-) -> None:
+) -> int:
     """List channels in an MCAP file.
 
     Parameters
@@ -50,7 +50,7 @@ def channels(
 
     if not summary.channels:
         console.print("[yellow]No channels found[/yellow]")
-        return
+        return 0
 
     table = Table()
     table.add_column("ID", style="green", justify="right")
@@ -72,10 +72,12 @@ def channels(
 
     console.print(table)
 
+    return 0
+
 
 def chunks(
     file: str,
-) -> None:
+) -> int:
     """List chunks in an MCAP file.
 
     Parameters
@@ -88,7 +90,7 @@ def chunks(
 
     if not summary.chunk_indexes:
         console.print("[yellow]No chunks found[/yellow]")
-        return
+        return 0
 
     table = Table()
     table.add_column("Offset", style="cyan", justify="right")
@@ -135,10 +137,12 @@ def chunks(
 
     console.print(table)
 
+    return 0
+
 
 def schemas(
     file: str,
-) -> None:
+) -> int:
     """List schemas in an MCAP file.
 
     Parameters
@@ -151,7 +155,7 @@ def schemas(
 
     if not summary.schemas:
         console.print("[yellow]No schemas found[/yellow]")
-        return
+        return 0
 
     table = Table()
     table.add_column("ID", style="green", justify="right")
@@ -184,10 +188,12 @@ def schemas(
 
     console.print(table)
 
+    return 0
+
 
 def attachments(
     file: str,
-) -> None:
+) -> int:
     """List attachments in an MCAP file.
 
     Parameters
@@ -200,7 +206,7 @@ def attachments(
 
     if not summary.attachment_indexes:
         console.print("[yellow]No attachments found[/yellow]")
-        return
+        return 0
 
     table = Table()
     table.add_column("Name", style="bold white")
@@ -232,10 +238,12 @@ def attachments(
 
     console.print(table)
 
+    return 0
+
 
 def metadata(
     file: str,
-) -> None:
+) -> int:
     """List metadata records in an MCAP file.
 
     Parameters
@@ -248,7 +256,7 @@ def metadata(
 
     if not summary.metadata_indexes:
         console.print("[yellow]No metadata found[/yellow]")
-        return
+        return 0
 
     table = Table()
     table.add_column("Name", style="bold white")
@@ -268,6 +276,8 @@ def metadata(
         )
 
     console.print(table)
+
+    return 0
 
 
 def _render_fields(
@@ -349,7 +359,7 @@ def schema(
         str | None,
         Parameter(name=["--name"]),
     ] = None,
-) -> None:
+) -> int:
     """Inspect schema structure with nested field display.
 
     Parse and display ROS2 message schemas as a tree, showing nested
@@ -377,7 +387,7 @@ def schema(
 
     if not summary.schemas:
         console.print("[yellow]No schemas found[/yellow]")
-        return
+        return 0
 
     matched = False
     for schema_id in sorted(summary.schemas.keys()):
@@ -429,6 +439,8 @@ def schema(
             console.print(f"[yellow]No schemas matching '{name}'[/yellow]")
         else:
             console.print("[yellow]No parseable schemas found[/yellow]")
+
+    return 0
 
 
 # Register commands with the app
