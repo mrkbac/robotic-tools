@@ -491,7 +491,7 @@ wheels = [
 
 [[package]]
 name = "digitalis"
-version = "0.6.1"
+version = "0.6.2"
 source = { editable = "digitalis" }
 dependencies = [
     { name = "lark" },
@@ -1042,7 +1042,7 @@ wheels = [
 
 [[package]]
 name = "mcap-ros2-support-fast"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "mcap-ros2-support-fast" }
 dependencies = [
     { name = "ros-parser" },
@@ -1780,7 +1780,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2265,7 +2265,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]
