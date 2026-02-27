@@ -8,13 +8,13 @@ import socket
 from typing import TYPE_CHECKING, Any
 
 from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
-from websocket_bridge import (
+from robo_ws_bridge import (
     ConnectionState,
     ServerConnection,
     WebSocketBridgeClient,
     WebSocketBridgeServer,
 )
-from websocket_bridge.server import Channel
+from robo_ws_bridge.server import Channel
 
 from .metrics import MetricsCollector
 from .schemas import get_schema
@@ -23,7 +23,7 @@ from .transformers import TransformerRegistry, TransformError
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from websocket_bridge.ws_types import ChannelInfo
+    from robo_ws_bridge.ws_types import ChannelInfo
 
 logger = logging.getLogger(__name__)
 

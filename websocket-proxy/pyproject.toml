@@ -30,7 +30,7 @@ dependencies = [
     "websockets>=15.0.1",
     "typing-extensions>=4.12.2",
     "mcap-ros2-support-fast",
-    "websocket-bridge",
+    "robo-ws-bridge",
     "rich>=14.2.0",
     "av>=12.0.0",
 ]
@@ -49,7 +49,7 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
-websocket-bridge = { workspace = true }
+robo-ws-bridge = { workspace = true }
 
 [dependency-groups]
 example = [

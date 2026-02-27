@@ -17,8 +17,8 @@ on:
           - pymcap-cli
           - ros-parser
           - small-mcap
-          - websocket-bridge
-          # - websocket-proxy
+          - robo-ws-bridge
+          - websocket-proxy
       dry_run:
         description: "Dry run (build but do not publish)"
         required: false
@@ -50,8 +50,8 @@ jobs:
           - pymcap-cli
           - ros-parser
           - small-mcap
-          - websocket-bridge
-          # - websocket-proxy
+          - robo-ws-bridge
+          - websocket-proxy
 
     steps:
       - uses: actions/checkout@v5

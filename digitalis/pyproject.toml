@@ -37,7 +37,7 @@ dependencies = [
     # only available on mac arm
     "textual-speedups>=0.2.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "typing-extensions>=4.14.1",
-    "websocket-bridge",
+    "robo-ws-bridge",
     "websockets>=15.0.1",
 ]
 
@@ -66,4 +66,4 @@ invalid-assignment = "ignore" # causes issues with reactive
 mcap-ros2-support-fast = { workspace = true }
 ros-parser = { workspace = true }
 small-mcap = { workspace = true }
-websocket-bridge = { workspace = true }
+robo-ws-bridge = { workspace = true }

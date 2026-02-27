@@ -12,10 +12,10 @@ members = [
     "digitalis",
     "mcap-ros2-support-fast",
     "pymcap-cli",
+    "robo-ws-bridge",
     "robotic-tools",
     "ros-parser",
     "small-mcap",
-    "websocket-bridge",
     "websocket-proxy",
 ]
 
@@ -497,6 +497,7 @@ dependencies = [
     { name = "lark" },
     { name = "mcap-ros2-support-fast" },
     { name = "pointcloud2" },
+    { name = "robo-ws-bridge" },
     { name = "ros-parser" },
     { name = "small-mcap", extra = ["compression"] },
     { name = "textual" },
@@ -504,7 +505,6 @@ dependencies = [
     { name = "textual-slider" },
     { name = "textual-speedups", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "typing-extensions" },
-    { name = "websocket-bridge" },
     { name = "websockets" },
 ]
 
@@ -518,6 +518,7 @@ requires-dist = [
     { name = "lark", specifier = ">=1.2.2" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "pointcloud2", specifier = ">=0.2.3" },
+    { name = "robo-ws-bridge", editable = "robo-ws-bridge" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "textual", specifier = ">=5.1.1" },
@@ -525,7 +526,6 @@ requires-dist = [
     { name = "textual-slider", specifier = ">=0.2.0" },
     { name = "textual-speedups", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.2.0" },
     { name = "typing-extensions", specifier = ">=4.14.1" },
-    { name = "websocket-bridge", editable = "websocket-bridge" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
 
@@ -1990,6 +1990,21 @@ wheels = [
 ]
 
 [[package]]
+name = "robo-ws-bridge"
+version = "0.1.1"
+source = { editable = "robo-ws-bridge" }
+dependencies = [
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "typing-extensions", specifier = ">=4.15.0" },
+    { name = "websockets", specifier = ">=15.0.1" },
+]
+
+[[package]]
 name = "robotic-tools"
 version = "0.1.0"
 source = { virtual = "." }
@@ -2489,21 +2504,6 @@ wheels = [
 ]
 
 [[package]]
-name = "websocket-bridge"
-version = "0.1.1"
-source = { editable = "websocket-bridge" }
-dependencies = [
-    { name = "typing-extensions" },
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "typing-extensions", specifier = ">=4.15.0" },
-    { name = "websockets", specifier = ">=15.0.1" },
-]
-
-[[package]]
 name = "websocket-proxy"
 version = "0.1.1"
 source = { editable = "websocket-proxy" }
@@ -2514,8 +2514,8 @@ dependencies = [
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pointcloud2" },
     { name = "rich" },
+    { name = "robo-ws-bridge" },
     { name = "typing-extensions" },
-    { name = "websocket-bridge" },
     { name = "websockets" },
 ]
 
@@ -2531,8 +2531,8 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pointcloud2", specifier = ">=0.2.3" },
     { name = "rich", specifier = ">=14.2.0" },
+    { name = "robo-ws-bridge", editable = "robo-ws-bridge" },
     { name = "typing-extensions", specifier = ">=4.12.2" },
-    { name = "websocket-bridge", editable = "websocket-bridge" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
 

@@ -21,7 +21,7 @@ members = [
     "pymcap-cli",
     "small-mcap",
     "websocket-proxy",
-    "websocket-bridge",
+    "robo-ws-bridge",
     "ros-parser",
 ]
 

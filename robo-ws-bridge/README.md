@@ -1,11 +1,11 @@
-# websocket-bridge
+# robo-ws-bridge
 
 A Python library implementing the Foxglove WebSocket protocol for streaming robotics data.
 
 ## Installation
 
 ```bash
-uv add websocket-bridge
+uv add robo-ws-bridge
 ```
 
 ## Features
@@ -20,8 +20,8 @@ uv add websocket-bridge
 
 ```python
 import asyncio
-from websocket_bridge.server import Channel
-from websocket_bridge import WebSocketBridgeServer
+from robo_ws_bridge.server import Channel
+from robo_ws_bridge import WebSocketBridgeServer
 
 async def main():
     server = WebSocketBridgeServer(host="0.0.0.0", port=8765, name="my-server")
@@ -51,7 +51,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from websocket_bridge import WebSocketBridgeClient
+from robo_ws_bridge import WebSocketBridgeClient
 
 async def main():
     client = WebSocketBridgeClient("ws://localhost:8765")

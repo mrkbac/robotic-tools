@@ -1,7 +1,7 @@
 import argparse
 import logging
 
-from websocket_bridge.client import WebSocketBridgeClient
+from robo_ws_bridge.client import WebSocketBridgeClient
 
 logging.basicConfig(level=logging.DEBUG)
 

@@ -1,6 +1,6 @@
 """WebSocket source implementation."""
 
-from websocket_bridge.ws_types import (
+from robo_ws_bridge.ws_types import (
     AdvertiseMessage,
     BinaryOpCodes,
     JsonOpCodes,

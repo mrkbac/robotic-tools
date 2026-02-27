@@ -5,9 +5,9 @@ from collections.abc import Callable
 from typing import Any
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
+from robo_ws_bridge import WebSocketBridgeClient
+from robo_ws_bridge.ws_types import ChannelInfo, ConnectionStatus
 from small_mcap import Schema
-from websocket_bridge import WebSocketBridgeClient
-from websocket_bridge.ws_types import ChannelInfo, ConnectionStatus
 
 from digitalis.reader.source import Source, SourceStatus
 from digitalis.reader.types import MessageEvent, SourceInfo, Topic
