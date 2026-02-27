@@ -7,37 +7,37 @@ from typing_extensions import Required
 
 
 class ChannelInfo(TypedDict, total=False):
-    """
+    r"""
     ChannelInfo.
 
     Information about a channel.
     """
 
     id: Required[int]
-    """ Required property """
+    r""" Required property """
 
     topic: Required[str]
-    """ Required property """
+    r""" Required property """
 
     schema_id: Required[int]
-    """ Required property """
+    r""" Required property """
 
     schema_name: str | None
     message_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     size_bytes: int | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     duration_ns: int | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     hz_stats: Required["PartialStats"]
-    """
+    r"""
     PartialStats.
 
     Statistics where only average is always available; min/max/median are only available in rebuild mode.
@@ -46,40 +46,40 @@ class ChannelInfo(TypedDict, total=False):
     """
 
     hz_channel: int | float | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     bytes_per_second_stats: "_ChannelInfobytespersecondstats"
-    """ Aggregation type: anyOf """
+    r""" Aggregation type: anyOf """
 
     bytes_per_message: int | float | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     message_distribution: Required[list["_ChannelInfomessagedistributionitem"]]
-    """ Required property """
+    r""" Required property """
 
     message_start_time: int | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     message_end_time: int | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
 
 class ChunkOverlaps(TypedDict, total=False):
-    """
+    r"""
     ChunkOverlaps.
 
     Chunk overlap information.
     """
 
     max_concurrent: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     max_concurrent_bytes: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
@@ -87,17 +87,17 @@ class ChunkOverlaps(TypedDict, total=False):
 
 
 class ChunksInfo(TypedDict, total=False):
-    """
+    r"""
     ChunksInfo.
 
     Chunk-related information.
     """
 
     by_compression: Required[dict[str, "CompressionStats"]]
-    """ Required property """
+    r""" Required property """
 
     overlaps: Required["ChunkOverlaps"]
-    """
+    r"""
     ChunkOverlaps.
 
     Chunk overlap information.
@@ -107,49 +107,49 @@ class ChunksInfo(TypedDict, total=False):
 
 
 class CompressionStats(TypedDict, total=False):
-    """
+    r"""
     CompressionStats.
 
     Statistics for a specific compression type.
     """
 
     count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     compressed_size: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     uncompressed_size: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     compression_ratio: Required[int | float]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     message_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     size_stats: Required["Stats"]
-    """
+    r"""
     Stats.
 
     Statistics with minimum, average, and maximum values.
@@ -158,7 +158,7 @@ class CompressionStats(TypedDict, total=False):
     """
 
     duration_stats: Required["Stats"]
-    """
+    r"""
     Stats.
 
     Statistics with minimum, average, and maximum values.
@@ -168,17 +168,17 @@ class CompressionStats(TypedDict, total=False):
 
 
 class FileInfo(TypedDict, total=False):
-    """
+    r"""
     FileInfo.
 
     File metadata.
     """
 
     path: Required[str]
-    """ Required property """
+    r""" Required property """
 
     size_bytes: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
@@ -186,28 +186,28 @@ class FileInfo(TypedDict, total=False):
 
 
 class HeaderInfo(TypedDict, total=False):
-    """
+    r"""
     HeaderInfo.
 
     MCAP header information.
     """
 
     library: Required[str]
-    """ Required property """
+    r""" Required property """
 
     profile: Required[str]
-    """ Required property """
+    r""" Required property """
 
 
 class McapInfoOutput(TypedDict, total=False):
-    """
+    r"""
     McapInfoOutput.
 
     Complete MCAP info output structure.
     """
 
     file: Required["FileInfo"]
-    """
+    r"""
     FileInfo.
 
     File metadata.
@@ -216,7 +216,7 @@ class McapInfoOutput(TypedDict, total=False):
     """
 
     header: Required["HeaderInfo"]
-    """
+    r"""
     HeaderInfo.
 
     MCAP header information.
@@ -225,7 +225,7 @@ class McapInfoOutput(TypedDict, total=False):
     """
 
     statistics: Required["StatisticsInfo"]
-    """
+    r"""
     StatisticsInfo.
 
     MCAP statistics.
@@ -234,7 +234,7 @@ class McapInfoOutput(TypedDict, total=False):
     """
 
     chunks: Required["ChunksInfo"]
-    """
+    r"""
     ChunksInfo.
 
     Chunk-related information.
@@ -243,13 +243,13 @@ class McapInfoOutput(TypedDict, total=False):
     """
 
     channels: Required[list["ChannelInfo"]]
-    """ Required property """
+    r""" Required property """
 
     schemas: Required[list["SchemaInfo"]]
-    """ Required property """
+    r""" Required property """
 
     message_distribution: Required["MessageDistribution"]
-    """
+    r"""
     MessageDistribution.
 
     Message distribution across time buckets.
@@ -259,31 +259,31 @@ class McapInfoOutput(TypedDict, total=False):
 
 
 class MessageDistribution(TypedDict, total=False):
-    """
+    r"""
     MessageDistribution.
 
     Message distribution across time buckets.
     """
 
     bucket_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     bucket_duration_ns: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     message_counts: Required[list["_MessageDistributionmessagecountsitem"]]
-    """ Required property """
+    r""" Required property """
 
     max_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
@@ -291,7 +291,7 @@ class MessageDistribution(TypedDict, total=False):
 
 
 class PartialStats(TypedDict, total=False):
-    """
+    r"""
     PartialStats.
 
     Statistics where only average is always available; min/max/median are only available in rebuild
@@ -299,97 +299,97 @@ class PartialStats(TypedDict, total=False):
     """
 
     average: Required[int | float]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     minimum: int | float | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     maximum: int | float | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     median: int | float | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
 
 class SchemaInfo(TypedDict, total=False):
-    """
+    r"""
     SchemaInfo.
 
     Information about a schema.
     """
 
     id: Required[int]
-    """ Required property """
+    r""" Required property """
 
     name: Required[str]
-    """ Required property """
+    r""" Required property """
 
 
 class StatisticsInfo(TypedDict, total=False):
-    """
+    r"""
     StatisticsInfo.
 
     MCAP statistics.
     """
 
     message_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     chunk_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     message_index_count: int | None
-    """ minimum: 0 """
+    r""" minimum: 0 """
 
     channel_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     attachment_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     metadata_count: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     message_start_time: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     message_end_time: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     duration_ns: Required[int]
-    """
+    r"""
     minimum: 0
 
     Required property
@@ -397,35 +397,35 @@ class StatisticsInfo(TypedDict, total=False):
 
 
 class Stats(TypedDict, total=False):
-    """
+    r"""
     Stats.
 
     Statistics with minimum, average, and maximum values.
     """
 
     minimum: Required[int | float]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     maximum: Required[int | float]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     average: Required[int | float]
-    """
+    r"""
     minimum: 0
 
     Required property
     """
 
     median: Required[int | float]
-    """
+    r"""
     minimum: 0
 
     Required property
@@ -433,12 +433,12 @@ class Stats(TypedDict, total=False):
 
 
 _ChannelInfobytespersecondstats = Union["PartialStats", None]
-""" Aggregation type: anyOf """
+r""" Aggregation type: anyOf """
 
 
 _ChannelInfomessagedistributionitem = int
-""" minimum: 0 """
+r""" minimum: 0 """
 
 
 _MessageDistributionmessagecountsitem = int
-""" minimum: 0 """
+r""" minimum: 0 """

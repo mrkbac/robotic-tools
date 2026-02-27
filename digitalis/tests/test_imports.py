@@ -3,21 +3,21 @@
 import importlib
 import pkgutil
 
-import pytest
-
 import digitalis
-
+import pytest
 
 _SKIP = frozenset({"digitalis.__main__"})
 
 
 def _all_submodules() -> list[str]:
     """Walk the digitalis package tree and return all importable module names."""
-    modules: list[str] = [digitalis.__name__]
     prefix = digitalis.__name__ + "."
-    for info in pkgutil.walk_packages(digitalis.__path__, prefix):
-        if info.name not in _SKIP:
-            modules.append(info.name)
+    modules = [digitalis.__name__]
+    modules.extend(
+        info.name
+        for info in pkgutil.walk_packages(digitalis.__path__, prefix)
+        if info.name not in _SKIP
+    )
     return sorted(modules)
 
 

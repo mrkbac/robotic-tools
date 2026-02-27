@@ -143,8 +143,7 @@ class DecoderGeneratorFactory:
             else:
                 with self.code.indent("if _str_size > 1:"):
                     self.code.append(
-                        f'{target} = str(_data[_offset:'
-                        f'_offset + _str_size - 1], "utf-8")'
+                        f'{target} = str(_data[_offset:_offset + _str_size - 1], "utf-8")'
                     )
                 with self.code.indent("else:"):
                     self.code.append(f'{target} = ""')
@@ -161,9 +160,7 @@ class DecoderGeneratorFactory:
             pattern = f"{self.endianness}{struct_name}"
             pattern_var = self.get_struct_pattern_var_name(pattern)
             if self.static_offset is not None:
-                self.code.append(
-                    f"{target}, = {pattern_var}(_data, {self.static_offset})"
-                )
+                self.code.append(f"{target}, = {pattern_var}(_data, {self.static_offset})")
                 self.static_offset += struct_size
             else:
                 self.code.append(f"{target}, = {pattern_var}(_data, _offset)")
@@ -207,10 +204,7 @@ class DecoderGeneratorFactory:
             # Special case for byte arrays — uses _raw directly
             if array_size is None:
                 self._ensure_dynamic()
-                self.code.append(
-                    f"{target} = _data[_offset"
-                    f" : _offset + _array_size]"
-                )
+                self.code.append(f"{target} = _data[_offset : _offset + _array_size]")
                 self.code.append("_offset += _array_size")
             elif self.static_offset is not None:
                 self.code.append(
@@ -218,10 +212,7 @@ class DecoderGeneratorFactory:
                 )
                 self.static_offset += array_size
             else:
-                self.code.append(
-                    f"{target} = _data[_offset"
-                    f" : _offset + {array_size}]"
-                )
+                self.code.append(f"{target} = _data[_offset : _offset + {array_size}]")
                 self.code.append(f"_offset += {array_size}")
             self.reset_alignment()  # After string unknown position readjustment
         elif array_size is None:  # dynamic array
@@ -240,8 +231,7 @@ class DecoderGeneratorFactory:
                 # Slow path: need byteswap, use array.array
                 self.code.append(f"{target} = array.array('{struct_name}')")
                 self.code.append(
-                    f"{target}.frombytes(_data[_offset"
-                    f" : _offset + _array_size * {struct_size}])"
+                    f"{target}.frombytes(_data[_offset : _offset + _array_size * {struct_size}])"
                 )
                 self.code.append(f"{target}.byteswap()")
             self.code.append(f"_offset += _array_size * {struct_size}")
@@ -277,8 +267,7 @@ class DecoderGeneratorFactory:
                     # Slow path: need byteswap, use array.array
                     self.code.append(f"{target} = array.array('{struct_name}')")
                     self.code.append(
-                        f"{target}.frombytes(_data[_offset"
-                        f" : _offset + {total_bytes}])"
+                        f"{target}.frombytes(_data[_offset : _offset + {total_bytes}])"
                     )
                     self.code.append(f"{target}.byteswap()")
                 self.code.append(f"_offset += {total_bytes}")
@@ -317,9 +306,7 @@ class DecoderGeneratorFactory:
         target_str = ", ".join(name for name, typeid in targets if typeid != TypeId.PADDING)
         struct_var = self.get_struct_pattern_var_name(pattern)
         if self.static_offset is not None:
-            self.code.append(
-                f"{target_str} = {struct_var}(_data, {self.static_offset})"
-            )
+            self.code.append(f"{target_str} = {struct_var}(_data, {self.static_offset})")
             self.static_offset += struct_size
         else:
             self.code.append(f"{target_str} = {struct_var}(_data, _offset)")
@@ -387,9 +374,7 @@ class DecoderGeneratorFactory:
         target_str = ", ".join(name for name, typeid in targets if typeid != TypeId.PADDING)
         struct_var = self.get_struct_pattern_var_name(pattern)
         if self.static_offset is not None:
-            self.code.append(
-                f"{target_str} = {struct_var}(_data, {self.static_offset})"
-            )
+            self.code.append(f"{target_str} = {struct_var}(_data, {self.static_offset})")
             self.static_offset += struct_size
         else:
             self.code.append(f"{target_str} = {struct_var}(_data, _offset)")
@@ -442,8 +427,7 @@ class DecoderGeneratorFactory:
             if self.static_offset is not None:
                 self._emit_assign(
                     plan_target,
-                    f"{target_type.__name__}"
-                    f"(*{struct_var}(_data, {self.static_offset}))",
+                    f"{target_type.__name__}(*{struct_var}(_data, {self.static_offset}))",
                 )
                 self.static_offset += struct_size
             else:
