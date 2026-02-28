@@ -44,6 +44,12 @@ else:
     except ImportError:
         lz4_compress = None
 
+# Module-level constants for hot-path message serialization (avoid per-call attribute lookups)
+_MSG_RECORD_STRUCT = struct.Struct("<BQHIQQ")  # opcode + length + channel_id + sequence + log_time + publish_time
+_MSG_HEADER_SIZE = _MSG_RECORD_STRUCT.size  # 31
+_MSG_OPCODE = Opcode.MESSAGE
+_MSG_FIXED_LEN = 22  # channel_id(2) + sequence(4) + log_time(8) + publish_time(8)
+
 
 class _ThreadLocal(threading.local):
     zstd_compressor: "zstandard.ZstdCompressor | None" = None
@@ -580,6 +586,7 @@ class _ChunkBuilder:
         """Reset builder state for a new chunk."""
         self.buffer.seek(0)
         self.buffer.truncate(0)
+        self._buf_pos = 0
         self.message_start_time = 0
         self.message_end_time = 0
         self.message_indices: dict[int, MessageIndex] = {}
@@ -605,6 +612,51 @@ class _ChunkBuilder:
 
         # Write directly to BytesIO buffer
         record.write_record_to(self.buffer)
+
+    def add_raw(
+        self,
+        channel_id: int,
+        log_time: int,
+        data: bytes | memoryview,
+        publish_time: int,
+        sequence: int,
+    ) -> None:
+        """Inline message serialization — no Message object created."""
+        buf = self.buffer
+        data_len = len(data)
+
+        # Update time tracking (if/else instead of min/max)
+        if self.num_messages == 0:
+            self.message_start_time = log_time
+            self.message_end_time = log_time
+        else:
+            if log_time < self.message_start_time:
+                self.message_start_time = log_time
+            if log_time > self.message_end_time:
+                self.message_end_time = log_time
+
+        # Update message index using tracked position
+        msg_idx = self.message_indices.get(channel_id)
+        if msg_idx is None:
+            msg_idx = MessageIndex(channel_id=channel_id, records=[])
+            self.message_indices[channel_id] = msg_idx
+        msg_idx.records.append((log_time, self._buf_pos))
+
+        self.num_messages += 1
+
+        # Pack header + write data directly (no Message dataclass)
+        buf.write(
+            _MSG_RECORD_STRUCT.pack(
+                _MSG_OPCODE,
+                _MSG_FIXED_LEN + data_len,
+                channel_id,
+                sequence,
+                log_time,
+                publish_time,
+            )
+        )
+        buf.write(data)
+        self._buf_pos += _MSG_HEADER_SIZE + data_len
 
     def extract(
         self,
@@ -751,24 +803,15 @@ class McapWriter(McapWriterRaw):
     ) -> None:
         """Add a message to the file."""
         if self.use_chunking and self.chunk_builder is not None:
-            # Route through chunk builder
-            message = Message(
-                channel_id=channel_id,
-                sequence=sequence,
-                log_time=log_time,
-                publish_time=publish_time,
-                data=data,
-            )
-
             # Check if chunk is ready to be written *before* adding the new message
             if (
-                self.chunk_builder.buffer.tell() >= self.chunk_builder.chunk_size
+                self.chunk_builder._buf_pos >= self.chunk_builder.chunk_size
                 and self.chunk_builder.num_messages > 0
             ):
                 self._submit_or_write_chunk()
                 self.chunk_builder.reset()
 
-            self.chunk_builder.add(message)
+            self.chunk_builder.add_raw(channel_id, log_time, data, publish_time, sequence)
         else:
             # No chunking - write directly
             super().add_message(channel_id, log_time, data, publish_time, sequence)
