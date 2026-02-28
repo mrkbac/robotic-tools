@@ -1,5 +1,9 @@
 """Info command - report statistics about an MCAP file."""
 
+import base64
+import gzip
+import json
+import sys
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Annotated
@@ -7,9 +11,8 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 from rich.table import Table
-from small_mcap import InvalidMagicError, McapError
 
-from pymcap_cli.cmd.info_json_cmd import info_to_dict
+from pymcap_cli.cmd.info_data import info_to_dict
 from pymcap_cli.display_utils import (
     ChannelTableColumn,
     DistributionBar,
@@ -17,7 +20,7 @@ from pymcap_cli.display_utils import (
 )
 from pymcap_cli.info_types import McapInfoOutput
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
+from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
 console = Console()
 
@@ -198,6 +201,22 @@ def _display_channels_table(
     )
 
 
+def _output_json(
+    all_outputs: list[McapInfoOutput],
+    compress: bool,
+) -> None:
+    """Output JSON (single file -> dict, multiple files -> list)."""
+    output_data = all_outputs[0] if len(all_outputs) == 1 else all_outputs
+    output_json = json.dumps(output_data)
+
+    if compress:
+        compressed_output = gzip.compress(output_json.encode("utf-8"))
+        output_b64 = base64.b64encode(compressed_output).decode("utf-8")
+        print(output_b64)  # noqa: T201
+    else:
+        print(output_json)  # noqa: T201
+
+
 def info(
     files: list[str],
     *,
@@ -220,6 +239,20 @@ def info(
         Parameter(
             name=["--debug"],
             group=PROCESSING_GROUP,
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        Parameter(
+            name=["--json"],
+            group=DISPLAY_GROUP,
+        ),
+    ] = False,
+    compress: Annotated[
+        bool,
+        Parameter(
+            name=["--compress"],
+            group=DISPLAY_GROUP,
         ),
     ] = False,
     sort: Annotated[
@@ -280,6 +313,10 @@ def info(
         --rebuild).
     debug
         Enable debug mode with additional diagnostic output.
+    json_output
+        Output as JSON instead of Rich tables.
+    compress
+        Compressed JSON output using gzip+base64 (requires --json).
     sort
         Sort channels by field (topic, id, msgs, size, hz, bps, b_per_msg,
         schema).
@@ -311,30 +348,47 @@ def info(
 
     # Calculate per-channel Hz using individual durations
     pymcap-cli info recording.mcap --index-duration
+
+    # JSON output
+    pymcap-cli info recording.mcap --json
     ```
     """
     # Validate input
     if not files:
-        console.print("[red]Error:[/] At least one file must be specified")
+        if json_output:
+            print('{"error": "At least one file must be specified"}', file=sys.stderr)  # noqa: T201
+        else:
+            console.print("[red]Error:[/] At least one file must be specified")
         return 1
 
-    # Process all files and display each separately
+    if compress and not json_output:
+        console.print("[red]Error:[/] --compress requires --json")
+        return 1
+
+    # JSON output mode
+    if json_output:
+        all_outputs: list[McapInfoOutput] = []
+        for file in files:
+            with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
+                info_data = read_or_rebuild_info(
+                    f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
+                )
+            data = info_to_dict(info_data, str(file), file_size)
+            all_outputs.append(data)
+        _output_json(all_outputs, compress)
+        return 0
+
+    # Rich table output mode
     for i, file in enumerate(files):
         if i > 0:
             console.print("\n" + "=" * 80 + "\n")
 
         with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
-            if rebuild:
-                info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
-            else:
-                try:
-                    info_data = read_info(f_buffered)
-                except (InvalidMagicError, McapError, AssertionError):
-                    console.print("[red]Invalid MCAP magic, rebuilding info.[/]")
-                    f_buffered.seek(0)  # Reset to start
-                    info_data = rebuild_info(f_buffered, file_size, exact_sizes=exact_sizes)
+            info_data = read_or_rebuild_info(
+                f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
+            )
 
-        # Get structured JSON data
+        # Get structured data
         data = info_to_dict(info_data, str(file), file_size)
         has_chunk_info = info_data.chunk_information is not None
 

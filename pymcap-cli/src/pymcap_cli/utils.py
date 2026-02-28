@@ -20,7 +20,14 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 from rich.text import Text
-from small_mcap import McapError, RebuildInfo, get_header, get_summary, rebuild_summary
+from small_mcap import (
+    InvalidMagicError,
+    McapError,
+    RebuildInfo,
+    get_header,
+    get_summary,
+    rebuild_summary,
+)
 
 from pymcap_cli.osc_utils import OSCProgressColumn
 
@@ -259,6 +266,35 @@ def read_info(f: IO[bytes]) -> RebuildInfo:
     if summary is None:
         raise McapError("No valid summary section found")
     return RebuildInfo(header=header, summary=summary)
+
+
+def read_or_rebuild_info(
+    f: IO[bytes],
+    file_size: int,
+    *,
+    rebuild: bool = False,
+    exact_sizes: bool = False,
+    console: Console | None = None,
+) -> RebuildInfo:
+    """Read MCAP info, falling back to rebuild on invalid magic or errors.
+
+    Args:
+        f: Input file stream
+        file_size: Total file size for progress tracking
+        rebuild: Force rebuild instead of reading summary
+        exact_sizes: Calculate exact message sizes (requires rebuild)
+        console: Rich console instance for progress output
+
+    Returns:
+        RebuildInfo with header, summary, and optional channel_sizes
+    """
+    if rebuild:
+        return rebuild_info(f, file_size, exact_sizes=exact_sizes, console=console)
+    try:
+        return read_info(f)
+    except (InvalidMagicError, McapError, AssertionError):
+        f.seek(0)
+        return rebuild_info(f, file_size, exact_sizes=exact_sizes, console=console)
 
 
 # Maximum value for a signed 64-bit integer (used for unbounded time range)

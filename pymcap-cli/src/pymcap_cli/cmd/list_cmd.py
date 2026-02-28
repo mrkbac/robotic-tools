@@ -10,11 +10,11 @@ from rich.table import Table
 from rich.tree import Tree
 from ros_parser import parse_schema_to_definitions
 from ros_parser.models import Constant, MessageDefinition
-from small_mcap import InvalidMagicError, McapError, RebuildInfo
+from small_mcap import RebuildInfo
 
 from pymcap_cli.display_utils import _create_ros_docs_url
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.utils import bytes_to_human, read_info, rebuild_info
+from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
 console = Console()
 
@@ -24,15 +24,8 @@ list_app = App(help="List records in an MCAP file")
 
 def _read_mcap_info(file_path: str) -> RebuildInfo:
     """Read MCAP file info, with automatic rebuild on invalid magic."""
-    with open_input(file_path) as (f_raw, file_size):
-        try:
-            info = read_info(f_raw)
-        except (InvalidMagicError, McapError, AssertionError):
-            console.print("[yellow]Invalid MCAP magic, rebuilding info...[/yellow]")
-            f_raw.seek(0)  # Reset buffer to start
-            info = rebuild_info(f_raw, file_size)
-
-    return info
+    with open_input(file_path) as (f, file_size):
+        return read_or_rebuild_info(f, file_size)
 
 
 def channels(
