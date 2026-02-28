@@ -509,3 +509,160 @@ class TestMcapWriterStatistics:
             assert stats.message_start_time == start_time
             assert stats.message_end_time == end_time
             assert stats.channel_message_counts == {1: 2}
+
+
+def _write_test_mcap(path, num_workers: int, compression=CompressionType.ZSTD, chunk_size=512):
+    """Helper to write a test MCAP with given num_workers."""
+    with open(path, "wb") as f:
+        writer = McapWriter(
+            f,
+            compression=compression,
+            chunk_size=chunk_size,
+            num_workers=num_workers,
+        )
+        writer.start()
+        writer.add_schema(schema_id=1, name="Test", encoding="json", data=b"{}")
+        writer.add_channel(channel_id=1, topic="/a", message_encoding="json", schema_id=1)
+        writer.add_channel(channel_id=2, topic="/b", message_encoding="json", schema_id=1)
+        for i in range(200):
+            ch = 1 if i % 2 == 0 else 2
+            writer.add_message(
+                channel_id=ch,
+                log_time=i * 1_000_000,
+                data=f"msg-{i}".encode() + b"\x00" * 50,
+                publish_time=i * 1_000_000,
+            )
+        writer.finish()
+
+
+class TestMcapWriterParallel:
+    """Test parallel chunk compression."""
+
+    def test_parallel_matches_sequential(self, tmp_path):
+        """Parallel and sequential writes produce identical messages on read-back."""
+        seq_path = tmp_path / "seq.mcap"
+        par_path = tmp_path / "par.mcap"
+
+        _write_test_mcap(seq_path, num_workers=0)
+        _write_test_mcap(par_path, num_workers=2)
+
+        with open(seq_path, "rb") as f:
+            seq_msgs = list(read_message(f))
+        with open(par_path, "rb") as f:
+            par_msgs = list(read_message(f))
+
+        assert len(seq_msgs) == len(par_msgs) == 200
+        for (_, s_ch, s_msg), (_, p_ch, p_msg) in zip(seq_msgs, par_msgs, strict=True):
+            assert s_ch.id == p_ch.id
+            assert s_msg.log_time == p_msg.log_time
+            assert s_msg.data == p_msg.data
+
+    def test_statistics_match(self, tmp_path):
+        """Statistics are identical between parallel and sequential modes."""
+        seq_path = tmp_path / "seq.mcap"
+        par_path = tmp_path / "par.mcap"
+
+        _write_test_mcap(seq_path, num_workers=0)
+        _write_test_mcap(par_path, num_workers=2)
+
+        with open(seq_path, "rb") as f:
+            seq_stats = get_summary(f).statistics
+        with open(par_path, "rb") as f:
+            par_stats = get_summary(f).statistics
+
+        assert seq_stats.message_count == par_stats.message_count
+        assert seq_stats.chunk_count == par_stats.chunk_count
+        assert seq_stats.channel_message_counts == par_stats.channel_message_counts
+        assert seq_stats.message_start_time == par_stats.message_start_time
+        assert seq_stats.message_end_time == par_stats.message_end_time
+
+    @pytest.mark.parametrize(
+        "compression",
+        [CompressionType.ZSTD, CompressionType.LZ4, CompressionType.NONE],
+    )
+    def test_compression_types(self, tmp_path, compression):
+        """Parallel mode works with all compression types."""
+        path = tmp_path / f"par_{compression.value or 'none'}.mcap"
+        _write_test_mcap(path, num_workers=2, compression=compression)
+
+        with open(path, "rb") as f:
+            msgs = list(read_message(f))
+        assert len(msgs) == 200
+
+        with open(path, "rb") as f:
+            stats = get_summary(f).statistics
+        assert stats.message_count == 200
+        assert stats.chunk_count > 1
+
+    def test_interleaved_attachment_metadata(self, tmp_path):
+        """Attachments and metadata interleaved with messages drain pending chunks."""
+        path = tmp_path / "interleaved.mcap"
+        with open(path, "wb") as f:
+            writer = McapWriter(f, chunk_size=256, num_workers=2)
+            writer.start()
+            writer.add_schema(schema_id=1, name="T", encoding="json", data=b"{}")
+            writer.add_channel(channel_id=1, topic="/t", message_encoding="json", schema_id=1)
+
+            for i in range(50):
+                writer.add_message(
+                    channel_id=1,
+                    log_time=i * 1_000_000,
+                    data=b"x" * 100,
+                    publish_time=i * 1_000_000,
+                )
+
+            writer.add_attachment(
+                log_time=0,
+                create_time=0,
+                name="f.bin",
+                media_type="application/octet-stream",
+                data=b"att",
+            )
+
+            for i in range(50, 100):
+                writer.add_message(
+                    channel_id=1,
+                    log_time=i * 1_000_000,
+                    data=b"x" * 100,
+                    publish_time=i * 1_000_000,
+                )
+
+            writer.add_metadata(name="info", metadata={"k": "v"})
+
+            for i in range(100, 150):
+                writer.add_message(
+                    channel_id=1,
+                    log_time=i * 1_000_000,
+                    data=b"x" * 100,
+                    publish_time=i * 1_000_000,
+                )
+
+            writer.finish()
+
+        with open(path, "rb") as f:
+            stats = get_summary(f).statistics
+        assert stats.message_count == 150
+        assert stats.attachment_count == 1
+        assert stats.metadata_count == 1
+
+        with open(path, "rb") as f:
+            msgs = list(read_message(f))
+        assert len(msgs) == 150
+
+    def test_use_chunking_false_ignores_num_workers(self, tmp_path):
+        """When use_chunking=False, num_workers is ignored."""
+        path = tmp_path / "unchunked.mcap"
+        with open(path, "wb") as f:
+            writer = McapWriter(f, use_chunking=False, num_workers=2)
+            writer.start()
+            writer.add_schema(schema_id=1, name="T", encoding="json", data=b"{}")
+            writer.add_channel(channel_id=1, topic="/t", message_encoding="json", schema_id=1)
+            writer.add_message(channel_id=1, log_time=1000, data=b"hi", publish_time=1000)
+            writer.finish()
+
+        assert writer._pool is None
+
+        with open(path, "rb") as f:
+            stats = get_summary(f).statistics
+        assert stats.message_count == 1
+        assert stats.chunk_count == 0

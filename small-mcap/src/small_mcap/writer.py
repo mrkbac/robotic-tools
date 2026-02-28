@@ -1,8 +1,10 @@
 import io
 import struct
+import threading
 import zlib
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, Flag, auto
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
@@ -43,7 +45,11 @@ else:
         lz4_compress = None
 
 
-_zstd_compressor: "zstandard.ZstdCompressor | None" = None
+class _ThreadLocal(threading.local):
+    zstd_compressor: "zstandard.ZstdCompressor | None" = None
+
+
+_thread_local = _ThreadLocal()
 
 # Fixed size of SummaryOffset record (opcode 1 + length 8 + content 17 = 26 bytes)
 SUMMARY_OFFSET_RECORD_SIZE = 26
@@ -531,10 +537,11 @@ def _compress_chunk_data(
     if compression == CompressionType.ZSTD:
         if zstandard is None:
             raise ImportError("zstandard module not available")
-        global _zstd_compressor  # noqa: PLW0603
-        if _zstd_compressor is None:
-            _zstd_compressor = zstandard.ZstdCompressor()
-        compressed = _zstd_compressor.compress(data)
+        compressor = _thread_local.zstd_compressor
+        if compressor is None:
+            compressor = zstandard.ZstdCompressor()
+            _thread_local.zstd_compressor = compressor
+        compressed = compressor.compress(data)
     elif compression == CompressionType.LZ4:
         if lz4_compress is None:
             raise ImportError("lz4 module not available")
@@ -599,33 +606,57 @@ class _ChunkBuilder:
         # Write directly to BytesIO buffer
         record.write_record_to(self.buffer)
 
-    def maybe_finalize(self) -> tuple[Chunk, dict[int, MessageIndex]] | None:
-        # Check if we need to finalize current chunk before adding this record
-        if self.buffer.tell() >= self.chunk_size and self.num_messages > 0:
-            result = self.finalize()
-            self.reset()
-            return result
-        return None
+    def extract(
+        self,
+    ) -> tuple[bytes, int, int, int, int, dict[int, MessageIndex]] | None:
+        """Extract raw chunk data and metadata without compressing.
 
-    def finalize(self) -> tuple[Chunk, dict[int, MessageIndex]] | None:
-        """Build and return the final chunk from current buffer state."""
+        Returns (chunk_data, uncompressed_crc, uncompressed_size,
+                 start_time, end_time, message_indices) or None if empty.
+        """
         if self.num_messages == 0:
             return None
 
         chunk_data = self.buffer.getvalue()
         uncompressed_size = len(chunk_data)
+        uncompressed_crc = zlib.crc32(chunk_data) if self.enable_crcs else 0
 
-        # Compress data (will fall back to uncompressed if < 5% savings)
+        return (
+            chunk_data,
+            uncompressed_crc,
+            uncompressed_size,
+            self.message_start_time,
+            self.message_end_time,
+            self.message_indices,
+        )
+
+    def finalize(self) -> tuple[Chunk, dict[int, MessageIndex]] | None:
+        """Build and return the final chunk from current buffer state."""
+        extracted = self.extract()
+        if extracted is None:
+            return None
+        chunk_data, uncompressed_crc, uncompressed_size, start, end, indices = extracted
         compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
-
         return Chunk(
             compression=compression_used,
             data=compressed_data,
-            message_start_time=self.message_start_time,
-            message_end_time=self.message_end_time,
-            uncompressed_crc=zlib.crc32(chunk_data) if self.enable_crcs else 0,
+            message_start_time=start,
+            message_end_time=end,
+            uncompressed_crc=uncompressed_crc,
             uncompressed_size=uncompressed_size,
-        ), self.message_indices
+        ), indices
+
+
+@dataclass(slots=True)
+class _PendingChunk:
+    """Holds metadata for a chunk whose compression is in flight."""
+
+    future: Future[tuple[bytes | memoryview, str]]
+    message_start_time: int
+    message_end_time: int
+    uncompressed_size: int
+    uncompressed_crc: int
+    message_indices: dict[int, MessageIndex]
 
 
 class EncoderFactoryProtocol(Protocol):
@@ -650,6 +681,7 @@ class McapWriter(McapWriterRaw):
         chunk_size: int = 1024 * 1024,
         compression: CompressionType = CompressionType.ZSTD,
         encoder_factory: EncoderFactoryProtocol | None = None,
+        num_workers: int = 0,
     ) -> None:
         super().__init__(
             output=output,
@@ -666,8 +698,13 @@ class McapWriter(McapWriterRaw):
         self.encoder_factory = encoder_factory
         self.encoder_functions: dict[int, Callable[[Any], bytes | memoryview]] = {}
         self.chunk_builder: _ChunkBuilder | None = None
+        self._pool: ThreadPoolExecutor | None = None
+        self._pending: list[_PendingChunk] = []
         if use_chunking:
             self.chunk_builder = _ChunkBuilder(compression, enable_crcs, chunk_size)
+            if num_workers > 0:
+                self._pool = ThreadPoolExecutor(max_workers=num_workers)
+                self._max_pending = num_workers
 
     def add_message_encode(
         self,
@@ -722,29 +759,130 @@ class McapWriter(McapWriterRaw):
                 publish_time=publish_time,
                 data=data,
             )
-            self.chunk_builder.add(message)
 
-            # Check if chunk is ready to be written
-            if result := self.chunk_builder.maybe_finalize():
-                chunk, message_indices = result
-                super().add_chunk(chunk, message_indices)
+            # Check if chunk is ready to be written *before* adding the new message
+            if (
+                self.chunk_builder.buffer.tell() >= self.chunk_builder.chunk_size
+                and self.chunk_builder.num_messages > 0
+            ):
+                self._submit_or_write_chunk()
                 self.chunk_builder.reset()
+
+            self.chunk_builder.add(message)
         else:
             # No chunking - write directly
             super().add_message(channel_id, log_time, data, publish_time, sequence)
+
+    def _write_chunk(
+        self,
+        compressed_data: bytes | memoryview,
+        compression: str,
+        message_start_time: int,
+        message_end_time: int,
+        uncompressed_size: int,
+        uncompressed_crc: int,
+        message_indices: dict[int, MessageIndex],
+    ) -> None:
+        """Construct a Chunk from fields and write it via the base class."""
+        chunk = Chunk(
+            compression=compression,
+            data=compressed_data,
+            message_start_time=message_start_time,
+            message_end_time=message_end_time,
+            uncompressed_crc=uncompressed_crc,
+            uncompressed_size=uncompressed_size,
+        )
+        super().add_chunk(chunk, message_indices)
+
+    def _submit_or_write_chunk(self) -> None:
+        """Submit chunk for async compression or write synchronously.
+
+        Caller must ensure ``self.chunk_builder`` is not None.
+        """
+        assert self.chunk_builder is not None
+        extracted = self.chunk_builder.extract()
+        if extracted is None:
+            return
+        chunk_data, uncompressed_crc, uncompressed_size, start_time, end_time, message_indices = (
+            extracted
+        )
+
+        if self._pool is not None:
+            future = self._pool.submit(_compress_chunk_data, chunk_data, self.compression)
+            self._pending.append(
+                _PendingChunk(
+                    future=future,
+                    message_start_time=start_time,
+                    message_end_time=end_time,
+                    uncompressed_size=uncompressed_size,
+                    uncompressed_crc=uncompressed_crc,
+                    message_indices=message_indices,
+                )
+            )
+            if len(self._pending) > self._max_pending:
+                self._drain_one()
+        else:
+            compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
+            self._write_chunk(
+                compressed_data,
+                compression_used,
+                start_time,
+                end_time,
+                uncompressed_size,
+                uncompressed_crc,
+                message_indices,
+            )
+
+    def _drain_one(self) -> None:
+        """Wait on the oldest pending chunk and write it."""
+        if not self._pending:
+            return
+        pending = self._pending.pop(0)
+        compressed_data, compression_used = pending.future.result()
+        self._write_chunk(
+            compressed_data,
+            compression_used,
+            pending.message_start_time,
+            pending.message_end_time,
+            pending.uncompressed_size,
+            pending.uncompressed_crc,
+            pending.message_indices,
+        )
+
+    def _drain_all(self) -> None:
+        """Drain all pending chunks in FIFO order."""
+        while self._pending:
+            self._drain_one()
 
     def add_chunk(self, chunk: Chunk, message_indices: dict[int, MessageIndex]) -> None:
         self._finalize_current_chunk()
         return super().add_chunk(chunk, message_indices)
 
+    def add_attachment(
+        self,
+        log_time: int,
+        create_time: int,
+        name: str,
+        media_type: str,
+        data: bytes | memoryview,
+    ) -> None:
+        self._drain_all()
+        return super().add_attachment(log_time, create_time, name, media_type, data)
+
+    def add_metadata(self, name: str, metadata: dict[str, str]) -> None:
+        self._drain_all()
+        return super().add_metadata(name, metadata)
+
     def _finalize_current_chunk(self) -> None:
         """Finalize and write any remaining chunk."""
-        if self.chunk_builder is not None and (result := self.chunk_builder.finalize()):
-            chunk, message_indices = result
-            # do not call self
-            super().add_chunk(chunk, message_indices)
+        if self.chunk_builder is not None and self.chunk_builder.num_messages > 0:
+            self._submit_or_write_chunk()
             self.chunk_builder.reset()
+        self._drain_all()
 
     def finish(self) -> None:
         self._finalize_current_chunk()
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+            self._pool = None
         return super().finish()
