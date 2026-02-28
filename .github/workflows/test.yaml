@@ -23,7 +23,7 @@ jobs:
 
       - name: Fetch conformance test data
         run: |
-          git submodule init data/mcap
+          git submodule update --init --depth 1 --filter=blob:none data/mcap
           cd data/mcap
           git sparse-checkout init
           git sparse-checkout set tests/conformance/data
