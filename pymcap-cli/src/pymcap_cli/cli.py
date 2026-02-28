@@ -20,6 +20,7 @@ from pymcap_cli.cmd import (
     recover_cmd,
     recover_inplace_cmd,
     tftree_cmd,
+    topic_chunks_cmd,
 )
 
 try:
@@ -82,6 +83,7 @@ list_cmd.list_app.group = (inspect_group,)
 app.command(list_cmd.list_app, name="list")
 app.command(name="records", group=inspect_group)(records_cmd.records)
 app.command(name="tftree", group=inspect_group)(tftree_cmd.tftree)
+app.command(name="topic-chunks", group=inspect_group)(topic_chunks_cmd.topic_chunks)
 
 # Transform commands — convert, filter, or produce new files
 app.command(name="compress", group=transform_group)(compress_cmd.compress)
