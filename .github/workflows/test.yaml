@@ -20,12 +20,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          lfs: true
-          submodules: true
 
-      - name: Fetch LFS files from submodules
-        run: git submodule foreach --recursive 'git lfs pull'
+      - name: Fetch conformance test data
+        run: |
+          git submodule init data/mcap
+          cd data/mcap
+          git sparse-checkout init
+          git sparse-checkout set tests/conformance/data
+          git checkout
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
