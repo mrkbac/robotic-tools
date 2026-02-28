@@ -2,6 +2,8 @@
 
 import logging
 import platform
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -44,7 +46,10 @@ from pymcap_cli.types_manual import (
 from pymcap_cli.utils import confirm_output_overwrite
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
     from av.video.codeccontext import VideoCodecContext
+    from small_mcap.reader import DecodedMessage
 
 
 FOXGLOVE_COMPRESSED_VIDEO = """builtin_interfaces/Time timestamp
@@ -123,6 +128,35 @@ def _detect_encoder() -> str:
 def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
     """Decode a compressed image (JPEG/PNG) to a VideoFrame in native format."""
     return decode_compressed_frame(compressed_data)
+
+
+def _prefetch_image_decodes(
+    messages: "Iterable[DecodedMessage]",
+    pool: ThreadPoolExecutor,
+    prefetch: int = 8,
+) -> "Iterator[tuple[DecodedMessage, Future[VideoFrame] | None]]":
+    """Wrap message iterator to decode JPEGs in background threads.
+
+    Buffers up to `prefetch` messages ahead, submitting JPEG decode jobs
+    to the thread pool eagerly. By the time we process a message, its
+    decode is likely already complete.
+    """
+    buffer: deque[tuple[DecodedMessage, Future[VideoFrame] | None]] = deque()
+
+    for msg in messages:
+        schema_name = msg.schema.name if msg.schema else ""
+        if schema_name in COMPRESSED_SCHEMAS:
+            data = bytes(msg.decoded_message.data)
+            future: Future[VideoFrame] | None = pool.submit(_decode_compressed_image, data)
+        else:
+            future = None
+        buffer.append((msg, future))
+
+        if len(buffer) > prefetch:
+            yield buffer.popleft()
+
+    while buffer:
+        yield buffer.popleft()
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,14 +245,18 @@ class _VideoEncoder:
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Failed to open encoder {codec_name}: {exc}") from exc
 
+    # Pixel formats that are plane-compatible with yuv420p (only color range differs)
+    # and can be passed directly to the encoder without an expensive sws_scale reformat.
+    _YUV420P_COMPAT = frozenset({"yuv420p", "yuvj420p"})
+
     def encode(self, frame: VideoFrame) -> bytes | None:
         """Encode a single frame and return compressed video bytes, or None if buffered."""
-        # Reformat directly to encoder pixel format and dimensions in one step
-        if (
-            frame.width != self.config.width
-            or frame.height != self.config.height
-            or frame.format.name != self._context.pix_fmt
-        ):
+        # Only reformat when dimensions differ or the format is truly incompatible.
+        # yuvj420p (full-range) is plane-compatible with yuv420p; FFmpeg handles the
+        # color-range flag internally so we can skip the costly sws_scale conversion.
+        needs_resize = frame.width != self.config.width or frame.height != self.config.height
+        needs_fmt = frame.format.name not in self._YUV420P_COMPAT
+        if needs_resize or needs_fmt:
             frame = frame.reformat(
                 width=self.config.width, height=self.config.height, format=self._context.pix_fmt
             )
@@ -470,6 +508,7 @@ def roscompress(
             writer = McapWriter(
                 output_stream,
                 encoder_factory=encoder_factory,
+                num_workers=4,
             )
             writer.start()
 
@@ -479,7 +518,11 @@ def roscompress(
             next_schema_id = 1
             next_channel_id = 1
 
-            for msg in read_message_decoded(input_stream, decoder_factories=[decoder_factory]):
+            decode_pool = ThreadPoolExecutor(max_workers=4)
+            messages = read_message_decoded(input_stream, decoder_factories=[decoder_factory])
+            prefetched = _prefetch_image_decodes(messages, decode_pool)
+
+            for msg, decode_future in prefetched:
                 schema_name = msg.schema.name if msg.schema else ""
 
                 if video and schema_name in IMAGE_SCHEMAS:
@@ -491,8 +534,7 @@ def roscompress(
                     if topic not in encoders:
                         # Decode first frame to get dimensions
                         if schema_name in COMPRESSED_SCHEMAS:
-                            compressed_data = bytes(msg.decoded_message.data)
-                            first_frame = _decode_compressed_image(compressed_data)
+                            first_frame = decode_future.result()  # type: ignore[union-attr]
                             width, height = first_frame.width, first_frame.height
                             frame = first_frame  # Reuse decoded frame
                         else:  # RAW_SCHEMAS
@@ -527,7 +569,9 @@ def roscompress(
 
                     # Decode image (skip if already decoded for encoder init)
                     if frame is None:
-                        if schema_name in COMPRESSED_SCHEMAS:
+                        if decode_future is not None:
+                            frame = decode_future.result()
+                        elif schema_name in COMPRESSED_SCHEMAS:
                             compressed_data = bytes(msg.decoded_message.data)
                             frame = _decode_compressed_image(compressed_data)
                         else:  # RAW_SCHEMAS
@@ -753,6 +797,7 @@ def roscompress(
 
                 progress.update(task_id, advance=1)
 
+            decode_pool.shutdown(wait=False)
             writer.finish()
 
     finally:

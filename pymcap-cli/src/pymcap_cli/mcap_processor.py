@@ -313,29 +313,28 @@ class MessageGroup:
         )
 
     def add_message(self, message: Message) -> None:
-        # ChunkBuilder auto-ensures channel and schema
+        self._flush_if_full()
         self.chunk_builder.add(message)
-
-        # If chunk is full, finalize and write it
-        if (
-            self.chunk_builder.buffer.tell() >= self.chunk_builder.chunk_size
-            and self.chunk_builder.num_messages > 0
-        ):
-            if result := self.chunk_builder.finalize():
-                chunk, message_indexes = result
-                # TODO: also check requested chunk size?
-                if chunk.compression != self.chunk_builder.compression.value:
-                    self.compress_fail_counter += 1
-                    if self.compress_fail_counter > 2:
-                        console.print(
-                            "[yellow]Multiple compression failures,"
-                            " switching to uncompressed.[/yellow]"
-                        )
-                        self.chunk_builder.compression = CompressionType.NONE
-                self.writer.add_chunk(chunk, message_indexes)
-            self.chunk_builder.reset()
-
         self.message_count += 1
+
+    def _flush_if_full(self) -> None:
+        """Finalize and write the current chunk if it has reached the target size."""
+        if (
+            self.chunk_builder.buffer.tell() < self.chunk_builder.chunk_size
+            or self.chunk_builder.num_messages == 0
+        ):
+            return
+        if result := self.chunk_builder.finalize():
+            chunk, message_indexes = result
+            if chunk.compression != self.chunk_builder.compression.value:
+                self.compress_fail_counter += 1
+                if self.compress_fail_counter > 2:
+                    console.print(
+                        "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
+                    )
+                    self.chunk_builder.compression = CompressionType.NONE
+            self.writer.add_chunk(chunk, message_indexes)
+        self.chunk_builder.reset()
 
     def flush(self) -> None:
         result = self.chunk_builder.finalize()
