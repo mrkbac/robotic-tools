@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from pointcloud2 import PointField, dtype_from_fields, fields_from_dtype
+from pointcloud2 import PointField, _normalize_fields, dtype_from_fields, fields_from_dtype
 
 
 class TestDtypeFromFields:
@@ -73,7 +73,7 @@ class TestDtypeFromFields:
     def test_field_count_zero_raises_error(self):
         """Test that field with count=0 raises assertion error."""
         fields = [PointField("x", 0, PointField.FLOAT32, 0)]
-        with pytest.raises(AssertionError, match="Can't process fields with count = 0"):
+        with pytest.raises(ValueError, match="Can't process fields with count = 0"):
             dtype_from_fields(fields)
 
     def test_duplicate_field_names_raises_error(self):
@@ -82,7 +82,7 @@ class TestDtypeFromFields:
             PointField("x", 0, PointField.FLOAT32),
             PointField("x", 4, PointField.FLOAT32),
         ]
-        with pytest.raises(AssertionError, match="Duplicate field names are not allowed"):
+        with pytest.raises(ValueError, match="Duplicate field names are not allowed"):
             dtype_from_fields(fields)
 
     def test_all_datatype_constants(self):
@@ -202,3 +202,35 @@ class TestFieldsFromDtype:
             assert original.name == converted.name
             assert original.datatype == converted.datatype
             # Note: offsets might differ due to dtype structure, but datatypes should match
+
+
+class TestNormalizeFields:
+    """Test the _normalize_fields function."""
+
+    def test_auto_offset(self):
+        """Test that auto offset is calculated correctly for dict fields."""
+        fields = [
+            {"name": "x", "datatype": PointField.FLOAT32},
+            {"name": "y", "datatype": PointField.FLOAT32},
+            {"name": "z", "datatype": PointField.FLOAT32},
+        ]
+        result = _normalize_fields(fields)
+
+        assert len(result) == 3
+        assert result[0].offset == 0
+        assert result[1].offset == 4
+        assert result[2].offset == 8
+
+    def test_explicit_then_auto_offset(self):
+        """Test that auto offset resumes correctly after an explicit offset."""
+        fields = [
+            {"name": "x", "datatype": PointField.FLOAT32, "offset": 0},
+            {"name": "padding", "datatype": PointField.FLOAT32, "offset": 8},
+            {"name": "y", "datatype": PointField.FLOAT32},
+        ]
+        result = _normalize_fields(fields)
+
+        assert result[0].offset == 0
+        assert result[1].offset == 8
+        # y should be placed after padding (8 + 4 = 12)
+        assert result[2].offset == 12

@@ -70,7 +70,7 @@ class PointCloudVoxelTransformer(Transformer):
                 field_names=list(XYZ_FIELDS),
                 skip_nans=self.skip_nans,
             )
-        except AssertionError as exc:
+        except (ValueError, AssertionError) as exc:
             raise TransformError(f"Point cloud missing XYZ fields: {exc}") from exc
 
         if point_array.size == 0:

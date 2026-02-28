@@ -55,19 +55,6 @@ include = [
 [tool.ty.overrides.rules]
 unresolved-attribute = "ignore"
 
-# ty can't narrow `dict` to `TypedDict` via isinstance; numpy dtype.fields tuple mismatch
-[[tool.ty.overrides]]
-include = [
-    "pointcloud2/src/pointcloud2/__init__.py",
-]
-
-[tool.ty.overrides.rules]
-invalid-argument-type = "ignore"
-invalid-assignment = "ignore"
-no-matching-overload = "ignore"
-not-iterable = "ignore"
-unresolved-attribute = "ignore"
-unsupported-operator = "ignore"
 
 [tool.ruff]
 required-version = ">=0.8.0"

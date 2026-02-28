@@ -3,15 +3,18 @@
 from typing import Any, Protocol, TypedDict
 
 
-class PointFieldDict(TypedDict, total=False):
+class _PointFieldDictRequired(TypedDict):
+    datatype: int
+
+
+class PointFieldDict(_PointFieldDictRequired, total=False):
     """A dictionary representation of a PointField.
 
-    The `name` and `datatype` fields are required, while `count` and `offset` are optional.
+    The `datatype` field is required, while `name`, `offset` and `count` are optional.
     """
 
     name: str
     offset: int
-    datatype: int
     count: int
 
 

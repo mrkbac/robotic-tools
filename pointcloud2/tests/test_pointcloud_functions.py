@@ -96,7 +96,7 @@ class TestReadPoints:
     def test_read_nonexistent_field_raises_error(self):
         """Test that reading non-existent field raises assertion error."""
         cloud = self.create_test_cloud()
-        with pytest.raises(AssertionError, match="Requests field is not in the fields"):
+        with pytest.raises(ValueError, match="Requests field is not in the fields"):
             read_points(cloud, field_names=["nonexistent"])
 
     def test_read_with_uvs(self):
@@ -327,7 +327,7 @@ class TestCreateCloud:
             PointField("z", 8, PointField.FLOAT32),
         ]
 
-        with pytest.raises(AssertionError, match="Too many dimensions"):
+        with pytest.raises(ValueError, match="Too many dimensions"):
             create_cloud(header=None, fields=fields, points=points)
 
     def test_mismatched_dtype_raises_error(self):
@@ -346,7 +346,7 @@ class TestCreateCloud:
         ]
 
         with pytest.raises(
-            AssertionError,
+            ValueError,
             match="PointFields and structured NumPy array dtype do not match",
         ):
             create_cloud(header=None, fields=fields, points=points)
@@ -401,3 +401,114 @@ class TestCreateCloud:
         assert cloud.point_step == 12
         assert cloud.row_step == 24
         assert len(cloud.data) == 24
+
+    def test_create_and_read_with_dict_fields(self):
+        """Test round-trip with PointFieldDict fields."""
+        fields = [
+            {"name": "x", "datatype": PointField.FLOAT32},
+            {"name": "y", "datatype": PointField.FLOAT32},
+            {"name": "z", "datatype": PointField.FLOAT32},
+        ]
+        points = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+        cloud = create_cloud(header=None, fields=fields, points=points)
+        result = read_points(cloud)
+
+        assert len(result) == 2
+        np.testing.assert_array_almost_equal(result["x"], [1.0, 4.0])
+        np.testing.assert_array_almost_equal(result["y"], [2.0, 5.0])
+        np.testing.assert_array_almost_equal(result["z"], [3.0, 6.0])
+
+
+class TestSkipNans:
+    """Test NaN handling edge cases."""
+
+    def test_skip_nans_with_mixed_int_float_fields(self):
+        """Test that skip_nans works with mixed integer and float fields."""
+        dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("label", "<u4")])
+        points = np.array(
+            [
+                (1.0, 2.0, 10),
+                (np.nan, 5.0, 20),
+                (7.0, 8.0, 30),
+            ],
+            dtype=dtype,
+        )
+
+        fields = [
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("label", 8, PointField.UINT32),
+        ]
+
+        cloud = MockPointCloud2(
+            header=None,
+            height=1,
+            width=3,
+            fields=fields,
+            is_bigendian=False,
+            point_step=dtype.itemsize,
+            row_step=dtype.itemsize * 3,
+            data=points.tobytes(),
+            is_dense=False,
+        )
+
+        result = read_points(cloud, skip_nans=True)
+        assert len(result) == 2
+        np.testing.assert_array_equal(result["x"], [1.0, 7.0])
+        np.testing.assert_array_equal(result["label"], [10, 30])
+
+    def test_skip_nans_dense_cloud_is_noop(self):
+        """Test that skip_nans with is_dense=True does not filter."""
+        points = np.array(
+            [
+                (1.0, 2.0, 3.0),
+                (np.nan, 5.0, 6.0),
+            ],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
+        )
+
+        fields = [
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
+        ]
+
+        cloud = MockPointCloud2(
+            header=None,
+            height=1,
+            width=2,
+            fields=fields,
+            is_bigendian=False,
+            point_step=12,
+            row_step=24,
+            data=points.tobytes(),
+            is_dense=True,
+        )
+
+        result = read_points(cloud, skip_nans=True)
+        assert len(result) == 2
+
+    def test_read_empty_cloud(self):
+        """Test reading a cloud with zero points."""
+        fields = [
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
+        ]
+
+        cloud = MockPointCloud2(
+            header=None,
+            height=1,
+            width=0,
+            fields=fields,
+            is_bigendian=False,
+            point_step=12,
+            row_step=0,
+            data=b"",
+            is_dense=True,
+        )
+
+        result = read_points(cloud)
+        assert len(result) == 0
+        assert result.dtype.names == ("x", "y", "z")
