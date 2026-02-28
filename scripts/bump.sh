@@ -87,3 +87,4 @@ done
 
 echo
 echo "Done: $bumped bumped, $skipped skipped"
+uv lock
