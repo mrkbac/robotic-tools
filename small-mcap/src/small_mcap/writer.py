@@ -405,8 +405,8 @@ class McapWriterRaw:
         )
 
         for idx in message_indices.values():
-            self.statistics.channel_message_counts[idx.channel_id] += len(idx.records)
-            self.statistics.message_count += len(idx.records)
+            self.statistics.channel_message_counts[idx.channel_id] += len(idx.timestamps)
+            self.statistics.message_count += len(idx.timestamps)
 
         self.statistics.chunk_count += 1
 
@@ -604,9 +604,10 @@ class _ChunkBuilder:
         # Update message index (get position before writing)
         msg_idx = self.message_indices.get(record.channel_id)
         if msg_idx is None:
-            msg_idx = MessageIndex(channel_id=record.channel_id, records=[])
+            msg_idx = MessageIndex(channel_id=record.channel_id, timestamps=[], offsets=[])
             self.message_indices[record.channel_id] = msg_idx
-        msg_idx.records.append((record.log_time, self.buffer.tell()))
+        msg_idx.timestamps.append(record.log_time)
+        msg_idx.offsets.append(self.buffer.tell())
 
         self.num_messages += 1
 
@@ -638,9 +639,10 @@ class _ChunkBuilder:
         # Update message index using tracked position
         msg_idx = self.message_indices.get(channel_id)
         if msg_idx is None:
-            msg_idx = MessageIndex(channel_id=channel_id, records=[])
+            msg_idx = MessageIndex(channel_id=channel_id, timestamps=[], offsets=[])
             self.message_indices[channel_id] = msg_idx
-        msg_idx.records.append((log_time, self._buf_pos))
+        msg_idx.timestamps.append(log_time)
+        msg_idx.offsets.append(self._buf_pos)
 
         self.num_messages += 1
 

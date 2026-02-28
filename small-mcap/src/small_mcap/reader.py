@@ -175,25 +175,33 @@ def _breakup_chunk_with_indexes(
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
     view = memoryview(data)
 
-    records: Iterable[tuple[int, int]]
+    offsets_iter: Iterable[int]
     if len(message_indexes) == 1:
         # Fast path: single channel - direct iteration, no heap needed
-        records = message_indexes[0].records
-        if reverse:
-            records = reversed(records)
+        idx = message_indexes[0]
+        offsets_iter = reversed(idx.offsets) if reverse else idx.offsets
     elif reverse:
-        records = heapq.merge(
-            *(reversed(x.records) for x in message_indexes),
-            key=itemgetter(0),
-            reverse=True,
+        offsets_iter = (
+            o
+            for _, o in heapq.merge(
+                *(
+                    zip(reversed(x.timestamps), reversed(x.offsets))
+                    for x in message_indexes
+                ),
+                key=itemgetter(0),
+                reverse=True,
+            )
         )
     else:
-        records = heapq.merge(
-            *(x.records for x in message_indexes),
-            key=itemgetter(0),
+        offsets_iter = (
+            o
+            for _, o in heapq.merge(
+                *(zip(x.timestamps, x.offsets) for x in message_indexes),
+                key=itemgetter(0),
+            )
         )
 
-    for _timestamp, offset in records:
+    for offset in offsets_iter:
         pos = offset
         opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
         pos += _RECORD_HEADER_SIZE
@@ -511,12 +519,12 @@ def _filter_message_index_by_time(
     Returns:
         A new MessageIndex with filtered records, or the original if no filtering needed
     """
-    if not message_index.records:
+    if not message_index.timestamps:
         return message_index
 
     # Check if we need to filter at all
-    first_time = message_index.records[0][0]
-    last_time = message_index.records[-1][0]
+    first_time = message_index.timestamps[0]
+    last_time = message_index.timestamps[-1]
 
     if first_time >= start_time_ns and last_time < end_time_ns:
         # All records are within range, no filtering needed
@@ -524,16 +532,20 @@ def _filter_message_index_by_time(
 
     if last_time < start_time_ns or first_time >= end_time_ns:
         # No records are within range
-        return MessageIndex(message_index.channel_id, [])
+        return MessageIndex(message_index.channel_id, [], [])
 
     # Binary search for start index (first record >= start_time_ns)
-    start_idx = bisect.bisect_left(message_index.records, start_time_ns, key=itemgetter(0))
+    start_idx = bisect.bisect_left(message_index.timestamps, start_time_ns)
 
     # Binary search for end index (first record >= end_time_ns)
-    end_idx = bisect.bisect_left(message_index.records, end_time_ns, key=itemgetter(0))
+    end_idx = bisect.bisect_left(message_index.timestamps, end_time_ns)
 
     # Return filtered MessageIndex
-    return MessageIndex(message_index.channel_id, message_index.records[start_idx:end_idx])
+    return MessageIndex(
+        message_index.channel_id,
+        message_index.timestamps[start_idx:end_idx],
+        message_index.offsets[start_idx:end_idx],
+    )
 
 
 def _filter_message_indices_by_time(
@@ -547,7 +559,7 @@ def _filter_message_indices_by_time(
 
     for mi in message_index:
         filtered_mi = _filter_message_index_by_time(mi, start_time_ns, end_time_ns)
-        if filtered_mi.records:
+        if filtered_mi.timestamps:
             yield filtered_mi
 
 
@@ -860,7 +872,7 @@ def _read_message_non_seeking(
                 pending_chunk = record
             elif isinstance(record, MessageIndex):
                 # Ignore empty MessageIndex records
-                if record.records:
+                if record.timestamps:
                     pending_message_indexes.append(record)
             else:
                 yield record

@@ -600,7 +600,11 @@ class TestSchemasInChunks:
                 msg_offsets.setdefault(record.channel_id, []).append((record.log_time, offset))
 
         message_indexes = [
-            MessageIndex(channel_id=ch_id, records=entries)
+            MessageIndex(
+                channel_id=ch_id,
+                timestamps=[t for t, _ in entries],
+                offsets=[o for _, o in entries],
+            )
             for ch_id, entries in msg_offsets.items()
         ]
         return buf.getvalue(), message_indexes

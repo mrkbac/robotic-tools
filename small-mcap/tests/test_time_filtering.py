@@ -721,7 +721,7 @@ def test_non_seekable_reverse_raises():
 
 def test_empty_message_index_filter():
     """_filter_message_index_by_time should handle empty records."""
-    mi = MessageIndex(channel_id=1, records=[])
+    mi = MessageIndex(channel_id=1, timestamps=[], offsets=[])
     result = _filter_message_index_by_time(mi, 0, 1_000_000)
 
     assert result is mi  # Same object returned for empty

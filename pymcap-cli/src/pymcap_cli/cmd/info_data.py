@@ -108,8 +108,8 @@ def _collect_channel_statistics(
     # Single pass over all chunk information
     for msg_idx_list in info.chunk_information.values():
         for msg_idx in msg_idx_list:
-            records = msg_idx.records
-            if not records:
+            timestamps = msg_idx.timestamps
+            if not timestamps:
                 continue
 
             channel_id = msg_idx.channel_id
@@ -124,13 +124,12 @@ def _collect_channel_statistics(
             channel_dist = per_channel_distributions[channel_id]
 
             # Process first record separately
-            first_timestamp = records[0][0]
+            first_timestamp = timestamps[0]
             stats.first_time = min(stats.first_time, first_timestamp)
 
-            # Compute intervals within this chunk (records are already sorted by log_time)
-            # Using pairwise on records directly avoids storing timestamps
+            # Compute intervals within this chunk (timestamps are already sorted by log_time)
             prev_timestamp = first_timestamp
-            for timestamp, _ in records:
+            for timestamp in timestamps:
                 # Update last_time (will end up with the max)
                 stats.last_time = max(stats.last_time, timestamp)
 
@@ -331,7 +330,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
         stats.uncompressed_sizes.append(x.uncompressed_size)
         stats.durations_ns.append(x.message_end_time - x.message_start_time)
         if info.chunk_information and (cinfo := info.chunk_information.get(x.chunk_start_offset)):
-            stats.message_count += sum(len(ci.records) for ci in cinfo)
+            stats.message_count += sum(len(ci.timestamps) for ci in cinfo)
 
     # Calculate chunk overlaps
     max_concurrent, overlap_size = _calculate_chunk_overlaps(summary.chunk_indexes)

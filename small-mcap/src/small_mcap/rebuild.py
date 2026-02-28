@@ -57,25 +57,25 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
     # Fast path: single channel (common case)
     if len(indexes) == 1:
         idx = indexes[0]
-        records = idx.records
-        if not records:
+        offsets = idx.offsets
+        if not offsets:
             return {}
         total = sum(
-            records[i + 1][1] - records[i][1] - MESSAGE_RECORD_OVERHEAD
-            for i in range(len(records) - 1)
+            offsets[i + 1] - offsets[i] - MESSAGE_RECORD_OVERHEAD
+            for i in range(len(offsets) - 1)
         )
-        total += chunk_size - records[-1][1] - MESSAGE_RECORD_OVERHEAD  # last message
+        total += chunk_size - offsets[-1] - MESSAGE_RECORD_OVERHEAD  # last message
         return {idx.channel_id: total}
 
     # Multi-channel: collect all (offset, channel_id) pairs and sort by offset
     # Pre-calculate total size to avoid list resizing
-    total_records = sum(len(idx.records) for idx in indexes)
+    total_records = sum(len(idx.timestamps) for idx in indexes)
     all_msgs: list[tuple[int, int]] = [(0, 0)] * total_records
 
     i = 0
     for idx in indexes:
         ch = idx.channel_id
-        for _, offset in idx.records:
+        for offset in idx.offsets:
             all_msgs[i] = (offset, ch)
             i += 1
 
@@ -260,9 +260,10 @@ def rebuild_summary(
                         # Build MessageIndex entry
                         if record.channel_id not in rebuilt_indexes:
                             rebuilt_indexes[record.channel_id] = MessageIndex(
-                                channel_id=record.channel_id, records=[]
+                                channel_id=record.channel_id, timestamps=[], offsets=[]
                             )
-                        rebuilt_indexes[record.channel_id].records.append((record.log_time, offset))
+                        rebuilt_indexes[record.channel_id].timestamps.append(record.log_time)
+                        rebuilt_indexes[record.channel_id].offsets.append(offset)
                 # Replace pending_indexes with rebuilt ones
                 pending_indexes = list(rebuilt_indexes.values())
             else:
@@ -286,8 +287,8 @@ def rebuild_summary(
                     channel_sizes[channel_id] += size
 
             for idx in pending_indexes:
-                statistics.message_count += len(idx.records)
-                statistics.channel_message_counts[idx.channel_id] += len(idx.records)
+                statistics.message_count += len(idx.timestamps)
+                statistics.channel_message_counts[idx.channel_id] += len(idx.timestamps)
 
         # Store MessageIndex records for this chunk
         if pending_indexes:
@@ -370,7 +371,7 @@ def rebuild_summary(
                     )
                 pending_chunk = record
             elif isinstance(record, MessageIndex):
-                if record.records:
+                if record.timestamps:
                     pending_indexes.append(record)
                     # Track the position of this MessageIndex for this channel
                     pending_message_index_offsets.setdefault(record.channel_id, record_start_pos)

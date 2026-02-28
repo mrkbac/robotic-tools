@@ -668,8 +668,8 @@ class MessageIndex(McapRecord):
 
     Attributes:
         channel_id: [2 bytes] The channel ID for which this index applies
-        records: [4 + N bytes] Array of (Timestamp, uint64) tuples for each message record.
-            The offset is relative to the start of the uncompressed chunk data.
+        timestamps: [list[int]] Log time values for each message record
+        offsets: [list[int]] Byte offsets into uncompressed chunk data for each message record
     """
 
     OPCODE: ClassVar[int] = Opcode.MESSAGE_INDEX
@@ -677,11 +677,12 @@ class MessageIndex(McapRecord):
     _ENTRY_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
 
     channel_id: int
-    records: list[tuple[int, int]]
+    timestamps: list[int]
+    offsets: list[int]
 
     def write_record_to(self, out: WritableBuffer) -> int:
         # Pre-allocate buffer for better performance
-        num_records = len(self.records)
+        num_records = len(self.timestamps)
         records_size = num_records * 16  # 2 * 8 bytes per record
         content_size = 2 + 4 + records_size  # channel_id + length prefix + records
 
@@ -690,8 +691,8 @@ class MessageIndex(McapRecord):
         OPCODE_AND_LEN_STRUCT.pack_into(buffer, 0, self.OPCODE, content_size)
         self._HEADER_STRUCT.pack_into(buffer, 9, self.channel_id, records_size)
         offset = 15  # 9 + 6
-        for timestamp, msg_offset in self.records:
-            self._ENTRY_STRUCT.pack_into(buffer, offset, timestamp, msg_offset)
+        for i in range(num_records):
+            self._ENTRY_STRUCT.pack_into(buffer, offset, self.timestamps[i], self.offsets[i])
             offset += 16
 
         out.write(buffer)
@@ -701,9 +702,13 @@ class MessageIndex(McapRecord):
     def read(cls, data: bytes | memoryview) -> "MessageIndex":
         channel_id, records_len = cls._HEADER_STRUCT.unpack_from(data, 0)
         if records_len == 0:
-            return cls(channel_id, [])
-        records = list(struct.iter_unpack(cls._ENTRY_STRUCT.format, data[6 : 6 + records_len]))
-        return cls(channel_id, records)
+            return cls(channel_id, [], [])
+        timestamps: list[int] = []
+        offsets: list[int] = []
+        for t, o in struct.iter_unpack(cls._ENTRY_STRUCT.format, data[6 : 6 + records_len]):
+            timestamps.append(t)
+            offsets.append(o)
+        return cls(channel_id, timestamps, offsets)
 
 
 @dataclass(slots=True)

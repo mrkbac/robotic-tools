@@ -380,30 +380,25 @@ class TestMessageIndex:
         """Test MessageIndex write and read roundtrip."""
         original = MessageIndex(
             channel_id=1,
-            records=[
-                (1000, 100),
-                (1000, 200),
-                (2000, 300),
-                (3000, 400),
-                (3000, 500),
-                (3000, 600),
-            ],
+            timestamps=[1000, 1000, 2000, 3000, 3000, 3000],
+            offsets=[100, 200, 300, 400, 500, 600],
         )
         serialized = write_content(original)
         deserialized = MessageIndex.read(serialized)
 
         assert deserialized == original
         assert deserialized.channel_id == 1
-        assert len(deserialized.records) == 6
+        assert len(deserialized.timestamps) == 6
 
     def test_message_index_with_empty_records(self):
         """Test MessageIndex with empty records."""
-        original = MessageIndex(channel_id=1, records=[])
+        original = MessageIndex(channel_id=1, timestamps=[], offsets=[])
         serialized = write_content(original)
         deserialized = MessageIndex.read(serialized)
 
         assert deserialized == original
-        assert deserialized.records == []
+        assert deserialized.timestamps == []
+        assert deserialized.offsets == []
 
     def test_message_index_opcode(self):
         """Test MessageIndex has correct opcode."""

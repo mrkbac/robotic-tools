@@ -219,7 +219,7 @@ def test_rebuild_matches_original_summary():
 def test_estimate_size_single_channel():
     """Test estimation with a single channel and multiple messages."""
     # 3 messages at offsets 0, 100, 200 in a 300-byte chunk
-    indexes = [MessageIndex(channel_id=1, records=[(1000, 0), (2000, 100), (3000, 200)])]
+    indexes = [MessageIndex(channel_id=1, timestamps=[1000, 2000, 3000], offsets=[0, 100, 200])]
     chunk_size = 300
 
     result = _estimate_size_from_indexes(indexes, chunk_size)
@@ -233,8 +233,8 @@ def test_estimate_size_multi_channel():
     """Test multi-channel estimation (regression test for closure bug)."""
     # 2 channels with interleaved messages at equal spacing
     indexes = [
-        MessageIndex(channel_id=1, records=[(100, 0), (300, 200)]),  # ch1 at offsets 0, 200
-        MessageIndex(channel_id=2, records=[(200, 100), (400, 300)]),  # ch2 at offsets 100, 300
+        MessageIndex(channel_id=1, timestamps=[100, 300], offsets=[0, 200]),  # ch1 at offsets 0, 200
+        MessageIndex(channel_id=2, timestamps=[200, 400], offsets=[100, 300]),  # ch2 at offsets 100, 300
     ]
     chunk_size = 400
 
@@ -249,8 +249,8 @@ def test_estimate_size_multi_channel():
 def test_estimate_size_multi_channel_uneven_distribution():
     """Test multi-channel with uneven message distribution."""
     indexes = [
-        MessageIndex(channel_id=1, records=[(100, 0)]),  # 1 message
-        MessageIndex(channel_id=2, records=[(200, 50), (300, 100), (400, 150)]),  # 3 messages
+        MessageIndex(channel_id=1, timestamps=[100], offsets=[0]),  # 1 message
+        MessageIndex(channel_id=2, timestamps=[200, 300, 400], offsets=[50, 100, 150]),  # 3 messages
     ]
     chunk_size = 200
 
@@ -272,7 +272,7 @@ def test_estimate_size_empty_indexes():
 
 def test_estimate_size_empty_records():
     """Test with index containing no records."""
-    indexes = [MessageIndex(channel_id=1, records=[])]
+    indexes = [MessageIndex(channel_id=1, timestamps=[], offsets=[])]
     result = _estimate_size_from_indexes(indexes, 1000)
     assert result == {}
 
@@ -413,11 +413,9 @@ def test_rebuild_pending_chunk_rebuilds_missing_indexes():
     assert rebuild_info.chunk_information is not None
     rebuilt_indexes = rebuild_info.chunk_information[chunk_start_offset]
     assert len(rebuilt_indexes) == 1
-    rebuilt_records = rebuilt_indexes[0].records
-    assert [log_time for log_time, _ in rebuilt_records] == [0, 1, 2]
-    assert [offset for _, offset in rebuilt_records] == sorted(
-        offset for _, offset in rebuilt_records
-    )
+    rebuilt_idx = rebuilt_indexes[0]
+    assert rebuilt_idx.timestamps == [0, 1, 2]
+    assert rebuilt_idx.offsets == sorted(rebuilt_idx.offsets)
 
 
 def test_rebuild_no_index_file_does_not_rebuild_indexes():
