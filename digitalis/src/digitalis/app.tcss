@@ -2,14 +2,6 @@ Footer {
     background: $primary;
 }
 
-Header {
-    background: $primary;
-}
-
-TimeControl {
-    dock: bottom;
-}
-
 Tooltip {
     max-width: 100%;
 }
@@ -17,8 +9,28 @@ Tooltip {
 TopicSearch {
     min-width: 30;
     width: 2fr;
+    border-right: solid $primary 50%;
 }
 
 DataView {
     width: 5fr;
+
+    #raw {
+        content-align: center middle;
+        color: $text 50%;
+        text-style: italic;
+    }
+}
+
+#main-panel {
+    height: 1fr;
+}
+
+TimeControl {
+    dock: bottom;
+    border-top: solid $primary 50%;
+
+    #time-info {
+        background: $primary 30%;
+    }
 }

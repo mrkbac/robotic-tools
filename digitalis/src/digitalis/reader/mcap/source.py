@@ -9,6 +9,7 @@ from typing import IO, TYPE_CHECKING
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap import (
+    DecodedMessage,
     EndOfFileError,
     get_summary,
     read_message_decoded,
@@ -45,7 +46,7 @@ class McapSource(PlaybackSource):
         self._file = open(path, "rb")  # noqa: PTH123, SIM115
         self._decoder_factory = DecoderFactory()
         self._summary: Summary | None = None
-        self._message_iterator: Iterator[MessageEvent] | None = None
+        self._message_iterator: Iterator[DecodedMessage] | None = None
         self._stats: Statistics | None = None
         self._channels: dict[int, Topic] = {}
         self._subscribed_topics: set[str] = set()
@@ -55,6 +56,7 @@ class McapSource(PlaybackSource):
         self._playback_task: asyncio.Task[None] | None = None
         self._playback_condition = asyncio.Event()
         self._seek_flag = False
+        self._last_time_notify_wall: float = 0.0
 
         # Status tracking
         self._current_status = SourceStatus.READY
@@ -198,12 +200,12 @@ class McapSource(PlaybackSource):
         msg = self.get_next_message()
         if msg is not None:
             # Send message if we're subscribed to its topic
-            if msg.topic in self._subscribed_topics:
-                self._notify_message(msg)
+            if msg.channel.topic in self._subscribed_topics:
+                self._notify_message(self._to_message_event(msg))
 
             # Update current time to the actual message timestamp
-            self._current_time = msg.timestamp_ns
-            self._notify_time(msg.timestamp_ns)
+            self._current_time = msg.message.log_time
+            self._notify_time(msg.message.log_time)
 
     @property
     def is_playing(self) -> bool:
@@ -255,34 +257,74 @@ class McapSource(PlaybackSource):
                 await asyncio.sleep(0.01)
                 continue
 
-            # Send message if subscribed
-            if msg.topic in self._subscribed_topics:
-                self._notify_message(msg)
+            msg_time = msg.message.log_time
 
             # Calculate and perform sleep for realistic playback timing
             if last_msg_time is not None:
-                msg_delta = msg.timestamp_ns - last_msg_time
+                msg_delta = msg_time - last_msg_time
                 elapsed = time.perf_counter_ns() - start_time
                 target_sleep = (msg_delta / self._playback_speed) - elapsed
 
                 if target_sleep > 0:
                     await self._smooth_sleep(target_sleep / 1_000_000_000)
+                elif target_sleep < -50_000_000 and self._playback_speed > 2.0:
+                    # More than 50ms behind at high speed — skip ahead without decoding
+                    catchup_target = msg_time + int(-target_sleep * self._playback_speed)
+                    msg = self._skip_to_catchup(msg, catchup_target)
+                    msg_time = msg.message.log_time
+
+            # Only decode when delivering to UI
+            if msg.channel.topic in self._subscribed_topics:
+                self._notify_message(self._to_message_event(msg))
 
             # Update state for next iteration
-            last_msg_time = msg.timestamp_ns
-            self._current_time = msg.timestamp_ns
-            self._notify_time(msg.timestamp_ns)
+            last_msg_time = msg_time
+            self._current_time = msg_time
+
+            # Throttle time notifications to ~30Hz
+            now = time.monotonic()
+            if now - self._last_time_notify_wall >= 0.033:
+                self._notify_time(msg_time)
+                self._last_time_notify_wall = now
+
             start_time = time.perf_counter_ns()
 
     async def _smooth_sleep(self, sleep_seconds: float) -> None:
         """Sleep with interruption checking."""
         await asyncio.sleep(sleep_seconds)
 
-    def get_next_message(self) -> MessageEvent | None:
+    def _skip_to_catchup(self, current: DecodedMessage, target_time: int) -> DecodedMessage:
+        """Advance the iterator without decoding until we reach target_time.
+
+        Iterates through DecodedMessage objects cheaply (just MCAP header
+        parsing, no ROS2 CDR decode) and returns the last message at or
+        past the target timestamp.
+        """
+        assert self._message_iterator is not None
+        latest = current
+        try:
+            while latest.message.log_time < target_time:
+                latest = next(self._message_iterator)
+        except (StopIteration, EndOfFileError):
+            pass
+        return latest
+
+    @staticmethod
+    def _to_message_event(msg: DecodedMessage) -> MessageEvent:
+        """Convert a DecodedMessage to MessageEvent, triggering decode."""
+        return MessageEvent(
+            topic=msg.channel.topic,
+            message=msg.decoded_message,
+            timestamp_ns=msg.message.log_time,
+            schema_name=msg.schema.name if msg.schema else None,
+        )
+
+    def get_next_message(self) -> DecodedMessage | None:
         """Get the next message from the stream.
 
         Returns:
-            MessageEvent: The next message in the stream, or None if stream is exhausted.
+            The next message, or None if stream is exhausted.
+            The message is NOT decoded until .decoded_message is accessed.
         """
         assert self._message_iterator is not None
 
@@ -291,22 +333,15 @@ class McapSource(PlaybackSource):
         except (StopIteration, EndOfFileError):
             return None
 
-    def _get_messages(self, io: IO[bytes], timestamp_ns: int) -> Iterable[MessageEvent]:
-        """Generator to yield messages from the stream."""
+    def _get_messages(self, io: IO[bytes], timestamp_ns: int) -> Iterable[DecodedMessage]:
+        """Generator to yield lazy DecodedMessage objects from the stream."""
 
         if not self._subscribed_topics_id:
             return
 
-        for msg in read_message_decoded(
+        yield from read_message_decoded(
             io,
             lambda channel, _schema: channel.id in self._subscribed_topics_id,
             decoder_factories=[self._decoder_factory],
             start_time_ns=timestamp_ns,
-        ):
-            msg_event = MessageEvent(
-                topic=msg.channel.topic,
-                message=msg.decoded_message,
-                timestamp_ns=msg.message.log_time,
-                schema_name=msg.schema.name if msg.schema else None,
-            )
-            yield msg_event
+        )

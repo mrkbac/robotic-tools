@@ -90,7 +90,7 @@ class CustomHeaderStatus(Widget):
     DEFAULT_CSS = """
     CustomHeaderStatus {
         dock: right;
-        width: 16;
+        width: 20;
         padding: 0 1;
         content-align: right middle;
     }

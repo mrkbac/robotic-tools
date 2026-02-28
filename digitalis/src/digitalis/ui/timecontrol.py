@@ -107,11 +107,14 @@ class TimeControl(VerticalGroup):
                 Select {
                     display: none;
                 }
+                Slider {
+                    display: none;
+                }
             }
             #time-info {
                 width: 3;
                 padding: 0 1;
-                background: $warning;
+                background: $primary 30%;
             }
         }
     """

@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Callable
 from functools import partial
 from typing import ClassVar
@@ -7,7 +8,6 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import Hit, Hits, Provider
-from textual.constants import MAX_FPS
 from textual.containers import Horizontal, Vertical
 from textual.messages import ExitApp
 from textual.reactive import reactive
@@ -113,11 +113,14 @@ class DataScreen(Screen[None]):
 
     def __init__(self, file_or_url: str) -> None:
         super().__init__()
-        self.title = f"Digitalis 🪻 - {file_or_url} - FPS: {MAX_FPS}"
+        self.title = "Digitalis 🪻"
+        self.sub_title = file_or_url
+        self._file_or_url = file_or_url
+        self._last_data_update: float = 0.0
 
         self.source = create_source(
             file_or_url,
-            on_message=self.on_message,
+            on_message=self._on_source_message,
             on_source_info=self.on_source_info,
             on_time=self.on_time_update,
             on_status=self.on_status_update,
@@ -132,16 +135,21 @@ class DataScreen(Screen[None]):
         if source_info.start_time_ns is not None and source_info.end_time_ns is not None:
             self.start_end = (source_info.start_time_ns, source_info.end_time_ns)
 
-    def on_message(self, message: MessageEvent) -> None:
-        """Handle messages from the source."""
+    _MIN_UPDATE_INTERVAL: float = 1.0 / 30  # 30 Hz throttle
+
+    def _on_source_message(self, message: MessageEvent) -> None:
+        """Handle messages from the source, throttled to 30 Hz."""
         if self.selected_topic and self.selected_topic.name == message.topic:
-            data_panel = self.query_one(DataView)
-            data_panel.data = message
+            now = time.monotonic()
+            if now - self._last_data_update >= self._MIN_UPDATE_INTERVAL:
+                self._last_data_update = now
+                data_panel = self.query_one(DataView)
+                data_panel.data = message
 
     def on_status_update(self, status: SourceStatus) -> None:
         """Handle source status updates."""
         self.source_status = status
-        self.title = f"Digitalis 🪻 - {status.value} - FPS: {MAX_FPS}"
+        self.sub_title = f"{self._file_or_url} - {status.value}"
         logging.debug(f"Source status changed to: {status.value}")
 
     def compose(self) -> ComposeResult:
@@ -188,6 +196,10 @@ class DataScreen(Screen[None]):
             data_panel.data = None
             self.run_worker(self.source.subscribe(topic.name))
             self._previous_topic = topic
+
+            # Seek to current time to prime the panel with the first message
+            if isinstance(self.source, PlaybackSource):
+                self.run_worker(self.source.seek_to_time(self.current_time))
 
     def on_mount(self) -> None:
         """Initialize the app when mounted."""

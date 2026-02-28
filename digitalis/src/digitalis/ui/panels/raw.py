@@ -143,13 +143,13 @@ class TreeView(Tree[str]):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._current_message_string: str | None = None
+        self._current_message_key: tuple[str, int] | None = None
 
     def _has_message_changed(self, message: MessageEvent) -> bool:
         """Check if the message has changed since last update."""
-        new_message_string = repr(message)
-        if self._current_message_string != new_message_string:
-            self._current_message_string = new_message_string
+        new_key = (message.topic, message.timestamp_ns)
+        if self._current_message_key != new_key:
+            self._current_message_key = new_key
             return True
         return False
 
@@ -425,7 +425,7 @@ class TreeView(Tree[str]):
         """
         if not channel_message:
             self.clear()
-            self._current_message_string = None
+            self._current_message_key = None
             return
 
         # Check if entire message changed (quick check)

@@ -32,11 +32,13 @@ class TopicSearch(VerticalGroup):
                 border: solid $primary;
             }
             ListView {
-                border-right: $primary;
-
                 ListItem {
                     padding: 0 1;
                 }
+                &:focus ListItem.-highlight {
+                    background: $primary 20%;
+                }
+                scrollbar-size-vertical: 1;
             }
             # This allows us to use the cursor_up/down actions
             ListItem:disabled {
@@ -109,7 +111,10 @@ class TopicSearch(VerticalGroup):
 
     def create_list_item(self, topic: Topic) -> ListItem:
         topic_name = topic.name
-        label_text = f"{topic_name}"
+        schema_short = topic.schema_name.rsplit("/", 1)[-1] if topic.schema_name else ""
+        label_text = f"[b]{topic_name}[/b]"
+        if schema_short:
+            label_text += f"  [dim italic]{schema_short}[/dim italic]"
         if topic.message_count is not None:
             label_text += f"\n[dim]{topic.message_count} msgs[/dim]"
 
@@ -149,19 +154,27 @@ class TopicSearch(VerticalGroup):
             self.topics_old[int(child.id[1:])].name for child in topic_children if child.id
         ]
 
+        new_items: list[tuple[ListItem, int]] = []
         for channel_id, channel_data in sorted(self.topics_old.items(), key=lambda x: x[1].name):
             if channel_id in existing_ids:
                 continue
 
             item = self.create_list_item(channel_data)
             topic_name = channel_data.name
-
             insert_index = bisect.bisect_left(topic_names, topic_name)
+            new_items.append((item, insert_index))
+
+        if not new_items:
+            return
+
+        # Mount all new items in a single pass
+        await topic_list.mount_all([item for item, _ in new_items])
+
+        # Reorder items to correct positions
+        for item, insert_index in new_items:
             insert_before = (
                 topic_children[insert_index] if insert_index < len(topic_children) else None
             )
-
-            await topic_list.append(item)
             if insert_before:
                 topic_list.move_child(item, before=insert_before)
 

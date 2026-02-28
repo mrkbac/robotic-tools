@@ -34,7 +34,7 @@ class DataView(Widget, can_focus=True):
     def compose(self) -> ComposeResult:
         """Compose the DataView widget."""
         with ContentSwitcher():
-            yield Static("N/A", id="raw")
+            yield Static("Select a topic from the sidebar to begin", id="raw")
             yield Container(id="data")
 
     async def watch_topic(self, topic: Topic | None) -> None:
@@ -60,7 +60,7 @@ class DataView(Widget, can_focus=True):
         switcher = self.query_one(ContentSwitcher)
         static = self.query_one("#raw", Static)
         if data is None:
-            static.update("No data received")
+            static.update("Waiting for data...")
             switcher.current = "raw"
             return
 
@@ -71,7 +71,7 @@ class DataView(Widget, can_focus=True):
 
         schema_name = data.schema_name
         if schema_name is None:
-            static.update(f"Unsupported schema: {schema_name}")
+            static.update(f"No panel available for schema: {schema_name}")
             switcher.current = "raw"
             return
 
