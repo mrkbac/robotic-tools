@@ -19,6 +19,7 @@ members = [
     "digitalis",
     "mcap-ros2-support-fast",
     "pointcloud2",
+    "pureini",
     "pymcap-cli",
     "small-mcap",
     "websocket-proxy",
@@ -39,7 +40,7 @@ exclude = [
 ]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["lz4", "lz4.frame", "av", "foxglove"]
+allowed-unresolved-imports = ["lz4", "lz4.frame", "lz4.block", "av", "foxglove"]
 
 [tool.ty.terminal]
 error-on-warning = true
@@ -104,5 +105,6 @@ ignore = [
 # Relaxed lints for test files
 "*/tests/*" = ["T201", "SLF001", "ANN", "PTH123", "S603", "S607"]
 "*/benchmarks/*" = ["T201", "INP001", "PLC0415", "PTH123"]
+"*/examples/*" = ["T201", "INP001", "BLE001"]
 # Typer commands - function call in defaults is required pattern
 "*/cmd/*_cmd.py" = ["B008", "B904", "TC003"]
