@@ -134,6 +134,36 @@ class _EncoderConfig:
     codec_name: str
 
 
+def _build_encoder_options(
+    codec_name: str, quality: int, width: int, height: int
+) -> tuple[dict[str, str], int | None]:
+    """Build codec-specific encoder options from user-facing quality (CRF).
+
+    Returns (options_dict, bit_rate_or_none).
+    """
+    if codec_name == "libx264":
+        return {
+            "crf": str(quality),
+            "preset": "superfast",
+            "tune": "zerolatency",
+        }, None
+    if codec_name == "libx265":
+        return {
+            "crf": str(quality),
+            "preset": "superfast",
+        }, None
+    if codec_name in {"h264_videotoolbox", "hevc_videotoolbox"}:
+        # CRF → bitrate: 5 Mbps baseline scaled by quality and resolution
+        pixel_scale = (width * height) / (1920 * 1080)
+        bit_rate = int(5_000_000 * (2 ** ((28 - quality) / 6)) * pixel_scale)
+        return {}, bit_rate
+    if codec_name == "h264_nvenc":
+        return {"rc": "vbr", "cq": str(quality)}, None
+    if codec_name == "h264_vaapi":
+        return {"qp": str(quality)}, None
+    return {}, None
+
+
 class _VideoEncoder:
     """PyAV-based video encoder for converting images to compressed video."""
 
@@ -143,7 +173,6 @@ class _VideoEncoder:
         height: int,
         codec_name: str,
         quality: int = 28,
-        preset: str = "medium",
         target_fps: float = 30.0,
         gop_size: int = 30,
     ) -> None:
@@ -151,7 +180,6 @@ class _VideoEncoder:
         self._target_fps = max(target_fps, 1.0)
         self._frame_index = 0
         self._quality = quality
-        self._preset = preset
         self._gop_size = gop_size
 
         try:
@@ -169,18 +197,12 @@ class _VideoEncoder:
         self._context.time_base = Fraction(1, fps_int)
         self._context.framerate = Fraction(fps_int, 1)
         self._context.gop_size = gop_size
+        self._context.max_b_frames = 0  # Ensure every frame produces immediate output
 
-        # Set encoder-specific options
-        options: dict[str, str] = {}
-        if codec_name in {"libx264", "h264_videotoolbox"}:
-            options["preset"] = preset
-            options["crf"] = str(quality)
-            if codec_name == "libx264":
-                options["tune"] = "zerolatency"
-        elif codec_name in {"libx265", "hevc_videotoolbox"}:
-            options["preset"] = preset
-            options["crf"] = str(quality)
-
+        # Set codec-specific options
+        options, bit_rate = _build_encoder_options(codec_name, quality, width, height)
+        if bit_rate is not None:
+            self._context.bit_rate = bit_rate
         if options:
             self._context.options = options
 
@@ -189,8 +211,8 @@ class _VideoEncoder:
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Failed to open encoder {codec_name}: {exc}") from exc
 
-    def encode(self, frame: VideoFrame) -> bytes:
-        """Encode a single frame and return compressed video bytes."""
+    def encode(self, frame: VideoFrame) -> bytes | None:
+        """Encode a single frame and return compressed video bytes, or None if buffered."""
         # Reformat directly to encoder pixel format and dimensions in one step
         if (
             frame.width != self.config.width
@@ -208,17 +230,20 @@ class _VideoEncoder:
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Encoding error: {exc}") from exc
 
-        # If no packets, try flushing (some codecs buffer internally)
         if not packets:
-            try:
-                packets = list(self._context.encode(None))
-            except av.error.FFmpegError as exc:
-                raise VideoEncoderError(f"Encoder flush error: {exc}") from exc
+            return None
 
-        data = b"".join(bytes(packet) for packet in packets)
-        if not data:
-            raise VideoEncoderError("Encoder produced empty packet")
-        return data
+        return b"".join(bytes(packet) for packet in packets)
+
+    def flush(self) -> bytes | None:
+        """Flush remaining buffered frames from the encoder."""
+        try:
+            packets = list(self._context.encode(None))
+        except av.error.FFmpegError:
+            return None
+        if not packets:
+            return None
+        return b"".join(bytes(packet) for packet in packets)
 
     def close(self) -> None:
         """Close the encoder (no-op, context cleaned up by garbage collector)."""
@@ -300,6 +325,20 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = "zstd",
+    video: Annotated[
+        bool,
+        Parameter(
+            name=["--video/--no-video"],
+            group=ENCODING_GROUP,
+        ),
+    ] = True,
+    pointcloud: Annotated[
+        bool,
+        Parameter(
+            name=["--pointcloud/--no-pointcloud"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = True,
 ) -> int:
     """Compress ROS MCAP by converting image and point cloud topics.
 
@@ -326,31 +365,38 @@ def roscompress(
         Point cloud encoding mode (lossy, lossless, none). Default: lossy.
     pc_compression
         Point cloud second-stage compression (zstd, lz4, none). Default: zstd.
+    video
+        Enable video compression of image topics. Default: True.
+    pointcloud
+        Enable point cloud compression. Default: True.
     """
     confirm_output_overwrite(output, force)
 
     # Detect encoder
-    if encoder:
-        if not test_encoder(encoder):
-            console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
-            return 1
-        encoder_name = encoder
-    else:
-        encoder_name = _detect_encoder()
+    encoder_name = ""
+    if video:
+        if encoder:
+            if not test_encoder(encoder):
+                console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
+                return 1
+            encoder_name = encoder
+        else:
+            encoder_name = _detect_encoder()
 
     # Lazy-import pureini for point cloud compression
     pureini_available = True
-    try:
-        from pureini import (  # noqa: PLC0415
-            CompressionOption,
-            EncodingOptions,
-            PointcloudEncoder,
-        )
-    except ImportError:
-        pureini_available = False
+    if pointcloud:
+        try:
+            from pureini import (  # noqa: PLC0415
+                CompressionOption,
+                EncodingOptions,
+                PointcloudEncoder,
+            )
+        except ImportError:
+            pureini_available = False
 
     # Map string options to pureini enums
-    if pureini_available:
+    if pointcloud and pureini_available:
         encoding_map = {
             "lossy": EncodingOptions.LOSSY,
             "lossless": EncodingOptions.LOSSLESS,
@@ -366,13 +412,18 @@ def roscompress(
 
     console.print(f"[cyan]Input:[/cyan] {file}")
     console.print(f"[cyan]Output:[/cyan] {output}")
-    console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
-    console.print(f"[cyan]Quality (CRF):[/cyan] {quality}")
-    if pureini_available:
+    if video:
+        console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
+        console.print(f"[cyan]Quality (CRF):[/cyan] {quality}")
+    else:
+        console.print("[cyan]Video compression:[/cyan] disabled")
+    if pointcloud and pureini_available:
         console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
         console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
         if pc_encoding == "lossy":
             console.print(f"[cyan]Point cloud resolution:[/cyan] {resolution}")
+    elif not pointcloud:
+        console.print("[cyan]Point cloud compression:[/cyan] disabled")
 
     # Get message count from summary for progress bar
     total_message_count: int | None = None
@@ -386,6 +437,8 @@ def roscompress(
 
     # Track encoders per topic (lazy initialization)
     encoders: dict[str, _VideoEncoder] = {}
+    # (EncodingInfo, PointcloudEncoder) — typed as object since pureini is lazily imported
+    pc_encoders: dict[str, tuple[object, object]] = {}
     decoder_factory = DecoderFactory()
     encoder_factory = ROS2EncoderFactory()
 
@@ -429,20 +482,23 @@ def roscompress(
             for msg in read_message_decoded(input_stream, decoder_factories=[decoder_factory]):
                 schema_name = msg.schema.name if msg.schema else ""
 
-                if schema_name in IMAGE_SCHEMAS:
+                if video and schema_name in IMAGE_SCHEMAS:
                     # Convert to CompressedVideo
                     topic = msg.channel.topic
 
                     # Lazy initialization of encoder for this topic
+                    frame: VideoFrame | None = None
                     if topic not in encoders:
                         # Decode first frame to get dimensions
                         if schema_name in COMPRESSED_SCHEMAS:
                             compressed_data = bytes(msg.decoded_message.data)
                             first_frame = _decode_compressed_image(compressed_data)
                             width, height = first_frame.width, first_frame.height
+                            frame = first_frame  # Reuse decoded frame
                         else:  # RAW_SCHEMAS
                             rgb_array = raw_image_to_array(msg.decoded_message)
                             height, width = rgb_array.shape[:2]
+                            frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
 
                         # Ensure even dimensions (required for yuv420p)
                         width -= width % 2
@@ -455,7 +511,6 @@ def roscompress(
                                 height=height,
                                 codec_name=encoder_name,
                                 quality=quality,
-                                preset="medium",
                                 target_fps=30.0,
                                 gop_size=30,
                             )
@@ -470,13 +525,14 @@ def roscompress(
                             )
                             return 1
 
-                    # Decode image
-                    if schema_name in COMPRESSED_SCHEMAS:
-                        compressed_data = bytes(msg.decoded_message.data)
-                        frame = _decode_compressed_image(compressed_data)
-                    else:  # RAW_SCHEMAS
-                        rgb_array = raw_image_to_array(msg.decoded_message)
-                        frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+                    # Decode image (skip if already decoded for encoder init)
+                    if frame is None:
+                        if schema_name in COMPRESSED_SCHEMAS:
+                            compressed_data = bytes(msg.decoded_message.data)
+                            frame = _decode_compressed_image(compressed_data)
+                        else:  # RAW_SCHEMAS
+                            rgb_array = raw_image_to_array(msg.decoded_message)
+                            frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
 
                     # Encode to video
                     try:
@@ -499,7 +555,6 @@ def roscompress(
                                     height=height,
                                     codec_name="libx264",
                                     quality=quality,
-                                    preset="medium",
                                     target_fps=30.0,
                                     gop_size=30,
                                 )
@@ -515,6 +570,11 @@ def roscompress(
                                 f"[red]Error:[/red] Failed to encode frame for {topic}: {exc}"
                             )
                             return 1
+
+                    # Skip writing if encoder buffered the frame (no output yet)
+                    if video_data is None:
+                        progress.update(task_id, advance=1)
+                        continue
 
                     # Create CompressedVideo message
                     compressed_video_msg = {
@@ -560,7 +620,7 @@ def roscompress(
                     )
                     messages_converted += 1
 
-                elif schema_name in POINTCLOUD2_SCHEMAS:
+                elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
                     if not pureini_available:
                         console.print(
                             "[red]Error:[/red] pureini is required for PointCloud2 compression. "
@@ -574,8 +634,12 @@ def roscompress(
                     info = _build_encoding_info(
                         msg.decoded_message, pc_encoding_opt, pc_compression_opt, resolution
                     )
-                    pc_encoder = PointcloudEncoder(info)
-                    compressed = pc_encoder.encode(bytes(msg.decoded_message.data))
+                    # Cache PointcloudEncoder per topic, recreate if info changes
+                    cached = pc_encoders.get(topic)
+                    if cached is None or cached[0] != info:
+                        pc_encoders[topic] = (info, PointcloudEncoder(info))
+                    pc_encoder = pc_encoders[topic][1]
+                    compressed = pc_encoder.encode(bytes(msg.decoded_message.data))  # ty: ignore[unresolved-attribute]
 
                     if topic not in pointcloud_topics_converted:
                         pointcloud_topics_converted.add(topic)
@@ -692,8 +756,9 @@ def roscompress(
             writer.finish()
 
     finally:
-        # Clean up encoders
+        # Flush and clean up encoders
         for video_encoder in encoders.values():
+            video_encoder.flush()
             video_encoder.close()
 
     # Report statistics

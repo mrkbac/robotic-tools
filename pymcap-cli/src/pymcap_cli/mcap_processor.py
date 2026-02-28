@@ -316,18 +316,24 @@ class MessageGroup:
         # ChunkBuilder auto-ensures channel and schema
         self.chunk_builder.add(message)
 
-        # If chunk builder returns a completed chunk, write it immediately
-        if result := self.chunk_builder.maybe_finalize():
-            chunk, message_indexes = result
-            # TODO: also check requested chunk size?
-            if chunk.compression != self.chunk_builder.compression.value:
-                self.compress_fail_counter += 1
-                if self.compress_fail_counter > 2:
-                    console.print(
-                        "[yellow]Multiple compression failures, switching to uncompressed.[/yellow]"
-                    )
-                    self.chunk_builder.compression = CompressionType.NONE
-            self.writer.add_chunk(chunk, message_indexes)
+        # If chunk is full, finalize and write it
+        if (
+            self.chunk_builder.buffer.tell() >= self.chunk_builder.chunk_size
+            and self.chunk_builder.num_messages > 0
+        ):
+            if result := self.chunk_builder.finalize():
+                chunk, message_indexes = result
+                # TODO: also check requested chunk size?
+                if chunk.compression != self.chunk_builder.compression.value:
+                    self.compress_fail_counter += 1
+                    if self.compress_fail_counter > 2:
+                        console.print(
+                            "[yellow]Multiple compression failures,"
+                            " switching to uncompressed.[/yellow]"
+                        )
+                        self.chunk_builder.compression = CompressionType.NONE
+                self.writer.add_chunk(chunk, message_indexes)
+            self.chunk_builder.reset()
 
         self.message_count += 1
 
