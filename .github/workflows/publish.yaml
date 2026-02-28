@@ -43,6 +43,7 @@ jobs:
       url: https://pypi.org/project/${{ matrix.package }}/
     permissions:
       id-token: write
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -104,3 +105,10 @@ jobs:
       - name: Publish to PyPI
         if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
         run: uv publish dist/*
+
+      - name: Create release tag
+        if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          tag="${{ matrix.package }}@${{ steps.check.outputs.version }}"
+          git tag "$tag"
+          git push origin "$tag"

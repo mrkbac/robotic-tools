@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bump minor version for workspace packages that have code changes since their last version bump.
-# Uses the last commit that touched <pkg>/pyproject.toml as a proxy for the last bump.
+# Bump patch version for workspace packages that have code changes since their last release.
+# Uses per-package git tags (pkg@version) as the reference point for detecting changes.
+# Guards against double-bumps when pyproject.toml already has an uncommitted version change.
+
+# Run pre-commit checks before bumping to avoid lint failures after version change.
+echo "Running pre-commit checks..."
+pre-commit run --all-files
+echo
 
 # Parse workspace members from root pyproject.toml
 members=()
@@ -34,17 +40,33 @@ for pkg in "${members[@]}"; do
         continue
     fi
 
-    # Find the last commit that touched this package's pyproject.toml
-    last_bump_commit=$(git log -1 --format=%H -- "$pkg/pyproject.toml" 2>/dev/null || true)
+    # Guard: if pyproject.toml already has an uncommitted version change, skip.
+    # This prevents double-bumps when a previous bump wasn't committed yet (e.g. lint hook failed).
+    version_diff=$(git diff HEAD -- "$pkg/pyproject.toml" 2>/dev/null | grep -E '^\+version\s*=' || true)
+    if [ -n "$version_diff" ]; then
+        echo "— $pkg: version already bumped (uncommitted), skipping"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # Read current version from pyproject.toml
+    current_version=$(grep -m1 '^version' "$pkg/pyproject.toml" | sed 's/.*"\(.*\)".*/\1/')
+    tag="${pkg}@${current_version}"
+
+    # Find the commit the tag points to
+    tag_commit=$(git rev-list -1 "$tag" 2>/dev/null || true)
 
     needs_bump=false
 
-    if [ -z "$last_bump_commit" ]; then
-        # No commit ever touched pyproject.toml — first time, needs bump
-        needs_bump=true
+    if [ -z "$tag_commit" ]; then
+        # No tag exists — check for any uncommitted changes in the package (excluding pyproject.toml)
+        uncommitted_diff=$(git diff HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
+        if [ -n "$uncommitted_diff" ]; then
+            needs_bump=true
+        fi
     else
-        # Check committed changes since last bump (exclude pyproject.toml itself)
-        committed_diff=$(git diff "$last_bump_commit"..HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
+        # Check committed changes since tag (exclude pyproject.toml itself)
+        committed_diff=$(git diff "$tag_commit"..HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
         # Check uncommitted changes — staged + unstaged (exclude pyproject.toml itself)
         uncommitted_diff=$(git diff HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
 
