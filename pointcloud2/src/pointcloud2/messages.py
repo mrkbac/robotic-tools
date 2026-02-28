@@ -1,7 +1,5 @@
 """Python typing protocol definitions for the PointCloud2 message."""
 
-from __future__ import annotations
-
 from typing import Any, Protocol, TypedDict
 
 

@@ -11,6 +11,7 @@ resolution-markers = [
 members = [
     "digitalis",
     "mcap-ros2-support-fast",
+    "pointcloud2",
     "pymcap-cli",
     "robo-ws-bridge",
     "robotic-tools",
@@ -517,7 +518,7 @@ dev = [
 requires-dist = [
     { name = "lark", specifier = ">=1.2.2" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
-    { name = "pointcloud2", specifier = ">=0.2.3" },
+    { name = "pointcloud2", editable = "pointcloud2" },
     { name = "robo-ws-bridge", editable = "robo-ws-bridge" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
@@ -1567,15 +1568,14 @@ wheels = [
 [[package]]
 name = "pointcloud2"
 version = "0.2.3"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "pointcloud2" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0b/4f/550f7283f6205fe4adb63a430204d78d2196b4b93ff6528ff9d14787b936/pointcloud2-0.2.3.tar.gz", hash = "sha256:54d1031a5aabfc63c5d77a3f9b1ca92979864038156d4264329444fdefef3571", size = 6493, upload-time = "2025-07-06T21:12:25.343Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b7/12/4b322d0fc8ec88966b232db3883d52fc5bb2c70ad691affa10f68d7ca000/pointcloud2-0.2.3-py3-none-any.whl", hash = "sha256:3f4de290981ac437528ef2ec4280a2048ec1641cfc8e437d8892882f7702ac10", size = 7324, upload-time = "2025-07-06T21:12:24.318Z" },
-]
+
+[package.metadata]
+requires-dist = [{ name = "numpy", specifier = ">1" }]
 
 [[package]]
 name = "propcache"
@@ -2529,7 +2529,7 @@ requires-dist = [
     { name = "av", specifier = ">=12.0.0" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "numpy", specifier = ">=2.0.0" },
-    { name = "pointcloud2", specifier = ">=0.2.3" },
+    { name = "pointcloud2", editable = "pointcloud2" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "robo-ws-bridge", editable = "robo-ws-bridge" },
     { name = "typing-extensions", specifier = ">=4.12.2" },

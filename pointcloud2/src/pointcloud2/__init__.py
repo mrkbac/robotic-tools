@@ -36,22 +36,18 @@
 
 """
 
-from __future__ import annotations
-
 import array
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 from numpy.lib.recfunctions import unstructured_to_structured
 
-if TYPE_CHECKING:
-    from pointcloud2.messages import Pointcloud2Msg, PointFieldDict, PointFieldMsg
+from pointcloud2.messages import Pointcloud2Msg, PointFieldDict, PointFieldMsg
 
-
-__docformat__ = 'google'
+__docformat__ = "google"
 
 
 @dataclass
@@ -109,7 +105,7 @@ class PointCloud2:
     is_dense: bool
 
 
-DUMMY_FIELD_PREFIX = 'unnamed_field'
+DUMMY_FIELD_PREFIX = "unnamed_field"
 
 
 def _normalize_fields(fields: Iterable[PointFieldMsg | PointFieldDict]) -> list[PointField]:
@@ -127,13 +123,13 @@ def _normalize_fields(fields: Iterable[PointFieldMsg | PointFieldDict]) -> list[
     for field in fields:
         if isinstance(field, dict):
             # PointFieldDict case
-            field_datatype = field['datatype']
-            field_name = field.get('name', '')
-            field_count = field.get('count', 1)
+            field_datatype = field["datatype"]
+            field_name = field.get("name", "")
+            field_count = field.get("count", 1)
 
             # Calculate offset if not provided
-            if 'offset' in field:
-                field_offset = field['offset']
+            if "offset" in field:
+                field_offset = field["offset"]
                 current_offset = field_offset
             else:
                 field_offset = current_offset
@@ -146,7 +142,7 @@ def _normalize_fields(fields: Iterable[PointFieldMsg | PointFieldDict]) -> list[
             )
 
             # Update current_offset for automatic calculation
-            if 'offset' not in field:
+            if "offset" not in field:
                 datatype_size = FIELD_TYPE_TO_NP[field_datatype].itemsize
                 current_offset += field_count * datatype_size
         else:
@@ -186,14 +182,14 @@ def dtype_from_fields(
         # Datatype as numpy datatype
         datatype = FIELD_TYPE_TO_NP[field.datatype]
         # Name field
-        name = f'{DUMMY_FIELD_PREFIX}_{i}' if not field.name else field.name
+        name = f"{DUMMY_FIELD_PREFIX}_{i}" if not field.name else field.name
         # Handle fields with count > 1 by creating subfields with a suffix consisting
         # of '_' followed by the subfield counter [0 -> (count - 1)]
         assert field.count > 0, "Can't process fields with count = 0."
         for a in range(field.count):
             # Add suffix if we have multiple subfields
-            subfield_name = f'{name}_{a}' if field.count > 1 else name
-            assert subfield_name not in field_names, 'Duplicate field names are not allowed!'
+            subfield_name = f"{name}_{a}" if field.count > 1 else name
+            assert subfield_name not in field_names, "Duplicate field names are not allowed!"
             field_names.append(subfield_name)
             # Create new offset that includes subfields
             field_offsets.append(field.offset + a * datatype.itemsize)
@@ -201,12 +197,12 @@ def dtype_from_fields(
 
     # Create a tuple for each field containing name and data type
     dtype_dict = {
-        'names': field_names,
-        'formats': field_datatypes,
-        'offsets': field_offsets,
+        "names": field_names,
+        "formats": field_datatypes,
+        "offsets": field_offsets,
     }
     if point_step is not None:
-        dtype_dict['itemsize'] = point_step
+        dtype_dict["itemsize"] = point_step
     return np.dtype(dtype_dict)
 
 
@@ -261,13 +257,13 @@ def read_points(
     # Keep only the requested fields
     if field_names is not None:
         assert all(field_name in points.dtype.names for field_name in field_names), (
-            'Requests field is not in the fields of the PointCloud!'
+            "Requests field is not in the fields of the PointCloud!"
         )
         # Mask fields
         points = points[list(field_names)]
 
     # Swap array if byte order does not match
-    if bool(sys.byteorder != 'little') != bool(cloud.is_bigendian):
+    if bool(sys.byteorder != "little") != bool(cloud.is_bigendian):
         points = points.byteswap()
 
     # Check if we want to drop points with nan values
@@ -328,8 +324,8 @@ def create_cloud(
             )
         else:
             assert points.dtype == dtype_from_fields(fields, point_step=step), (
-                'PointFields and structured NumPy array dtype do not match for all fields! \
-                    Check their field order, names and types.'
+                "PointFields and structured NumPy array dtype do not match for all fields! \
+                    Check their field order, names and types."
             )
     else:
         # Cast python objects to structured NumPy array (slow)
@@ -341,8 +337,8 @@ def create_cloud(
 
     # Handle organized clouds
     assert len(points.shape) <= 2, (
-        'Too many dimensions for organized cloud! \
-            Points can only be organized in max. two dimensional space'
+        "Too many dimensions for organized cloud! \
+            Points can only be organized in max. two dimensional space"
     )
     height = 1
     width = points.shape[0]
@@ -352,8 +348,8 @@ def create_cloud(
 
     # Convert numpy points to array.array
     memory_view = memoryview(points)
-    casted = memory_view.cast('B')
-    array_array = array.array('B')
+    casted = memory_view.cast("B")
+    array_array = array.array("B")
     array_array.frombytes(casted)
 
     # Convert fields to PointField objects if they are dictionaries
@@ -365,7 +361,7 @@ def create_cloud(
         height=height,
         width=width,
         fields=converted_fields,
-        is_bigendian=sys.byteorder != 'little',
+        is_bigendian=sys.byteorder != "little",
         point_step=points.dtype.itemsize,
         row_step=points.dtype.itemsize * width,
         data=array_array.tobytes(),

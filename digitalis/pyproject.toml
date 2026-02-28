@@ -64,6 +64,7 @@ invalid-assignment = "ignore" # causes issues with reactive
 
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
+pointcloud2 = { workspace = true }
 ros-parser = { workspace = true }
 small-mcap = { workspace = true }
 robo-ws-bridge = { workspace = true }

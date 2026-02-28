@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from pointcloud2 import PointField, create_cloud, read_points
 
 
@@ -43,13 +42,13 @@ class TestReadPoints:
                 (4.0, 5.0, 6.0),
                 (7.0, 8.0, 9.0),
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         return MockPointCloud2(
@@ -70,35 +69,35 @@ class TestReadPoints:
         points = read_points(cloud)
 
         assert len(points) == 3
-        assert points.dtype.names == ('x', 'y', 'z')
-        np.testing.assert_array_equal(points['x'], [1.0, 4.0, 7.0])
-        np.testing.assert_array_equal(points['y'], [2.0, 5.0, 8.0])
-        np.testing.assert_array_equal(points['z'], [3.0, 6.0, 9.0])
+        assert points.dtype.names == ("x", "y", "z")
+        np.testing.assert_array_equal(points["x"], [1.0, 4.0, 7.0])
+        np.testing.assert_array_equal(points["y"], [2.0, 5.0, 8.0])
+        np.testing.assert_array_equal(points["z"], [3.0, 6.0, 9.0])
 
     def test_read_specific_fields(self):
         """Test reading specific fields from a cloud."""
         cloud = self.create_test_cloud()
-        points = read_points(cloud, field_names=['x', 'z'])
+        points = read_points(cloud, field_names=["x", "z"])
 
         assert len(points) == 3
-        assert points.dtype.names == ('x', 'z')
-        np.testing.assert_array_equal(points['x'], [1.0, 4.0, 7.0])
-        np.testing.assert_array_equal(points['z'], [3.0, 6.0, 9.0])
+        assert points.dtype.names == ("x", "z")
+        np.testing.assert_array_equal(points["x"], [1.0, 4.0, 7.0])
+        np.testing.assert_array_equal(points["z"], [3.0, 6.0, 9.0])
 
     def test_read_single_field(self):
         """Test reading a single field from a cloud."""
         cloud = self.create_test_cloud()
-        points = read_points(cloud, field_names=['y'])
+        points = read_points(cloud, field_names=["y"])
 
         assert len(points) == 3
-        assert points.dtype.names == ('y',)
-        np.testing.assert_array_equal(points['y'], [2.0, 5.0, 8.0])
+        assert points.dtype.names == ("y",)
+        np.testing.assert_array_equal(points["y"], [2.0, 5.0, 8.0])
 
     def test_read_nonexistent_field_raises_error(self):
         """Test that reading non-existent field raises assertion error."""
         cloud = self.create_test_cloud()
-        with pytest.raises(AssertionError, match='Requests field is not in the fields'):
-            read_points(cloud, field_names=['nonexistent'])
+        with pytest.raises(AssertionError, match="Requests field is not in the fields"):
+            read_points(cloud, field_names=["nonexistent"])
 
     def test_read_with_uvs(self):
         """Test reading specific points by indices."""
@@ -106,9 +105,9 @@ class TestReadPoints:
         points = read_points(cloud, uvs=[0, 2])
 
         assert len(points) == 2
-        np.testing.assert_array_equal(points['x'], [1.0, 7.0])
-        np.testing.assert_array_equal(points['y'], [2.0, 8.0])
-        np.testing.assert_array_equal(points['z'], [3.0, 9.0])
+        np.testing.assert_array_equal(points["x"], [1.0, 7.0])
+        np.testing.assert_array_equal(points["y"], [2.0, 8.0])
+        np.testing.assert_array_equal(points["z"], [3.0, 9.0])
 
     def test_read_with_numpy_uvs(self):
         """Test reading specific points with numpy array indices."""
@@ -117,9 +116,9 @@ class TestReadPoints:
         points = read_points(cloud, uvs=uvs)
 
         assert len(points) == 2
-        np.testing.assert_array_equal(points['x'], [4.0, 7.0])
-        np.testing.assert_array_equal(points['y'], [5.0, 8.0])
-        np.testing.assert_array_equal(points['z'], [6.0, 9.0])
+        np.testing.assert_array_equal(points["x"], [4.0, 7.0])
+        np.testing.assert_array_equal(points["y"], [5.0, 8.0])
+        np.testing.assert_array_equal(points["z"], [6.0, 9.0])
 
     def create_test_cloud_with_nans(self):
         """Create a test point cloud with NaN values."""
@@ -129,13 +128,13 @@ class TestReadPoints:
                 (np.nan, 5.0, 6.0),
                 (7.0, np.nan, 9.0),
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         return MockPointCloud2(
@@ -156,9 +155,9 @@ class TestReadPoints:
         points = read_points(cloud, skip_nans=True)
 
         assert len(points) == 1
-        np.testing.assert_array_equal(points['x'], [1.0])
-        np.testing.assert_array_equal(points['y'], [2.0])
-        np.testing.assert_array_equal(points['z'], [3.0])
+        np.testing.assert_array_equal(points["x"], [1.0])
+        np.testing.assert_array_equal(points["y"], [2.0])
+        np.testing.assert_array_equal(points["z"], [3.0])
 
     def test_keep_nans(self):
         """Test keeping NaN values."""
@@ -166,8 +165,8 @@ class TestReadPoints:
         points = read_points(cloud, skip_nans=False)
 
         assert len(points) == 3
-        assert np.isnan(points['x'][1])
-        assert np.isnan(points['y'][2])
+        assert np.isnan(points["x"][1])
+        assert np.isnan(points["y"][2])
 
     def create_organized_cloud(self):
         """Create a 2D organized point cloud."""
@@ -178,13 +177,13 @@ class TestReadPoints:
                 (7.0, 8.0, 9.0),
                 (10.0, 11.0, 12.0),
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         return MockPointCloud2(
@@ -205,7 +204,7 @@ class TestReadPoints:
         points = read_points(cloud, reshape_organized_cloud=True)
 
         assert points.shape == (2, 2)
-        assert points.dtype.names == ('x', 'y', 'z')
+        assert points.dtype.names == ("x", "y", "z")
 
 
 class TestCreateCloud:
@@ -218,13 +217,13 @@ class TestCreateCloud:
                 (1.0, 2.0, 3.0),
                 (4.0, 5.0, 6.0),
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=points)
@@ -246,9 +245,9 @@ class TestCreateCloud:
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=points)
@@ -265,9 +264,9 @@ class TestCreateCloud:
         ]
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=points)
@@ -283,13 +282,13 @@ class TestCreateCloud:
                 [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)],
                 [(7.0, 8.0, 9.0), (10.0, 11.0, 12.0)],
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=points)
@@ -308,9 +307,9 @@ class TestCreateCloud:
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=points, step=16)
@@ -320,15 +319,15 @@ class TestCreateCloud:
 
     def test_create_cloud_too_many_dimensions_raises_error(self):
         """Test that creating cloud with too many dimensions raises error."""
-        points = np.array([[[(1.0, 2.0, 3.0)]]], dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')])
+        points = np.array([[[(1.0, 2.0, 3.0)]]], dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
-        with pytest.raises(AssertionError, match='Too many dimensions'):
+        with pytest.raises(AssertionError, match="Too many dimensions"):
             create_cloud(header=None, fields=fields, points=points)
 
     def test_mismatched_dtype_raises_error(self):
@@ -337,18 +336,18 @@ class TestCreateCloud:
             [
                 (1.0, 2.0, 3.0),
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('a', 0, PointField.FLOAT32),  # Different field name
-            PointField('b', 4, PointField.FLOAT32),
-            PointField('c', 8, PointField.FLOAT32),
+            PointField("a", 0, PointField.FLOAT32),  # Different field name
+            PointField("b", 4, PointField.FLOAT32),
+            PointField("c", 8, PointField.FLOAT32),
         ]
 
         with pytest.raises(
             AssertionError,
-            match='PointFields and structured NumPy array dtype do not match',
+            match="PointFields and structured NumPy array dtype do not match",
         ):
             create_cloud(header=None, fields=fields, points=points)
 
@@ -359,22 +358,22 @@ class TestCreateCloud:
                 (1.0, 2.0, 3.0),
                 (4.0, 5.0, 6.0),
             ],
-            dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4')],
+            dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
 
         fields = [
-            PointField('x', 0, PointField.FLOAT32),
-            PointField('y', 4, PointField.FLOAT32),
-            PointField('z', 8, PointField.FLOAT32),
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+            PointField("z", 8, PointField.FLOAT32),
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=original_points)
         read_back_points = read_points(cloud)
 
         assert len(read_back_points) == len(original_points)
-        np.testing.assert_array_equal(read_back_points['x'], original_points['x'])
-        np.testing.assert_array_equal(read_back_points['y'], original_points['y'])
-        np.testing.assert_array_equal(read_back_points['z'], original_points['z'])
+        np.testing.assert_array_equal(read_back_points["x"], original_points["x"])
+        np.testing.assert_array_equal(read_back_points["y"], original_points["y"])
+        np.testing.assert_array_equal(read_back_points["z"], original_points["z"])
 
     def test_create_cloud_from_dict(self):
         """Test creating cloud from a dictionary of fields."""
@@ -386,9 +385,9 @@ class TestCreateCloud:
         )
 
         fields = [
-            {'name': 'x', 'datatype': PointField.FLOAT32},
-            {'name': 'y', 'datatype': PointField.FLOAT32},
-            {'name': 'z', 'datatype': PointField.FLOAT32},
+            {"name": "x", "datatype": PointField.FLOAT32},
+            {"name": "y", "datatype": PointField.FLOAT32},
+            {"name": "z", "datatype": PointField.FLOAT32},
         ]
 
         cloud = create_cloud(header=None, fields=fields, points=points)
@@ -396,9 +395,9 @@ class TestCreateCloud:
         assert cloud.width == 2
         assert cloud.height == 1
         assert len(cloud.fields) == 3
-        assert cloud.fields[0].name == 'x'
-        assert cloud.fields[1].name == 'y'
-        assert cloud.fields[2].name == 'z'
+        assert cloud.fields[0].name == "x"
+        assert cloud.fields[1].name == "y"
+        assert cloud.fields[2].name == "z"
         assert cloud.point_step == 12
         assert cloud.row_step == 24
         assert len(cloud.data) == 24

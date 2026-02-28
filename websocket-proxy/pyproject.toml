@@ -49,6 +49,7 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
+pointcloud2 = { workspace = true }
 robo-ws-bridge = { workspace = true }
 
 [dependency-groups]
