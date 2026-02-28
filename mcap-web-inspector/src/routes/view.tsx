@@ -10,6 +10,7 @@ import { ChannelsTable } from "../components/ChannelsTable.tsx";
 import { SchemasTable } from "../components/SchemasTable.tsx";
 import { MetadataTable } from "../components/MetadataTable.tsx";
 import { AttachmentsTable } from "../components/AttachmentsTable.tsx";
+import { ExportPanel } from "../components/ExportPanel.tsx";
 import { UnifiedDistributionChart } from "../components/UnifiedDistributionChart.tsx";
 import { ScanStepper } from "../components/ScanStepper.tsx";
 import { FileDropzone } from "../components/FileDropzone.tsx";
@@ -35,7 +36,7 @@ function ViewPage() {
   const [decodeError, setDecodeError] = useState(false);
 
   const generationRef = useRef(0);
-  const { tryGetCachedRaw, readAndCache } = useMcapCache();
+  const { tryGetCachedRaw, readAndCache, getCachedMode } = useMcapCache();
   const decodedRef = useRef(false);
 
   const { status: recoveryStatus, file: recoveredFile, requestAccess } =
@@ -81,18 +82,89 @@ function ViewPage() {
   const fileUnavailable = isSharedView && recoveryStatus !== "granted";
 
   const handleFileAssociation = useCallback(
-    (file: File, handle?: FileSystemFileHandle) => {
+    async (file: File, handle?: FileSystemFileHandle) => {
+      // Matching file: associate for scan upgrades
       if (fileId && fileMatchesId(file, fileId)) {
         setFileRef(file);
         setLocalFile(file);
         if (handle) {
-          saveFileHandle(fileId, handle); // fire-and-forget
+          saveFileHandle(fileId, handle);
         }
-      } else if (fileId) {
-        setError(`File doesn't match. Expected ID: ${fileId}`);
+        return;
+      }
+
+      // Different file: process as a brand new scan
+      const newFileId = createFileId(file);
+      setFileRef(file);
+      setLocalFile(file);
+      setError(null);
+      if (handle) {
+        saveFileHandle(newFileId, handle);
+      }
+
+      try {
+        const cachedMode = await getCachedMode(file);
+        const initialMode: ScanMode = cachedMode ?? "summary";
+
+        const cachedRaw = await tryGetCachedRaw(file, initialMode);
+        if (cachedRaw) {
+          const result = computeStats(cachedRaw, file.name, file.size);
+          setData(result);
+          setScanMode(initialMode);
+          setFileId(newFileId);
+          const newHash = await encodeToHash(result, initialMode, newFileId);
+          saveHistoryEntry({
+            fileId: newFileId,
+            fileName: file.name,
+            fileSize: file.size,
+            scanMode: initialMode,
+            hash: newHash,
+            scannedAt: Date.now(),
+          });
+          navigate({ to: "/view", hash: newHash });
+          return;
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load cached scan");
+        return;
+      }
+
+      const gen = ++generationRef.current;
+      setLoading(true);
+      setProgress(0);
+
+      try {
+        const raw = await readAndCache(file, "summary", (bytesRead, total) => {
+          setProgress(Math.round((bytesRead / total) * 100));
+        });
+
+        if (generationRef.current !== gen) return;
+
+        const result = computeStats(raw, file.name, file.size);
+        setData(result);
+        setScanMode("summary");
+        setFileId(newFileId);
+        const newHash = await encodeToHash(result, "summary", newFileId);
+        saveHistoryEntry({
+          fileId: newFileId,
+          fileName: file.name,
+          fileSize: file.size,
+          scanMode: "summary",
+          hash: newHash,
+          scannedAt: Date.now(),
+        });
+        navigate({ to: "/view", hash: newHash });
+      } catch (err) {
+        if (generationRef.current !== gen) return;
+        setError(err instanceof Error ? err.message : "Failed to scan MCAP file");
+      } finally {
+        if (generationRef.current === gen) {
+          setLoading(false);
+          setScanTarget(null);
+        }
       }
     },
-    [fileId],
+    [fileId, getCachedMode, tryGetCachedRaw, readAndCache, navigate],
   );
 
   const handleScanTo = useCallback(
@@ -202,18 +274,16 @@ function ViewPage() {
           icon={<IconInfoCircle size={18} />}
           title="Viewing shared data"
         >
-          Drop the .mcap file to enable scan upgrades and schema details.
+          Drop the .mcap file to enable scan upgrades, or drop a different file to inspect it.
         </Alert>
       )}
 
-      {(recoveryStatus === "idle" || !isSharedView) && (
-        <FileDropzone
-          onFileSelect={handleFileAssociation}
-          loading={false}
-          currentFile={localFile ?? null}
-          compact
-        />
-      )}
+      <FileDropzone
+        onFileSelect={handleFileAssociation}
+        loading={false}
+        currentFile={localFile ?? null}
+        compact
+      />
 
       <ScanStepper
         scannedMode={scanMode}
@@ -257,6 +327,8 @@ function ViewPage() {
           fileSize={data.file.sizeBytes}
         />
       </Stack>
+
+      {localFile && data && <ExportPanel file={localFile} data={data} />}
     </>
   );
 }

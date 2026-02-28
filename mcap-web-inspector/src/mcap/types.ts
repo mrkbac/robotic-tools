@@ -121,3 +121,18 @@ export interface McapInfoOutput {
 }
 
 export type ScanMode = "summary" | "rebuild" | "exact";
+
+export interface FilterConfig {
+  includeChannelIds: Set<number> | null; // null = all
+  startTime: bigint | null;
+  endTime: bigint | null;
+  includeMetadata: boolean;
+  includeAttachments: boolean;
+}
+
+export type ExportProgressCallback = (info: {
+  bytesRead: number;
+  totalBytes: number;
+  messagesWritten: number;
+  messagesSkipped: number;
+}) => void;

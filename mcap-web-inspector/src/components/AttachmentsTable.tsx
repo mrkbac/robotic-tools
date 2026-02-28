@@ -83,7 +83,7 @@ function AttachmentRow({
         attachment.offset,
         attachment.length,
       );
-      const blob = new Blob([result.data], { type: result.mediaType });
+      const blob = new Blob([result.data as BlobPart], { type: result.mediaType });
       const url = URL.createObjectURL(blob);
 
       if (isImage && !thumbnailUrl) {
@@ -116,7 +116,7 @@ function AttachmentRow({
         attachment.offset,
         attachment.length,
       );
-      const blob = new Blob([result.data], { type: result.mediaType });
+      const blob = new Blob([result.data as BlobPart], { type: result.mediaType });
       setThumbnailUrl(URL.createObjectURL(blob));
       setLoaded(true);
     } finally {
