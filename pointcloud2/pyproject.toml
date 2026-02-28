@@ -1,0 +1,67 @@
+[project]
+name = "pointcloud2"
+description = "PointCloud2 lib for non ROS environments"
+authors = [
+    { name = "Marko Bausch", email = "60338487+mrkbac@users.noreply.github.com" },
+]
+dependencies = ["numpy>1"]
+readme = "README.md"
+requires-python = ">= 3.8"
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+]
+
+version = "0.2.3"
+
+[project.urls]
+Source = "https://github.com/mrkbac/pointcloud2"
+
+[build-system]
+requires = ["uv_build>=0.7.19,<0.8.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = 'py38'
+
+[tool.ruff.lint]
+select = ['ALL']
+
+ignore = [
+    'ANN401',  # any-type
+    'PLR2004', # MagicValueComparisons
+    'S101',    # AssertUsed
+    'TC003',   # typing-only-standard-library-import
+
+    'COM812', # Formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Relaxed lints for test files
+"test/**/*.py" = ["ANN001", "ANN201", "ANN204", "D", "PLR"]
+
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = 'single'
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[dependency-groups]
+dev = ["pytest>=8.3.5"]
+
+[tool.pytest.ini_options]
+addopts = "--doctest-modules --doctest-glob=README.md"

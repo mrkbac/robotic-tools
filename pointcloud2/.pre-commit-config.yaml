@@ -1,0 +1,67 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-json
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-vcs-permalinks
+      - id: check-xml
+      - id: check-yaml
+      - id: destroyed-symlinks
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.12.2"
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.34.0
+    hooks:
+      - id: typos
+
+  - repo: https://github.com/crate-ci/committed
+    rev: v1.1.7
+    hooks:
+      - id: committed
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.33.2
+    hooks:
+      - id: check-github-workflows
+        args: ["--verbose"]
+      - id: check-dependabot
+        args: ["--verbose"]
+
+  - repo: https://github.com/jsh9/pydoclint
+    rev: 0.6.7
+    hooks:
+      - id: pydoclint
+        args:
+          - --style=google
+          - --arg-type-hints-in-docstring=false
+          - --check-return-types=false
+          - --check-style-mismatch=true
+          - --skip-checking-raises=true
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.33.0
+    hooks:
+      - id: check-github-workflows
+        args: ["--verbose"]
+      - id: check-dependabot
+        args: ["--verbose"]
