@@ -121,8 +121,8 @@ def _detect_encoder() -> str:
 
 
 def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
-    """Decode a compressed image (JPEG/PNG) to an rgb24 VideoFrame."""
-    return decode_compressed_frame(compressed_data).reformat(format="rgb24")
+    """Decode a compressed image (JPEG/PNG) to a VideoFrame in native format."""
+    return decode_compressed_frame(compressed_data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,18 +191,15 @@ class _VideoEncoder:
 
     def encode(self, frame: VideoFrame) -> bytes:
         """Encode a single frame and return compressed video bytes."""
-        # Ensure frame is in the correct format and dimensions
+        # Reformat directly to encoder pixel format and dimensions in one step
         if (
             frame.width != self.config.width
             or frame.height != self.config.height
-            or frame.format.name != "rgb24"
+            or frame.format.name != self._context.pix_fmt
         ):
             frame = frame.reformat(
-                width=self.config.width, height=self.config.height, format="rgb24"
+                width=self.config.width, height=self.config.height, format=self._context.pix_fmt
             )
-
-        # Convert to encoder pixel format
-        frame = frame.reformat(format=self._context.pix_fmt)
         frame.pts = self._frame_index
         self._frame_index += 1
 
@@ -526,7 +523,7 @@ def roscompress(
                             "nanosec": msg.decoded_message.header.stamp.nanosec,
                         },
                         "frame_id": msg.decoded_message.header.frame_id,
-                        "data": list(video_data),
+                        "data": video_data,
                         "format": codec,
                     }
 
@@ -611,7 +608,7 @@ def roscompress(
                         "is_bigendian": decoded.is_bigendian,
                         "point_step": decoded.point_step,
                         "row_step": decoded.row_step,
-                        "compressed_data": list(compressed),
+                        "compressed_data": compressed,
                         "is_dense": decoded.is_dense,
                         "format": "cloudini",
                     }

@@ -36,7 +36,7 @@ FIELD_UINT64 = int(FieldType.UINT64)
 @nb.njit(cache=True, inline="always")
 def _read_le_u32(data: np.ndarray, offset: int) -> np.uint32:
     """Read a little-endian uint32 from 4 bytes."""
-    return (
+    return np.uint32(
         np.uint32(data[offset])
         | (np.uint32(data[offset + 1]) << 8)
         | (np.uint32(data[offset + 2]) << 16)
@@ -47,7 +47,7 @@ def _read_le_u32(data: np.ndarray, offset: int) -> np.uint32:
 @nb.njit(cache=True, inline="always")
 def _read_le_u64(data: np.ndarray, offset: int) -> np.uint64:
     """Read a little-endian uint64 from 8 bytes."""
-    return (
+    return np.uint64(
         np.uint64(data[offset])
         | (np.uint64(data[offset + 1]) << 8)
         | (np.uint64(data[offset + 2]) << 16)

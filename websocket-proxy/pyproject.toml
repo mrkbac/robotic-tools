@@ -1,6 +1,6 @@
 [project]
 name = "websocket-proxy"
-version = "0.1.1"
+version = "0.1.2"
 description = "Foxglove WebSocket proxy with message transformations"
 readme = "README.md"
 requires-python = ">=3.10"
