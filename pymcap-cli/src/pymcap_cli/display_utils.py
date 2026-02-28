@@ -386,6 +386,7 @@ def display_channels_table(
     index_duration: bool = False,
     use_median: bool = False,
     tree: bool = False,
+    terminal_width: int | None = None,
 ) -> Table:
     """Build and return a channels table with configurable columns and sorting.
 
@@ -452,26 +453,28 @@ def display_channels_table(
     has_distribution_data = any(ch.get("message_distribution") for ch in data["channels"])
 
     # Determine which columns to show based on responsive mode
+    effective_width = terminal_width if terminal_width is not None else console.width
     if responsive:
-        terminal_width = console.width
         show_size = (
-            terminal_width >= 80 and has_size_data and bool(columns & ChannelTableColumn.SIZE)
+            effective_width >= 80 and has_size_data and bool(columns & ChannelTableColumn.SIZE)
         )
         show_percent = (
-            terminal_width >= 80 and has_size_data and bool(columns & ChannelTableColumn.PERCENT)
+            effective_width >= 80 and has_size_data and bool(columns & ChannelTableColumn.PERCENT)
         )
         show_bps = (
-            terminal_width >= 100 and has_size_data and bool(columns & ChannelTableColumn.BPS)
+            effective_width >= 100 and has_size_data and bool(columns & ChannelTableColumn.BPS)
         )
         show_b_per_msg = (
-            terminal_width >= 120 and has_size_data and bool(columns & ChannelTableColumn.B_PER_MSG)
+            effective_width >= 120
+            and has_size_data
+            and bool(columns & ChannelTableColumn.B_PER_MSG)
         )
         show_distribution = (
-            terminal_width >= 140
+            effective_width >= 140
             and has_distribution_data
             and bool(columns & ChannelTableColumn.DISTRIBUTION)
         )
-        show_schema = terminal_width >= 160 and bool(columns & ChannelTableColumn.SCHEMA)
+        show_schema = effective_width >= 160 and bool(columns & ChannelTableColumn.SCHEMA)
     else:
         # Always show requested columns
         show_size = bool(columns & ChannelTableColumn.SIZE)
@@ -487,7 +490,7 @@ def display_channels_table(
     total_size = sum(ch.get("size_bytes") or 0 for ch in data["channels"]) if show_percent else 0
 
     # Build the table
-    channels_table = Table()
+    channels_table = Table(expand=terminal_width is not None, width=terminal_width)
     if columns & ChannelTableColumn.ID:
         channels_table.add_column("ID", style="bold blue", no_wrap=True, justify="right")
     channels_table.add_column("Topic", overflow="fold")
@@ -576,7 +579,9 @@ def display_channels_table(
             row.append(bytes_to_human(channel.get("bytes_per_message")))
         if show_distribution:
             distribution = channel.get("message_distribution", [])
-            row.append(DistributionBar(distribution))
+            # Use fixed bar width in watch mode to prevent jitter
+            bar_width = max(20, effective_width // 4) if terminal_width is not None else None
+            row.append(DistributionBar(distribution, width=bar_width))
         channels_table.add_row(*row)
 
     return channels_table

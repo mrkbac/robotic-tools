@@ -187,6 +187,7 @@ def _build_channels_table(
     index_duration: bool,
     use_median: bool,
     tree: bool,
+    terminal_width: int | None = None,
 ) -> Table:
     """Build channels table renderable."""
     return display_channels_table(
@@ -208,6 +209,7 @@ def _build_channels_table(
         index_duration=index_duration,
         use_median=use_median,
         tree=tree,
+        terminal_width=terminal_width,
     )
 
 
@@ -219,6 +221,7 @@ def _build_info_display(
     index_duration: bool,
     use_median: bool,
     tree: bool,
+    terminal_width: int | None = None,
 ) -> Group:
     """Assemble all info sections into a single renderable."""
     parts: list[RenderableType] = [_build_file_info_and_summary(data)]
@@ -228,7 +231,11 @@ def _build_info_display(
         parts.append(distribution)
 
     parts.append(_build_compression_table(data, has_chunk_info))
-    parts.append(_build_channels_table(data, sort_key, reverse, index_duration, use_median, tree))
+    parts.append(
+        _build_channels_table(
+            data, sort_key, reverse, index_duration, use_median, tree, terminal_width
+        )
+    )
 
     return Group(*parts)
 
@@ -246,6 +253,7 @@ def _watch_file(
     path = Path(file_path)
     last_size = 0
     info_data = None
+    terminal_width = console.width
 
     try:
         with Live(console=console, refresh_per_second=4) as live:
@@ -295,7 +303,14 @@ def _watch_file(
                 data = info_to_dict(info_data, file_path, current_size)
                 has_chunk_info = info_data.chunk_information is not None
                 display = _build_info_display(
-                    data, has_chunk_info, sort_key, reverse, index_duration, use_median, tree
+                    data,
+                    has_chunk_info,
+                    sort_key,
+                    reverse,
+                    index_duration,
+                    use_median,
+                    tree,
+                    terminal_width,
                 )
 
                 now = datetime.now(tz=timezone.utc).astimezone().strftime("%H:%M:%S")

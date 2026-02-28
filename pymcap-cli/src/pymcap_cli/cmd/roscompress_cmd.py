@@ -1,12 +1,10 @@
 """Command to compress image and point cloud topics in MCAP files."""
 
-import logging
 import platform
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import av
@@ -102,27 +100,55 @@ int32 sec
 uint32 nanosec"""
 
 console = Console()
-logger = logging.getLogger(__name__)
 
 # Parameter groups
 ENCODING_GROUP = Group("Encoding")
 POINTCLOUD_GROUP = Group("Point Cloud")
 
 
-def _detect_encoder() -> str:
-    """Detect the best available H.264 encoder for this system."""
-    # Try hardware encoders first
-    system = platform.system()
-    if system == "Darwin":
-        if test_encoder("h264_videotoolbox"):
-            return "h264_videotoolbox"
-    elif system == "Linux":
-        for encoder in ["h264_nvenc", "h264_vaapi"]:
-            if test_encoder(encoder):
-                return encoder
+def _calculate_downscale_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
+    """Downscale dimensions to fit within max_dimension, preserving aspect ratio.
 
-    # Fallback to software encoder
-    return "libx264"
+    Ensures both dimensions are even (required for yuv420p).
+    """
+
+    def ensure_even(value: int) -> int:
+        return value if value % 2 == 0 else max(value - 1, 2)
+
+    if width <= max_dimension and height <= max_dimension:
+        return ensure_even(width), ensure_even(height)
+
+    aspect_ratio = width / height
+    if width > height:
+        new_width = max_dimension
+        new_height = int(new_width / aspect_ratio)
+    else:
+        new_height = max_dimension
+        new_width = int(new_height * aspect_ratio)
+
+    return ensure_even(new_width), ensure_even(new_height)
+
+
+def _detect_encoder(codec: Literal["h264", "h265"]) -> str:
+    """Detect the best available encoder for the given codec (h264 or h265)."""
+    system = platform.system()
+    if codec == "h264":
+        if system == "Darwin" and test_encoder("h264_videotoolbox"):
+            return "h264_videotoolbox"
+        if system == "Linux":
+            for enc in ["h264_nvenc", "h264_vaapi"]:
+                if test_encoder(enc):
+                    return enc
+        return "libx264"
+    if codec == "h265":
+        if system == "Darwin" and test_encoder("hevc_videotoolbox"):
+            return "hevc_videotoolbox"
+        if system == "Linux":
+            for enc in ["hevc_nvenc", "hevc_vaapi"]:
+                if test_encoder(enc):
+                    return enc
+        return "libx265"
+    raise ValueError(f"Unsupported codec: {codec}")
 
 
 def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
@@ -191,9 +217,9 @@ def _build_encoder_options(
         pixel_scale = (width * height) / (1920 * 1080)
         bit_rate = int(5_000_000 * (2 ** ((28 - quality) / 6)) * pixel_scale)
         return {}, bit_rate
-    if codec_name == "h264_nvenc":
+    if codec_name in {"h264_nvenc", "hevc_nvenc"}:
         return {"rc": "vbr", "cq": str(quality)}, None
-    if codec_name == "h264_vaapi":
+    if codec_name in {"h264_vaapi", "hevc_vaapi"}:
         return {"qp": str(quality)}, None
     return {}, None
 
@@ -283,9 +309,6 @@ class _VideoEncoder:
             return None
         return b"".join(bytes(packet) for packet in packets)
 
-    def close(self) -> None:
-        """Close the encoder (no-op, context cleaned up by garbage collector)."""
-
 
 def _build_encoding_info(
     msg: object,
@@ -329,7 +352,7 @@ def roscompress(
         ),
     ] = 28,
     codec: Annotated[
-        str,
+        Literal["h264", "h265"],
         Parameter(
             name=["--codec"],
             group=ENCODING_GROUP,
@@ -363,6 +386,13 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = "zstd",
+    scale: Annotated[
+        int | None,
+        Parameter(
+            name=["--scale", "-s"],
+            group=ENCODING_GROUP,
+        ),
+    ] = None,
     video: Annotated[
         bool,
         Parameter(
@@ -397,6 +427,9 @@ def roscompress(
         Video codec (h264, h265). Default: h264.
     encoder
         Force specific encoder (libx264, h264_videotoolbox, etc.). If None, auto-detect.
+    scale
+        Cap the maximum image dimension (width or height) while preserving aspect ratio.
+        When None, use original resolution.
     resolution
         Resolution for lossy float compression of point clouds. Default: 0.01.
     pc_encoding
@@ -419,10 +452,9 @@ def roscompress(
                 return 1
             encoder_name = encoder
         else:
-            encoder_name = _detect_encoder()
+            encoder_name = _detect_encoder(codec)
 
     # Lazy-import pureini for point cloud compression
-    pureini_available = True
     if pointcloud:
         try:
             from pureini import (  # noqa: PLC0415
@@ -431,10 +463,14 @@ def roscompress(
                 PointcloudEncoder,
             )
         except ImportError:
-            pureini_available = False
+            console.print(
+                "[red]Error:[/red] pureini is required for PointCloud2 compression. "
+                "Install with: uv add 'pymcap-cli[pointcloud]'"
+            )
+            return 1
 
     # Map string options to pureini enums
-    if pointcloud and pureini_available:
+    if pointcloud:
         encoding_map = {
             "lossy": EncodingOptions.LOSSY,
             "lossless": EncodingOptions.LOSSLESS,
@@ -453,14 +489,16 @@ def roscompress(
     if video:
         console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
         console.print(f"[cyan]Quality (CRF):[/cyan] {quality}")
+        if scale is not None:
+            console.print(f"[cyan]Scale (max dim):[/cyan] {scale}px")
     else:
         console.print("[cyan]Video compression:[/cyan] disabled")
-    if pointcloud and pureini_available:
+    if pointcloud:
         console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
         console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
         if pc_encoding == "lossy":
             console.print(f"[cyan]Point cloud resolution:[/cyan] {resolution}")
-    elif not pointcloud:
+    else:
         console.print("[cyan]Point cloud compression:[/cyan] disabled")
 
     # Get message count from summary for progress bar
@@ -475,8 +513,7 @@ def roscompress(
 
     # Track encoders per topic (lazy initialization)
     encoders: dict[str, _VideoEncoder] = {}
-    # (EncodingInfo, PointcloudEncoder) — typed as object since pureini is lazily imported
-    pc_encoders: dict[str, tuple[object, object]] = {}
+    pc_encoders: dict[str, tuple[EncodingInfo, PointcloudEncoder]] = {}  # noqa: F821  # ty: ignore[unresolved-reference]
     decoder_factory = DecoderFactory()
     encoder_factory = ROS2EncoderFactory()
 
@@ -486,327 +523,334 @@ def roscompress(
     topics_converted: set[str] = set()
     pointcloud_messages_converted = 0
     pointcloud_topics_converted: set[str] = set()
+    last_video_times: dict[str, tuple[int, int]] = {}  # topic -> (log_time, publish_time)
 
-    try:
-        with (
-            open_input(file) as (input_stream, _),
-            output.open("wb") as output_stream,
-            Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                MofNCompleteColumn(),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-                OSCProgressColumn(title="Compressing images"),
-                console=console,
-            ) as progress,
-        ):
-            task_id = progress.add_task("Processing messages", total=total_message_count)
+    with (
+        open_input(file) as (input_stream, input_size),
+        output.open("wb") as output_stream,
+        Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            OSCProgressColumn(title="Compressing images"),
+            console=console,
+        ) as progress,
+    ):
+        task_id = progress.add_task("Processing messages", total=total_message_count)
 
-            writer = McapWriter(
-                output_stream,
-                encoder_factory=encoder_factory,
-                num_workers=4,
-            )
-            writer.start()
+        writer = McapWriter(
+            output_stream,
+            encoder_factory=encoder_factory,
+            num_workers=4,
+        )
+        writer.start()
 
-            # Track schema/channel IDs
-            schema_ids: dict[str, int] = {}  # schema_name -> schema_id
-            channel_ids: dict[str, int] = {}  # topic -> channel_id
-            next_schema_id = 1
-            next_channel_id = 1
+        # Track schema/channel IDs
+        schema_ids: dict[str, int] = {}  # schema_name -> schema_id
+        channel_ids: dict[str, int] = {}  # topic -> channel_id
+        next_schema_id = 1
+        next_channel_id = 1
 
-            decode_pool = ThreadPoolExecutor(max_workers=4)
-            messages = read_message_decoded(
-                input_stream, decoder_factories=[decoder_factory], num_workers=4
-            )
-            prefetched = _prefetch_image_decodes(messages, decode_pool, prefetch=16)
+        decode_pool = ThreadPoolExecutor(max_workers=4)
+        messages = read_message_decoded(
+            input_stream, decoder_factories=[decoder_factory], num_workers=4
+        )
+        prefetched = _prefetch_image_decodes(messages, decode_pool, prefetch=16)
 
-            for msg, decode_future in prefetched:
-                schema_name = msg.schema.name if msg.schema else ""
+        for msg, decode_future in prefetched:
+            schema_name = msg.schema.name if msg.schema else ""
 
-                if video and schema_name in IMAGE_SCHEMAS:
-                    # Convert to CompressedVideo
-                    topic = msg.channel.topic
+            if video and schema_name in IMAGE_SCHEMAS:
+                # Convert to CompressedVideo
+                topic = msg.channel.topic
 
-                    # Lazy initialization of encoder for this topic
-                    frame: VideoFrame | None = None
-                    if topic not in encoders:
-                        # Decode first frame to get dimensions
-                        if schema_name in COMPRESSED_SCHEMAS:
-                            first_frame = decode_future.result()  # type: ignore[union-attr]
-                            width, height = first_frame.width, first_frame.height
-                            frame = first_frame  # Reuse decoded frame
-                        else:  # RAW_SCHEMAS
-                            rgb_array = raw_image_to_array(msg.decoded_message)
-                            height, width = rgb_array.shape[:2]
-                            frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+                # Lazy initialization of encoder for this topic
+                frame: VideoFrame | None = None
+                if topic not in encoders:
+                    # Decode first frame to get dimensions
+                    if schema_name in COMPRESSED_SCHEMAS:
+                        first_frame = decode_future.result()  # type: ignore[union-attr]
+                        width, height = first_frame.width, first_frame.height
+                        frame = first_frame  # Reuse decoded frame
+                    else:  # RAW_SCHEMAS
+                        rgb_array = raw_image_to_array(msg.decoded_message)
+                        height, width = rgb_array.shape[:2]
+                        frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
 
-                        # Ensure even dimensions (required for yuv420p)
+                    # Downscale if --scale is set, and ensure even dimensions
+                    if scale is not None:
+                        width, height = _calculate_downscale_dimensions(width, height, scale)
+                    else:
                         width -= width % 2
                         height -= height % 2
 
-                        # Create encoder for this topic
+                    # Create encoder for this topic
+                    try:
+                        encoders[topic] = _VideoEncoder(
+                            width=width,
+                            height=height,
+                            codec_name=encoder_name,
+                            quality=quality,
+                            target_fps=30.0,
+                            gop_size=30,
+                        )
+                        topics_converted.add(topic)
+                        console.print(
+                            f"[green]✓[/green] Converting {topic}: {width}x{height} "
+                            f"({schema_name} → CompressedVideo)"
+                        )
+                    except VideoEncoderError as exc:
+                        console.print(
+                            f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}"
+                        )
+                        return 1
+
+                # Decode image (skip if already decoded for encoder init)
+                if frame is None:
+                    if decode_future is not None:
+                        frame = decode_future.result()
+                    elif schema_name in COMPRESSED_SCHEMAS:
+                        compressed_data = bytes(msg.decoded_message.data)
+                        frame = _decode_compressed_image(compressed_data)
+                    else:  # RAW_SCHEMAS
+                        rgb_array = raw_image_to_array(msg.decoded_message)
+                        frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+
+                # Encode to video
+                try:
+                    video_data = encoders[topic].encode(frame)
+                except VideoEncoderError as exc:
+                    # Try fallback to software encoder if hardware encoder fails
+                    sw_encoder = "libx265" if codec == "h265" else "libx264"
+                    if encoders[topic].config.codec_name != sw_encoder:
+                        console.print(
+                            f"[yellow]Warning:[/yellow] Hardware encoder failed for {topic}, "
+                            f"falling back to {sw_encoder}"
+                        )
+                        # Recreate encoder with software encoder
+                        width = encoders[topic].config.width
+                        height = encoders[topic].config.height
                         try:
                             encoders[topic] = _VideoEncoder(
                                 width=width,
                                 height=height,
-                                codec_name=encoder_name,
+                                codec_name=sw_encoder,
                                 quality=quality,
                                 target_fps=30.0,
                                 gop_size=30,
                             )
-                            topics_converted.add(topic)
+                            video_data = encoders[topic].encode(frame)
+                        except VideoEncoderError as fallback_exc:
                             console.print(
-                                f"[green]✓[/green] Converting {topic}: {width}x{height} "
-                                f"({schema_name} → CompressedVideo)"
-                            )
-                        except VideoEncoderError as exc:
-                            console.print(
-                                f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}"
+                                f"[red]Error:[/red] Software encoder also failed for {topic}: "
+                                f"{fallback_exc}"
                             )
                             return 1
-
-                    # Decode image (skip if already decoded for encoder init)
-                    if frame is None:
-                        if decode_future is not None:
-                            frame = decode_future.result()
-                        elif schema_name in COMPRESSED_SCHEMAS:
-                            compressed_data = bytes(msg.decoded_message.data)
-                            frame = _decode_compressed_image(compressed_data)
-                        else:  # RAW_SCHEMAS
-                            rgb_array = raw_image_to_array(msg.decoded_message)
-                            frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
-
-                    # Encode to video
-                    try:
-                        video_data = encoders[topic].encode(frame)
-                    except VideoEncoderError as exc:
-                        # Try fallback to software encoder if hardware encoder fails
-                        if encoders[topic].config.codec_name != "libx264":
-                            console.print(
-                                f"[yellow]Warning:[/yellow] Hardware encoder failed for {topic}, "
-                                f"falling back to libx264"
-                            )
-                            encoder_name = "libx264"
-                            # Recreate encoder with software encoder
-                            width = encoders[topic].config.width
-                            height = encoders[topic].config.height
-                            encoders[topic].close()
-                            try:
-                                encoders[topic] = _VideoEncoder(
-                                    width=width,
-                                    height=height,
-                                    codec_name="libx264",
-                                    quality=quality,
-                                    target_fps=30.0,
-                                    gop_size=30,
-                                )
-                                video_data = encoders[topic].encode(frame)
-                            except VideoEncoderError as fallback_exc:
-                                console.print(
-                                    f"[red]Error:[/red] Software encoder also failed for {topic}: "
-                                    f"{fallback_exc}"
-                                )
-                                return 1
-                        else:
-                            console.print(
-                                f"[red]Error:[/red] Failed to encode frame for {topic}: {exc}"
-                            )
-                            return 1
-
-                    # Skip writing if encoder buffered the frame (no output yet)
-                    if video_data is None:
-                        progress.update(task_id, advance=1)
-                        continue
-
-                    # Create CompressedVideo message
-                    compressed_video_msg = {
-                        "timestamp": {
-                            "sec": msg.decoded_message.header.stamp.sec,
-                            "nanosec": msg.decoded_message.header.stamp.nanosec,
-                        },
-                        "frame_id": msg.decoded_message.header.frame_id,
-                        "data": video_data,
-                        "format": codec,
-                    }
-
-                    # Register schema if needed
-                    compressed_video_schema = "foxglove_msgs/msg/CompressedVideo"
-                    if compressed_video_schema not in schema_ids:
-                        schema_id = next_schema_id
-                        next_schema_id += 1
-                        writer.add_schema(
-                            schema_id,
-                            compressed_video_schema,
-                            "ros2msg",
-                            FOXGLOVE_COMPRESSED_VIDEO.encode(),
-                        )
-                        schema_ids[compressed_video_schema] = schema_id
                     else:
-                        schema_id = schema_ids[compressed_video_schema]
-
-                    # Register channel if needed
-                    if topic not in channel_ids:
-                        channel_id = next_channel_id
-                        next_channel_id += 1
-                        writer.add_channel(channel_id, topic, "cdr", schema_id)
-                        channel_ids[topic] = channel_id
-                    else:
-                        channel_id = channel_ids[topic]
-
-                    # Write as CompressedVideo
-                    writer.add_message_encode(
-                        channel_id=channel_id,
-                        log_time=msg.message.log_time,
-                        data=compressed_video_msg,
-                        publish_time=msg.message.publish_time,
-                    )
-                    messages_converted += 1
-
-                elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
-                    if not pureini_available:
                         console.print(
-                            "[red]Error:[/red] pureini is required for PointCloud2 compression. "
-                            "Install with: uv add 'pymcap-cli[pointcloud]'"
+                            f"[red]Error:[/red] Failed to encode frame for {topic}: {exc}"
                         )
                         return 1
 
-                    topic = msg.channel.topic
+                # Skip writing if encoder buffered the frame (no output yet)
+                if video_data is None:
+                    progress.update(task_id, advance=1)
+                    continue
 
-                    # Build encoding info and compress
-                    info = _build_encoding_info(
-                        msg.decoded_message, pc_encoding_opt, pc_compression_opt, resolution
+                # Create CompressedVideo message
+                compressed_video_msg = {
+                    "timestamp": {
+                        "sec": msg.decoded_message.header.stamp.sec,
+                        "nanosec": msg.decoded_message.header.stamp.nanosec,
+                    },
+                    "frame_id": msg.decoded_message.header.frame_id,
+                    "data": video_data,
+                    "format": codec,
+                }
+
+                # Register schema if needed
+                compressed_video_schema = "foxglove_msgs/msg/CompressedVideo"
+                if compressed_video_schema not in schema_ids:
+                    schema_id = next_schema_id
+                    next_schema_id += 1
+                    writer.add_schema(
+                        schema_id,
+                        compressed_video_schema,
+                        "ros2msg",
+                        FOXGLOVE_COMPRESSED_VIDEO.encode(),
                     )
-                    # Cache PointcloudEncoder per topic, recreate if info changes
-                    cached = pc_encoders.get(topic)
-                    if cached is None or cached[0] != info:
-                        pc_encoders[topic] = (info, PointcloudEncoder(info))
-                    pc_encoder = pc_encoders[topic][1]
-                    compressed = pc_encoder.encode(bytes(msg.decoded_message.data))  # ty: ignore[unresolved-attribute]
-
-                    if topic not in pointcloud_topics_converted:
-                        pointcloud_topics_converted.add(topic)
-                        console.print(
-                            f"[green]✓[/green] Converting {topic} "
-                            f"({schema_name} → CompressedPointCloud2)"
-                        )
-
-                    # Create CompressedPointCloud2 message
-                    decoded = msg.decoded_message
-                    compressed_pc_msg = {
-                        "header": {
-                            "stamp": {
-                                "sec": decoded.header.stamp.sec,
-                                "nanosec": decoded.header.stamp.nanosec,
-                            },
-                            "frame_id": decoded.header.frame_id,
-                        },
-                        "height": decoded.height,
-                        "width": decoded.width,
-                        "fields": [
-                            {
-                                "name": f.name,
-                                "offset": f.offset,
-                                "datatype": f.datatype,
-                                "count": f.count,
-                            }
-                            for f in decoded.fields
-                        ],
-                        "is_bigendian": decoded.is_bigendian,
-                        "point_step": decoded.point_step,
-                        "row_step": decoded.row_step,
-                        "compressed_data": compressed,
-                        "is_dense": decoded.is_dense,
-                        "format": "cloudini",
-                    }
-
-                    # Register schema if needed
-                    compressed_pc_schema = "point_cloud_interfaces/msg/CompressedPointCloud2"
-                    if compressed_pc_schema not in schema_ids:
-                        schema_id = next_schema_id
-                        next_schema_id += 1
-                        writer.add_schema(
-                            schema_id,
-                            compressed_pc_schema,
-                            "ros2msg",
-                            COMPRESSED_POINTCLOUD2.encode(),
-                        )
-                        schema_ids[compressed_pc_schema] = schema_id
-                    else:
-                        schema_id = schema_ids[compressed_pc_schema]
-
-                    # Register channel if needed
-                    if topic not in channel_ids:
-                        channel_id = next_channel_id
-                        next_channel_id += 1
-                        writer.add_channel(channel_id, topic, "cdr", schema_id)
-                        channel_ids[topic] = channel_id
-                    else:
-                        channel_id = channel_ids[topic]
-
-                    # Write as CompressedPointCloud2
-                    writer.add_message_encode(
-                        channel_id=channel_id,
-                        log_time=msg.message.log_time,
-                        data=compressed_pc_msg,
-                        publish_time=msg.message.publish_time,
-                    )
-                    pointcloud_messages_converted += 1
-
+                    schema_ids[compressed_video_schema] = schema_id
                 else:
-                    # Copy unchanged
-                    topic = msg.channel.topic
+                    schema_id = schema_ids[compressed_video_schema]
 
-                    if topic not in channel_ids:
-                        # Register schema if needed
-                        if msg.schema:
-                            if msg.schema.name not in schema_ids:
-                                schema_id = next_schema_id
-                                next_schema_id += 1
-                                writer.add_schema(
-                                    schema_id, msg.schema.name, msg.schema.encoding, msg.schema.data
-                                )
-                                schema_ids[msg.schema.name] = schema_id
-                            else:
-                                schema_id = schema_ids[msg.schema.name]
-                        else:
-                            schema_id = 0
+                # Register channel if needed
+                if topic not in channel_ids:
+                    channel_id = next_channel_id
+                    next_channel_id += 1
+                    writer.add_channel(channel_id, topic, "cdr", schema_id)
+                    channel_ids[topic] = channel_id
+                else:
+                    channel_id = channel_ids[topic]
 
-                        channel_id = next_channel_id
-                        next_channel_id += 1
-                        writer.add_channel(
-                            channel_id=channel_id,
-                            topic=topic,
-                            message_encoding=msg.channel.message_encoding,
-                            schema_id=schema_id,
-                            metadata=msg.channel.metadata,
-                        )
-                        channel_ids[topic] = channel_id
-                    else:
-                        channel_id = channel_ids[topic]
+                # Write as CompressedVideo
+                writer.add_message_encode(
+                    channel_id=channel_id,
+                    log_time=msg.message.log_time,
+                    data=compressed_video_msg,
+                    publish_time=msg.message.publish_time,
+                )
+                messages_converted += 1
+                last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
 
-                    # Write message with original data
-                    writer.add_message(
-                        channel_id=channel_id,
-                        log_time=msg.message.log_time,
-                        data=msg.message.data,
-                        publish_time=msg.message.publish_time,
+            elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
+                topic = msg.channel.topic
+
+                # Build encoding info and compress
+                info = _build_encoding_info(
+                    msg.decoded_message, pc_encoding_opt, pc_compression_opt, resolution
+                )
+                # Cache PointcloudEncoder per topic, recreate if info changes
+                cached = pc_encoders.get(topic)
+                if cached is None or cached[0] != info:
+                    pc_encoders[topic] = (info, PointcloudEncoder(info))
+                pc_encoder = pc_encoders[topic][1]
+                compressed = pc_encoder.encode(bytes(msg.decoded_message.data))
+
+                if topic not in pointcloud_topics_converted:
+                    pointcloud_topics_converted.add(topic)
+                    console.print(
+                        f"[green]✓[/green] Converting {topic} "
+                        f"({schema_name} → CompressedPointCloud2)"
                     )
-                    messages_copied += 1
 
-                progress.update(task_id, advance=1)
+                # Create CompressedPointCloud2 message
+                decoded = msg.decoded_message
+                compressed_pc_msg = {
+                    "header": {
+                        "stamp": {
+                            "sec": decoded.header.stamp.sec,
+                            "nanosec": decoded.header.stamp.nanosec,
+                        },
+                        "frame_id": decoded.header.frame_id,
+                    },
+                    "height": decoded.height,
+                    "width": decoded.width,
+                    "fields": [
+                        {
+                            "name": f.name,
+                            "offset": f.offset,
+                            "datatype": f.datatype,
+                            "count": f.count,
+                        }
+                        for f in decoded.fields
+                    ],
+                    "is_bigendian": decoded.is_bigendian,
+                    "point_step": decoded.point_step,
+                    "row_step": decoded.row_step,
+                    "compressed_data": compressed,
+                    "is_dense": decoded.is_dense,
+                    "format": "cloudini",
+                }
 
-            decode_pool.shutdown(wait=False)
-            writer.finish()
+                # Register schema if needed
+                compressed_pc_schema = "point_cloud_interfaces/msg/CompressedPointCloud2"
+                if compressed_pc_schema not in schema_ids:
+                    schema_id = next_schema_id
+                    next_schema_id += 1
+                    writer.add_schema(
+                        schema_id,
+                        compressed_pc_schema,
+                        "ros2msg",
+                        COMPRESSED_POINTCLOUD2.encode(),
+                    )
+                    schema_ids[compressed_pc_schema] = schema_id
+                else:
+                    schema_id = schema_ids[compressed_pc_schema]
 
-    finally:
-        # Flush and clean up encoders
-        for video_encoder in encoders.values():
-            video_encoder.flush()
-            video_encoder.close()
+                # Register channel if needed
+                if topic not in channel_ids:
+                    channel_id = next_channel_id
+                    next_channel_id += 1
+                    writer.add_channel(channel_id, topic, "cdr", schema_id)
+                    channel_ids[topic] = channel_id
+                else:
+                    channel_id = channel_ids[topic]
+
+                # Write as CompressedPointCloud2
+                writer.add_message_encode(
+                    channel_id=channel_id,
+                    log_time=msg.message.log_time,
+                    data=compressed_pc_msg,
+                    publish_time=msg.message.publish_time,
+                )
+                pointcloud_messages_converted += 1
+
+            else:
+                # Copy unchanged
+                topic = msg.channel.topic
+
+                if topic not in channel_ids:
+                    # Register schema if needed
+                    if msg.schema:
+                        if msg.schema.name not in schema_ids:
+                            schema_id = next_schema_id
+                            next_schema_id += 1
+                            writer.add_schema(
+                                schema_id, msg.schema.name, msg.schema.encoding, msg.schema.data
+                            )
+                            schema_ids[msg.schema.name] = schema_id
+                        else:
+                            schema_id = schema_ids[msg.schema.name]
+                    else:
+                        schema_id = 0
+
+                    channel_id = next_channel_id
+                    next_channel_id += 1
+                    writer.add_channel(
+                        channel_id=channel_id,
+                        topic=topic,
+                        message_encoding=msg.channel.message_encoding,
+                        schema_id=schema_id,
+                        metadata=msg.channel.metadata,
+                    )
+                    channel_ids[topic] = channel_id
+                else:
+                    channel_id = channel_ids[topic]
+
+                # Write message with original data
+                writer.add_message(
+                    channel_id=channel_id,
+                    log_time=msg.message.log_time,
+                    data=msg.message.data,
+                    publish_time=msg.message.publish_time,
+                )
+                messages_copied += 1
+
+            progress.update(task_id, advance=1)
+
+        # Flush remaining frames from video encoders
+        for topic_name, video_enc in encoders.items():
+            flushed = video_enc.flush()
+            if flushed and topic_name in channel_ids and topic_name in last_video_times:
+                log_time, publish_time = last_video_times[topic_name]
+                writer.add_message_encode(
+                    channel_id=channel_ids[topic_name],
+                    log_time=log_time,
+                    data={
+                        "timestamp": {"sec": 0, "nanosec": 0},
+                        "frame_id": "",
+                        "data": flushed,
+                        "format": codec,
+                    },
+                    publish_time=publish_time,
+                )
+
+        decode_pool.shutdown(wait=True)
+        writer.finish()
 
     # Report statistics
     total_converted = messages_converted + pointcloud_messages_converted
@@ -829,15 +873,17 @@ def roscompress(
     console.print(f"[cyan]Total messages:[/cyan] {total_converted + messages_copied:,}")
 
     # Show file size comparison
-    input_size = Path(file).stat().st_size
     output_size = output.stat().st_size
-    reduction_pct = ((input_size - output_size) / input_size) * 100 if input_size > 0 else 0
+    if input_size > 0:
+        reduction_pct = ((input_size - output_size) / input_size) * 100
 
-    console.print(f"\n[cyan]Input size:[/cyan] {input_size / 1024 / 1024:.2f} MB")
-    console.print(f"[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.2f} MB")
-    if reduction_pct > 0:
-        console.print(f"[green]Reduction:[/green] {reduction_pct:.1f}%")
+        console.print(f"\n[cyan]Input size:[/cyan] {input_size / 1024 / 1024:.2f} MB")
+        console.print(f"[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.2f} MB")
+        if reduction_pct > 0:
+            console.print(f"[green]Reduction:[/green] {reduction_pct:.1f}%")
+        else:
+            console.print(f"[yellow]Size change:[/yellow] {-reduction_pct:.1f}% increase")
     else:
-        console.print(f"[yellow]Size change:[/yellow] {-reduction_pct:.1f}% increase")
+        console.print(f"\n[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.2f} MB")
 
     return 0
