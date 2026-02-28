@@ -4,13 +4,19 @@ import base64
 import gzip
 import json
 import sys
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Annotated
 
-from cyclopts import Group, Parameter
-from rich.console import Console
+from cyclopts import Group as CycloptsGroup
+from cyclopts import Parameter
+from rich.console import Console, Group, RenderableType
+from rich.live import Live
 from rich.table import Table
+from rich.text import Text
+from small_mcap import McapError, rebuild_summary
 
 from pymcap_cli.cmd.info_data import info_to_dict
 from pymcap_cli.display_utils import (
@@ -25,8 +31,8 @@ from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 console = Console()
 
 # Parameter groups
-PROCESSING_GROUP = Group("Processing Options")
-DISPLAY_GROUP = Group("Display Options")
+PROCESSING_GROUP = CycloptsGroup("Processing Options")
+DISPLAY_GROUP = CycloptsGroup("Display Options")
 _NS_TO_MS = 1_000_000
 _NS_TO_SEC = 1_000_000_000
 
@@ -44,14 +50,14 @@ class SortChoice(str, Enum):
     SCHEMA = "schema"
 
 
-def _display_message_distribution(data: McapInfoOutput) -> None:
-    """Display message distribution histogram using Unicode block characters."""
+def _build_message_distribution(data: McapInfoOutput) -> RenderableType | None:
+    """Build message distribution histogram renderable."""
     distribution = data["message_distribution"]
     max_count = distribution["max_count"]
 
     # Skip if no messages
     if max_count == 0:
-        return
+        return None
 
     # Format bucket duration using timedelta
     bucket_duration_ns = distribution["bucket_duration_ns"]
@@ -70,13 +76,17 @@ def _display_message_distribution(data: McapInfoOutput) -> None:
         hours = total_seconds / 3600
         duration_str = f"{hours:.1f} hr"
 
-    console.print("\n[bold cyan]Message Distribution:[/] ", end="")
-    console.print(DistributionBar(distribution["message_counts"]))
-    console.print(f"[dim]Max: {max_count:,} msgs/bucket | Bucket size: {duration_str}[/]\n")
+    return Group(
+        Text(""),
+        Text.from_markup("[bold cyan]Message Distribution:[/]"),
+        DistributionBar(distribution["message_counts"]),
+        Text.from_markup(f"[dim]Max: {max_count:,} msgs/bucket | Bucket size: {duration_str}[/]"),
+        Text(""),
+    )
 
 
-def _display_file_info_and_summary(data: McapInfoOutput) -> None:
-    """Display file information and summary statistics."""
+def _build_file_info_and_summary(data: McapInfoOutput) -> Table:
+    """Build file information and summary statistics renderable."""
     stats = data["statistics"]
     duration_ns = stats["duration_ns"]
     duration_human = timedelta(milliseconds=duration_ns / _NS_TO_MS)
@@ -111,11 +121,11 @@ def _display_file_info_and_summary(data: McapInfoOutput) -> None:
     info_table.add_row("Metadata:", f"[cyan]{stats['metadata_count']:,}[/]")
     if msg_idx_count := stats.get("message_index_count"):
         info_table.add_row("Indexed Messages:", f"[green]{msg_idx_count:,}[/]")
-    console.print(info_table)
+    return info_table
 
 
-def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> None:
-    """Display compression statistics table."""
+def _build_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> RenderableType:
+    """Build compression statistics renderable."""
     compression_table = Table()
     compression_table.add_column("Type", style="bold cyan")
     compression_table.add_column("Chunks", justify="right", style="green")
@@ -153,8 +163,6 @@ def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> No
 
         compression_table.add_row(*row)
 
-    console.print(compression_table)
-
     # Display chunk overlaps if applicable
     overlaps = data["chunks"]["overlaps"]
     if overlaps["max_concurrent"] > 1:
@@ -167,19 +175,21 @@ def _display_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> No
             f"[yellow]{bytes_to_human(overlaps['max_concurrent_bytes'])}[/] "
             f"max total size at once",
         )
-        console.print(overlap_table)
+        return Group(compression_table, overlap_table)
+
+    return compression_table
 
 
-def _display_channels_table(
+def _build_channels_table(
     data: McapInfoOutput,
     sort_key: str,
     reverse: bool,
     index_duration: bool,
     use_median: bool,
     tree: bool,
-) -> None:
-    """Display channels table with sorting support."""
-    display_channels_table(
+) -> Table:
+    """Build channels table renderable."""
+    return display_channels_table(
         data,
         console,
         sort_key=sort_key,
@@ -199,6 +209,109 @@ def _display_channels_table(
         use_median=use_median,
         tree=tree,
     )
+
+
+def _build_info_display(
+    data: McapInfoOutput,
+    has_chunk_info: bool,
+    sort_key: str,
+    reverse: bool,
+    index_duration: bool,
+    use_median: bool,
+    tree: bool,
+) -> Group:
+    """Assemble all info sections into a single renderable."""
+    parts: list[RenderableType] = [_build_file_info_and_summary(data)]
+
+    distribution = _build_message_distribution(data)
+    if distribution is not None:
+        parts.append(distribution)
+
+    parts.append(_build_compression_table(data, has_chunk_info))
+    parts.append(_build_channels_table(data, sort_key, reverse, index_duration, use_median, tree))
+
+    return Group(*parts)
+
+
+def _watch_file(
+    file_path: str,
+    sort_key: str,
+    reverse: bool,
+    index_duration: bool,
+    use_median: bool,
+    tree: bool,
+    interval: float,
+) -> int:
+    """Watch an MCAP file for changes and display live-updating statistics."""
+    path = Path(file_path)
+    last_size = 0
+    info_data = None
+
+    try:
+        with Live(console=console, refresh_per_second=4) as live:
+            while True:
+                try:
+                    current_size = path.stat().st_size
+                except OSError as e:
+                    console.print(f"[red]Error:[/] {e}")
+                    return 1
+
+                if current_size == last_size and info_data is not None:
+                    time.sleep(interval)
+                    continue
+
+                needs_full_rescan = info_data is None or current_size < last_size
+
+                try:
+                    with path.open("rb") as f:
+                        if needs_full_rescan:
+                            info_data = rebuild_summary(
+                                f,
+                                validate_crc=False,
+                                calculate_channel_sizes=True,
+                                exact_sizes=False,
+                            )
+                        else:
+                            assert info_data is not None
+                            f.seek(info_data.next_offset)
+                            info_data = rebuild_summary(
+                                f,
+                                validate_crc=False,
+                                calculate_channel_sizes=True,
+                                exact_sizes=False,
+                                initial_state=info_data,
+                                skip_magic=True,
+                            )
+                except OSError as e:
+                    console.print(f"[red]Error reading file:[/] {e}")
+                    return 1
+                except (McapError, ValueError, AssertionError):
+                    # File may be partially written; wait and retry
+                    time.sleep(interval)
+                    continue
+
+                last_size = current_size
+
+                data = info_to_dict(info_data, file_path, current_size)
+                has_chunk_info = info_data.chunk_information is not None
+                display = _build_info_display(
+                    data, has_chunk_info, sort_key, reverse, index_duration, use_median, tree
+                )
+
+                now = datetime.now(tz=timezone.utc).astimezone().strftime("%H:%M:%S")
+                status = Text.from_markup(
+                    f"\n[dim]Watching... Last update: {now}"
+                    f" | Size: {bytes_to_human(current_size)}"
+                    f" | Ctrl+C to stop[/]"
+                )
+                live.update(Group(display, status))
+
+                time.sleep(interval)
+
+    except KeyboardInterrupt:
+        console.print("\n[dim]Watch stopped.[/]")
+
+    return 0
 
 
 def _output_json(
@@ -290,6 +403,20 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = False,
+    watch: Annotated[
+        bool,
+        Parameter(
+            name=["-w", "--watch"],
+            group=PROCESSING_GROUP,
+        ),
+    ] = False,
+    watch_interval: Annotated[
+        float,
+        Parameter(
+            name=["--watch-interval"],
+            group=PROCESSING_GROUP,
+        ),
+    ] = 0.5,
 ) -> int:
     """Report statistics about MCAP file(s).
 
@@ -330,6 +457,11 @@ def info(
         --rebuild to calculate message intervals.
     tree
         Display channels in a hierarchical tree structure based on topic paths.
+    watch
+        Watch the file for changes and display live-updating statistics.
+        Requires exactly one local file. Incompatible with --json and --compress.
+    watch_interval
+        Polling interval in seconds for watch mode (default: 0.5).
 
     Examples
     --------
@@ -351,6 +483,9 @@ def info(
 
     # JSON output
     pymcap-cli info recording.mcap --json
+
+    # Watch a file for live updates
+    pymcap-cli info recording.mcap --watch
     ```
     """
     # Validate input
@@ -364,6 +499,20 @@ def info(
     if compress and not json_output:
         console.print("[red]Error:[/] --compress requires --json")
         return 1
+
+    if watch:
+        if json_output:
+            console.print("[red]Error:[/] --watch is incompatible with --json")
+            return 1
+        if compress:
+            console.print("[red]Error:[/] --watch is incompatible with --compress")
+            return 1
+        if len(files) != 1:
+            console.print("[red]Error:[/] --watch requires exactly one file")
+            return 1
+        return _watch_file(
+            files[0], sort.value, reverse, index_duration, median, tree, watch_interval
+        )
 
     # JSON output mode
     if json_output:
@@ -425,9 +574,10 @@ def info(
             console.print()
 
         # Display all sections
-        _display_file_info_and_summary(data)
-        _display_message_distribution(data)
-        _display_compression_table(data, has_chunk_info)
-        _display_channels_table(data, sort.value, reverse, index_duration, median, tree)
+        console.print(
+            _build_info_display(
+                data, has_chunk_info, sort.value, reverse, index_duration, median, tree
+            )
+        )
 
     return 0

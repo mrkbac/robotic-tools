@@ -79,6 +79,32 @@ class TestInfo:
         assert "File:" in result.stdout
         assert "Messages:" in result.stdout
 
+    def test_info_watch_with_json_errors(self, image_small_mcap: Path):
+        """Test --watch is incompatible with --json."""
+        result = subprocess.run(
+            ["pymcap-cli", "info", str(image_small_mcap), "--watch", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 1
+        assert "--watch is incompatible with --json" in result.stdout
+
+    def test_info_watch_with_multiple_files_errors(
+        self, image_small_mcap: Path, image_rgb_mcap: Path
+    ):
+        """Test --watch requires exactly one file."""
+        result = subprocess.run(
+            ["pymcap-cli", "info", str(image_small_mcap), str(image_rgb_mcap), "--watch"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 1
+        assert "--watch requires exactly one file" in result.stdout
+
 
 @pytest.mark.e2e
 class TestInfoJson:

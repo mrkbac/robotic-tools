@@ -42,21 +42,23 @@ def du(
 
     data = info_to_dict(info, str(file), file_size)
 
-    display_channels_table(
-        data,
-        console,
-        sort_key="size",
-        reverse=True,
-        columns=(
-            ChannelTableColumn.MSGS
-            | ChannelTableColumn.HZ
-            | ChannelTableColumn.SIZE
-            | ChannelTableColumn.PERCENT
-            | ChannelTableColumn.BPS
-            | ChannelTableColumn.B_PER_MSG
-        ),
-        responsive=False,
-        index_duration=False,
+    console.print(
+        display_channels_table(
+            data,
+            console,
+            sort_key="size",
+            reverse=True,
+            columns=(
+                ChannelTableColumn.MSGS
+                | ChannelTableColumn.HZ
+                | ChannelTableColumn.SIZE
+                | ChannelTableColumn.PERCENT
+                | ChannelTableColumn.BPS
+                | ChannelTableColumn.B_PER_MSG
+            ),
+            responsive=False,
+            index_duration=False,
+        )
     )
 
     return 0

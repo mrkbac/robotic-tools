@@ -386,12 +386,12 @@ def display_channels_table(
     index_duration: bool = False,
     use_median: bool = False,
     tree: bool = False,
-) -> None:
-    """Display a channels table with configurable columns and sorting.
+) -> Table:
+    """Build and return a channels table with configurable columns and sorting.
 
     Args:
         data: MCAP info data containing channel information
-        console: Rich console instance for output
+        console: Rich console instance (used for responsive width calculation)
         sort_key: Field to sort by (topic, id, msgs, size, hz, bps, b_per_msg, schema)
         reverse: Sort in descending order if True
         columns: IntFlag of columns to display. If None, defaults to all columns.
@@ -399,6 +399,9 @@ def display_channels_table(
         index_duration: Use per-channel Hz calculation instead of global duration
         use_median: Display median rates instead of mean rates
         tree: Display channels in a tree hierarchy based on topic path
+
+    Returns:
+        Rich Table containing the formatted channels data
     """
 
     # Default columns if not specified
@@ -576,4 +579,4 @@ def display_channels_table(
             row.append(DistributionBar(distribution))
         channels_table.add_row(*row)
 
-    console.print(channels_table)
+    return channels_table
