@@ -14,7 +14,7 @@ import zstandard as zstd
 from .encoding_utils import BufferView, build_field_metadata
 from .header import HeaderEncoding, encode_header
 from .jit_codec import encode_chunk_jit
-from .types import CompressionOption, EncodingInfo, EncodingOptions, POINTS_PER_CHUNK
+from .types import POINTS_PER_CHUNK, CompressionOption, EncodingInfo, EncodingOptions
 
 
 def _zstd_compress_bound(src_size: int) -> int:

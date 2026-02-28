@@ -82,27 +82,24 @@ def _write_le_u64(output: np.ndarray, offset: int, value: np.uint64) -> None:
 
 
 @nb.njit(cache=True, inline="always")
-def _encode_delta_varint(
-    delta: int, output: np.ndarray, out_offset: int
-) -> int:
+def _encode_delta_varint(delta: int, output: np.ndarray, out_offset: int) -> int:
     """Zigzag + varint encode a delta value. Returns new out_offset."""
     val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
     val += 1  # Reserve 0 for NaN
     if val <= 0x7F:
         output[out_offset] = val & 0xFF
         return out_offset + 1
-    elif val <= 0x3FFF:
+    if val <= 0x3FFF:
         output[out_offset] = (val & 0x7F) | 0x80
         output[out_offset + 1] = (val >> 7) & 0xFF
         return out_offset + 2
-    elif val <= 0x1FFFFF:
+    if val <= 0x1FFFFF:
         output[out_offset] = (val & 0x7F) | 0x80
         output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
         output[out_offset + 2] = (val >> 14) & 0xFF
         return out_offset + 3
-    else:
-        count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-        return out_offset + count
+    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
+    return out_offset + count
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +208,7 @@ def encode_chunk_jit(
                     _write_le_u64(output, out_offset, residual)
                     out_offset += 8
 
-            elif field_type == FIELD_UINT8:
-                output[out_offset] = point_data[data_offset]
-                out_offset += 1
-
-            elif field_type == FIELD_INT8:
+            elif field_type in (FIELD_UINT8, FIELD_INT8):
                 output[out_offset] = point_data[data_offset]
                 out_offset += 1
 
