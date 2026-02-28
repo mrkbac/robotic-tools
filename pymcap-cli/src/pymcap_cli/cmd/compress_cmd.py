@@ -2,14 +2,8 @@
 
 from rich.console import Console
 
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import (
-    InputFile,
-    InputOptions,
-    McapProcessor,
-    OutputOptions,
-    ProcessingOptions,
-)
+from pymcap_cli.cmd._run_processor import run_processor
+from pymcap_cli.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
@@ -54,38 +48,23 @@ def compress(
     pymcap-cli compress in.mcap -o out.mcap
     ```
     """
-    # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
-
     console.print(f"[blue]Compressing '{file}' to '{output}'[/blue]")
 
-    with open_input(file) as (f, file_size), output.open("wb") as output_stream:
-        # Build input file with options - force decode for re-compression
-        input_file = InputFile(
-            stream=f,
-            size=file_size,
-            options=InputOptions.from_args(always_decode_chunk=True),
-        )
-
-        # Build processing options
-        processing_options = ProcessingOptions(
-            inputs=[input_file],
-            input_options=InputOptions.from_args(),
+    try:
+        result = run_processor(
+            files=[file],
+            output=output,
+            input_options=InputOptions.from_args(always_decode_chunk=True),
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),
         )
-
-        processor = McapProcessor(processing_options)
-
-        try:
-            stats = processor.process(output_stream)
-
-            console.print("[green]✓ Compression completed successfully![/green]")
-            console.print(stats)
-        except Exception as e:  # noqa: BLE001
-            console.print(f"[red]Error during compression: {e}[/red]")
-            return 1
+        console.print("[green]✓ Compression completed successfully![/green]")
+        console.print(result.stats)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error during compression: {e}[/red]")
+        return 1
 
     return 0

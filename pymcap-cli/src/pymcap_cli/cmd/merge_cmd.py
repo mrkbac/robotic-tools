@@ -1,19 +1,12 @@
 """Merge command for pymcap-cli."""
 
-import contextlib
 from typing import Annotated
 
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import (
-    InputFile,
-    InputOptions,
-    McapProcessor,
-    OutputOptions,
-    ProcessingOptions,
-)
+from pymcap_cli.cmd._run_processor import run_processor
+from pymcap_cli.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
@@ -85,54 +78,29 @@ def merge(
     pymcap-cli merge *.mcap -o all_recordings.mcap --compression lz4
     ```
     """
-    # Validate inputs (merge requires at least 2 files)
     if len(files) < 2:
         console.print("[red]Error: At least 2 input files are required for merging[/red]")
         return 1
 
-    # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
-    # Use ExitStack to manage multiple file handles
-    with contextlib.ExitStack() as stack:
-        input_files: list[InputFile] = []
-
-        for f in files:
-            stream, size = stack.enter_context(open_input(f))
-            input_files.append(
-                InputFile(
-                    stream=stream,
-                    size=size,
-                    options=InputOptions.from_args(
-                        include_metadata=metadata_mode == MetadataMode.INCLUDE,
-                        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
-                    ),
-                )
-            )
-
-        output_stream = stack.enter_context(output.open("wb"))
-
-        # Build processing options
-        processing_options = ProcessingOptions(
-            inputs=input_files,
-            input_options=InputOptions.from_args(),
+    try:
+        result = run_processor(
+            files=files,
+            output=output,
+            input_options=InputOptions.from_args(
+                include_metadata=metadata_mode == MetadataMode.INCLUDE,
+                include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+            ),
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),
         )
-
-        # Create processor and run
-        processor = McapProcessor(processing_options)
-
-        try:
-            stats = processor.process(output_stream)
-
-            console.print(f"[green]✓ Successfully merged {len(files)} files![/green]")
-            console.print(stats)
-
-        except Exception as e:  # noqa: BLE001
-            console.print(f"[red]Error during merge: {e}[/red]")
-            return 1
+        console.print(f"[green]✓ Successfully merged {len(files)} files![/green]")
+        console.print(result.stats)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error during merge: {e}[/red]")
+        return 1
 
     return 0

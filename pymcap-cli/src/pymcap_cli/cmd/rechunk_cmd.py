@@ -6,15 +6,8 @@ from typing import TYPE_CHECKING, Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import (
-    InputFile,
-    InputOptions,
-    McapProcessor,
-    OutputOptions,
-    ProcessingOptions,
-    RechunkStrategy,
-)
+from pymcap_cli.cmd._run_processor import run_processor
+from pymcap_cli.mcap_processor import InputOptions, OutputOptions, RechunkStrategy
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
@@ -109,7 +102,6 @@ def rechunk(
 
     output_file = Path(output)
 
-    # Confirm overwrite if needed
     confirm_output_overwrite(output_file, force)
 
     # Compile patterns if using PATTERN strategy
@@ -133,47 +125,35 @@ def rechunk(
                 "All messages will be in one group.[/yellow]"
             )
 
-    with open_input(file) as (input_stream, file_size), output_file.open("wb") as output_stream:
-        # Build input file - include everything
-        input_file = InputFile(
-            stream=input_stream,
-            size=file_size,
-            options=InputOptions.from_args(),
-        )
+    result = run_processor(
+        files=[file],
+        output=output_file,
+        input_options=InputOptions.from_args(),
+        output_options=OutputOptions(
+            rechunk_strategy=strategy,
+            rechunk_patterns=patterns,
+            compression=compression.value,
+            chunk_size=chunk_size,
+        ),
+    )
 
-        # Build processing options with rechunking enabled
-        options = ProcessingOptions(
-            inputs=[input_file],
-            input_options=InputOptions.from_args(),
-            output_options=OutputOptions(
-                rechunk_strategy=strategy,
-                rechunk_patterns=patterns,
-                compression=compression.value,
-                chunk_size=chunk_size,
-            ),
-        )
+    # Report results
+    console.print("[green]✓ Rechunking completed successfully![/green]")
+    console.print(
+        f"Processed {result.stats.messages_processed:,} messages, "
+        f"wrote {result.stats.writer_statistics.message_count:,} messages"
+    )
 
-        # Create processor and run
-        processor = McapProcessor(options)
-        stats = processor.process(output_stream)
-
-        # Report results
-        console.print("[green]✓ Rechunking completed successfully![/green]")
+    # Strategy-specific stats
+    num_unique_groups = len(result.processor.rechunk_groups)
+    if strategy == RechunkStrategy.ALL:
+        console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")
+    elif strategy == RechunkStrategy.AUTO:
         console.print(
-            f"Processed {stats.messages_processed:,} messages, "
-            f"wrote {stats.writer_statistics.message_count:,} messages"
+            f"Created {num_unique_groups} chunk group(s) "
+            f"({len(result.processor.large_channels)} large, rest shared)"
         )
-
-        # Strategy-specific stats
-        num_unique_groups = len(processor.rechunk_groups)
-        if strategy == RechunkStrategy.ALL:
-            console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")
-        elif strategy == RechunkStrategy.AUTO:
-            console.print(
-                f"Created {num_unique_groups} chunk group(s) "
-                f"({len(processor.large_channels)} large, rest shared)"
-            )
-        elif strategy == RechunkStrategy.PATTERN and patterns:
-            console.print(f"Used {len(patterns)} topic pattern(s) for grouping")
+    elif strategy == RechunkStrategy.PATTERN and patterns:
+        console.print(f"Used {len(patterns)} topic pattern(s) for grouping")
 
     return 0

@@ -3,14 +3,8 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import (
-    InputFile,
-    InputOptions,
-    McapProcessor,
-    OutputOptions,
-    ProcessingOptions,
-)
+from pymcap_cli.cmd._run_processor import run_processor
+from pymcap_cli.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
@@ -67,48 +61,31 @@ def recover(
     pymcap-cli recover in.mcap -o out.mcap
     ```
     """
-    # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
 
-    with open_input(file) as (f, file_size), output.open("wb") as output_stream:
-        # Build input file - recovery mode with all content included
-        input_file = InputFile(
-            stream=f,
-            size=file_size,
-            options=InputOptions.from_args(always_decode_chunk=always_decode_chunk),
-        )
-
-        # Build processing options
-        processing_options = ProcessingOptions(
-            inputs=[input_file],
-            input_options=InputOptions.from_args(),
+    try:
+        result = run_processor(
+            files=[file],
+            output=output,
+            input_options=InputOptions.from_args(always_decode_chunk=always_decode_chunk),
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
             ),
         )
-
-        # Create processor and run
-        processor = McapProcessor(processing_options)
-
-        try:
-            stats = processor.process(output_stream)
-
-            console.print("[green]✓ Recovery completed successfully![/green]")
-            console.print(stats)
-
-        except RuntimeError as e:
-            if "Writer not started" in str(e):
-                # Empty file case - this is expected for empty/corrupt files
-                console.print(
-                    "[yellow]Warning: File appears to be empty or severely corrupted[/yellow]"
-                )
-                console.print("No valid MCAP data found to recover")
-            else:
-                console.print(f"[red]Error during recovery: {e}[/red]")
-                return 1
-        except Exception as e:  # noqa: BLE001
+        console.print("[green]✓ Recovery completed successfully![/green]")
+        console.print(result.stats)
+    except RuntimeError as e:
+        if "Writer not started" in str(e):
+            console.print(
+                "[yellow]Warning: File appears to be empty or severely corrupted[/yellow]"
+            )
+            console.print("No valid MCAP data found to recover")
+        else:
             console.print(f"[red]Error during recovery: {e}[/red]")
             return 1
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error during recovery: {e}[/red]")
+        return 1
 
     return 0
