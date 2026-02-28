@@ -61,8 +61,7 @@ def _estimate_size_from_indexes(indexes: list[MessageIndex], chunk_size: int) ->
         if not offsets:
             return {}
         total = sum(
-            offsets[i + 1] - offsets[i] - MESSAGE_RECORD_OVERHEAD
-            for i in range(len(offsets) - 1)
+            offsets[i + 1] - offsets[i] - MESSAGE_RECORD_OVERHEAD for i in range(len(offsets) - 1)
         )
         total += chunk_size - offsets[-1] - MESSAGE_RECORD_OVERHEAD  # last message
         return {idx.channel_id: total}

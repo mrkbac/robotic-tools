@@ -45,7 +45,9 @@ else:
         lz4_compress = None
 
 # Module-level constants for hot-path message serialization (avoid per-call attribute lookups)
-_MSG_RECORD_STRUCT = struct.Struct("<BQHIQQ")  # opcode + length + channel_id + sequence + log_time + publish_time
+_MSG_RECORD_STRUCT = struct.Struct(
+    "<BQHIQQ"
+)  # opcode + length + channel_id + sequence + log_time + publish_time
 _MSG_HEADER_SIZE = _MSG_RECORD_STRUCT.size  # 31
 _MSG_OPCODE = Opcode.MESSAGE
 _MSG_FIXED_LEN = 22  # channel_id(2) + sequence(4) + log_time(8) + publish_time(8)
@@ -586,7 +588,7 @@ class _ChunkBuilder:
         """Reset builder state for a new chunk."""
         self.buffer.seek(0)
         self.buffer.truncate(0)
-        self._buf_pos = 0
+        self.buf_pos = 0
         self.message_start_time = 0
         self.message_end_time = 0
         self.message_indices: dict[int, MessageIndex] = {}
@@ -631,10 +633,8 @@ class _ChunkBuilder:
             self.message_start_time = log_time
             self.message_end_time = log_time
         else:
-            if log_time < self.message_start_time:
-                self.message_start_time = log_time
-            if log_time > self.message_end_time:
-                self.message_end_time = log_time
+            self.message_start_time = min(self.message_start_time, log_time)
+            self.message_end_time = max(self.message_end_time, log_time)
 
         # Update message index using tracked position
         msg_idx = self.message_indices.get(channel_id)
@@ -642,7 +642,7 @@ class _ChunkBuilder:
             msg_idx = MessageIndex(channel_id=channel_id, timestamps=[], offsets=[])
             self.message_indices[channel_id] = msg_idx
         msg_idx.timestamps.append(log_time)
-        msg_idx.offsets.append(self._buf_pos)
+        msg_idx.offsets.append(self.buf_pos)
 
         self.num_messages += 1
 
@@ -658,7 +658,7 @@ class _ChunkBuilder:
             )
         )
         buf.write(data)
-        self._buf_pos += _MSG_HEADER_SIZE + data_len
+        self.buf_pos += _MSG_HEADER_SIZE + data_len
 
     def extract(
         self,
@@ -807,7 +807,7 @@ class McapWriter(McapWriterRaw):
         if self.use_chunking and self.chunk_builder is not None:
             # Check if chunk is ready to be written *before* adding the new message
             if (
-                self.chunk_builder._buf_pos >= self.chunk_builder.chunk_size
+                self.chunk_builder.buf_pos >= self.chunk_builder.chunk_size
                 and self.chunk_builder.num_messages > 0
             ):
                 self._submit_or_write_chunk()

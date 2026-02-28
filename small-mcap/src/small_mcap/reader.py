@@ -185,7 +185,7 @@ def _breakup_chunk_with_indexes(
             o
             for _, o in heapq.merge(
                 *(
-                    zip(reversed(x.timestamps), reversed(x.offsets))
+                    zip(reversed(x.timestamps), reversed(x.offsets), strict=True)
                     for x in message_indexes
                 ),
                 key=itemgetter(0),
@@ -196,7 +196,7 @@ def _breakup_chunk_with_indexes(
         offsets_iter = (
             o
             for _, o in heapq.merge(
-                *(zip(x.timestamps, x.offsets) for x in message_indexes),
+                *(zip(x.timestamps, x.offsets, strict=True) for x in message_indexes),
                 key=itemgetter(0),
             )
         )

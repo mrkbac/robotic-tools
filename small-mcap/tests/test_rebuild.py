@@ -233,8 +233,12 @@ def test_estimate_size_multi_channel():
     """Test multi-channel estimation (regression test for closure bug)."""
     # 2 channels with interleaved messages at equal spacing
     indexes = [
-        MessageIndex(channel_id=1, timestamps=[100, 300], offsets=[0, 200]),  # ch1 at offsets 0, 200
-        MessageIndex(channel_id=2, timestamps=[200, 400], offsets=[100, 300]),  # ch2 at offsets 100, 300
+        MessageIndex(
+            channel_id=1, timestamps=[100, 300], offsets=[0, 200]
+        ),  # ch1 at offsets 0, 200
+        MessageIndex(
+            channel_id=2, timestamps=[200, 400], offsets=[100, 300]
+        ),  # ch2 at offsets 100, 300
     ]
     chunk_size = 400
 
@@ -250,7 +254,9 @@ def test_estimate_size_multi_channel_uneven_distribution():
     """Test multi-channel with uneven message distribution."""
     indexes = [
         MessageIndex(channel_id=1, timestamps=[100], offsets=[0]),  # 1 message
-        MessageIndex(channel_id=2, timestamps=[200, 300, 400], offsets=[50, 100, 150]),  # 3 messages
+        MessageIndex(
+            channel_id=2, timestamps=[200, 300, 400], offsets=[50, 100, 150]
+        ),  # 3 messages
     ]
     chunk_size = 200
 
