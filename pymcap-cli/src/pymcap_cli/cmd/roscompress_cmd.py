@@ -519,8 +519,10 @@ def roscompress(
             next_channel_id = 1
 
             decode_pool = ThreadPoolExecutor(max_workers=4)
-            messages = read_message_decoded(input_stream, decoder_factories=[decoder_factory])
-            prefetched = _prefetch_image_decodes(messages, decode_pool)
+            messages = read_message_decoded(
+                input_stream, decoder_factories=[decoder_factory], num_workers=4
+            )
+            prefetched = _prefetch_image_decodes(messages, decode_pool, prefetch=16)
 
             for msg, decode_future in prefetched:
                 schema_name = msg.schema.name if msg.schema else ""
