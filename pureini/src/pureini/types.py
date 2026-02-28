@@ -49,6 +49,7 @@ ENCODING_VERSION = 3
 MAGIC_HEADER = b"CLOUDINI_V"
 MAGIC_HEADER_LENGTH = 10
 DECODE_BUT_SKIP_STORE = 0xFFFFFFFF  # uint32_t max value
+POINTS_PER_CHUNK = 32768
 
 
 def sizeof_field_type(field_type: FieldType) -> int:
@@ -66,39 +67,6 @@ def sizeof_field_type(field_type: FieldType) -> int:
         FieldType.UINT64: 8,
     }
     return size_map.get(field_type, 0)
-
-
-def field_type_to_string(field_type: FieldType) -> str:
-    """Convert FieldType to string representation."""
-    return field_type.name
-
-
-def field_type_from_string(s: str) -> FieldType:
-    """Convert string to FieldType."""
-    try:
-        return FieldType[s.upper()]
-    except KeyError:
-        return FieldType.UNKNOWN
-
-
-def encoding_options_to_string(opt: EncodingOptions) -> str:
-    """Convert EncodingOptions to string representation."""
-    return opt.name
-
-
-def encoding_options_from_string(s: str) -> EncodingOptions:
-    """Convert string to EncodingOptions."""
-    return EncodingOptions[s.upper()]
-
-
-def compression_option_to_string(opt: CompressionOption) -> str:
-    """Convert CompressionOption to string representation."""
-    return opt.name
-
-
-def compression_option_from_string(s: str) -> CompressionOption:
-    """Convert string to CompressionOption."""
-    return CompressionOption[s.upper()]
 
 
 @dataclass(slots=True, eq=True)

@@ -55,6 +55,7 @@ jobs:
           uv run pytest mcap-ros2-support-fast/tests -v --cov=mcap_ros2_support_fast --cov-append -m "not benchmark"
           uv run pytest ros-parser/tests -v --cov=ros_parser --cov-append -m "not benchmark"
           uv run pytest pointcloud2/tests -v --cov=pointcloud2 --cov-append -m "not benchmark"
+          uv run pytest pureini/tests -v --cov=pureini --cov-append -m "not benchmark"
           uv run pytest digitalis/tests -v --no-cov -m "not benchmark"
 
       - name: Upload coverage reports to Codecov

@@ -1,11 +1,11 @@
-"""Command to compress CompressedImage topics to CompressedVideo in MCAP files."""
+"""Command to compress image and point cloud topics in MCAP files."""
 
 import logging
 import platform
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import av
 import av.error
@@ -57,11 +57,51 @@ MSG: builtin_interfaces/Time
 int32 sec
 uint32 nanosec"""
 
+POINTCLOUD2_SCHEMAS = {"sensor_msgs/msg/PointCloud2", "sensor_msgs/PointCloud2"}
+
+COMPRESSED_POINTCLOUD2 = """\
+std_msgs/Header header
+uint32 height
+uint32 width
+sensor_msgs/PointField[] fields
+bool is_bigendian
+uint32 point_step
+uint32 row_step
+uint8[] compressed_data
+bool is_dense
+string format
+
+================================================================================
+MSG: sensor_msgs/PointField
+uint8 INT8    = 1
+uint8 UINT8   = 2
+uint8 INT16   = 3
+uint8 UINT16  = 4
+uint8 INT32   = 5
+uint8 UINT32  = 6
+uint8 FLOAT32 = 7
+uint8 FLOAT64 = 8
+string name
+uint32 offset
+uint8  datatype
+uint32 count
+
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec"""
+
 console = Console()
 logger = logging.getLogger(__name__)
 
 # Parameter groups
 ENCODING_GROUP = Group("Encoding")
+POINTCLOUD_GROUP = Group("Point Cloud")
 
 
 def _detect_encoder() -> str:
@@ -187,6 +227,35 @@ class _VideoEncoder:
         """Close the encoder (no-op, context cleaned up by garbage collector)."""
 
 
+def _build_encoding_info(
+    msg: object,
+    encoding_opt: "EncodingOptions",  # noqa: F821  # ty: ignore[unresolved-reference]
+    compression_opt: "CompressionOption",  # noqa: F821  # ty: ignore[unresolved-reference]
+    resolution: float,
+) -> "EncodingInfo":  # noqa: F821  # ty: ignore[unresolved-reference]
+    """Build pureini EncodingInfo from a decoded ROS2 PointCloud2 message."""
+    from pureini import EncodingInfo, FieldType, PointField  # noqa: PLC0415
+
+    info = EncodingInfo()
+    info.width = msg.width  # type: ignore[attr-defined]
+    info.height = msg.height  # type: ignore[attr-defined]
+    info.point_step = msg.point_step  # type: ignore[attr-defined]
+    info.encoding_opt = encoding_opt
+    info.compression_opt = compression_opt
+
+    info.fields = []
+    for ros_field in msg.fields:  # type: ignore[attr-defined]
+        field = PointField(
+            name=ros_field.name,
+            offset=ros_field.offset,
+            type=FieldType(ros_field.datatype),
+            resolution=resolution if ros_field.datatype == 7 else None,
+        )
+        info.fields.append(field)
+
+    return info
+
+
 def roscompress(
     file: str,
     output: OutputPathOption,
@@ -213,11 +282,32 @@ def roscompress(
             group=ENCODING_GROUP,
         ),
     ] = None,
+    resolution: Annotated[
+        float,
+        Parameter(
+            name=["--resolution"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = 0.01,
+    pc_encoding: Annotated[
+        Literal["lossy", "lossless", "none"],
+        Parameter(
+            name=["--pc-encoding"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = "lossy",
+    pc_compression: Annotated[
+        Literal["zstd", "lz4", "none"],
+        Parameter(
+            name=["--pc-compression"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = "zstd",
 ) -> int:
-    """Compress ROS MCAP by converting CompressedImage/Image topics to CompressedVideo.
+    """Compress ROS MCAP by converting image and point cloud topics.
 
-    This reduces file size while maintaining visual quality by using video compression
-    instead of individual image compression.
+    Converts CompressedImage/Image topics to CompressedVideo and
+    PointCloud2 topics to CompressedPointCloud2 using pureini.
 
     Parameters
     ----------
@@ -233,6 +323,12 @@ def roscompress(
         Video codec (h264, h265). Default: h264.
     encoder
         Force specific encoder (libx264, h264_videotoolbox, etc.). If None, auto-detect.
+    resolution
+        Resolution for lossy float compression of point clouds. Default: 0.01.
+    pc_encoding
+        Point cloud encoding mode (lossy, lossless, none). Default: lossy.
+    pc_compression
+        Point cloud second-stage compression (zstd, lz4, none). Default: zstd.
     """
     confirm_output_overwrite(output, force)
 
@@ -245,10 +341,41 @@ def roscompress(
     else:
         encoder_name = _detect_encoder()
 
+    # Lazy-import pureini for point cloud compression
+    pureini_available = True
+    try:
+        from pureini import (  # noqa: PLC0415
+            CompressionOption,
+            EncodingOptions,
+            PointcloudEncoder,
+        )
+    except ImportError:
+        pureini_available = False
+
+    # Map string options to pureini enums
+    if pureini_available:
+        encoding_map = {
+            "lossy": EncodingOptions.LOSSY,
+            "lossless": EncodingOptions.LOSSLESS,
+            "none": EncodingOptions.NONE,
+        }
+        compression_map = {
+            "zstd": CompressionOption.ZSTD,
+            "lz4": CompressionOption.LZ4,
+            "none": CompressionOption.NONE,
+        }
+        pc_encoding_opt = encoding_map[pc_encoding]
+        pc_compression_opt = compression_map[pc_compression]
+
     console.print(f"[cyan]Input:[/cyan] {file}")
     console.print(f"[cyan]Output:[/cyan] {output}")
     console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
     console.print(f"[cyan]Quality (CRF):[/cyan] {quality}")
+    if pureini_available:
+        console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
+        console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
+        if pc_encoding == "lossy":
+            console.print(f"[cyan]Point cloud resolution:[/cyan] {resolution}")
 
     # Get message count from summary for progress bar
     total_message_count: int | None = None
@@ -269,6 +396,8 @@ def roscompress(
     messages_converted = 0
     messages_copied = 0
     topics_converted: set[str] = set()
+    pointcloud_messages_converted = 0
+    pointcloud_topics_converted: set[str] = set()
 
     try:
         with (
@@ -299,7 +428,6 @@ def roscompress(
             channel_ids: dict[str, int] = {}  # topic -> channel_id
             next_schema_id = 1
             next_channel_id = 1
-            registered_channels: set[int] = set()
 
             for msg in read_message_decoded(input_stream, decoder_factories=[decoder_factory]):
                 schema_name = msg.schema.name if msg.schema else ""
@@ -358,7 +486,7 @@ def roscompress(
                         video_data = encoders[topic].encode(frame)
                     except VideoEncoderError as exc:
                         # Try fallback to software encoder if hardware encoder fails
-                        if encoder_name != "libx264":
+                        if encoders[topic].config.codec_name != "libx264":
                             console.print(
                                 f"[yellow]Warning:[/yellow] Hardware encoder failed for {topic}, "
                                 f"falling back to libx264"
@@ -372,7 +500,7 @@ def roscompress(
                                 encoders[topic] = _VideoEncoder(
                                     width=width,
                                     height=height,
-                                    codec_name=encoder_name,
+                                    codec_name="libx264",
                                     quality=quality,
                                     preset="medium",
                                     target_fps=30.0,
@@ -435,11 +563,97 @@ def roscompress(
                     )
                     messages_converted += 1
 
-                else:
-                    # Copy unchanged - register schema/channel if not already registered
-                    channel_id = msg.channel.id
+                elif schema_name in POINTCLOUD2_SCHEMAS:
+                    if not pureini_available:
+                        console.print(
+                            "[red]Error:[/red] pureini is required for PointCloud2 compression. "
+                            "Install with: uv add 'pymcap-cli[pointcloud]'"
+                        )
+                        return 1
 
-                    if channel_id not in registered_channels:
+                    topic = msg.channel.topic
+
+                    # Build encoding info and compress
+                    info = _build_encoding_info(
+                        msg.decoded_message, pc_encoding_opt, pc_compression_opt, resolution
+                    )
+                    pc_encoder = PointcloudEncoder(info)
+                    compressed = pc_encoder.encode(bytes(msg.decoded_message.data))
+
+                    if topic not in pointcloud_topics_converted:
+                        pointcloud_topics_converted.add(topic)
+                        console.print(
+                            f"[green]✓[/green] Converting {topic} "
+                            f"({schema_name} → CompressedPointCloud2)"
+                        )
+
+                    # Create CompressedPointCloud2 message
+                    decoded = msg.decoded_message
+                    compressed_pc_msg = {
+                        "header": {
+                            "stamp": {
+                                "sec": decoded.header.stamp.sec,
+                                "nanosec": decoded.header.stamp.nanosec,
+                            },
+                            "frame_id": decoded.header.frame_id,
+                        },
+                        "height": decoded.height,
+                        "width": decoded.width,
+                        "fields": [
+                            {
+                                "name": f.name,
+                                "offset": f.offset,
+                                "datatype": f.datatype,
+                                "count": f.count,
+                            }
+                            for f in decoded.fields
+                        ],
+                        "is_bigendian": decoded.is_bigendian,
+                        "point_step": decoded.point_step,
+                        "row_step": decoded.row_step,
+                        "compressed_data": list(compressed),
+                        "is_dense": decoded.is_dense,
+                        "format": "cloudini",
+                    }
+
+                    # Register schema if needed
+                    compressed_pc_schema = "point_cloud_interfaces/msg/CompressedPointCloud2"
+                    if compressed_pc_schema not in schema_ids:
+                        schema_id = next_schema_id
+                        next_schema_id += 1
+                        writer.add_schema(
+                            schema_id,
+                            compressed_pc_schema,
+                            "ros2msg",
+                            COMPRESSED_POINTCLOUD2.encode(),
+                        )
+                        schema_ids[compressed_pc_schema] = schema_id
+                    else:
+                        schema_id = schema_ids[compressed_pc_schema]
+
+                    # Register channel if needed
+                    if topic not in channel_ids:
+                        channel_id = next_channel_id
+                        next_channel_id += 1
+                        writer.add_channel(channel_id, topic, "cdr", schema_id)
+                        channel_ids[topic] = channel_id
+                    else:
+                        channel_id = channel_ids[topic]
+
+                    # Write as CompressedPointCloud2
+                    writer.add_message_encode(
+                        channel_id=channel_id,
+                        log_time=msg.message.log_time,
+                        data=compressed_pc_msg,
+                        publish_time=msg.message.publish_time,
+                    )
+                    pointcloud_messages_converted += 1
+
+                else:
+                    # Copy unchanged
+                    topic = msg.channel.topic
+
+                    if topic not in channel_ids:
                         # Register schema if needed
                         if msg.schema:
                             if msg.schema.name not in schema_ids:
@@ -454,15 +668,18 @@ def roscompress(
                         else:
                             schema_id = 0
 
-                        # Register channel with same ID as input
+                        channel_id = next_channel_id
+                        next_channel_id += 1
                         writer.add_channel(
                             channel_id=channel_id,
-                            topic=msg.channel.topic,
+                            topic=topic,
                             message_encoding=msg.channel.message_encoding,
                             schema_id=schema_id,
                             metadata=msg.channel.metadata,
                         )
-                        registered_channels.add(channel_id)
+                        channel_ids[topic] = channel_id
+                    else:
+                        channel_id = channel_ids[topic]
 
                     # Write message with original data
                     writer.add_message(
@@ -483,14 +700,24 @@ def roscompress(
             video_encoder.close()
 
     # Report statistics
+    total_converted = messages_converted + pointcloud_messages_converted
     console.print("\n[green bold]✓ Compression complete![/green bold]")
-    console.print(f"[cyan]Topics converted:[/cyan] {len(topics_converted)}")
     if topics_converted:
+        console.print(f"[cyan]Video topics converted:[/cyan] {len(topics_converted)}")
         for topic in sorted(topics_converted):
             console.print(f"  - {topic}")
-    console.print(f"[cyan]Messages converted:[/cyan] {messages_converted:,}")
+        console.print(f"[cyan]Video messages converted:[/cyan] {messages_converted:,}")
+    if pointcloud_topics_converted:
+        console.print(
+            f"[cyan]Point cloud topics converted:[/cyan] {len(pointcloud_topics_converted)}"
+        )
+        for topic in sorted(pointcloud_topics_converted):
+            console.print(f"  - {topic}")
+        console.print(
+            f"[cyan]Point cloud messages converted:[/cyan] {pointcloud_messages_converted:,}"
+        )
     console.print(f"[cyan]Messages copied:[/cyan] {messages_copied:,}")
-    console.print(f"[cyan]Total messages:[/cyan] {messages_converted + messages_copied:,}")
+    console.print(f"[cyan]Total messages:[/cyan] {total_converted + messages_copied:,}")
 
     # Show file size comparison
     input_size = Path(file).stat().st_size

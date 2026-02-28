@@ -6,100 +6,21 @@ Licensed under the Apache License, Version 2.0
 """
 
 import struct
-from typing import Any
 
 import numba as nb
+import numpy as np
+
+from .types import EncodingInfo, EncodingOptions, FieldType
 
 
 class BufferView:
     """
-    A mutable view into a byte buffer that can be consumed as data is written/read.
-    Similar to C++ Span<uint8_t> with trim_front() capability.
-    """
-
-    def __init__(self, data: bytearray | memoryview) -> None:
-        """
-        Initialize a buffer view.
-
-        Args:
-            data: The underlying buffer (bytearray or memoryview)
-        """
-        if isinstance(data, bytearray):
-            self._view = memoryview(data)
-        else:
-            self._view = data
-        self._offset = 0
-
-    @property
-    def data(self) -> memoryview:
-        """Get the current view of remaining data."""
-        return self._view[self._offset :]
-
-    def size(self) -> int:
-        """Get the size of remaining data."""
-        return len(self._view) - self._offset
-
-    def empty(self) -> bool:
-        """Check if buffer is empty."""
-        return self.size() == 0
-
-    def trim_front(self, n: int) -> None:
-        """
-        Advance the buffer view by n bytes.
-
-        Args:
-            n: Number of bytes to skip
-
-        Raises:
-            RuntimeError: If trying to trim more than available
-        """
-        if n > self.size():
-            raise RuntimeError(f"Cannot trim {n} bytes, only {self.size()} available")
-        self._offset += n
-
-    def write_bytes(self, data: bytes | bytearray) -> None:
-        """
-        Write raw bytes to the buffer and advance.
-
-        Args:
-            data: Bytes to write
-        """
-        n = len(data)
-        if n > self.size():
-            raise RuntimeError(f"Cannot write {n} bytes, only {self.size()} available")
-        self.data[:n] = data
-        self.trim_front(n)
-
-    def read_bytes(self, n: int) -> bytes:
-        """
-        Read n bytes and advance the buffer.
-
-        Args:
-            n: Number of bytes to read
-
-        Returns:
-            The read bytes
-        """
-        if n > self.size():
-            raise RuntimeError(f"Cannot read {n} bytes, only {self.size()} available")
-        result = bytes(self.data[:n])
-        self.trim_front(n)
-        return result
-
-
-class ConstBufferView:
-    """
-    An immutable view into a byte buffer for reading.
-    Similar to C++ Span<const uint8_t>.
+    A view into a byte buffer that can be consumed as data is written/read.
+    Accepts bytes, bytearray, or memoryview. Write operations require a
+    writable underlying buffer (bytearray or writable memoryview).
     """
 
     def __init__(self, data: bytes | bytearray | memoryview) -> None:
-        """
-        Initialize a const buffer view.
-
-        Args:
-            data: The underlying buffer
-        """
         if isinstance(data, (bytes, bytearray)):
             self._view = memoryview(data)
         else:
@@ -120,29 +41,18 @@ class ConstBufferView:
         return self.size() == 0
 
     def trim_front(self, n: int) -> None:
-        """
-        Advance the buffer view by n bytes.
-
-        Args:
-            n: Number of bytes to skip
-
-        Raises:
-            RuntimeError: If trying to trim more than available
-        """
         if n > self.size():
             raise RuntimeError(f"Cannot trim {n} bytes, only {self.size()} available")
         self._offset += n
 
+    def write_bytes(self, data: bytes | bytearray) -> None:
+        n = len(data)
+        if n > self.size():
+            raise RuntimeError(f"Cannot write {n} bytes, only {self.size()} available")
+        self.data[:n] = data
+        self.trim_front(n)
+
     def read_bytes(self, n: int) -> bytes:
-        """
-        Read n bytes and advance the buffer.
-
-        Args:
-            n: Number of bytes to read
-
-        Returns:
-            The read bytes
-        """
         if n > self.size():
             raise RuntimeError(f"Cannot read {n} bytes, only {self.size()} available")
         result = bytes(self.data[:n])
@@ -255,7 +165,7 @@ def decode_varint(data: bytes | memoryview, offset: int = 0) -> tuple[int, int]:
     return val, ptr - offset
 
 
-def encode(value: Any, buff: BufferView, format_char: str) -> None:
+def encode(value: float, buff: BufferView, format_char: str) -> None:
     """
     Encode a primitive value into the buffer using struct.pack.
 
@@ -287,7 +197,7 @@ def encode_string(s: str, buff: BufferView) -> None:
     buff.write_bytes(encoded)
 
 
-def decode(buff: ConstBufferView, format_char: str) -> Any:
+def decode(buff: BufferView, format_char: str) -> int | float:
     """
     Decode a primitive value from the buffer using struct.unpack.
 
@@ -303,7 +213,7 @@ def decode(buff: ConstBufferView, format_char: str) -> Any:
     return struct.unpack(f"<{format_char}", data)[0]
 
 
-def decode_string(buff: ConstBufferView) -> str:
+def decode_string(buff: BufferView) -> str:
     """
     Decode a string (uint16 length + UTF-8 bytes).
 
@@ -313,7 +223,7 @@ def decode_string(buff: ConstBufferView) -> str:
     Returns:
         The decoded string
     """
-    length = decode(buff, "H")
+    length = int(decode(buff, "H"))
     encoded = buff.read_bytes(length)
     return encoded.decode("utf-8")
 
@@ -332,3 +242,47 @@ def to_int64(data: bytes | bytearray | memoryview, offset: int, dtype: str) -> i
     """
     value = struct.unpack_from(f"<{dtype}", data, offset)[0]
     return int(value)
+
+
+def build_field_metadata(
+    info: EncodingInfo,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build numpy arrays for field metadata to pass to JIT functions.
+
+    Creates three arrays:
+    - field_offsets: byte offset of each field
+    - field_types: type code for each field
+    - field_resolutions: resolution for each field
+
+    Resolution sentinel values:
+      > 0.0  -> lossy quantize+delta+varint
+      == 0.0 -> XOR lossless (FLOAT64 only)
+      -1.0   -> raw 4-byte copy (FLOAT32 without resolution)
+
+    Args:
+        info: Encoding configuration
+
+    Returns:
+        Tuple of (field_offsets, field_types, field_resolutions)
+    """
+    num_fields = len(info.fields)
+
+    field_offsets = np.zeros(num_fields, dtype=np.int32)
+    field_types = np.zeros(num_fields, dtype=np.int32)
+    field_resolutions = np.zeros(num_fields, dtype=np.float64)
+
+    for idx, field in enumerate(info.fields):
+        field_offsets[idx] = field.offset
+        field_types[idx] = int(field.type)
+
+        if info.encoding_opt == EncodingOptions.LOSSY and field.resolution is not None:
+            field_resolutions[idx] = field.resolution
+        elif field.type == FieldType.FLOAT64:
+            field_resolutions[idx] = 0.0
+        elif field.type == FieldType.FLOAT32:
+            field_resolutions[idx] = -1.0
+        else:
+            field_resolutions[idx] = 0.0
+
+    return field_offsets, field_types, field_resolutions

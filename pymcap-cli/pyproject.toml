@@ -43,6 +43,7 @@ Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [project.optional-dependencies]
 video = ["av>=12.0.0", "numpy>=1.24.0"]
+pointcloud = ["pureini"]
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]
@@ -56,3 +57,4 @@ pymcap-cli = "pymcap_cli.cli:main"
 small-mcap = { workspace = true }
 mcap-ros2-support-fast = { workspace = true }
 ros-parser = { workspace = true }
+pureini = { workspace = true }

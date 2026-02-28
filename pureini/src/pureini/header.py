@@ -9,7 +9,6 @@ from enum import Enum
 
 from .encoding_utils import (
     BufferView,
-    ConstBufferView,
     decode,
     decode_string,
     encode,
@@ -24,12 +23,6 @@ from .types import (
     EncodingOptions,
     FieldType,
     PointField,
-    compression_option_from_string,
-    compression_option_to_string,
-    encoding_options_from_string,
-    encoding_options_to_string,
-    field_type_from_string,
-    field_type_to_string,
 )
 
 
@@ -55,14 +48,14 @@ def encoding_info_to_yaml(info: EncodingInfo) -> str:
     lines.append(f"width: {info.width}")
     lines.append(f"height: {info.height}")
     lines.append(f"point_step: {info.point_step}")
-    lines.append(f"encoding_opt: {encoding_options_to_string(info.encoding_opt)}")
-    lines.append(f"compression_opt: {compression_option_to_string(info.compression_opt)}")
+    lines.append(f"encoding_opt: {info.encoding_opt.name}")
+    lines.append(f"compression_opt: {info.compression_opt.name}")
     lines.append("fields:")
 
     for field in info.fields:
         lines.append(f"  - name: {field.name}")
         lines.append(f"    offset: {field.offset}")
-        lines.append(f"    type: {field_type_to_string(field.type)}")
+        lines.append(f"    type: {field.type.name}")
         if field.resolution is not None:
             lines.append(f"    resolution: {field.resolution}")
         else:
@@ -129,10 +122,10 @@ def encoding_info_from_yaml(yaml: str) -> EncodingInfo:
     info.point_step = int(val)
 
     val, idx = read_value_from_line(lines, idx, "encoding_opt")
-    info.encoding_opt = encoding_options_from_string(val)
+    info.encoding_opt = EncodingOptions[val.upper()]
 
     val, idx = read_value_from_line(lines, idx, "compression_opt")
-    info.compression_opt = compression_option_from_string(val)
+    info.compression_opt = CompressionOption[val.upper()]
 
     # Read "fields:" line
     _, idx = read_value_from_line(lines, idx, "fields")
@@ -164,7 +157,10 @@ def encoding_info_from_yaml(yaml: str) -> EncodingInfo:
 
         # Read type
         val, idx = read_value_from_line(lines, idx, "type")
-        field.type = field_type_from_string(val)
+        try:
+            field.type = FieldType[val.upper()]
+        except KeyError:
+            field.type = FieldType.UNKNOWN
 
         # Read resolution
         val, idx = read_value_from_line(lines, idx, "resolution")
@@ -265,7 +261,7 @@ def encode_header(
     return output
 
 
-def decode_header(input_data: bytes | bytearray) -> EncodingInfo:
+def decode_header(input_data: bytes | bytearray) -> tuple[EncodingInfo, int]:
     """
     Decode EncodingInfo from bytes.
 
@@ -273,9 +269,10 @@ def decode_header(input_data: bytes | bytearray) -> EncodingInfo:
         input_data: Encoded header bytes
 
     Returns:
-        Decoded EncodingInfo
+        Tuple of (decoded EncodingInfo, number of header bytes consumed)
     """
-    buff = ConstBufferView(input_data)
+    buff = BufferView(input_data)
+    initial_size = buff.size()
 
     # Check magic header
     magic = buff.read_bytes(MAGIC_HEADER_LENGTH)
@@ -313,29 +310,30 @@ def decode_header(input_data: bytes | bytearray) -> EncodingInfo:
             buff.trim_front(null_pos + 1)  # consume header + null
         else:
             yaml_str = data_bytes.decode("utf-8")
+            buff.trim_front(len(data_bytes))
 
-        return encoding_info_from_yaml(yaml_str)
+        return encoding_info_from_yaml(yaml_str), initial_size - buff.size()
 
     # Binary encoded header
     header = EncodingInfo()
     header.version = version
 
-    header.width = decode(buff, "I")  # uint32
-    header.height = decode(buff, "I")  # uint32
-    header.point_step = decode(buff, "I")  # uint32
+    header.width = int(decode(buff, "I"))  # uint32
+    header.height = int(decode(buff, "I"))  # uint32
+    header.point_step = int(decode(buff, "I"))  # uint32
 
-    stage = decode(buff, "B")  # uint8
+    stage = int(decode(buff, "B"))  # uint8
     header.encoding_opt = EncodingOptions(stage)
 
-    stage = decode(buff, "B")  # uint8
+    stage = int(decode(buff, "B"))  # uint8
     header.compression_opt = CompressionOption(stage)
 
-    fields_count = decode(buff, "H")  # uint16
+    fields_count = int(decode(buff, "H"))  # uint16
 
     for _ in range(fields_count):
         field = PointField(name="")
         field.name = decode_string(buff)
-        field.offset = decode(buff, "I")  # uint32
+        field.offset = int(decode(buff, "I"))  # uint32
         type_val = decode(buff, "B")  # uint8
         field.type = FieldType(type_val)
         res = decode(buff, "f")  # float32
@@ -344,4 +342,4 @@ def decode_header(input_data: bytes | bytearray) -> EncodingInfo:
 
         header.fields.append(field)
 
-    return header
+    return header, initial_size - buff.size()

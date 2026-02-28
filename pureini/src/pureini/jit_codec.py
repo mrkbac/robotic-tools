@@ -13,18 +13,101 @@ import numba as nb
 import numpy as np
 
 from .encoding_utils import decode_varint, encode_varint64_to_buffer
+from .types import FieldType
 
-# Field type constants (from FieldType IntEnum)
-FIELD_INT8 = 1
-FIELD_UINT8 = 2
-FIELD_INT16 = 3
-FIELD_UINT16 = 4
-FIELD_INT32 = 5
-FIELD_UINT32 = 6
-FIELD_FLOAT32 = 7
-FIELD_FLOAT64 = 8
-FIELD_INT64 = 9
-FIELD_UINT64 = 10
+# Field type constants derived from FieldType enum (Numba can't use Python enums)
+FIELD_INT8 = int(FieldType.INT8)
+FIELD_UINT8 = int(FieldType.UINT8)
+FIELD_INT16 = int(FieldType.INT16)
+FIELD_UINT16 = int(FieldType.UINT16)
+FIELD_INT32 = int(FieldType.INT32)
+FIELD_UINT32 = int(FieldType.UINT32)
+FIELD_FLOAT32 = int(FieldType.FLOAT32)
+FIELD_FLOAT64 = int(FieldType.FLOAT64)
+FIELD_INT64 = int(FieldType.INT64)
+FIELD_UINT64 = int(FieldType.UINT64)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers (always inlined by Numba)
+# ---------------------------------------------------------------------------
+
+
+@nb.njit(cache=True, inline="always")
+def _read_le_u32(data: np.ndarray, offset: int) -> np.uint32:
+    """Read a little-endian uint32 from 4 bytes."""
+    return (
+        np.uint32(data[offset])
+        | (np.uint32(data[offset + 1]) << 8)
+        | (np.uint32(data[offset + 2]) << 16)
+        | (np.uint32(data[offset + 3]) << 24)
+    )
+
+
+@nb.njit(cache=True, inline="always")
+def _read_le_u64(data: np.ndarray, offset: int) -> np.uint64:
+    """Read a little-endian uint64 from 8 bytes."""
+    return (
+        np.uint64(data[offset])
+        | (np.uint64(data[offset + 1]) << 8)
+        | (np.uint64(data[offset + 2]) << 16)
+        | (np.uint64(data[offset + 3]) << 24)
+        | (np.uint64(data[offset + 4]) << 32)
+        | (np.uint64(data[offset + 5]) << 40)
+        | (np.uint64(data[offset + 6]) << 48)
+        | (np.uint64(data[offset + 7]) << 56)
+    )
+
+
+@nb.njit(cache=True, inline="always")
+def _write_le_u32(output: np.ndarray, offset: int, value: np.uint32) -> None:
+    """Write a uint32 as 4 little-endian bytes."""
+    output[offset] = value & 0xFF
+    output[offset + 1] = (value >> 8) & 0xFF
+    output[offset + 2] = (value >> 16) & 0xFF
+    output[offset + 3] = (value >> 24) & 0xFF
+
+
+@nb.njit(cache=True, inline="always")
+def _write_le_u64(output: np.ndarray, offset: int, value: np.uint64) -> None:
+    """Write a uint64 as 8 little-endian bytes."""
+    output[offset] = value & 0xFF
+    output[offset + 1] = (value >> 8) & 0xFF
+    output[offset + 2] = (value >> 16) & 0xFF
+    output[offset + 3] = (value >> 24) & 0xFF
+    output[offset + 4] = (value >> 32) & 0xFF
+    output[offset + 5] = (value >> 40) & 0xFF
+    output[offset + 6] = (value >> 48) & 0xFF
+    output[offset + 7] = (value >> 56) & 0xFF
+
+
+@nb.njit(cache=True, inline="always")
+def _encode_delta_varint(
+    delta: int, output: np.ndarray, out_offset: int
+) -> int:
+    """Zigzag + varint encode a delta value. Returns new out_offset."""
+    val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
+    val += 1  # Reserve 0 for NaN
+    if val <= 0x7F:
+        output[out_offset] = val & 0xFF
+        return out_offset + 1
+    elif val <= 0x3FFF:
+        output[out_offset] = (val & 0x7F) | 0x80
+        output[out_offset + 1] = (val >> 7) & 0xFF
+        return out_offset + 2
+    elif val <= 0x1FFFFF:
+        output[out_offset] = (val & 0x7F) | 0x80
+        output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
+        output[out_offset + 2] = (val >> 14) & 0xFF
+        return out_offset + 3
+    else:
+        count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
+        return out_offset + count
+
+
+# ---------------------------------------------------------------------------
+# Encoder
+# ---------------------------------------------------------------------------
 
 
 @nb.njit(cache=True, fastmath=False)  # Must disable fastmath for NaN handling
@@ -45,16 +128,6 @@ def encode_chunk_jit(
     - FLOAT32/FLOAT64 with resolution: quantize + delta + varint
     - FLOAT32/FLOAT64 without resolution: XOR encoding (lossless)
     - INT8-UINT64: delta + varint (except INT8/UINT8 which are copied)
-
-    Args:
-        point_data: Raw point cloud data as uint8 array
-        chunk_start: Starting point index in the cloud
-        chunk_points: Number of points to encode in this chunk
-        point_step: Size of one point in bytes
-        field_offsets: Byte offset of each field within a point
-        field_types: Type code for each field (FIELD_INT8, etc.)
-        field_resolutions: Resolution for lossy float encoding (0.0 = lossless/XOR)
-        output: Output buffer for encoded data
 
     Returns:
         Number of bytes written to output
@@ -87,343 +160,114 @@ def encode_chunk_jit(
             # Handle each field type
             if field_type == FIELD_FLOAT32:
                 if resolution < 0.0:
-                    # Raw copy (C++ FieldEncoderCopy for FLOAT32 without resolution)
+                    # Raw copy (FLOAT32 without resolution)
                     output[out_offset] = point_data[data_offset]
                     output[out_offset + 1] = point_data[data_offset + 1]
                     output[out_offset + 2] = point_data[data_offset + 2]
                     output[out_offset + 3] = point_data[data_offset + 3]
                     out_offset += 4
                 elif resolution > 0.0:
-                    # Read as bits
-                    float_bits = (
-                        np.uint32(point_data[data_offset])
-                        | (np.uint32(point_data[data_offset + 1]) << 8)
-                        | (np.uint32(point_data[data_offset + 2]) << 16)
-                        | (np.uint32(point_data[data_offset + 3]) << 24)
-                    )
-
-                    # Lossy: reinterpret bits as float using pre-allocated scratch buffer
+                    float_bits = _read_le_u32(point_data, data_offset)
                     scratch_u32[0] = float_bits
                     value_real = scratch_f32[0]
 
-                    # Lossy: quantize + delta + varint
                     if np.isnan(value_real):
                         output[out_offset] = 0
                         prev_int_values[field_idx] = 0
                         out_offset += 1
                     else:
-                        multiplier = 1.0 / resolution
-                        quantized = int(np.round(value_real * multiplier))
+                        quantized = int(np.round(value_real / resolution))
                         delta = quantized - prev_int_values[field_idx]
                         prev_int_values[field_idx] = quantized
-
-                        # Inline varint encoding for speed
-                        val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                        val += 1
-                        if val <= 0x7F:
-                            output[out_offset] = val & 0xFF
-                            out_offset += 1
-                        elif val <= 0x3FFF:
-                            output[out_offset] = (val & 0x7F) | 0x80
-                            output[out_offset + 1] = (val >> 7) & 0xFF
-                            out_offset += 2
-                        elif val <= 0x1FFFFF:
-                            output[out_offset] = (val & 0x7F) | 0x80
-                            output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                            output[out_offset + 2] = (val >> 14) & 0xFF
-                            out_offset += 3
-                        else:
-                            count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                            out_offset += count
+                        out_offset = _encode_delta_varint(delta, output, out_offset)
                 else:
-                    # Read as bits for XOR
-                    float_bits = (
-                        np.uint32(point_data[data_offset])
-                        | (np.uint32(point_data[data_offset + 1]) << 8)
-                        | (np.uint32(point_data[data_offset + 2]) << 16)
-                        | (np.uint32(point_data[data_offset + 3]) << 24)
-                    )
-
                     # Lossless: XOR encoding
+                    float_bits = _read_le_u32(point_data, data_offset)
                     residual = float_bits ^ np.uint32(prev_float_bits[field_idx])
                     prev_float_bits[field_idx] = float_bits
-
-                    # Write as uint32
-                    output[out_offset] = residual & 0xFF
-                    output[out_offset + 1] = (residual >> 8) & 0xFF
-                    output[out_offset + 2] = (residual >> 16) & 0xFF
-                    output[out_offset + 3] = (residual >> 24) & 0xFF
+                    _write_le_u32(output, out_offset, residual)
                     out_offset += 4
 
             elif field_type == FIELD_FLOAT64:
-                # Read as bits first (unified for both lossy and lossless)
-                float_bits = (
-                    np.uint64(point_data[data_offset])
-                    | (np.uint64(point_data[data_offset + 1]) << 8)
-                    | (np.uint64(point_data[data_offset + 2]) << 16)
-                    | (np.uint64(point_data[data_offset + 3]) << 24)
-                    | (np.uint64(point_data[data_offset + 4]) << 32)
-                    | (np.uint64(point_data[data_offset + 5]) << 40)
-                    | (np.uint64(point_data[data_offset + 6]) << 48)
-                    | (np.uint64(point_data[data_offset + 7]) << 56)
-                )
+                float_bits = _read_le_u64(point_data, data_offset)
 
                 if resolution > 0.0:
-                    # Lossy: reinterpret bits as float using pre-allocated scratch buffer
                     scratch_u64[0] = float_bits
                     value_real = scratch_f64[0]
 
-                    # Lossy: quantize + delta + varint
                     if np.isnan(value_real):
                         output[out_offset] = 0
                         prev_int_values[field_idx] = 0
                         out_offset += 1
                     else:
-                        multiplier = 1.0 / resolution
-                        quantized = int(np.round(value_real * multiplier))
+                        quantized = int(np.round(value_real / resolution))
                         delta = quantized - prev_int_values[field_idx]
                         prev_int_values[field_idx] = quantized
-
-                        # Inline varint encoding for speed
-                        val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                        val += 1
-                        if val <= 0x7F:
-                            output[out_offset] = val & 0xFF
-                            out_offset += 1
-                        elif val <= 0x3FFF:
-                            output[out_offset] = (val & 0x7F) | 0x80
-                            output[out_offset + 1] = (val >> 7) & 0xFF
-                            out_offset += 2
-                        elif val <= 0x1FFFFF:
-                            output[out_offset] = (val & 0x7F) | 0x80
-                            output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                            output[out_offset + 2] = (val >> 14) & 0xFF
-                            out_offset += 3
-                        else:
-                            count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                            out_offset += count
+                        out_offset = _encode_delta_varint(delta, output, out_offset)
                 else:
                     # Lossless: XOR encoding
                     residual = float_bits ^ prev_float_bits[field_idx]
                     prev_float_bits[field_idx] = float_bits
-
-                    # Write as uint64
-                    output[out_offset] = residual & 0xFF
-                    output[out_offset + 1] = (residual >> 8) & 0xFF
-                    output[out_offset + 2] = (residual >> 16) & 0xFF
-                    output[out_offset + 3] = (residual >> 24) & 0xFF
-                    output[out_offset + 4] = (residual >> 32) & 0xFF
-                    output[out_offset + 5] = (residual >> 40) & 0xFF
-                    output[out_offset + 6] = (residual >> 48) & 0xFF
-                    output[out_offset + 7] = (residual >> 56) & 0xFF
+                    _write_le_u64(output, out_offset, residual)
                     out_offset += 8
 
             elif field_type == FIELD_UINT8:
-                # No compression for uint8
                 output[out_offset] = point_data[data_offset]
                 out_offset += 1
 
             elif field_type == FIELD_INT8:
-                # No compression for int8
                 output[out_offset] = point_data[data_offset]
                 out_offset += 1
 
             elif field_type == FIELD_UINT16:
-                # Delta + varint - read directly
                 value = np.uint16(point_data[data_offset]) | (
                     np.uint16(point_data[data_offset + 1]) << 8
                 )
                 delta = np.int64(value) - prev_int_values[field_idx]
                 prev_int_values[field_idx] = value
-
-                # Inline varint encoding for speed
-                val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                val += 1
-                if val <= 0x7F:
-                    output[out_offset] = val & 0xFF
-                    out_offset += 1
-                elif val <= 0x3FFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = (val >> 7) & 0xFF
-                    out_offset += 2
-                elif val <= 0x1FFFFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                    output[out_offset + 2] = (val >> 14) & 0xFF
-                    out_offset += 3
-                else:
-                    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                    out_offset += count
+                out_offset = _encode_delta_varint(delta, output, out_offset)
 
             elif field_type == FIELD_INT16:
-                # Delta + varint - read directly
                 uval = np.uint16(point_data[data_offset]) | (
                     np.uint16(point_data[data_offset + 1]) << 8
                 )
-                # Sign extend from 16-bit to int64
                 value = np.int64(np.int16(uval))
                 delta = value - prev_int_values[field_idx]
                 prev_int_values[field_idx] = value
-
-                # Inline varint encoding for speed
-                val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                val += 1
-                if val <= 0x7F:
-                    output[out_offset] = val & 0xFF
-                    out_offset += 1
-                elif val <= 0x3FFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = (val >> 7) & 0xFF
-                    out_offset += 2
-                elif val <= 0x1FFFFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                    output[out_offset + 2] = (val >> 14) & 0xFF
-                    out_offset += 3
-                else:
-                    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                    out_offset += count
+                out_offset = _encode_delta_varint(delta, output, out_offset)
 
             elif field_type == FIELD_UINT32:
-                # Delta + varint - read directly
-                value = (
-                    np.uint32(point_data[data_offset])
-                    | (np.uint32(point_data[data_offset + 1]) << 8)
-                    | (np.uint32(point_data[data_offset + 2]) << 16)
-                    | (np.uint32(point_data[data_offset + 3]) << 24)
-                )
+                value = _read_le_u32(point_data, data_offset)
                 delta = np.int64(value) - prev_int_values[field_idx]
                 prev_int_values[field_idx] = value
-
-                # Inline varint encoding for speed
-                # Zigzag encoding
-                val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                val += 1  # Reserve 0 for NaN
-
-                # Varint encoding (inlined)
-                if val <= 0x7F:
-                    # 1 byte (common case)
-                    output[out_offset] = val & 0xFF
-                    out_offset += 1
-                elif val <= 0x3FFF:
-                    # 2 bytes
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = (val >> 7) & 0xFF
-                    out_offset += 2
-                elif val <= 0x1FFFFF:
-                    # 3 bytes
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                    output[out_offset + 2] = (val >> 14) & 0xFF
-                    out_offset += 3
-                else:
-                    # Fall back to loop for larger values
-                    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                    out_offset += count
+                out_offset = _encode_delta_varint(delta, output, out_offset)
 
             elif field_type == FIELD_INT32:
-                # Delta + varint - read directly
-                uval = (
-                    np.uint32(point_data[data_offset])
-                    | (np.uint32(point_data[data_offset + 1]) << 8)
-                    | (np.uint32(point_data[data_offset + 2]) << 16)
-                    | (np.uint32(point_data[data_offset + 3]) << 24)
-                )
-                # Sign extend from 32-bit to int64
+                uval = _read_le_u32(point_data, data_offset)
                 value = np.int64(np.int32(uval))
                 delta = value - prev_int_values[field_idx]
                 prev_int_values[field_idx] = value
-
-                # Inline varint encoding for speed
-                val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                val += 1
-                if val <= 0x7F:
-                    output[out_offset] = val & 0xFF
-                    out_offset += 1
-                elif val <= 0x3FFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = (val >> 7) & 0xFF
-                    out_offset += 2
-                elif val <= 0x1FFFFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                    output[out_offset + 2] = (val >> 14) & 0xFF
-                    out_offset += 3
-                else:
-                    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                    out_offset += count
+                out_offset = _encode_delta_varint(delta, output, out_offset)
 
             elif field_type == FIELD_UINT64:
-                # Delta + varint - read directly
-                value = (
-                    np.uint64(point_data[data_offset])
-                    | (np.uint64(point_data[data_offset + 1]) << 8)
-                    | (np.uint64(point_data[data_offset + 2]) << 16)
-                    | (np.uint64(point_data[data_offset + 3]) << 24)
-                    | (np.uint64(point_data[data_offset + 4]) << 32)
-                    | (np.uint64(point_data[data_offset + 5]) << 40)
-                    | (np.uint64(point_data[data_offset + 6]) << 48)
-                    | (np.uint64(point_data[data_offset + 7]) << 56)
-                )
+                value = _read_le_u64(point_data, data_offset)
                 delta = np.int64(value) - prev_int_values[field_idx]
                 prev_int_values[field_idx] = np.int64(value)
-
-                # Inline varint encoding for speed
-                val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                val += 1
-                if val <= 0x7F:
-                    output[out_offset] = val & 0xFF
-                    out_offset += 1
-                elif val <= 0x3FFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = (val >> 7) & 0xFF
-                    out_offset += 2
-                elif val <= 0x1FFFFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                    output[out_offset + 2] = (val >> 14) & 0xFF
-                    out_offset += 3
-                else:
-                    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                    out_offset += count
+                out_offset = _encode_delta_varint(delta, output, out_offset)
 
             elif field_type == FIELD_INT64:
-                # Delta + varint - read directly
-                uval = (
-                    np.uint64(point_data[data_offset])
-                    | (np.uint64(point_data[data_offset + 1]) << 8)
-                    | (np.uint64(point_data[data_offset + 2]) << 16)
-                    | (np.uint64(point_data[data_offset + 3]) << 24)
-                    | (np.uint64(point_data[data_offset + 4]) << 32)
-                    | (np.uint64(point_data[data_offset + 5]) << 40)
-                    | (np.uint64(point_data[data_offset + 6]) << 48)
-                    | (np.uint64(point_data[data_offset + 7]) << 56)
-                )
-                # Reinterpret as signed
+                uval = _read_le_u64(point_data, data_offset)
                 value = np.int64(uval)
                 delta = value - prev_int_values[field_idx]
                 prev_int_values[field_idx] = value
-
-                # Inline varint encoding for speed
-                val = (delta << 1) if delta >= 0 else ((-delta - 1) << 1) | 1
-                val += 1
-                if val <= 0x7F:
-                    output[out_offset] = val & 0xFF
-                    out_offset += 1
-                elif val <= 0x3FFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = (val >> 7) & 0xFF
-                    out_offset += 2
-                elif val <= 0x1FFFFF:
-                    output[out_offset] = (val & 0x7F) | 0x80
-                    output[out_offset + 1] = ((val >> 7) & 0x7F) | 0x80
-                    output[out_offset + 2] = (val >> 14) & 0xFF
-                    out_offset += 3
-                else:
-                    count = encode_varint64_to_buffer(delta, output[out_offset:], 0)
-                    out_offset += count
+                out_offset = _encode_delta_varint(delta, output, out_offset)
 
     return out_offset
+
+
+# ---------------------------------------------------------------------------
+# Decoder
+# ---------------------------------------------------------------------------
 
 
 @nb.njit(cache=True, fastmath=False)  # Must disable fastmath for NaN handling
@@ -438,15 +282,6 @@ def decode_chunk_jit(
 ) -> int:
     """
     Decode a single chunk of points (all fields).
-
-    Args:
-        encoded_data: Encoded chunk data
-        num_points: Number of points to decode
-        point_step: Size of one point in bytes
-        field_offsets: Byte offset of each field within a point
-        field_types: Type code for each field
-        field_resolutions: Resolution for lossy float decoding (0.0 = lossless/XOR)
-        output: Output buffer for decoded point data
 
     Returns:
         Number of points decoded
@@ -483,7 +318,7 @@ def decode_chunk_jit(
             # Handle each field type
             if field_type == FIELD_FLOAT32:
                 if resolution < 0.0:
-                    # Raw copy (C++ FieldEncoderCopy for FLOAT32 without resolution)
+                    # Raw copy
                     output[data_offset] = encoded_data[in_offset]
                     output[data_offset + 1] = encoded_data[in_offset + 1]
                     output[data_offset + 2] = encoded_data[in_offset + 2]
@@ -492,198 +327,75 @@ def decode_chunk_jit(
                 elif resolution > 0.0:
                     # Lossy: varint + delta + dequantize
                     if encoded_data[in_offset] == 0:
-                        # NaN
                         value_real = np.nan
                         prev_int_values[field_idx] = 0
                         in_offset += 1
                     else:
-                        # Decode varint
                         delta, count = decode_varint(encoded_data, in_offset)
                         in_offset += count
-
-                        # Reconstruct quantized value
                         value = prev_int_values[field_idx] + delta
                         prev_int_values[field_idx] = value
-
-                        # Dequantize
                         value_real = float(value) * resolution
 
-                    # Write float32 - convert to bits using numpy view
                     scratch_f32[0] = value_real
-                    value_bits = scratch_u32[0]
-                    output[data_offset] = value_bits & 0xFF
-                    output[data_offset + 1] = (value_bits >> 8) & 0xFF
-                    output[data_offset + 2] = (value_bits >> 16) & 0xFF
-                    output[data_offset + 3] = (value_bits >> 24) & 0xFF
+                    _write_le_u32(output, data_offset, scratch_u32[0])
                 else:
                     # Lossless: XOR decoding
-                    residual = (
-                        np.uint32(encoded_data[in_offset])
-                        | (np.uint32(encoded_data[in_offset + 1]) << 8)
-                        | (np.uint32(encoded_data[in_offset + 2]) << 16)
-                        | (np.uint32(encoded_data[in_offset + 3]) << 24)
-                    )
+                    residual = _read_le_u32(encoded_data, in_offset)
                     in_offset += 4
-
                     current_bits = residual ^ np.uint32(prev_float_bits[field_idx])
                     prev_float_bits[field_idx] = current_bits
-
-                    # Write uint32 as float32
-                    output[data_offset] = current_bits & 0xFF
-                    output[data_offset + 1] = (current_bits >> 8) & 0xFF
-                    output[data_offset + 2] = (current_bits >> 16) & 0xFF
-                    output[data_offset + 3] = (current_bits >> 24) & 0xFF
+                    _write_le_u32(output, data_offset, current_bits)
 
             elif field_type == FIELD_FLOAT64:
                 if resolution > 0.0:
                     # Lossy: varint + delta + dequantize
                     if encoded_data[in_offset] == 0:
-                        # NaN
                         value_real = np.nan
                         prev_int_values[field_idx] = 0
                         in_offset += 1
                     else:
-                        # Decode varint
                         delta, count = decode_varint(encoded_data, in_offset)
                         in_offset += count
-
-                        # Reconstruct quantized value
                         value = prev_int_values[field_idx] + delta
                         prev_int_values[field_idx] = value
-
-                        # Dequantize
                         value_real = float(value) * resolution
 
-                    # Write float64 - convert to bits using numpy view
                     scratch_f64[0] = value_real
-                    value_bits = scratch_u64[0]
-                    output[data_offset] = value_bits & 0xFF
-                    output[data_offset + 1] = (value_bits >> 8) & 0xFF
-                    output[data_offset + 2] = (value_bits >> 16) & 0xFF
-                    output[data_offset + 3] = (value_bits >> 24) & 0xFF
-                    output[data_offset + 4] = (value_bits >> 32) & 0xFF
-                    output[data_offset + 5] = (value_bits >> 40) & 0xFF
-                    output[data_offset + 6] = (value_bits >> 48) & 0xFF
-                    output[data_offset + 7] = (value_bits >> 56) & 0xFF
+                    _write_le_u64(output, data_offset, scratch_u64[0])
                 else:
                     # Lossless: XOR decoding
-                    residual = (
-                        np.uint64(encoded_data[in_offset])
-                        | (np.uint64(encoded_data[in_offset + 1]) << 8)
-                        | (np.uint64(encoded_data[in_offset + 2]) << 16)
-                        | (np.uint64(encoded_data[in_offset + 3]) << 24)
-                        | (np.uint64(encoded_data[in_offset + 4]) << 32)
-                        | (np.uint64(encoded_data[in_offset + 5]) << 40)
-                        | (np.uint64(encoded_data[in_offset + 6]) << 48)
-                        | (np.uint64(encoded_data[in_offset + 7]) << 56)
-                    )
+                    residual = _read_le_u64(encoded_data, in_offset)
                     in_offset += 8
-
                     current_bits = residual ^ prev_float_bits[field_idx]
                     prev_float_bits[field_idx] = current_bits
-
-                    # Write uint64 as float64
-                    output[data_offset] = current_bits & 0xFF
-                    output[data_offset + 1] = (current_bits >> 8) & 0xFF
-                    output[data_offset + 2] = (current_bits >> 16) & 0xFF
-                    output[data_offset + 3] = (current_bits >> 24) & 0xFF
-                    output[data_offset + 4] = (current_bits >> 32) & 0xFF
-                    output[data_offset + 5] = (current_bits >> 40) & 0xFF
-                    output[data_offset + 6] = (current_bits >> 48) & 0xFF
-                    output[data_offset + 7] = (current_bits >> 56) & 0xFF
+                    _write_le_u64(output, data_offset, current_bits)
 
             elif field_type in (FIELD_UINT8, FIELD_INT8):
-                # No decompression
                 output[data_offset] = encoded_data[in_offset]
                 in_offset += 1
 
-            elif field_type == FIELD_UINT16:
-                # Varint + delta
+            elif field_type in (FIELD_UINT16, FIELD_INT16):
                 delta, count = decode_varint(encoded_data, in_offset)
                 in_offset += count
-
                 value = prev_int_values[field_idx] + delta
                 prev_int_values[field_idx] = value
-
-                # Write uint16 directly
                 output[data_offset] = value & 0xFF
                 output[data_offset + 1] = (value >> 8) & 0xFF
 
-            elif field_type == FIELD_INT16:
-                # Varint + delta
+            elif field_type in (FIELD_UINT32, FIELD_INT32):
                 delta, count = decode_varint(encoded_data, in_offset)
                 in_offset += count
-
                 value = prev_int_values[field_idx] + delta
                 prev_int_values[field_idx] = value
+                _write_le_u32(output, data_offset, np.uint32(value))
 
-                # Write int16 directly
-                output[data_offset] = value & 0xFF
-                output[data_offset + 1] = (value >> 8) & 0xFF
-
-            elif field_type == FIELD_UINT32:
-                # Varint + delta
+            elif field_type in (FIELD_UINT64, FIELD_INT64):
                 delta, count = decode_varint(encoded_data, in_offset)
                 in_offset += count
-
                 value = prev_int_values[field_idx] + delta
                 prev_int_values[field_idx] = value
-
-                # Write uint32 directly
-                output[data_offset] = value & 0xFF
-                output[data_offset + 1] = (value >> 8) & 0xFF
-                output[data_offset + 2] = (value >> 16) & 0xFF
-                output[data_offset + 3] = (value >> 24) & 0xFF
-
-            elif field_type == FIELD_INT32:
-                # Varint + delta
-                delta, count = decode_varint(encoded_data, in_offset)
-                in_offset += count
-
-                value = prev_int_values[field_idx] + delta
-                prev_int_values[field_idx] = value
-
-                # Write int32 directly
-                output[data_offset] = value & 0xFF
-                output[data_offset + 1] = (value >> 8) & 0xFF
-                output[data_offset + 2] = (value >> 16) & 0xFF
-                output[data_offset + 3] = (value >> 24) & 0xFF
-
-            elif field_type == FIELD_UINT64:
-                # Varint + delta
-                delta, count = decode_varint(encoded_data, in_offset)
-                in_offset += count
-
-                value = prev_int_values[field_idx] + delta
-                prev_int_values[field_idx] = value
-
-                # Write uint64 directly
-                output[data_offset] = value & 0xFF
-                output[data_offset + 1] = (value >> 8) & 0xFF
-                output[data_offset + 2] = (value >> 16) & 0xFF
-                output[data_offset + 3] = (value >> 24) & 0xFF
-                output[data_offset + 4] = (value >> 32) & 0xFF
-                output[data_offset + 5] = (value >> 40) & 0xFF
-                output[data_offset + 6] = (value >> 48) & 0xFF
-                output[data_offset + 7] = (value >> 56) & 0xFF
-
-            elif field_type == FIELD_INT64:
-                # Varint + delta
-                delta, count = decode_varint(encoded_data, in_offset)
-                in_offset += count
-
-                value = prev_int_values[field_idx] + delta
-                prev_int_values[field_idx] = value
-
-                # Write int64 directly
-                output[data_offset] = value & 0xFF
-                output[data_offset + 1] = (value >> 8) & 0xFF
-                output[data_offset + 2] = (value >> 16) & 0xFF
-                output[data_offset + 3] = (value >> 24) & 0xFF
-                output[data_offset + 4] = (value >> 32) & 0xFF
-                output[data_offset + 5] = (value >> 40) & 0xFF
-                output[data_offset + 6] = (value >> 48) & 0xFF
-                output[data_offset + 7] = (value >> 56) & 0xFF
+                _write_le_u64(output, data_offset, np.uint64(value))
 
         # Successfully decoded this point
         points_decoded += 1

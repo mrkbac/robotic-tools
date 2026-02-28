@@ -1877,6 +1877,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+pointcloud = [
+    { name = "pureini" },
+]
 video = [
     { name = "av" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1890,12 +1893,13 @@ requires-dist = [
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "numpy", marker = "extra == 'video'", specifier = ">=1.24.0" },
     { name = "platformdirs", specifier = ">=4.0.0" },
+    { name = "pureini", marker = "extra == 'pointcloud'", editable = "pureini" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
 ]
-provides-extras = ["video"]
+provides-extras = ["video", "pointcloud"]
 
 [[package]]
 name = "pytest"

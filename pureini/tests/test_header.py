@@ -39,7 +39,10 @@ def test_header_yaml_encoding():
     encoded = encode_header(header, HeaderEncoding.YAML)
 
     # Decode header
-    decoded_header = decode_header(encoded)
+    decoded_header, header_size = decode_header(encoded)
+
+    # Validate header size matches encoded length
+    assert header_size == len(encoded)
 
     # Validate metadata
     assert decoded_header.width == header.width  # 10
@@ -88,7 +91,10 @@ def test_header_binary_encoding():
     encoded = encode_header(header, HeaderEncoding.BINARY)
 
     # Decode header
-    decoded_header = decode_header(encoded)
+    decoded_header, header_size = decode_header(encoded)
+
+    # Validate header size matches encoded length
+    assert header_size == len(encoded)
 
     # Validate metadata
     assert decoded_header.width == header.width

@@ -5,17 +5,16 @@ Copyright 2025 Davide Faconti
 Licensed under the Apache License, Version 2.0
 """
 
+import struct
+
 import lz4.block
 import numpy as np
 import zstandard as zstd
 
-from .encoding_utils import BufferView, encode
+from .encoding_utils import BufferView, build_field_metadata
 from .header import HeaderEncoding, encode_header
 from .jit_codec import encode_chunk_jit
-from .types import CompressionOption, EncodingInfo, EncodingOptions, FieldType
-
-# Default chunk size: 32,768 points per chunk
-POINTS_PER_CHUNK = 32768
+from .types import CompressionOption, EncodingInfo, EncodingOptions, POINTS_PER_CHUNK
 
 
 def _zstd_compress_bound(src_size: int) -> int:
@@ -61,43 +60,11 @@ class PointcloudEncoder:
         self.header = encode_header(info, HeaderEncoding.YAML)
 
         # Build field metadata arrays for JIT
-        self._build_field_metadata()
+        self.field_offsets, self.field_types, self.field_resolutions = build_field_metadata(info)
 
-    def _build_field_metadata(self) -> None:
-        """
-        Build numpy arrays for field metadata to pass to JIT functions.
-
-        Creates three arrays:
-        - field_offsets: byte offset of each field
-        - field_types: type code for each field
-        - field_resolutions: resolution for each field (0.0 = lossless)
-        """
-        num_fields = len(self.info.fields)
-
-        self.field_offsets = np.zeros(num_fields, dtype=np.int32)
-        self.field_types = np.zeros(num_fields, dtype=np.int32)
-        self.field_resolutions = np.zeros(num_fields, dtype=np.float64)
-
-        for idx, field in enumerate(self.info.fields):
-            self.field_offsets[idx] = field.offset
-            self.field_types[idx] = int(field.type)
-
-            # Set resolution based on encoding option
-            # Sentinel values:
-            #   > 0.0  → lossy quantize+delta+varint
-            #   == 0.0 → XOR lossless (FLOAT64 only)
-            #   -1.0   → raw 4-byte copy (FLOAT32 without resolution)
-            if self.info.encoding_opt == EncodingOptions.LOSSY and field.resolution is not None:
-                self.field_resolutions[idx] = field.resolution
-            elif field.type == FieldType.FLOAT64:
-                # FLOAT64 without resolution → XOR lossless
-                self.field_resolutions[idx] = 0.0
-            elif field.type == FieldType.FLOAT32:
-                # FLOAT32 without resolution → raw copy (C++ uses FieldEncoderCopy)
-                self.field_resolutions[idx] = -1.0
-            else:
-                # Integer types: resolution doesn't matter (always delta+varint)
-                self.field_resolutions[idx] = 0.0
+        # Reuse compressor across chunks
+        if info.compression_opt == CompressionOption.ZSTD:
+            self._zstd_cctx = zstd.ZstdCompressor(level=1)
 
     def encode(self, cloud_data: bytes) -> bytes:
         """
@@ -189,31 +156,16 @@ class PointcloudEncoder:
             chunk_data: Encoded chunk data
             output_view: Output buffer
         """
-        if self.info.compression_opt == CompressionOption.NONE:
-            # No compression: write size + data
-            size_buffer = BufferView(memoryview(output_view.data[:4]))
-            encode(len(chunk_data), size_buffer, "I")
-            output_view.trim_front(4)
-            output_view.write_bytes(chunk_data)
-
-        elif self.info.compression_opt == CompressionOption.LZ4:
-            # LZ4 compression
-            compressed = lz4.block.compress(chunk_data, store_size=False)
-            # Write chunk size (uint32)
-            size_buffer = BufferView(memoryview(output_view.data[:4]))
-            encode(len(compressed), size_buffer, "I")
-            output_view.trim_front(4)
-            output_view.write_bytes(compressed)
-
+        if self.info.compression_opt == CompressionOption.LZ4:
+            payload = lz4.block.compress(chunk_data, store_size=False)
         elif self.info.compression_opt == CompressionOption.ZSTD:
-            # ZSTD compression
-            cctx = zstd.ZstdCompressor(level=1)
-            compressed = cctx.compress(chunk_data)
-            # Write chunk size (uint32)
-            size_buffer = BufferView(memoryview(output_view.data[:4]))
-            encode(len(compressed), size_buffer, "I")
-            output_view.trim_front(4)
-            output_view.write_bytes(compressed)
-
+            payload = self._zstd_cctx.compress(chunk_data)
+        elif self.info.compression_opt == CompressionOption.NONE:
+            payload = chunk_data
         else:
             raise RuntimeError(f"Unknown compression option: {self.info.compression_opt}")
+
+        # Write uint32 size + payload
+        struct.pack_into("<I", output_view.data, 0, len(payload))
+        output_view.trim_front(4)
+        output_view.write_bytes(payload)

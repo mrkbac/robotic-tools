@@ -9,18 +9,15 @@ import lz4.block
 import numpy as np
 import zstandard as zstd
 
-from .encoding_utils import ConstBufferView, decode
-from .header import HeaderEncoding, decode_header, encode_header
+from .encoding_utils import BufferView, build_field_metadata, decode
+from .header import decode_header
 from .jit_codec import decode_chunk_jit
 from .types import (
-    MAGIC_HEADER_LENGTH,
+    POINTS_PER_CHUNK,
     CompressionOption,
     EncodingInfo,
     EncodingOptions,
-    FieldType,
 )
-
-POINTS_PER_CHUNK = 32768
 
 
 class PointcloudDecoder:
@@ -44,30 +41,15 @@ class PointcloudDecoder:
         Returns:
             Tuple of (decompressed_data, encoding_info)
         """
-        # Create a mutable view for header decoding
-        input_view = ConstBufferView(compressed_data)
+        # Decode header and get bytes consumed
+        info, header_size = decode_header(bytes(compressed_data))
 
-        # Decode header (returns EncodingInfo)
-        info = decode_header(bytes(compressed_data))
-
-        # Calculate header size by encoding it again and checking length
-        # Check if it's YAML or binary by looking at the format
-        if len(compressed_data) > MAGIC_HEADER_LENGTH + 2:
-            if compressed_data[MAGIC_HEADER_LENGTH + 2] == ord("\n"):
-                # YAML format
-                test_header = encode_header(info, HeaderEncoding.YAML)
-            else:
-                # Binary format
-                test_header = encode_header(info, HeaderEncoding.BINARY)
-            header_size = len(test_header)
-        else:
-            raise RuntimeError("Invalid compressed data: too short")
-
-        # Skip the header
+        # Create view starting after header
+        input_view = BufferView(compressed_data)
         input_view.trim_front(header_size)
 
         # Build field metadata arrays for JIT
-        field_offsets, field_types, field_resolutions = self._build_field_metadata(info)
+        field_offsets, field_types, field_resolutions = build_field_metadata(info)
 
         # Allocate output buffer
         total_points = info.width * info.height
@@ -79,7 +61,7 @@ class PointcloudDecoder:
         if info.version >= 3:
             while not input_view.empty():
                 # Read chunk size
-                chunk_size = decode(input_view, "I")  # uint32
+                chunk_size = int(decode(input_view, "I"))  # uint32
 
                 if chunk_size > input_view.size():
                     raise RuntimeError("Invalid chunk size found while decoding")
@@ -140,47 +122,6 @@ class PointcloudDecoder:
                 output_offset = points_decoded * info.point_step
 
         return bytes(output[:output_offset]), info
-
-    def _build_field_metadata(
-        self, info: EncodingInfo
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Build numpy arrays for field metadata to pass to JIT functions.
-
-        Args:
-            info: Encoding information
-
-        Returns:
-            Tuple of (field_offsets, field_types, field_resolutions)
-        """
-        num_fields = len(info.fields)
-
-        field_offsets = np.zeros(num_fields, dtype=np.int32)
-        field_types = np.zeros(num_fields, dtype=np.int32)
-        field_resolutions = np.zeros(num_fields, dtype=np.float64)
-
-        for idx, field in enumerate(info.fields):
-            field_offsets[idx] = field.offset
-            field_types[idx] = int(field.type)
-
-            # Set resolution based on encoding option
-            # Sentinel values:
-            #   > 0.0  → lossy quantize+delta+varint
-            #   == 0.0 → XOR lossless (FLOAT64 only)
-            #   -1.0   → raw 4-byte copy (FLOAT32 without resolution)
-            if info.encoding_opt == EncodingOptions.LOSSY and field.resolution is not None:
-                field_resolutions[idx] = field.resolution
-            elif field.type == FieldType.FLOAT64:
-                # FLOAT64 without resolution → XOR lossless
-                field_resolutions[idx] = 0.0
-            elif field.type == FieldType.FLOAT32:
-                # FLOAT32 without resolution → raw copy (C++ uses FieldEncoderCopy)
-                field_resolutions[idx] = -1.0
-            else:
-                # Integer types: resolution doesn't matter (always delta+varint)
-                field_resolutions[idx] = 0.0
-
-        return field_offsets, field_types, field_resolutions
 
     def _decompress_chunk(self, info: EncodingInfo, chunk_data: bytes) -> bytes:
         """

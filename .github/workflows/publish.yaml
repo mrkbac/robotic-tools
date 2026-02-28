@@ -15,6 +15,7 @@ on:
           - digitalis
           - mcap-ros2-support-fast
           - pointcloud2
+          - pureini
           - pymcap-cli
           - ros-parser
           - small-mcap
@@ -49,6 +50,7 @@ jobs:
           - digitalis
           - mcap-ros2-support-fast
           - pointcloud2
+          - pureini
           - pymcap-cli
           - ros-parser
           - small-mcap
