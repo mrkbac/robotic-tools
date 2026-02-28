@@ -2,7 +2,7 @@
 
 import sys
 
-from cyclopts import App
+from cyclopts import App, Group
 
 from pymcap_cli.cmd import (
     cat_cmd,
@@ -70,27 +70,30 @@ app = App(
     help_format="rich",
 )
 
+inspect_group = Group("Inspect", sort_key=0)
+transform_group = Group("Transform", sort_key=1)
 
-# Register all commands
-app.command(name="cat")(cat_cmd.cat)
-app.command(name="info")(info_cmd.info)
-app.command(name="info-json")(info_json_cmd.info_json)
-app.command(name="recover")(recover_cmd.recover)
-app.command(name="recover-inplace")(recover_inplace_cmd.recover_inplace)
-app.command(name="du")(du_cmd.du)
-app.command(name="process")(process_cmd.process)
-app.command(name="rechunk")(rechunk_cmd.rechunk)
-app.command(name="tftree")(tftree_cmd.tftree)
-app.command(name="video")(video)
-app.command(name="filter")(filter_cmd.filter_cmd)
-app.command(name="merge")(merge_cmd.merge)
-app.command(name="compress")(compress_cmd.compress)
-app.command(name="convert")(convert_cmd.convert)
-app.command(name="records")(records_cmd.records)
-app.command(name="roscompress")(roscompress)
-
-# Command groups (list has 5 subcommands)
+# Inspect commands — read-only, extract information
+app.command(name="cat", group=inspect_group)(cat_cmd.cat)
+app.command(name="du", group=inspect_group)(du_cmd.du)
+app.command(name="info", group=inspect_group)(info_cmd.info)
+app.command(name="info-json", group=inspect_group)(info_json_cmd.info_json)
+list_cmd.list_app.group = (inspect_group,)
 app.command(list_cmd.list_app, name="list")
+app.command(name="records", group=inspect_group)(records_cmd.records)
+app.command(name="tftree", group=inspect_group)(tftree_cmd.tftree)
+
+# Transform commands — convert, filter, or produce new files
+app.command(name="compress", group=transform_group)(compress_cmd.compress)
+app.command(name="convert", group=transform_group)(convert_cmd.convert)
+app.command(name="filter", group=transform_group)(filter_cmd.filter_cmd)
+app.command(name="merge", group=transform_group)(merge_cmd.merge)
+app.command(name="process", group=transform_group)(process_cmd.process)
+app.command(name="rechunk", group=transform_group)(rechunk_cmd.rechunk)
+app.command(name="recover", group=transform_group)(recover_cmd.recover)
+app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
+app.command(name="roscompress", group=transform_group)(roscompress)
+app.command(name="video", group=transform_group)(video)
 
 
 def main() -> None:
