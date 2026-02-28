@@ -1,6 +1,6 @@
 [project]
 name = "pymcap-cli"
-version = "0.1.4"
+version = "0.1.5"
 description = "High-performance Python CLI for MCAP file processing with advanced recovery, filtering, and optimization capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
