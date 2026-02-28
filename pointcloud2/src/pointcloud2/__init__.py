@@ -233,9 +233,10 @@ def fields_from_dtype(dtype: np.dtype) -> list[PointField]:
     if dtype.names is None or dtype.fields is None:
         return []
 
+    field_info = dict(dtype.fields)
     fields: list[PointField] = []
     for name in dtype.names:
-        dt, offset, *_ = dtype.fields[name]
+        dt, offset, *_ = field_info[name]
         fields.append(PointField(name, offset, NP_TO_FIELD_TYPE[np.dtype(dt.type)]))
 
     return fields
