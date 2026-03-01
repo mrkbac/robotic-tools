@@ -21,6 +21,7 @@ declare module "@tanstack/react-table" {
     headerTitle?: string;
     width?: number;
     enableHiding?: boolean;
+    truncate?: boolean;
   }
 }
 
@@ -32,6 +33,7 @@ interface ColumnContext {
   detailExpandedIds: Set<number>;
   selectable?: boolean;
   compact?: boolean;
+  isTreeView?: boolean;
 }
 
 const COMPACT_HIDDEN = new Set([
@@ -156,9 +158,15 @@ export function getColumns(
       header: "Topic",
       enableSorting: true,
       sortingFn: "alphanumeric",
+      meta: { truncate: true },
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
-        return <TopicDisplay topic={row.original.topic} />;
+        return (
+          <TopicDisplay
+            topic={row.original.topic}
+            leafOnly={ctx.isTreeView}
+          />
+        );
       },
     }),
 
@@ -170,6 +178,7 @@ export function getColumns(
         const b = rowB.original.schema_name ?? "";
         return a.localeCompare(b);
       },
+      meta: { truncate: true },
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
         return <SchemaDisplay name={row.original.schema_name} />;

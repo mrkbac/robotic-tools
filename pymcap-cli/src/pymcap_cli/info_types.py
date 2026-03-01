@@ -6,6 +6,55 @@ from typing import TypedDict, Union
 from typing_extensions import Required
 
 
+class AttachmentInfo(TypedDict, total=False):
+    r"""
+    AttachmentInfo.
+
+    MCAP attachment record.
+    """
+
+    name: Required[str]
+    r""" Required property """
+
+    media_type: Required[str]
+    r""" Required property """
+
+    data_size: Required[int]
+    r"""
+    minimum: 0
+
+    Required property
+    """
+
+    log_time: Required[int]
+    r"""
+    minimum: 0
+
+    Required property
+    """
+
+    create_time: Required[int]
+    r"""
+    minimum: 0
+
+    Required property
+    """
+
+    offset: Required[int]
+    r"""
+    minimum: 0
+
+    Required property
+    """
+
+    length: Required[int]
+    r"""
+    minimum: 0
+
+    Required property
+    """
+
+
 class ChannelInfo(TypedDict, total=False):
     r"""
     ChannelInfo.
@@ -89,6 +138,27 @@ class ChannelInfo(TypedDict, total=False):
     message_end_time: Required[int | None]
     r"""
     minimum: 0
+
+    Required property
+    """
+
+    estimated_sizes: Required[bool]
+    r"""
+    Whether size_bytes is estimated from MessageIndex offsets (true) or measured from actual data (false).
+
+    Required property
+    """
+
+    jitter_ns: Required[int | float | None]
+    r"""
+    Standard deviation of inter-message intervals in nanoseconds.
+
+    Required property
+    """
+
+    jitter_cv: Required[int | float | None]
+    r"""
+    Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable.
 
     Required property
     """
@@ -287,6 +357,11 @@ class McapInfoOutput(TypedDict, total=False):
     Required property
     """
 
+    metadata: list["MetadataInfo"]
+    attachments: list["AttachmentInfo"]
+    thumbnail: str
+    r""" Base64-encoded micro-thumbnail JPEG (48x36, q=0.5). """
+
 
 class MessageDistribution(TypedDict, total=False):
     r"""
@@ -318,6 +393,20 @@ class MessageDistribution(TypedDict, total=False):
 
     Required property
     """
+
+
+class MetadataInfo(TypedDict, total=False):
+    r"""
+    MetadataInfo.
+
+    MCAP metadata record.
+    """
+
+    name: Required[str]
+    r""" Required property """
+
+    metadata: Required[dict[str, str]]
+    r""" Required property """
 
 
 class PartialStats(TypedDict, total=False):
@@ -368,6 +457,12 @@ class SchemaInfo(TypedDict, total=False):
     r""" Required property """
 
     name: Required[str]
+    r""" Required property """
+
+    encoding: Required[str]
+    r""" Required property """
+
+    data: Required[str]
     r""" Required property """
 
 

@@ -8,7 +8,7 @@
     "build": "prettier --write . && tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "generate-types": "json2ts -i ../pymcap-cli/schemas/mcap_info.json -o src/mcap/types.generated.ts --no-additionalProperties --style.singleQuote --style.semi"
+    "generate-types": "json2ts -i ../pymcap-cli/schemas/mcap_info.json -o src/mcap/types.generated.ts --no-additionalProperties --unreachableDefinitions --style.singleQuote --style.semi"
   },
   "dependencies": {
     "@foxglove/wasm-bz2": "^0.3.0",

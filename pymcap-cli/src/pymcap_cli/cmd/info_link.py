@@ -7,7 +7,7 @@ import zlib
 from pathlib import Path
 from typing import Literal, TypedDict
 
-from pymcap_cli.info_types import McapInfoOutput, SchemaInfo
+from pymcap_cli.info_types import McapInfoOutput
 
 ScanMode = Literal["summary", "rebuild", "exact"]
 
@@ -72,20 +72,26 @@ def _progressive_strip(payload: _UrlPayload) -> str:
     if len(encoded) <= MAX_HASH_BYTES:
         return encoded
 
-    # Strip metadata and attachments (present in web inspector payloads)
+    # Strip metadata and attachments
     data = payload["data"]
-    data.pop("metadata", None)  # type: ignore[misc]
-    data.pop("attachments", None)  # type: ignore[misc]
+    data.pop("metadata", None)
+    data.pop("attachments", None)
+    encoded = _encode(payload)
+    if len(encoded) <= MAX_HASH_BYTES:
+        return encoded
+
+    # Strip thumbnail as last resort
+    data.pop("thumbnail", None)
     return _encode(payload)
 
 
 def generate_link(data: McapInfoOutput, file_path: str, file_size: int, mode: ScanMode) -> str:
     file_id = _create_file_id(file_path, file_size)
 
-    # Strip schema data for URL (keep only id and name)
+    # Strip schema data for URL (keep only id, name, encoding; clear data content)
     stripped = McapInfoOutput(**data)
-    if "schemas" in stripped:
-        stripped["schemas"] = [SchemaInfo(id=s["id"], name=s["name"]) for s in stripped["schemas"]]
+    for s in stripped.get("schemas", []):
+        s["data"] = ""
 
     payload = _UrlPayload(mode=mode, fileId=file_id, data=stripped)
     return f"{BASE_URL}{_progressive_strip(payload)}"

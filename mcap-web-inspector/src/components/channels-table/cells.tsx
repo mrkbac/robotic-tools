@@ -1,4 +1,4 @@
-import { Text, HoverCard, Stack, Group } from "@mantine/core";
+import { Text, HoverCard, Stack, Group, Tooltip } from "@mantine/core";
 import type { PartialStats } from "../../mcap/types.ts";
 import { formatHz, formatBytes } from "../../format.ts";
 import { stringToColor, formatJitterNs, jitterColor } from "./utils.ts";
@@ -24,9 +24,21 @@ export function StatsRow({
   );
 }
 
-export function TopicDisplay({ topic }: { topic: string }) {
+export function TopicDisplay({
+  topic,
+  leafOnly,
+}: {
+  topic: string;
+  leafOnly?: boolean;
+}) {
   const parts = topic.split("/").filter(Boolean);
-  return (
+  const display = leafOnly ? (
+    <Text size="sm" style={{ fontFamily: "monospace" }}>
+      <span style={{ color: stringToColor(parts[parts.length - 1] ?? "") }}>
+        {parts[parts.length - 1]}
+      </span>
+    </Text>
+  ) : (
     <Text size="sm" style={{ fontFamily: "monospace" }}>
       {parts.map((part, i) => (
         <span key={i}>
@@ -35,6 +47,12 @@ export function TopicDisplay({ topic }: { topic: string }) {
         </span>
       ))}
     </Text>
+  );
+
+  return (
+    <Tooltip label={topic} openDelay={400}>
+      {display}
+    </Tooltip>
   );
 }
 
@@ -46,7 +64,11 @@ export function SchemaDisplay({ name }: { name: string | null | undefined }) {
       </Text>
     );
   }
-  return <Text size="sm">{name}</Text>;
+  return (
+    <Tooltip label={name} openDelay={400}>
+      <Text size="sm">{name}</Text>
+    </Tooltip>
+  );
 }
 
 export function HzDisplay({

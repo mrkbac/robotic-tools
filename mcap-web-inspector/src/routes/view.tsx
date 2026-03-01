@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useLocation } from "@tanstack/react-router";
 import {
   Stack,
   Progress,
@@ -40,6 +40,7 @@ import { saveHistoryEntry } from "../stores/historyStore.ts";
 
 function ViewPage() {
   const navigate = useNavigate();
+  const locationHash = useLocation({ select: (l) => l.hash });
   const [data, setData] = useState<McapInfoOutput | null>(null);
   const [scanMode, setScanMode] = useState<ScanMode>("summary");
   const [fileId, setFileId] = useState<string>("");
@@ -53,14 +54,13 @@ function ViewPage() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
-  const [hashThumbnail, setHashThumbnail] = useState<string | undefined>();
   const [detailSection, setDetailSection] = useState<DetailSection | null>(
     null,
   );
 
   const generationRef = useRef(0);
   const { tryGetCachedRaw, readAndCache, getThumbnails } = useMcapCache();
-  const decodedRef = useRef(false);
+  const [decodedHash, setDecodedHash] = useState<string>("");
 
   const {
     status: recoveryStatus,
@@ -76,34 +76,45 @@ function ViewPage() {
     }
   }, [recoveredFile, fileId]);
 
-  // Decode hash on mount
+  // Decode hash on mount and when hash changes (e.g. file dropped on /view)
   useEffect(() => {
-    if (decodedRef.current) return;
-    decodedRef.current = true;
-
-    const rawHash = location.hash.slice(1);
+    const rawHash = locationHash.startsWith("#")
+      ? locationHash.slice(1)
+      : locationHash;
     if (!rawHash) {
       setDecodeError(true);
       return;
     }
+    if (rawHash === decodedHash) return;
 
     decodeFromHash(rawHash)
       .then((result) => {
+        setDecodedHash(rawHash);
         setData(result.data);
         setScanMode(result.scanMode);
         setFileId(result.fileId);
-        if (result.thumbnail) setHashThumbnail(result.thumbnail);
+        setDecodeError(false);
+
+        // Reset thumbnails from module-level ref (set during processing)
+        const thumbRef = getThumbnailRef();
+        if (thumbRef && thumbRef.size > 0) {
+          setThumbnails(thumbRef);
+        } else {
+          setThumbnails(new Map());
+        }
 
         // Check if we have the file via WeakRef
         const ref = getFileRef();
         if (ref && fileMatchesId(ref, result.fileId)) {
           setLocalFile(ref);
+        } else {
+          setLocalFile(undefined);
         }
       })
       .catch(() => {
         setDecodeError(true);
       });
-  }, []);
+  }, [locationHash, decodedHash]);
 
   // Load thumbnails from IDB cache if not already available from ref
   useEffect(() => {
@@ -132,7 +143,7 @@ function ViewPage() {
         const fid = createFileId(localFile);
         const microThumb = thumbs
           ? await createMicroThumbFromMap(thumbs)
-          : (hashThumbnail ?? null);
+          : (data?.thumbnail ?? null);
         const newHash = await encodeToHash(result, m, fid, microThumb);
         saveHistoryEntry({
           fileId: fid,
@@ -199,7 +210,7 @@ function ViewPage() {
       localFile,
       loading,
       scanMode,
-      hashThumbnail,
+      data,
       thumbnails,
       tryGetCachedRaw,
       readAndCache,
@@ -299,16 +310,17 @@ function ViewPage() {
 
         <Tabs.Panel value="inspect" pt="md">
           <Stack gap="lg">
-            <FileHeader
-              fileName={data.file.path}
+            <FileHeader fileName={data.file.path} />
+            <FileInfo
+              data={data}
+              onCountClick={setDetailSection}
               thumbnails={thumbnails}
               fallbackThumbnailUrl={
-                hashThumbnail
-                  ? thumbnailBase64ToDataUrl(hashThumbnail)
+                data.thumbnail
+                  ? thumbnailBase64ToDataUrl(data.thumbnail)
                   : undefined
               }
             />
-            <FileInfo data={data} onCountClick={setDetailSection} />
             <UnifiedDistributionChart
               channels={data.channels}
               globalDistribution={data.message_distribution}

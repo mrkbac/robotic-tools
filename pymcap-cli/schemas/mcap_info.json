@@ -39,6 +39,22 @@
     },
     "message_distribution": {
       "$ref": "#/definitions/MessageDistribution"
+    },
+    "metadata": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/MetadataInfo"
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/AttachmentInfo"
+      }
+    },
+    "thumbnail": {
+      "type": "string",
+      "description": "Base64-encoded micro-thumbnail JPEG (48x36, q=0.5)."
     }
   },
   "definitions": {
@@ -300,7 +316,10 @@
         "bytes_per_message",
         "message_distribution",
         "message_start_time",
-        "message_end_time"
+        "message_end_time",
+        "estimated_sizes",
+        "jitter_ns",
+        "jitter_cv"
       ],
       "properties": {
         "id": {
@@ -383,6 +402,24 @@
             "null"
           ],
           "minimum": 0
+        },
+        "estimated_sizes": {
+          "type": "boolean",
+          "description": "Whether size_bytes is estimated from MessageIndex offsets (true) or measured from actual data (false)."
+        },
+        "jitter_ns": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Standard deviation of inter-message intervals in nanoseconds."
+        },
+        "jitter_cv": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable."
         }
       }
     },
@@ -392,7 +429,9 @@
       "type": "object",
       "required": [
         "id",
-        "name"
+        "name",
+        "encoding",
+        "data"
       ],
       "properties": {
         "id": {
@@ -400,6 +439,103 @@
         },
         "name": {
           "type": "string"
+        },
+        "encoding": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        }
+      }
+    },
+    "MetadataInfo": {
+      "title": "MetadataInfo",
+      "description": "MCAP metadata record.",
+      "type": "object",
+      "required": [
+        "name",
+        "metadata"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "AttachmentInfo": {
+      "title": "AttachmentInfo",
+      "description": "MCAP attachment record.",
+      "type": "object",
+      "required": [
+        "name",
+        "media_type",
+        "data_size",
+        "log_time",
+        "create_time",
+        "offset",
+        "length"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "data_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "log_time": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "create_time": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ScanMode": {
+      "title": "ScanMode",
+      "description": "Scan depth level.",
+      "type": "string",
+      "enum": ["summary", "rebuild", "exact"]
+    },
+    "UrlPayload": {
+      "title": "UrlPayload",
+      "description": "Shareable URL payload wrapping McapInfoOutput with scan metadata.",
+      "type": "object",
+      "required": [
+        "mode",
+        "fileId",
+        "data"
+      ],
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/ScanMode"
+        },
+        "fileId": {
+          "type": "string",
+          "description": "Browser-side file identifier derived from filename and size."
+        },
+        "data": {
+          "$ref": "#",
+          "description": "The McapInfoOutput data."
         }
       }
     },

@@ -6,6 +6,17 @@
  */
 
 /**
+ * Scan depth level.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "ScanMode".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "ScanMode".
+ */
+export type ScanMode = 'summary' | 'rebuild' | 'exact';
+
+/**
  * Complete MCAP info output structure.
  */
 export interface McapInfoOutput {
@@ -16,9 +27,21 @@ export interface McapInfoOutput {
   channels: ChannelInfo[];
   schemas: SchemaInfo[];
   message_distribution: MessageDistribution;
+  metadata?: MetadataInfo[];
+  attachments?: AttachmentInfo[];
+  /**
+   * Base64-encoded micro-thumbnail JPEG (48x36, q=0.5).
+   */
+  thumbnail?: string;
 }
 /**
  * File metadata.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "FileInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "FileInfo".
  */
 export interface FileInfo {
   path: string;
@@ -26,6 +49,12 @@ export interface FileInfo {
 }
 /**
  * MCAP header information.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "HeaderInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "HeaderInfo".
  */
 export interface HeaderInfo {
   library: string;
@@ -33,6 +62,12 @@ export interface HeaderInfo {
 }
 /**
  * MCAP statistics.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "StatisticsInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "StatisticsInfo".
  */
 export interface StatisticsInfo {
   message_count: number;
@@ -47,6 +82,12 @@ export interface StatisticsInfo {
 }
 /**
  * Chunk-related information.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "ChunksInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "ChunksInfo".
  */
 export interface ChunksInfo {
   by_compression: {
@@ -56,6 +97,12 @@ export interface ChunksInfo {
 }
 /**
  * Statistics for a specific compression type.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "CompressionStats".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "CompressionStats".
  */
 export interface CompressionStats {
   count: number;
@@ -68,6 +115,12 @@ export interface CompressionStats {
 }
 /**
  * Statistics with minimum, average, and maximum values.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "Stats".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "Stats".
  */
 export interface Stats {
   minimum: number;
@@ -77,6 +130,12 @@ export interface Stats {
 }
 /**
  * Chunk overlap information.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "ChunkOverlaps".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "ChunkOverlaps".
  */
 export interface ChunkOverlaps {
   max_concurrent: number;
@@ -84,6 +143,12 @@ export interface ChunkOverlaps {
 }
 /**
  * Information about a channel.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "ChannelInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "ChannelInfo".
  */
 export interface ChannelInfo {
   id: number;
@@ -100,9 +165,27 @@ export interface ChannelInfo {
   message_distribution: number[];
   message_start_time: number | null;
   message_end_time: number | null;
+  /**
+   * Whether size_bytes is estimated from MessageIndex offsets (true) or measured from actual data (false).
+   */
+  estimated_sizes: boolean;
+  /**
+   * Standard deviation of inter-message intervals in nanoseconds.
+   */
+  jitter_ns: number | null;
+  /**
+   * Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable.
+   */
+  jitter_cv: number | null;
 }
 /**
  * Statistics where only average is always available; min/max/median are only available in rebuild mode.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "PartialStats".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "PartialStats".
  */
 export interface PartialStats {
   average: number;
@@ -112,17 +195,96 @@ export interface PartialStats {
 }
 /**
  * Information about a schema.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "SchemaInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "SchemaInfo".
  */
 export interface SchemaInfo {
   id: number;
   name: string;
+  encoding: string;
+  data: string;
 }
 /**
  * Message distribution across time buckets.
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "MessageDistribution".
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "MessageDistribution".
  */
 export interface MessageDistribution {
   bucket_count: number;
   bucket_duration_ns: number;
   message_counts: number[];
   max_count: number;
+}
+/**
+ * MCAP metadata record.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "MetadataInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "MetadataInfo".
+ */
+export interface MetadataInfo {
+  name: string;
+  metadata: {
+    [k: string]: string;
+  };
+}
+/**
+ * MCAP attachment record.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "AttachmentInfo".
+ *
+ * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
+ * via the `definition` "AttachmentInfo".
+ */
+export interface AttachmentInfo {
+  name: string;
+  media_type: string;
+  data_size: number;
+  log_time: number;
+  create_time: number;
+  offset: number;
+  length: number;
+}
+/**
+ * Shareable URL payload wrapping McapInfoOutput with scan metadata.
+ *
+ * This interface was referenced by `McapInfoOutput`'s JSON-Schema
+ * via the `definition` "UrlPayload".
+ */
+export interface UrlPayload {
+  mode: ScanMode;
+  /**
+   * Browser-side file identifier derived from filename and size.
+   */
+  fileId: string;
+  data: McapInfoOutput1;
+}
+/**
+ * The McapInfoOutput data.
+ */
+export interface McapInfoOutput1 {
+  file: FileInfo;
+  header: HeaderInfo;
+  statistics: StatisticsInfo;
+  chunks: ChunksInfo;
+  channels: ChannelInfo[];
+  schemas: SchemaInfo[];
+  message_distribution: MessageDistribution;
+  metadata?: MetadataInfo[];
+  attachments?: AttachmentInfo[];
+  /**
+   * Base64-encoded micro-thumbnail JPEG (48x36, q=0.5).
+   */
+  thumbnail?: string;
 }

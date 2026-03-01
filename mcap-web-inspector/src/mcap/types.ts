@@ -1,6 +1,5 @@
 // Re-export all generated types (snake_case, number — matching JSON schema)
 export type {
-  McapInfoOutput as McapInfoOutputGenerated,
   FileInfo,
   HeaderInfo,
   StatisticsInfo,
@@ -9,62 +8,34 @@ export type {
   CompressionStats,
   ChunkOverlaps,
   ChunksInfo,
-  ChannelInfo as ChannelInfoGenerated,
-  SchemaInfo as SchemaInfoGenerated,
+  ChannelInfo,
+  SchemaInfo,
   MessageDistribution,
+  MetadataInfo,
+  AttachmentInfo,
+  ScanMode,
 } from "./types.generated.ts";
 
 import type {
   McapInfoOutput as McapInfoOutputGenerated,
-  ChannelInfo as ChannelInfoGenerated,
-  SchemaInfo as SchemaInfoGenerated,
+  ScanMode,
 } from "./types.generated.ts";
 
-// ── TS-only extensions ──
+// ── App-level types ──
 
-/** ChannelInfo with TS-only fields not yet in the JSON schema. */
-export interface ChannelInfo extends ChannelInfoGenerated {
-  /** Whether size_bytes is estimated from MessageIndex offsets (true) or measured from actual data (false). */
-  estimated_sizes: boolean;
-  /** Standard deviation of inter-message intervals in nanoseconds. */
-  jitter_ns: number | null;
-  /** Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable. */
-  jitter_cv: number | null;
+/** McapInfoOutput with metadata/attachments always present (defaulted to []). */
+export interface McapInfoOutput
+  extends Omit<McapInfoOutputGenerated, "metadata" | "attachments"> {
+  metadata: NonNullable<McapInfoOutputGenerated["metadata"]>;
+  attachments: NonNullable<McapInfoOutputGenerated["attachments"]>;
 }
 
-/** SchemaInfo with TS-only fields (encoding, data) not in JSON schema. */
-export interface SchemaInfo extends SchemaInfoGenerated {
-  encoding: string;
-  data: string;
+/** Shareable URL payload wrapping McapInfoOutput with scan metadata. */
+export interface UrlPayload {
+  mode: ScanMode;
+  fileId: string;
+  data: McapInfoOutput;
 }
-
-export interface MetadataInfo {
-  name: string;
-  metadata: Record<string, string>;
-}
-
-export interface AttachmentInfo {
-  name: string;
-  media_type: string;
-  data_size: number;
-  log_time: number;
-  create_time: number;
-  offset: number;
-  length: number;
-}
-
-/** Full McapInfoOutput with TS-only arrays and extended types. */
-export interface McapInfoOutput extends Omit<
-  McapInfoOutputGenerated,
-  "channels" | "schemas"
-> {
-  channels: ChannelInfo[];
-  schemas: SchemaInfo[];
-  metadata: MetadataInfo[];
-  attachments: AttachmentInfo[];
-}
-
-export type ScanMode = "summary" | "rebuild" | "exact";
 
 export interface FilterConfig {
   include_channel_ids: Set<number> | null; // null = all

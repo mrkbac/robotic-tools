@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   SimpleGrid,
   Text,
@@ -6,23 +7,54 @@ import {
   Badge,
   Group,
   Stack,
+  Image,
+  Modal,
   UnstyledButton,
 } from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
+import type { ThumbnailMap } from "../mcap/image.ts";
 import type { DetailSection } from "./DetailModal.tsx";
 import { formatBytes, formatDuration, formatTimestamp } from "../format.ts";
 import { DistributionChart } from "./DistributionChart.tsx";
 
+function thumbnailToUrl(data: Uint8Array, format: string): string {
+  const mime = format.startsWith("image/")
+    ? format
+    : `image/${format || "jpeg"}`;
+  return URL.createObjectURL(new Blob([data as BlobPart], { type: mime }));
+}
+
 interface FileInfoProps {
   data: McapInfoOutput;
   onCountClick?: (section: DetailSection) => void;
+  thumbnails: ThumbnailMap;
+  fallbackThumbnailUrl?: string;
 }
 
-export function FileInfo({ data, onCountClick }: FileInfoProps) {
+export function FileInfo({
+  data,
+  onCountClick,
+  thumbnails,
+  fallbackThumbnailUrl,
+}: FileInfoProps) {
   const { file, header, statistics, message_distribution } = data;
   const durationSec = statistics.duration_ns / 1_000_000_000;
   const bytesPerSec = durationSec > 0 ? file.size_bytes / durationSec : 0;
   const bytesPerHour = bytesPerSec * 3600;
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const entries = useMemo(() => [...thumbnails.values()], [thumbnails]);
+  const urlsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    const urls = entries.map((e) => thumbnailToUrl(e.data, e.format));
+    urlsRef.current = urls;
+    return () => urls.forEach((u) => URL.revokeObjectURL(u));
+  }, [entries]);
+
+  const hasThumbnail =
+    (entries.length > 0 && urlsRef.current.length > 0) ||
+    !!fallbackThumbnailUrl;
 
   const clickableValue = (count: number, section: DetailSection) => {
     const text = count.toLocaleString();
@@ -38,8 +70,8 @@ export function FileInfo({ data, onCountClick }: FileInfoProps) {
     return text;
   };
 
-  return (
-    <Paper p="md" withBorder>
+  const statsGrid = (
+    <>
       <SimpleGrid cols={{ base: 2, sm: 3, lg: 4 }} spacing="sm">
         <InfoItem
           label="Size"
@@ -116,7 +148,74 @@ export function FileInfo({ data, onCountClick }: FileInfoProps) {
           </Text>
         </>
       )}
+    </>
+  );
+
+  const hasFullThumbnail = entries.length > 0 && urlsRef.current.length > 0;
+  const thumbnailSrc = hasFullThumbnail
+    ? urlsRef.current[0]
+    : fallbackThumbnailUrl;
+
+  return (
+    <>
+    <Paper p="md" withBorder>
+      {hasThumbnail ? (
+        <Group align="stretch" gap="md" wrap="nowrap">
+          <UnstyledButton
+            onClick={hasFullThumbnail ? () => setModalOpen(true) : undefined}
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              cursor: hasFullThumbnail ? "pointer" : "default",
+            }}
+          >
+            <Image
+              src={thumbnailSrc}
+              alt="Thumbnail"
+              h={hasFullThumbnail ? "100%" : undefined}
+              miw={hasFullThumbnail ? undefined : 64}
+              mih={hasFullThumbnail ? undefined : 48}
+              mah={160}
+              w="auto"
+              maw={200}
+              fit={hasFullThumbnail ? "contain" : "cover"}
+              radius="sm"
+              style={hasFullThumbnail ? undefined : { imageRendering: "pixelated" }}
+            />
+          </UnstyledButton>
+          <div style={{ flex: 1, minWidth: 0 }}>{statsGrid}</div>
+        </Group>
+      ) : (
+        statsGrid
+      )}
     </Paper>
+
+    <Modal
+      opened={modalOpen}
+      onClose={() => setModalOpen(false)}
+      title="Image Topics"
+      size="xl"
+    >
+      <SimpleGrid cols={{ base: 1, xs: 2, sm: 3, md: 4 }} spacing="sm">
+        {entries.map((entry, i) => (
+          <Stack key={entry.channelId} gap={4} align="center">
+            <Image
+              src={urlsRef.current[i]}
+              alt={entry.topic}
+              h={100}
+              w="auto"
+              fit="contain"
+              radius="sm"
+            />
+            <Text size="xs" c="dimmed" ta="center" truncate="end" maw="100%">
+              {entry.topic}
+            </Text>
+          </Stack>
+        ))}
+      </SimpleGrid>
+    </Modal>
+    </>
   );
 }
 

@@ -6,17 +6,10 @@
  * No bigint handling needed — all fields are plain numbers.
  */
 
-import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
+import type { McapInfoOutput, ScanMode, UrlPayload } from "../mcap/types.ts";
 import { compressToBase64url, decompressFromBase64url } from "./compress.ts";
 
 const MAX_HASH_BYTES = 8 * 1024;
-
-interface UrlPayload {
-  mode: ScanMode;
-  fileId: string;
-  data: McapInfoOutput;
-  thumbnail?: string;
-}
 
 /** Strip large/irrelevant data for URL encoding. */
 function stripForUrl(data: McapInfoOutput): McapInfoOutput {
@@ -45,8 +38,9 @@ export async function encodeToHash(
   fileId: string,
   thumbnail?: string | null,
 ): Promise<string> {
-  const payload: UrlPayload = { mode, fileId, data: stripForUrl(data) };
-  if (thumbnail) payload.thumbnail = thumbnail;
+  const stripped = stripForUrl(data);
+  if (thumbnail) stripped.thumbnail = thumbnail;
+  const payload: UrlPayload = { mode, fileId, data: stripped };
 
   let json = JSON.stringify(payload);
   let encoded = await compressToBase64url(json);
@@ -79,8 +73,8 @@ export async function encodeToHash(
   }
 
   // Strip thumbnail as last resort
-  if (encoded.length > MAX_HASH_BYTES && payload.thumbnail) {
-    delete payload.thumbnail;
+  if (encoded.length > MAX_HASH_BYTES && payload.data.thumbnail) {
+    delete payload.data.thumbnail;
     json = JSON.stringify(payload);
     encoded = await compressToBase64url(json);
   }
@@ -92,20 +86,18 @@ export async function encodeToHash(
 // Decode
 // ---------------------------------------------------------------------------
 
-export async function decodeFromHash(
-  hash: string,
-): Promise<{
+export async function decodeFromHash(hash: string): Promise<{
   data: McapInfoOutput;
   scanMode: ScanMode;
   fileId: string;
-  thumbnail?: string;
 }> {
   const json = await decompressFromBase64url(hash);
   const payload = JSON.parse(json) as UrlPayload;
 
   const data = payload.data;
 
-  // Backward compat: old URLs may lack metadata/attachments/jitter
+  // Backward compat: old URLs may lack metadata/attachments/jitter or have
+  // thumbnail at payload root instead of inside data.
   if (!data.metadata) data.metadata = [];
   if (!data.attachments) data.attachments = [];
   for (const ch of data.channels) {
@@ -118,6 +110,5 @@ export async function decodeFromHash(
     data,
     scanMode: payload.mode,
     fileId: payload.fileId,
-    thumbnail: payload.thumbnail,
   };
 }

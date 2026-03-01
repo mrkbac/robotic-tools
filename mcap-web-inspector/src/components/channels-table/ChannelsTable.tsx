@@ -6,7 +6,7 @@ import {
   Text,
   Group,
   Collapse,
-  ScrollArea,
+
   SegmentedControl,
   Menu,
   ActionIcon,
@@ -153,6 +153,8 @@ export function ChannelsTable({
     saveTableState({ columnVisibility, sorting, columnOrder });
   }, [columnVisibility, sorting, columnOrder]);
 
+  const isTreeView = viewMode === "tree";
+
   const columns = useMemo(
     () =>
       getColumns({
@@ -161,24 +163,23 @@ export function ChannelsTable({
         detailExpandedIds,
         selectable,
         compact,
+        isTreeView,
       }),
-    [fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact],
+    [fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact, isTreeView],
   );
 
-  const effectiveViewMode = viewMode;
-
   const rawData = useMemo(() => {
-    if (effectiveViewMode === "tree") return buildTreeData(channels);
+    if (isTreeView) return buildTreeData(channels);
     return toFlatRows(channels);
-  }, [channels, effectiveViewMode]);
+  }, [channels, isTreeView]);
 
   // Apply global filter
   const filterLower = globalFilter.trim().toLowerCase();
   const data = useMemo(() => {
     if (!filterLower) return rawData;
-    if (effectiveViewMode === "tree") return filterTree(rawData, filterLower);
+    if (isTreeView) return filterTree(rawData, filterLower);
     return rawData.filter((row) => matchesFilter(row, filterLower));
-  }, [rawData, filterLower, effectiveViewMode]);
+  }, [rawData, filterLower, isTreeView]);
 
   const toggleDetail = useCallback((id: number) => {
     setDetailExpandedIds((prev) => {
@@ -191,7 +192,7 @@ export function ChannelsTable({
 
   // Force all expanded when filtering in tree mode
   const effectiveExpanded =
-    filterLower && effectiveViewMode === "tree" ? true : expanded;
+    filterLower && isTreeView ? true : expanded;
 
   // Selection state: convert between Set<number> and TanStack RowSelectionState
   const rowSelection = useMemo((): RowSelectionState => {
@@ -267,7 +268,6 @@ export function ChannelsTable({
   });
 
   const visibleCellCount = table.getVisibleLeafColumns().length;
-  const isTree = effectiveViewMode === "tree";
 
   const handleRowClick = useCallback(
     (row: Row<ChannelRow>) => {
@@ -293,8 +293,8 @@ export function ChannelsTable({
     channels.length === 0 ? (
       <Text c="dimmed">No channels found</Text>
     ) : (
-      <ScrollArea scrollbars="x">
-        <Table striped={!isTree} highlightOnHover>
+      <Table.ScrollContainer type="native" minWidth={500}>
+        <Table striped={!isTreeView} highlightOnHover stickyHeader stickyHeaderOffset={0}>
           <Table.Thead>
             {table.getHeaderGroups().map((headerGroup) => (
               <Table.Tr key={headerGroup.id}>
@@ -319,7 +319,7 @@ export function ChannelsTable({
                     {row.getVisibleCells().map((cell) => {
                       const meta = cell.column.columnDef.meta;
                       const railStyle =
-                        isTree && cell.column.id === "expand"
+                        isTreeView && cell.column.id === "expand"
                           ? getRailStyle(row.original.topic, row.depth)
                           : undefined;
                       return (
@@ -329,6 +329,14 @@ export function ChannelsTable({
                             textAlign: meta?.align,
                             width: meta?.width,
                             maxWidth: meta?.width,
+                            ...(meta?.truncate
+                              ? {
+                                  whiteSpace: "nowrap",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  maxWidth: meta?.width ?? 300,
+                                }
+                              : {}),
                             ...railStyle,
                             ...(isGroup
                               ? { fontWeight: 500, opacity: 0.8 }
@@ -370,7 +378,7 @@ export function ChannelsTable({
             })}
           </Table.Tbody>
         </Table>
-      </ScrollArea>
+      </Table.ScrollContainer>
     );
 
   if (selectable) {

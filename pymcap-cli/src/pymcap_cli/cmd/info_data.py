@@ -4,6 +4,7 @@ Extracted from info_json_cmd.py — no CLI or Rich dependencies.
 """
 
 import heapq
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -12,10 +13,12 @@ from dataclasses import dataclass, field
 from small_mcap import Channel, ChunkIndex, RebuildInfo, Schema
 
 from pymcap_cli.info_types import (
+    AttachmentInfo,
     ChannelInfo,
     CompressionStats,
     McapInfoOutput,
     MessageDistribution,
+    MetadataInfo,
     PartialStats,
     SchemaInfo,
     Stats,
@@ -185,11 +188,19 @@ def _collect_channel_statistics(
     )
 
 
+@dataclass(slots=True)
+class IntervalStatsResult:
+    hz_stats: dict[str, float]
+    jitter_ns: float
+    jitter_cv: float
+    bps_stats: dict[str, float] | None = None
+
+
 def _calculate_interval_stats(
     channel_intervals: dict[int, list[int]],
     channel_sizes: dict[int, int] | None,
     message_counts: dict[int, int],
-) -> dict[int, dict[str, dict[str, float]]]:
+) -> dict[int, IntervalStatsResult]:
     """Calculate statistical rate information from message intervals.
 
     Args:
@@ -198,11 +209,10 @@ def _calculate_interval_stats(
         message_counts: Dict mapping channel_id -> message count
 
     Returns:
-        Dict mapping channel_id -> dict with keys:
-            - hz_stats: dict with min, max, average, median Hz values
-            - bps_stats: dict with min, max, average, median bytes/second (if size data available)
+        Dict mapping channel_id -> IntervalStatsResult with hz_stats,
+        jitter_ns, jitter_cv, and optional bps_stats.
     """
-    interval_stats: dict[int, dict[str, dict[str, float]]] = {}
+    interval_stats: dict[int, IntervalStatsResult] = {}
 
     for channel_id, intervals in channel_intervals.items():
         if not intervals:
@@ -220,7 +230,13 @@ def _calculate_interval_stats(
             "median": statistics.median(hz_values),
         }
 
-        result: dict[str, dict[str, float]] = {"hz_stats": hz_stats}
+        # Calculate jitter (stddev and coefficient of variation of intervals)
+        mean_interval = sum(intervals) / len(intervals)
+        variance = sum((iv - mean_interval) ** 2 for iv in intervals) / len(intervals)
+        jitter_ns = math.sqrt(variance)
+        jitter_cv = jitter_ns / mean_interval if mean_interval > 0 else 0.0
+
+        result = IntervalStatsResult(hz_stats=hz_stats, jitter_ns=jitter_ns, jitter_cv=jitter_cv)
 
         # Calculate bytes per second statistics if size data is available
         if channel_sizes and channel_id in channel_sizes:
@@ -230,7 +246,7 @@ def _calculate_interval_stats(
             if message_count > 0:
                 # bytes/sec = Hz * average bytes per message
                 avg_bytes_per_msg = channel_size / message_count
-                result["bps_stats"] = {
+                result.bps_stats = {
                     "minimum": hz_stats["minimum"] * avg_bytes_per_msg,
                     "maximum": hz_stats["maximum"] * avg_bytes_per_msg,
                     "average": hz_stats["average"] * avg_bytes_per_msg,
@@ -346,7 +362,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     per_channel_distributions: dict[int, list[int]] = {}
     message_start_time: dict[int, int] = {}
     message_end_time: dict[int, int] = {}
-    interval_stats: dict[int, dict[str, dict[str, float]]] = {}
+    interval_stats: dict[int, IntervalStatsResult] = {}
 
     if info.chunk_information:
         (
@@ -436,6 +452,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
                 message_count=count,
                 schema_name=schema.name if schema else None,
                 channel_size=channel_size,
+                estimated_sizes=info.estimated_channel_sizes,
                 channel_duration_ns=ch_duration_ns,
                 global_duration_ns=duration_ns,
                 message_distribution=ch_distribution,
@@ -448,6 +465,25 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     # Add schema information
     for schema_id, schema in summary.schemas.items():
         output["schemas"].append(_build_schema_dict(schema_id, schema))
+
+    # Add metadata records
+    output["metadata"] = [
+        MetadataInfo(name=mi.name, metadata={}) for mi in summary.metadata_indexes
+    ]
+
+    # Add attachment information from indexes
+    output["attachments"] = [
+        AttachmentInfo(
+            name=ai.name,
+            media_type=ai.media_type,
+            data_size=ai.data_size,
+            log_time=ai.log_time,
+            create_time=ai.create_time,
+            offset=ai.offset,
+            length=ai.length,
+        )
+        for ai in summary.attachment_indexes
+    ]
 
     return output
 
@@ -487,10 +523,11 @@ def _build_channel_dict(
     message_count: int,
     schema_name: str | None,
     channel_size: int | None,
+    estimated_sizes: bool,
     channel_duration_ns: int | None,
     global_duration_ns: int,
     message_distribution: list[int],
-    interval_stats: dict[str, dict[str, float]] | None = None,
+    interval_stats: IntervalStatsResult | None = None,
     message_start_time: int | None = None,
     message_end_time: int | None = None,
 ) -> ChannelInfo:
@@ -514,11 +551,10 @@ def _build_channel_dict(
         "maximum": None,
         "median": None,
     }
-    if interval_stats and "hz_stats" in interval_stats:
-        istats = interval_stats["hz_stats"]
-        hz_stats["minimum"] = istats["minimum"]
-        hz_stats["maximum"] = istats["maximum"]
-        hz_stats["median"] = istats["median"]
+    if interval_stats:
+        hz_stats["minimum"] = interval_stats.hz_stats["minimum"]
+        hz_stats["maximum"] = interval_stats.hz_stats["maximum"]
+        hz_stats["median"] = interval_stats.hz_stats["median"]
 
     # Calculate bytes per message
     b_per_msg = None
@@ -538,11 +574,17 @@ def _build_channel_dict(
             "maximum": None,
             "median": None,
         }
-        if interval_stats and "bps_stats" in interval_stats:
-            bstats = interval_stats["bps_stats"]
-            bps_stats["minimum"] = bstats["minimum"]
-            bps_stats["maximum"] = bstats["maximum"]
-            bps_stats["median"] = bstats["median"]
+        if interval_stats and interval_stats.bps_stats:
+            bps_stats["minimum"] = interval_stats.bps_stats["minimum"]
+            bps_stats["maximum"] = interval_stats.bps_stats["maximum"]
+            bps_stats["median"] = interval_stats.bps_stats["median"]
+
+    # Extract jitter values from interval_stats (only available in rebuild mode)
+    jitter_ns: float | None = None
+    jitter_cv: float | None = None
+    if interval_stats:
+        jitter_ns = interval_stats.jitter_ns
+        jitter_cv = interval_stats.jitter_cv
 
     return {
         "id": channel.id,
@@ -551,6 +593,7 @@ def _build_channel_dict(
         "schema_name": schema_name,
         "message_count": message_count,
         "size_bytes": channel_size,
+        "estimated_sizes": estimated_sizes,
         "duration_ns": channel_duration_ns,
         "hz_stats": hz_stats,
         "hz_channel": hz_channel,
@@ -559,6 +602,8 @@ def _build_channel_dict(
         "message_distribution": message_distribution,
         "message_start_time": message_start_time,
         "message_end_time": message_end_time,
+        "jitter_ns": jitter_ns,
+        "jitter_cv": jitter_cv,
     }
 
 
@@ -567,4 +612,6 @@ def _build_schema_dict(schema_id: int, schema: Schema) -> SchemaInfo:
     return {
         "id": schema_id,
         "name": schema.name,
+        "encoding": schema.encoding,
+        "data": schema.data.decode("utf-8", errors="replace"),
     }
