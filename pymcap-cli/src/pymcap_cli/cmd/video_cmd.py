@@ -1,7 +1,6 @@
 """Video encoding command for pymcap-cli using av with grid view."""
 
 import math
-import platform
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -32,10 +31,13 @@ from pymcap_cli.image_utils import (
     COMPRESSED_SCHEMAS,
     IMAGE_SCHEMAS,
     RAW_SCHEMAS,
+    EncoderBackend,
+    VideoCodec,
     VideoEncoderError,
     decode_compressed_frame,
+    get_encoder_options,
     raw_image_to_array,
-    test_encoder,
+    resolve_encoder_for_backend,
 )
 from pymcap_cli.input_handler import open_input
 from pymcap_cli.osc_utils import OSCProgressColumn
@@ -59,25 +61,10 @@ def _validate_topics(topics: list[str]) -> list[str]:
     return topics
 
 
-class VideoCodec(str, Enum):
-    H264 = "h264"
-    H265 = "h265"
-    VP9 = "vp9"
-    AV1 = "av1"
-
-
 class QualityPreset(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
-
-
-class EncoderBackend(str, Enum):
-    AUTO = "auto"
-    SOFTWARE = "software"
-    VIDEOTOOLBOX = "videotoolbox"
-    NVENC = "nvenc"
-    VAAPI = "vaapi"
 
 
 class ImageType(Enum):
@@ -95,26 +82,6 @@ class TopicInfo:
     width: int
     height: int
 
-
-SOFTWARE_ENCODERS = {
-    VideoCodec.H264: "libx264",
-    VideoCodec.H265: "libx265",
-    VideoCodec.VP9: "libvpx-vp9",
-    VideoCodec.AV1: "libsvtav1",
-}
-
-HARDWARE_ENCODERS = {
-    VideoCodec.H264: {
-        "videotoolbox": "h264_videotoolbox",
-        "nvenc": "h264_nvenc",
-        "vaapi": "h264_vaapi",
-    },
-    VideoCodec.H265: {
-        "videotoolbox": "hevc_videotoolbox",
-        "nvenc": "hevc_nvenc",
-        "vaapi": "hevc_vaapi",
-    },
-}
 
 QUALITY_PRESETS = {
     VideoCodec.H264: {QualityPreset.HIGH: 32, QualityPreset.MEDIUM: 35, QualityPreset.LOW: 40},
@@ -169,60 +136,6 @@ def _discover_topic_info(message: Any, topic: str) -> TopicInfo:
         width=width,
         height=height,
     )
-
-
-def _detect_encoder(codec: VideoCodec, encoder_backend: EncoderBackend) -> str:
-    if encoder_backend == EncoderBackend.SOFTWARE:
-        encoder = SOFTWARE_ENCODERS.get(codec)
-        if not encoder:
-            raise VideoEncoderError(f"No software encoder available for codec: {codec.value}")
-        return encoder
-    if encoder_backend in (
-        EncoderBackend.VIDEOTOOLBOX,
-        EncoderBackend.NVENC,
-        EncoderBackend.VAAPI,
-    ):
-        hw = HARDWARE_ENCODERS.get(codec, {})
-        encoder = hw.get(encoder_backend.value)
-        if not encoder:
-            raise VideoEncoderError(
-                f"Hardware encoder '{encoder_backend.value}' not available for codec: {codec.value}"
-            )
-        if not test_encoder(encoder):
-            raise VideoEncoderError(
-                f"Hardware encoder '{encoder}' not available on this system. "
-                "Try --encoder software."
-            )
-        return encoder
-    if encoder_backend == EncoderBackend.AUTO:
-        hw = HARDWARE_ENCODERS.get(codec, {})
-        system = platform.system()
-        if system == "Darwin" and "videotoolbox" in hw:
-            encoder = hw["videotoolbox"]
-            if test_encoder(encoder):
-                return encoder
-        if system == "Linux":
-            for backend in ("nvenc", "vaapi"):
-                if backend in hw and test_encoder(hw[backend]):
-                    return hw[backend]
-        encoder = SOFTWARE_ENCODERS.get(codec)
-        if not encoder:
-            raise VideoEncoderError(f"No encoder available for codec: {codec.value}")
-        return encoder
-    raise VideoEncoderError(f"Unknown encoder backend: {encoder_backend}")
-
-
-def _get_encoder_options(codec: VideoCodec, encoder_name: str) -> dict[str, str]:
-    options: dict[str, str] = {}
-    # All encoders now use bitrate mode, so don't set CRF/CQ/QP
-    # Just set encoder-specific presets if needed
-    if "nvenc" in encoder_name:
-        options["preset"] = "p4"
-    elif (
-        codec in (VideoCodec.H264, VideoCodec.H265) and "libx264" in encoder_name
-    ) or "libx265" in encoder_name:
-        options["preset"] = "medium"
-    return options
 
 
 def _compose_grid(
@@ -300,7 +213,7 @@ def encode_video(
     console.print(f"[cyan]Output:[/cyan] {output_path}")
     console.print(f"[cyan]Codec:[/cyan] {codec.value}")
 
-    encoder_name = _detect_encoder(codec, encoder_backend)
+    encoder_name = resolve_encoder_for_backend(codec.value, encoder_backend.value)
     console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
 
     # Compute grid layout
@@ -415,7 +328,7 @@ def encode_video(
                     stream.codec_context.gop_size = 60  # 2 seconds at 30fps
 
                     # Set encoder options
-                    options = _get_encoder_options(codec, encoder_name)
+                    options = get_encoder_options(codec, encoder_name)
 
                     # Set bitrate (simplified, no input bitrate calculation)
                     if quality <= 20:  # high quality

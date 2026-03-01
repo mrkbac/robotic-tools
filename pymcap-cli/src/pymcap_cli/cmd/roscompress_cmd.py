@@ -34,8 +34,9 @@ from pymcap_cli.image_utils import (
     VideoEncoderError,
     calculate_downscale_dimensions,
     decode_compressed_frame,
-    detect_encoder,
+    get_software_encoder,
     raw_image_to_array,
+    resolve_encoder,
     test_encoder,
 )
 from pymcap_cli.input_handler import open_input
@@ -206,7 +207,7 @@ def roscompress(
                 return 1
             encoder_name = encoder
         else:
-            encoder_name = detect_encoder(codec)
+            encoder_name = resolve_encoder(codec)
 
     # Create point cloud compressor
     pc_compressor: PointCloudCompressor | None = None
@@ -362,7 +363,7 @@ def roscompress(
                     video_data = encoders[topic].encode(frame)
                 except VideoEncoderError as exc:
                     # Try fallback to software encoder if hardware encoder fails
-                    sw_encoder = "libx265" if codec == "h265" else "libx264"
+                    sw_encoder = get_software_encoder(codec)
                     if encoders[topic].config.codec_name != sw_encoder:
                         console.print(
                             f"[yellow]Warning:[/yellow] Hardware encoder failed for {topic}, "

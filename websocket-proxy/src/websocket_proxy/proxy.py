@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
@@ -17,8 +18,7 @@ from robo_ws_bridge import (
 from robo_ws_bridge.server import Channel
 
 from .metrics import MetricsCollector
-from .schemas import get_schema
-from .transformers import TransformerRegistry, TransformError
+from .transformers import Transformer, TransformerRegistry, TransformError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,43 +62,16 @@ def _get_network_interfaces(port: int) -> list[str]:
     return addresses
 
 
-class MessageCodecCache:
-    """Cache for message encoders and decoders with lazy generation."""
+@dataclass
+class ChannelState:
+    """All state for a single upstream channel and its downstream representation."""
 
-    def __init__(self) -> None:
-        """Initialize the codec cache."""
-        self._encoders: dict[str, Callable[[Any], bytes | memoryview[int]]] = {}
-        self._decoders: dict[str, Callable[[bytes], Any]] = {}
-
-    def get_decoder(self, schema_name: str, schema_def: str) -> Callable[[bytes], Any]:
-        """Get or create a decoder for the given schema.
-
-        Args:
-            schema_name: Name of the message schema
-            schema_def: Schema definition string
-
-        Returns:
-            Decoder function that takes bytes and returns decoded message
-        """
-        if schema_name not in self._decoders:
-            self._decoders[schema_name] = generate_dynamic(schema_name, schema_def)
-        return self._decoders[schema_name]
-
-    def get_encoder(
-        self, schema_name: str, schema_def: str
-    ) -> Callable[[Any], bytes | memoryview[int]]:
-        """Get or create an encoder for the given schema.
-
-        Args:
-            schema_name: Name of the message schema
-            schema_def: Schema definition string
-
-        Returns:
-            Encoder function that takes a message dict and returns CDR bytes or memoryview
-        """
-        if schema_name not in self._encoders:
-            self._encoders[schema_name] = serialize_dynamic(schema_name, schema_def)
-        return self._encoders[schema_name]
+    upstream_info: ChannelInfo
+    downstream_info: ChannelInfo
+    downstream_id: int
+    transformer: Transformer | None
+    throttle_hz: float | None = None
+    last_sent_time: float | None = None
 
 
 class ProxyBridge:
@@ -160,23 +133,14 @@ class ProxyBridge:
         self.downstream_server.on_unsubscribe(self._on_client_unsubscribe)
         self.downstream_server.on_disconnect(self._on_client_disconnected)
 
-        # Channel tracking - stores DOWNSTREAM channels (what clients see)
-        # Key is downstream channel ID (original or transformed)
-        self.advertised_channels: dict[int, ChannelInfo] = {}
-
-        # Track upstream channel info for transformation lookup
-        self.upstream_channels: dict[int, ChannelInfo] = {}
-
-        # Transformed channel tracking
-        # Maps upstream channel ID -> downstream transformed channel ID
-        self.transformed_channels: dict[int, int] = {}
-        # Maps transformed channel ID -> upstream channel ID
-        self.transformed_to_upstream: dict[int, int] = {}
+        # Channel state: upstream_id -> ChannelState
+        self.channels: dict[int, ChannelState] = {}
+        # Reverse mapping: downstream_id -> upstream_id
+        self.downstream_to_upstream: dict[int, int] = {}
         self.next_channel_id = 10000  # Start transformed channels at high ID to avoid conflicts
 
-        # Topic throttling (per upstream channel)
-        self.channel_throttle_hz: dict[int, float | None] = {}
-        self.channel_last_sent_time: dict[int, float] = {}
+        # Subscriber reverse index: downstream_channel_id -> {(websocket, client_sub_id)}
+        self.channel_subscribers: dict[int, set[tuple[ServerConnection, int]]] = {}
 
         # Downstream client subscription tracking
         # Maps client websocket -> {client_sub_id: (channel_id, upstream_sub_id)}
@@ -187,8 +151,9 @@ class ProxyBridge:
         self.upstream_subscriptions: dict[int, tuple[int, int]] = {}
         self.next_upstream_sub_id = 0
 
-        # Message encoder/decoder cache (generated from schema)
-        self.codec_cache = MessageCodecCache()
+        # Message encoder/decoder caches
+        self._decoders: dict[str, Callable[[bytes], Any]] = {}
+        self._encoders: dict[str, Callable[[Any], bytes | memoryview[int]]] = {}
 
         # Metrics collector
         self.metrics = MetricsCollector()
@@ -305,20 +270,13 @@ class ProxyBridge:
         channel_id = channel["id"]
         schema_name = channel["schemaName"]
 
-        # Track the upstream channel for transformation lookup
-        self.upstream_channels[channel_id] = channel
         logger.debug(
             f"Upstream channel advertised: {channel['topic']} "
             f"(id={channel_id}, schema={schema_name})"
         )
 
-        # Update metrics
-        self.metrics.upstream_topic_count = len(self.upstream_channels)
-
-        # Initialize throttling for this channel
+        # Determine throttle rate
         throttle_hz = self.topic_throttle_overrides.get(channel["topic"], self.default_throttle_hz)
-        self.channel_throttle_hz[channel_id] = throttle_hz
-        self.channel_last_sent_time.pop(channel_id, None)
 
         # Check if we have a transformer for this schema
         transformer = self.transformer_registry.get_transformer(schema_name)
@@ -327,40 +285,47 @@ class ProxyBridge:
         downstream_channel: ChannelInfo
         if transformer:
             # Create a transformed channel
-            transformed_id = self.next_channel_id
+            downstream_id = self.next_channel_id
             self.next_channel_id += 1
 
             output_schema = transformer.get_output_schema()
-            output_schema_def = get_schema(output_schema)
+            output_schema_def = transformer.get_output_schema_definition()
 
-            # Create transformed channel info
             downstream_channel = {
-                "id": transformed_id,
-                "topic": channel["topic"],  # Same topic name
-                "encoding": channel["encoding"],  # Same encoding (cdr)
+                "id": downstream_id,
+                "topic": channel["topic"],
+                "encoding": channel["encoding"],
                 "schemaName": output_schema,
                 "schema": output_schema_def,
                 "schemaEncoding": channel.get("schemaEncoding", "ros2msg"),
             }
 
-            # Track the transformation mapping
-            self.transformed_channels[channel_id] = transformed_id
-            self.transformed_to_upstream[transformed_id] = channel_id
-
-            # Update metrics
-            self.metrics.transformed_channel_count = len(self.transformed_channels)
-
             logger.debug(
                 f"Created transformed channel: {schema_name} -> {output_schema} "
-                f"(upstream_id={channel_id}, downstream_id={transformed_id})"
+                f"(upstream_id={channel_id}, downstream_id={downstream_id})"
             )
         else:
             # No transformer - forward original channel
+            downstream_id = channel_id
             downstream_channel = channel
             logger.debug(f"Forwarding original channel: {schema_name} (id={channel_id})")
 
-        # Store DOWNSTREAM channel
-        self.advertised_channels[downstream_channel["id"]] = downstream_channel
+        # Store channel state
+        state = ChannelState(
+            upstream_info=channel,
+            downstream_info=downstream_channel,
+            downstream_id=downstream_id,
+            transformer=transformer,
+            throttle_hz=throttle_hz,
+        )
+        self.channels[channel_id] = state
+        self.downstream_to_upstream[downstream_id] = channel_id
+
+        # Update metrics
+        self.metrics.upstream_topic_count = len(self.channels)
+        self.metrics.transformed_channel_count = sum(
+            1 for s in self.channels.values() if s.transformer is not None
+        )
 
         # Convert ChannelInfo to Channel object and advertise to all downstream clients
         channel_obj = Channel(
@@ -381,41 +346,29 @@ class ProxyBridge:
         """
         upstream_channel_id = channel["id"]
 
-        # Check if this channel was transformed
-        transformed_id = self.transformed_channels.pop(upstream_channel_id, None)
+        state = self.channels.pop(upstream_channel_id, None)
+        if state is None:
+            return
 
-        if transformed_id is not None:
-            # This was a transformed channel
-            downstream_channel = self.advertised_channels.pop(transformed_id, None)
-            self.transformed_to_upstream.pop(transformed_id, None)
-            downstream_channel_id = transformed_id
-            if downstream_channel:
-                logger.info(
-                    f"Transformed channel unadvertised: {downstream_channel.get('topic', '?')} "
-                    f"(upstream_id={upstream_channel_id}, downstream_id={transformed_id})"
-                )
+        self.downstream_to_upstream.pop(state.downstream_id, None)
+
+        topic = state.downstream_info.get("topic", "?")
+        if state.transformer is not None:
+            logger.info(
+                f"Transformed channel unadvertised: {topic} "
+                f"(upstream_id={upstream_channel_id}, downstream_id={state.downstream_id})"
+            )
         else:
-            # Original channel (not transformed)
-            downstream_channel = self.advertised_channels.pop(upstream_channel_id, None)
-            downstream_channel_id = upstream_channel_id
-            if downstream_channel:
-                logger.info(
-                    f"Channel unadvertised: {downstream_channel.get('topic', '?')} "
-                    f"(id={upstream_channel_id})"
-                )
-
-        # Clean up tracking
-        self.upstream_channels.pop(upstream_channel_id, None)
-        self.channel_throttle_hz.pop(upstream_channel_id, None)
-        self.channel_last_sent_time.pop(upstream_channel_id, None)
+            logger.info(f"Channel unadvertised: {topic} (id={upstream_channel_id})")
 
         # Update metrics
-        self.metrics.upstream_topic_count = len(self.upstream_channels)
-        self.metrics.transformed_channel_count = len(self.transformed_channels)
+        self.metrics.upstream_topic_count = len(self.channels)
+        self.metrics.transformed_channel_count = sum(
+            1 for s in self.channels.values() if s.transformer is not None
+        )
 
         # Unadvertise from downstream clients
-        if downstream_channel:
-            await self.downstream_server.unadvertise([downstream_channel_id])
+        await self.downstream_server.unadvertise([state.downstream_id])
 
     async def handle_upstream_message(
         self,
@@ -435,53 +388,50 @@ class ProxyBridge:
         # Track received message
         self.metrics.upstream_messages_received += 1
 
+        state = self.channels.get(channel_id)
+        if state is None:
+            return
+
         # Apply throttling before performing any transformations or forwarding
-        throttle_hz = self.channel_throttle_hz.get(channel_id, self.default_throttle_hz)
-
-        if throttle_hz is not None and throttle_hz > 0:
+        if state.throttle_hz is not None and state.throttle_hz > 0:
             now = asyncio.get_running_loop().time()
-            min_interval = 1.0 / throttle_hz if throttle_hz > 0 else 0.0
-            last_sent = self.channel_last_sent_time.get(channel_id)
+            min_interval = 1.0 / state.throttle_hz
 
-            if last_sent is not None and (now - last_sent) < min_interval:
+            if state.last_sent_time is not None and (now - state.last_sent_time) < min_interval:
                 logger.debug(
                     "Dropping message due to throttle: channel_id=%s, interval=%.3fs",
                     channel_id,
                     min_interval,
                 )
-                # Track throttled message
                 self.metrics.upstream_messages_throttled += 1
                 return
 
-            self.channel_last_sent_time[channel_id] = now
+            state.last_sent_time = now
 
-        # Check if this channel has a transformer
-        transformed_channel_id = self.transformed_channels.get(channel_id)
-
-        if transformed_channel_id:
+        if state.transformer is not None:
             # This channel is transformed - apply transformation
             try:
-                transformed_msg = self._transform_message_dict(channel, payload)
+                transformed_msg = self._transform_message_dict(channel, payload, state.transformer)
                 if transformed_msg:
-                    # Get output schema and encode
-                    transformer = self.transformer_registry.get_transformer(channel["schemaName"])
-                    if transformer:
-                        output_schema = transformer.get_output_schema()
-                        output_payload = self._encode_message(output_schema, transformed_msg)
+                    output_schema = state.transformer.get_output_schema()
+                    output_payload = self._encode_message(
+                        output_schema,
+                        state.transformer.get_output_schema_definition(),
+                        transformed_msg,
+                    )
 
-                        # Send to all subscribed clients
-                        await self._send_to_subscribed_clients(
-                            transformed_channel_id,
-                            timestamp,
-                            output_payload,
-                        )
+                    await self._send_to_subscribed_clients(
+                        state.downstream_id,
+                        timestamp,
+                        output_payload,
+                    )
             except TransformError as e:
                 logger.warning(f"Transform failed: {e}")
             except Exception:
                 logger.exception("Unexpected error during transformation")
         else:
             # No transformer - forward as-is
-            await self._send_to_subscribed_clients(channel_id, timestamp, payload)
+            await self._send_to_subscribed_clients(state.downstream_id, timestamp, payload)
 
     async def _send_to_subscribed_clients(
         self,
@@ -496,34 +446,30 @@ class ProxyBridge:
             timestamp: Message timestamp in nanoseconds
             payload: Message payload
         """
-        # Find all clients subscribed to this channel
-        # Create a snapshot to avoid "dictionary changed size during iteration" errors
-        subscriber_count = 0
-        for websocket, subs in list(self.client_subscriptions.items()):
-            for client_sub_id, (subscribed_channel_id, _) in list(subs.items()):
-                if subscribed_channel_id == channel_id:
-                    # Send message to this client
-                    try:
-                        await self.downstream_server.send_message_to_subscription(
-                            websocket,
-                            client_sub_id,
-                            payload,
-                            timestamp_ns=timestamp,
-                        )
-                        subscriber_count += 1
+        subscribers = self.channel_subscribers.get(channel_id)
+        if not subscribers:
+            return
 
-                        # Track message sent to client
-                        client_id = self._get_client_id(websocket)
-                        client_metrics = self.metrics.get_client(client_id)
-                        if client_metrics:
-                            client_metrics.record_message(len(payload))
-                    except Exception:
-                        logger.exception("Failed to send message to client")
-                        # Track error
-                        client_id = self._get_client_id(websocket)
-                        client_metrics = self.metrics.get_client(client_id)
-                        if client_metrics:
-                            client_metrics.record_error()
+        for websocket, client_sub_id in list(subscribers):
+            try:
+                await self.downstream_server.send_message_to_subscription(
+                    websocket,
+                    client_sub_id,
+                    payload,
+                    timestamp_ns=timestamp,
+                )
+
+                # Track message sent to client
+                client_id = self._get_client_id(websocket)
+                client_metrics = self.metrics.get_client(client_id)
+                if client_metrics:
+                    client_metrics.record_message(len(payload))
+            except Exception:
+                logger.exception("Failed to send message to client")
+                client_id = self._get_client_id(websocket)
+                client_metrics = self.metrics.get_client(client_id)
+                if client_metrics:
+                    client_metrics.record_error()
 
     async def handle_client_subscribe(
         self,
@@ -542,8 +488,8 @@ class ProxyBridge:
         if websocket not in self.client_subscriptions:
             self.client_subscriptions[websocket] = {}
 
-        # Check if this is a transformed channel
-        upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
+        # Resolve downstream -> upstream
+        upstream_channel_id = self.downstream_to_upstream.get(channel_id, channel_id)
 
         # Subscribe to upstream if not already subscribed (or increment ref count)
         upstream_sub_id: int
@@ -570,19 +516,24 @@ class ProxyBridge:
         # Track client subscription
         self.client_subscriptions[websocket][subscription_id] = (channel_id, upstream_sub_id)
 
+        # Add to subscriber reverse index
+        if channel_id not in self.channel_subscribers:
+            self.channel_subscribers[channel_id] = set()
+        self.channel_subscribers[channel_id].add((websocket, subscription_id))
+
         # Update client metrics (subscription count and topics)
         client_id = self._get_client_id(websocket)
         client_metrics = self.metrics.get_client(client_id)
         if client_metrics:
             client_metrics.subscription_count = len(self.client_subscriptions[websocket])
-            channel_info = self.advertised_channels.get(channel_id)
-            if channel_info:
-                client_metrics.subscribed_topics.add(channel_info["topic"])
+            state = self.channels.get(upstream_channel_id)
+            if state:
+                client_metrics.subscribed_topics.add(state.downstream_info["topic"])
 
-        channel_info = self.upstream_channels.get(upstream_channel_id)
-        is_transformed = channel_id in self.transformed_to_upstream
+        state = self.channels.get(upstream_channel_id)
+        is_transformed = upstream_channel_id != channel_id
         logger.info(
-            f"Client subscribed to {channel_info.get('topic', '?') if channel_info else '?'} "
+            f"Client subscribed to {state.upstream_info.get('topic', '?') if state else '?'} "
             f"(channel={channel_id}, upstream={upstream_channel_id}, transformed={is_transformed})"
         )
 
@@ -603,6 +554,13 @@ class ProxyBridge:
         if subscription_info is not None:
             channel_id, upstream_sub_id = subscription_info  # noqa: RUF059
 
+            # Remove from subscriber reverse index
+            subs = self.channel_subscribers.get(channel_id)
+            if subs is not None:
+                subs.discard((websocket, subscription_id))
+                if not subs:
+                    del self.channel_subscribers[channel_id]
+
             # Update client metrics
             client_id = self._get_client_id(websocket)
             client_metrics = self.metrics.get_client(client_id)
@@ -611,12 +569,15 @@ class ProxyBridge:
                 # Recalculate subscribed topics
                 client_metrics.subscribed_topics.clear()
                 for sub_channel_id, _ in client_subs.values():
-                    channel_info = self.advertised_channels.get(sub_channel_id)
-                    if channel_info:
-                        client_metrics.subscribed_topics.add(channel_info["topic"])
+                    sub_upstream_id = self.downstream_to_upstream.get(
+                        sub_channel_id, sub_channel_id
+                    )
+                    state = self.channels.get(sub_upstream_id)
+                    if state:
+                        client_metrics.subscribed_topics.add(state.downstream_info["topic"])
 
-            # Check if this is a transformed channel
-            upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
+            # Resolve downstream -> upstream
+            upstream_channel_id = self.downstream_to_upstream.get(channel_id, channel_id)
 
             # Decrement reference count for upstream channel
             if upstream_channel_id in self.upstream_subscriptions:
@@ -636,8 +597,8 @@ class ProxyBridge:
                     # Update ref count
                     self.upstream_subscriptions[upstream_channel_id] = (sub_id, new_ref_count)
 
-            channel_info = self.upstream_channels.get(upstream_channel_id)
-            topic_name = channel_info.get("topic", "?") if channel_info else "?"
+            state = self.channels.get(upstream_channel_id)
+            topic_name = state.upstream_info.get("topic", "?") if state else "?"
             logger.info(f"Client unsubscribed from {topic_name} (channel={channel_id})")
 
     async def handle_client_disconnected(self, websocket: ServerConnection) -> None:
@@ -686,8 +647,7 @@ class ProxyBridge:
 
         for client_subs in self.client_subscriptions.values():
             for channel_id, _ in client_subs.values():
-                # Get the upstream channel ID (handle transformed channels)
-                upstream_channel_id = self.transformed_to_upstream.get(channel_id, channel_id)
+                upstream_channel_id = self.downstream_to_upstream.get(channel_id, channel_id)
                 channel_ref_counts[upstream_channel_id] = (
                     channel_ref_counts.get(upstream_channel_id, 0) + 1
                 )
@@ -712,8 +672,8 @@ class ProxyBridge:
                 )
                 self.upstream_subscriptions[upstream_channel_id] = (upstream_sub_id, ref_count)
 
-                channel_info = self.upstream_channels.get(upstream_channel_id)
-                topic_name = channel_info.get("topic", "?") if channel_info else "?"
+                state = self.channels.get(upstream_channel_id)
+                topic_name = state.upstream_info.get("topic", "?") if state else "?"
                 logger.info(
                     f"Restored subscription to {topic_name} "
                     f"(channel={upstream_channel_id}, sub_id={upstream_sub_id}, refs={ref_count})"
@@ -722,22 +682,18 @@ class ProxyBridge:
                 logger.exception(f"Failed to restore subscription to channel {upstream_channel_id}")
 
     def _transform_message_dict(
-        self, channel: ChannelInfo, payload: bytes
+        self, channel: ChannelInfo, payload: bytes, transformer: Transformer
     ) -> dict[str, Any] | None:
-        """Transform a message using the registered transformer.
+        """Transform a message using the given transformer.
 
         Args:
             channel: The channel info
             payload: The message payload (CDR-encoded)
+            transformer: The transformer to apply
 
         Returns:
             Transformed message as a dictionary, or None if transformation failed
         """
-        schema_name = channel["schemaName"]
-        transformer = self.transformer_registry.get_transformer(schema_name)
-        if not transformer:
-            return None
-
         try:
             # Decode the input message
             input_msg = self._decode_message(channel, payload)
@@ -768,21 +724,23 @@ class ProxyBridge:
         """
         schema_name = channel["schemaName"]
         schema_def = channel["schema"]
-        decoder = self.codec_cache.get_decoder(schema_name, schema_def)
-        return decoder(payload)
+        if schema_name not in self._decoders:
+            self._decoders[schema_name] = generate_dynamic(schema_name, schema_def)
+        return self._decoders[schema_name](payload)
 
-    def _encode_message(self, schema_name: str, message: dict[str, Any]) -> bytes:
+    def _encode_message(self, schema_name: str, schema_def: str, message: dict[str, Any]) -> bytes:
         """Encode a message to CDR format.
 
         Args:
             schema_name: The message schema name
+            schema_def: The schema definition string
             message: The message as a dictionary
 
         Returns:
             CDR-encoded bytes
         """
-        schema_def = get_schema(schema_name)
-        encoder = self.codec_cache.get_encoder(schema_name, schema_def)
-        result = encoder(message)
+        if schema_name not in self._encoders:
+            self._encoders[schema_name] = serialize_dynamic(schema_name, schema_def)
+        result = self._encoders[schema_name](message)
         # Convert memoryview to bytes if needed
         return bytes(result) if isinstance(result, memoryview) else result

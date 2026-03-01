@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pymcap_cli.image_utils import PointCloudCompressor
+from pymcap_cli.image_utils import COMPRESSED_POINTCLOUD2, PointCloudCompressor
 
 from . import Transformer, TransformError
 
@@ -30,6 +30,9 @@ class PointCloudPureiniTransformer(Transformer):
 
     def get_output_schema(self) -> str:
         return "point_cloud_interfaces/msg/CompressedPointCloud2"
+
+    def get_output_schema_definition(self) -> str:
+        return COMPRESSED_POINTCLOUD2
 
     def transform(self, message: Any) -> dict[str, Any]:
         try:

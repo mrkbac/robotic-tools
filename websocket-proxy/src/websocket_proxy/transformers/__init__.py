@@ -18,6 +18,11 @@ class Transformer(ABC):
         ...
 
     @abstractmethod
+    def get_output_schema_definition(self) -> str:
+        """Get the full ROS2 message definition string for the output schema."""
+        ...
+
+    @abstractmethod
     def transform(self, message: dict[str, Any]) -> dict[str, Any]:
         """Transform a decoded message dict to another message dict.
 

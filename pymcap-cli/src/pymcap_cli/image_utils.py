@@ -3,9 +3,10 @@
 import platform
 import threading
 from dataclasses import dataclass
+from enum import Enum
 from fractions import Fraction
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import av
 import av.error
@@ -216,26 +217,127 @@ def calculate_downscale_dimensions(width: int, height: int, max_dimension: int) 
     return ensure_even(new_width), ensure_even(new_height)
 
 
-def detect_encoder(codec: Literal["h264", "h265"]) -> str:
-    """Detect the best available encoder for the given codec (h264 or h265)."""
-    system = platform.system()
-    if codec == "h264":
-        if system == "Darwin" and test_encoder("h264_videotoolbox"):
-            return "h264_videotoolbox"
-        if system == "Linux":
-            for enc in ["h264_nvenc", "h264_vaapi"]:
-                if test_encoder(enc):
-                    return enc
-        return "libx264"
-    if codec == "h265":
-        if system == "Darwin" and test_encoder("hevc_videotoolbox"):
-            return "hevc_videotoolbox"
-        if system == "Linux":
-            for enc in ["hevc_nvenc", "hevc_vaapi"]:
-                if test_encoder(enc):
-                    return enc
-        return "libx265"
-    raise ValueError(f"Unsupported codec: {codec}")
+# ---------------------------------------------------------------------------
+# Codec / encoder enums and mappings
+# ---------------------------------------------------------------------------
+
+
+class VideoCodec(str, Enum):
+    H264 = "h264"
+    H265 = "h265"
+    VP9 = "vp9"
+    AV1 = "av1"
+
+
+class EncoderBackend(str, Enum):
+    AUTO = "auto"
+    SOFTWARE = "software"
+    VIDEOTOOLBOX = "videotoolbox"
+    NVENC = "nvenc"
+    VAAPI = "vaapi"
+
+
+# Mapping from short codec name to software (CPU) encoder name.
+SOFTWARE_CODEC_MAP: dict[str, str] = {
+    "h264": "libx264",
+    "h265": "libx265",
+    "vp9": "libvpx-vp9",
+    "av1": "libaom-av1",
+}
+
+# Mapping from short codec name to hardware encoder names per backend.
+HARDWARE_CODEC_MAP: dict[str, dict[str, str]] = {
+    "h264": {
+        "videotoolbox": "h264_videotoolbox",
+        "nvenc": "h264_nvenc",
+        "vaapi": "h264_vaapi",
+    },
+    "h265": {
+        "videotoolbox": "hevc_videotoolbox",
+        "nvenc": "hevc_nvenc",
+        "vaapi": "hevc_vaapi",
+    },
+}
+
+# Platform → hardware backend probe order.
+_HW_PROBE_ORDER: dict[str, list[str]] = {
+    "Darwin": ["videotoolbox"],
+    "Linux": ["nvenc", "vaapi"],
+}
+
+
+def _detect_best_hardware_encoder(codec: str) -> str | None:
+    """Probe for the best available hardware encoder, or return None."""
+    hw = HARDWARE_CODEC_MAP.get(codec)
+    if not hw:
+        return None
+    for backend in _HW_PROBE_ORDER.get(platform.system(), []):
+        encoder = hw.get(backend)
+        if encoder and test_encoder(encoder):
+            return encoder
+    return None
+
+
+def get_software_encoder(codec: str) -> str:
+    """Return the software encoder name for *codec*.
+
+    Raises:
+        ValueError: If *codec* is not in SOFTWARE_CODEC_MAP.
+    """
+    sw = SOFTWARE_CODEC_MAP.get(codec)
+    if not sw:
+        raise ValueError(f"Unsupported codec '{codec}'. Supported: {', '.join(SOFTWARE_CODEC_MAP)}")
+    return sw
+
+
+def resolve_encoder(codec: str, *, use_hardware: bool = True) -> str:
+    """Pick the best available encoder for *codec*.
+
+    Attempts hardware detection first (when *use_hardware* is True and the
+    codec has known hardware encoders), then falls back to the software
+    encoder from SOFTWARE_CODEC_MAP.
+
+    Raises:
+        ValueError: If *codec* is not in SOFTWARE_CODEC_MAP.
+    """
+    if use_hardware:
+        hw = _detect_best_hardware_encoder(codec)
+        if hw:
+            return hw
+    return get_software_encoder(codec)
+
+
+def resolve_encoder_for_backend(codec: str, backend: str) -> str:
+    """Pick the encoder for *codec* using the specified *backend*.
+
+    *backend* must be one of the ``EncoderBackend`` values: ``"auto"``,
+    ``"software"``, ``"videotoolbox"``, ``"nvenc"``, or ``"vaapi"``.
+
+    Raises:
+        VideoEncoderError: If the encoder is unavailable or the backend is unknown.
+    """
+    if backend == "auto":
+        try:
+            return resolve_encoder(codec)
+        except ValueError as exc:
+            raise VideoEncoderError(str(exc)) from exc
+
+    if backend == "software":
+        try:
+            return get_software_encoder(codec)
+        except ValueError as exc:
+            raise VideoEncoderError(str(exc)) from exc
+
+    # Explicit hardware backend
+    hw = HARDWARE_CODEC_MAP.get(codec, {})
+    encoder = hw.get(backend)
+    if not encoder:
+        raise VideoEncoderError(f"Hardware encoder '{backend}' not available for codec: {codec}")
+    if not test_encoder(encoder):
+        raise VideoEncoderError(
+            f"Hardware encoder '{encoder}' not available on this system. Try --encoder software."
+        )
+    return encoder
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +386,6 @@ def build_encoder_options(
         return {"rc": "vbr", "cq": str(quality)}, None
     if codec_name in {"h264_vaapi", "hevc_vaapi"}:
         return {"qp": str(quality)}, None
-    # Software codecs used by websocket-proxy (vp9, av1)
     if codec_name == "libvpx-vp9":
         opts: dict[str, str] = {"cpu-used": "4", "crf": str(quality)}
         if preset:
@@ -296,6 +397,18 @@ def build_encoder_options(
             opts["usage"] = preset
         return opts, None
     return {}, None
+
+
+def get_encoder_options(codec: VideoCodec, encoder_name: str) -> dict[str, str]:
+    """Return encoder preset options for bitrate-mode encoding (e.g. file output)."""
+    options: dict[str, str] = {}
+    if "nvenc" in encoder_name:
+        options["preset"] = "p4"
+    elif (
+        codec in (VideoCodec.H264, VideoCodec.H265) and "libx264" in encoder_name
+    ) or "libx265" in encoder_name:
+        options["preset"] = "medium"
+    return options
 
 
 class VideoEncoder:
