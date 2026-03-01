@@ -34,12 +34,12 @@ interface CompressionPieChartProps {
 }
 
 export function CompressionPieChart({ chunks }: CompressionPieChartProps) {
-  const entries = Object.entries(chunks.byCompression);
+  const entries = Object.entries(chunks.by_compression);
   if (entries.length === 0) return null;
 
   const data = entries.map(([type, stats]) => ({
     name: type || "none",
-    value: stats.uncompressedSize,
+    value: stats.uncompressed_size,
     color: colorForType(type),
   }));
 

@@ -31,9 +31,9 @@ export function formatDuration(ns: number): string {
   return `${mins}m ${secs}s`;
 }
 
-/** Format a BigInt nanosecond timestamp to a date string. */
-export function formatTimestamp(nsTimestamp: bigint): string {
-  const ms = Number(nsTimestamp / 1_000_000n);
+/** Format a nanosecond timestamp to a date string. */
+export function formatTimestamp(nsTimestamp: number): string {
+  const ms = nsTimestamp / 1_000_000;
   return new Date(ms).toLocaleString();
 }
 

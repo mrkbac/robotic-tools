@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import type { Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 
 function spa404(): Plugin {
   return {
@@ -18,5 +18,5 @@ function spa404(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   base: "/robotic-tools/",
-  plugins: [TanStackRouterVite({ quoteStyle: "double" }), react(), spa404()],
+  plugins: [tanstackRouter({ quoteStyle: "double" }), react(), spa404()],
 });

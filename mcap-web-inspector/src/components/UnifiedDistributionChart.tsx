@@ -70,12 +70,12 @@ export function UnifiedDistributionChart({
   globalDistribution,
 }: UnifiedDistributionChartProps) {
   const withDist = useMemo(
-    () => channels.filter((ch) => ch.messageDistribution.length > 0),
+    () => channels.filter((ch) => ch.message_distribution.length > 0),
     [channels],
   );
 
-  const bucketCount = globalDistribution.bucketCount;
-  const bucketDurationNs = globalDistribution.bucketDurationNs;
+  const bucketCount = globalDistribution.bucket_count;
+  const bucketDurationNs = globalDistribution.bucket_duration_ns;
 
   const names = useMemo(() => uniqueNames(withDist), [withDist]);
 
@@ -86,7 +86,7 @@ export function UnifiedDistributionChart({
           time: formatBucketTime(i * bucketDurationNs),
         };
         for (const ch of withDist) {
-          row[names.get(ch)!] = ch.messageDistribution[i] ?? 0;
+          row[names.get(ch)!] = ch.message_distribution[i] ?? 0;
         }
         return row;
       }),

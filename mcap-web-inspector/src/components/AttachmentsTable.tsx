@@ -72,7 +72,7 @@ function AttachmentRow({
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  const isImage = attachment.mediaType.startsWith("image/");
+  const isImage = attachment.media_type.startsWith("image/");
 
   const handleDownload = useCallback(async () => {
     if (!localFile) return;
@@ -80,8 +80,8 @@ function AttachmentRow({
     try {
       const result = await readAttachment(
         localFile,
-        attachment.offset,
-        attachment.length,
+        BigInt(attachment.offset),
+        BigInt(attachment.length),
       );
       const blob = new Blob([result.data as BlobPart], { type: result.mediaType });
       const url = URL.createObjectURL(blob);
@@ -113,8 +113,8 @@ function AttachmentRow({
     try {
       const result = await readAttachment(
         localFile,
-        attachment.offset,
-        attachment.length,
+        BigInt(attachment.offset),
+        BigInt(attachment.length),
       );
       const blob = new Blob([result.data as BlobPart], { type: result.mediaType });
       setThumbnailUrl(URL.createObjectURL(blob));
@@ -133,17 +133,17 @@ function AttachmentRow({
       </Table.Td>
       <Table.Td>
         <Text size="sm" c="dimmed">
-          {attachment.mediaType}
+          {attachment.media_type}
         </Text>
       </Table.Td>
       <Table.Td style={{ textAlign: "right" }}>
-        <Text size="sm">{formatBytes(attachment.dataSize)}</Text>
+        <Text size="sm">{formatBytes(attachment.data_size)}</Text>
       </Table.Td>
       <Table.Td>
-        <Text size="xs">{attachment.logTime > 0n ? formatTimestamp(attachment.logTime) : "-"}</Text>
+        <Text size="xs">{attachment.log_time > 0 ? formatTimestamp(attachment.log_time) : "-"}</Text>
       </Table.Td>
       <Table.Td>
-        <Text size="xs">{attachment.createTime > 0n ? formatTimestamp(attachment.createTime) : "-"}</Text>
+        <Text size="xs">{attachment.create_time > 0 ? formatTimestamp(attachment.create_time) : "-"}</Text>
       </Table.Td>
       {localFile && (
         <Table.Td>

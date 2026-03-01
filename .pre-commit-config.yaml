@@ -1,5 +1,5 @@
 # ignore all vendored files and generated files
-exclude: ^.*vendor/.*$|^ros-parser/src/ros_parser/_.*\.py$|^ros-parser/src/ros_parser/.+/_standalone_parser\.py$|^ros-parser/tests/reference_parser\.py$|^pymcap-cli/src/pymcap_cli/types\.py$
+exclude: ^.*vendor/.*$|^ros-parser/src/ros_parser/_.*\.py$|^ros-parser/src/ros_parser/.+/_standalone_parser\.py$|^ros-parser/tests/reference_parser\.py$|^pymcap-cli/src/pymcap_cli/types\.py$|^mcap-web-inspector/src/mcap/types\.generated\.ts$
 default_install_hook_types:
   - pre-commit
   - commit-msg
@@ -55,12 +55,35 @@ repos:
 
   - repo: local
     hooks:
+      - id: generate-ts-types
+        name: generate TS types from JSON schema
+        entry: bun run --cwd mcap-web-inspector generate-types
+        language: system
+        files: ^pymcap-cli/schemas/mcap_info\.json$
+        pass_filenames: false
+
       - id: ty-check
         name: ty type check
         entry: uv run --frozen --all-groups --all-extras --all-packages ty check
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: oxlint
+        name: oxlint (mcap-web-inspector)
+        entry: bun run --cwd mcap-web-inspector oxlint src/
+        language: system
+        files: ^mcap-web-inspector/src/
+        types_or: [ts, tsx, javascript, jsx]
+        pass_filenames: false
+
+      - id: tsc-web
+        name: tsc (mcap-web-inspector)
+        entry: bun run --cwd mcap-web-inspector tsc -b
+        language: system
+        files: ^mcap-web-inspector/
+        types_or: [ts, tsx]
+        pass_filenames: false
 
       - id: pytest-fast
         name: pytest (fast tests only)

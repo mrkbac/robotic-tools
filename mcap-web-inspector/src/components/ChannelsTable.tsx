@@ -40,12 +40,12 @@ type SortField =
 type ViewMode = "flat" | "tree";
 
 function channelToDistribution(channel: ChannelInfo, bucketDurationNs: number): MessageDistribution {
-  const counts = channel.messageDistribution;
+  const counts = channel.message_distribution;
   return {
-    bucketCount: counts.length,
-    bucketDurationNs,
-    messageCounts: counts,
-    maxCount: counts.reduce((m, v) => (v > m ? v : m), 0),
+    bucket_count: counts.length,
+    bucket_duration_ns: bucketDurationNs,
+    message_counts: counts,
+    max_count: counts.reduce((m, v) => (v > m ? v : m), 0),
   };
 }
 
@@ -54,8 +54,8 @@ function formatPercent(part: number, total: number): string {
   return `${((part / total) * 100).toFixed(1)}%`;
 }
 
-function nsToDate(ns: bigint): Date {
-  return new Date(Number(ns / 1_000_000n));
+function nsToDate(ns: number): Date {
+  return new Date(ns / 1_000_000);
 }
 
 /** Format nanoseconds jitter to human-readable units. */
@@ -122,9 +122,9 @@ function aggregateNode(node: TopicTreeNode): { totalMessages: number; minHz: num
   let maxHz = -Infinity;
 
   for (const ch of node.channels) {
-    totalMessages += ch.messageCount;
-    minHz = Math.min(minHz, ch.hzStats.average);
-    maxHz = Math.max(maxHz, ch.hzStats.average);
+    totalMessages += ch.message_count;
+    minHz = Math.min(minHz, ch.hz_stats.average);
+    maxHz = Math.max(maxHz, ch.hz_stats.average);
   }
 
   for (const child of node.children.values()) {
@@ -149,14 +149,14 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [viewMode, setViewMode] = useState<ViewMode>("flat");
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(new Set());
-  const estimatePrefix = (ch: ChannelInfo) => ch.estimatedSizes ? "~" : "";
+  const estimatePrefix = (ch: ChannelInfo) => ch.estimated_sizes ? "~" : "";
 
-  const hasSizeData = channels.some((ch) => ch.sizeBytes !== null);
-  const hasEstimatedSizes = channels.some((ch) => ch.estimatedSizes && ch.sizeBytes !== null);
+  const hasSizeData = channels.some((ch) => ch.size_bytes !== null);
+  const hasEstimatedSizes = channels.some((ch) => ch.estimated_sizes && ch.size_bytes !== null);
   const hasDistribution = channels.some(
-    (ch) => ch.messageDistribution.length > 0,
+    (ch) => ch.message_distribution.length > 0,
   );
-  const hasJitter = channels.some((ch) => ch.jitterCv !== null);
+  const hasJitter = channels.some((ch) => ch.jitter_cv !== null);
 
   const totalColumns =
     4 + // ID, Topic, Schema, Msgs
@@ -177,27 +177,27 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
           cmp = a.id - b.id;
           break;
         case "schema":
-          cmp = (a.schemaName ?? "").localeCompare(b.schemaName ?? "");
+          cmp = (a.schema_name ?? "").localeCompare(b.schema_name ?? "");
           break;
         case "msgs":
-          cmp = a.messageCount - b.messageCount;
+          cmp = a.message_count - b.message_count;
           break;
         case "hz":
-          cmp = a.hzStats.average - b.hzStats.average;
+          cmp = a.hz_stats.average - b.hz_stats.average;
           break;
         case "jitter":
-          cmp = (a.jitterCv ?? 0) - (b.jitterCv ?? 0);
+          cmp = (a.jitter_cv ?? 0) - (b.jitter_cv ?? 0);
           break;
         case "size":
-          cmp = (a.sizeBytes ?? 0) - (b.sizeBytes ?? 0);
+          cmp = (a.size_bytes ?? 0) - (b.size_bytes ?? 0);
           break;
         case "bps":
           cmp =
-            (a.bytesPerSecondStats?.average ?? 0) -
-            (b.bytesPerSecondStats?.average ?? 0);
+            (a.bytes_per_second_stats?.average ?? 0) -
+            (b.bytes_per_second_stats?.average ?? 0);
           break;
         case "bPerMsg":
-          cmp = (a.bytesPerMessage ?? 0) - (b.bytesPerMessage ?? 0);
+          cmp = (a.bytes_per_message ?? 0) - (b.bytes_per_message ?? 0);
           break;
       }
       return sortReverse ? -cmp : cmp;
@@ -282,30 +282,30 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
             <TopicDisplay topic={ch.topic} />
           </Table.Td>
           <Table.Td>
-            <SchemaDisplay name={ch.schemaName} />
+            <SchemaDisplay name={ch.schema_name} />
           </Table.Td>
           <Table.Td style={{ textAlign: "right" }}>
-            {formatNumber(ch.messageCount)}
+            {formatNumber(ch.message_count)}
           </Table.Td>
           <Table.Td style={{ textAlign: "right" }}>
             <HzDisplay
-              stats={ch.hzStats}
-              hzChannel={ch.hzChannel}
+              stats={ch.hz_stats}
+              hzChannel={ch.hz_channel}
             />
           </Table.Td>
           {hasJitter && (
             <Table.Td style={{ textAlign: "right" }}>
-              <JitterDisplay jitterNs={ch.jitterNs} jitterCv={ch.jitterCv} />
+              <JitterDisplay jitterNs={ch.jitter_ns} jitterCv={ch.jitter_cv} />
             </Table.Td>
           )}
           {hasSizeData && (
             <>
               <Table.Td style={{ textAlign: "right" }}>
-                {ch.sizeBytes !== null ? (
+                {ch.size_bytes !== null ? (
                   <Text size="sm">
-                    {estimatePrefix(ch)}{formatBytes(ch.sizeBytes)}{" "}
+                    {estimatePrefix(ch)}{formatBytes(ch.size_bytes)}{" "}
                     <Text span size="xs" c="dimmed">
-                      ({estimatePrefix(ch)}{formatPercent(ch.sizeBytes, fileSize)})
+                      ({estimatePrefix(ch)}{formatPercent(ch.size_bytes, fileSize)})
                     </Text>
                   </Text>
                 ) : (
@@ -313,22 +313,22 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
                 )}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                <BpsDisplay stats={ch.bytesPerSecondStats} estimated={ch.estimatedSizes} />
+                <BpsDisplay stats={ch.bytes_per_second_stats} estimated={ch.estimated_sizes} />
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {ch.bytesPerMessage !== null
-                  ? `${estimatePrefix(ch)}${formatBytes(ch.bytesPerMessage)}`
+                {ch.bytes_per_message !== null
+                  ? `${estimatePrefix(ch)}${formatBytes(ch.bytes_per_message)}`
                   : "-"}
               </Table.Td>
             </>
           )}
           {hasDistribution && (
             <Table.Td>
-              {ch.messageDistribution.length > 0 ? (
+              {ch.message_distribution.length > 0 ? (
                 <Sparkline
                   w={120}
                   h={20}
-                  data={ch.messageDistribution}
+                  data={ch.message_distribution}
                   curveType="monotone"
                   color="blue"
                   fillOpacity={0.2}
@@ -546,10 +546,10 @@ function ChannelDetail({
   fileSize: number;
 }) {
   const hasTime =
-    channel.messageStartTime !== null && channel.messageEndTime !== null;
-  const hasSize = channel.sizeBytes !== null;
+    channel.message_start_time !== null && channel.message_end_time !== null;
+  const hasSize = channel.size_bytes !== null;
   const hasHz =
-    channel.hzStats.minimum !== null || channel.hzStats.maximum !== null;
+    channel.hz_stats.minimum !== null || channel.hz_stats.maximum !== null;
 
   return (
     <div style={{ padding: "12px 16px" }}>
@@ -562,8 +562,8 @@ function ChannelDetail({
           <StatsRow
             label="Duration"
             value={
-              channel.durationNs !== null
-                ? formatDuration(Number(channel.durationNs))
+              channel.duration_ns !== null
+                ? formatDuration(channel.duration_ns)
                 : "-"
             }
           />
@@ -573,13 +573,13 @@ function ChannelDetail({
                 <Text size="xs" c="dimmed">
                   Start
                 </Text>
-                <TimestampDisplay ns={channel.messageStartTime!} />
+                <TimestampDisplay ns={channel.message_start_time!} />
               </Group>
               <Group gap={4}>
                 <Text size="xs" c="dimmed">
                   End
                 </Text>
-                <TimestampDisplay ns={channel.messageEndTime!} />
+                <TimestampDisplay ns={channel.message_end_time!} />
               </Group>
             </>
           )}
@@ -592,38 +592,38 @@ function ChannelDetail({
           </Text>
           <StatsRow
             label="Average Hz"
-            value={formatHz(channel.hzStats.average)}
+            value={formatHz(channel.hz_stats.average)}
             bold
           />
           {hasHz && (
             <>
-              {channel.hzStats.minimum !== null && (
+              {channel.hz_stats.minimum !== null && (
                 <StatsRow
                   label="Min Hz"
-                  value={formatHz(channel.hzStats.minimum)}
+                  value={formatHz(channel.hz_stats.minimum)}
                 />
               )}
-              {channel.hzStats.maximum !== null && (
+              {channel.hz_stats.maximum !== null && (
                 <StatsRow
                   label="Max Hz"
-                  value={formatHz(channel.hzStats.maximum)}
+                  value={formatHz(channel.hz_stats.maximum)}
                 />
               )}
-              {channel.hzStats.median !== null && (
+              {channel.hz_stats.median !== null && (
                 <StatsRow
                   label="Median Hz"
-                  value={formatHz(channel.hzStats.median)}
+                  value={formatHz(channel.hz_stats.median)}
                 />
               )}
             </>
           )}
-          {channel.hzChannel !== null && (
+          {channel.hz_channel !== null && (
             <StatsRow
               label="Channel Hz"
-              value={formatHz(channel.hzChannel)}
+              value={formatHz(channel.hz_channel)}
             />
           )}
-          {channel.jitterCv !== null && channel.jitterNs !== null && (
+          {channel.jitter_cv !== null && channel.jitter_ns !== null && (
             <>
               <Box mt={4}>
                 <Text size="xs" fw={600} c="dimmed">
@@ -632,11 +632,11 @@ function ChannelDetail({
               </Box>
               <StatsRow
                 label="CV"
-                value={`${(channel.jitterCv * 100).toFixed(1)}%`}
+                value={`${(channel.jitter_cv * 100).toFixed(1)}%`}
               />
               <StatsRow
                 label="Stddev"
-                value={formatJitterNs(channel.jitterNs)}
+                value={formatJitterNs(channel.jitter_ns)}
               />
             </>
           )}
@@ -645,51 +645,51 @@ function ChannelDetail({
         {/* Size section */}
         <Stack gap={4}>
           <Text size="sm" fw={600}>
-            Size{channel.estimatedSizes ? " (estimated)" : ""}
+            Size{channel.estimated_sizes ? " (estimated)" : ""}
           </Text>
           {hasSize && (
             <>
               <StatsRow
                 label="Total"
-                value={`${channel.estimatedSizes ? "~" : ""}${formatBytes(channel.sizeBytes!)} (${channel.estimatedSizes ? "~" : ""}${formatPercent(channel.sizeBytes!, fileSize)})`}
+                value={`${channel.estimated_sizes ? "~" : ""}${formatBytes(channel.size_bytes!)} (${channel.estimated_sizes ? "~" : ""}${formatPercent(channel.size_bytes!, fileSize)})`}
                 bold
               />
               <Progress
-                value={(channel.sizeBytes! / fileSize) * 100}
+                value={(channel.size_bytes! / fileSize) * 100}
                 size="sm"
                 mt={2}
                 mb={2}
               />
-              {channel.bytesPerSecondStats && (
+              {channel.bytes_per_second_stats && (
                 <>
                   <StatsRow
                     label="Avg B/s"
-                    value={`${formatBytes(channel.bytesPerSecondStats.average)}/s`}
+                    value={`${formatBytes(channel.bytes_per_second_stats.average)}/s`}
                   />
-                  {channel.bytesPerSecondStats.minimum !== null && (
+                  {channel.bytes_per_second_stats.minimum !== null && (
                     <StatsRow
                       label="Min B/s"
-                      value={`${formatBytes(channel.bytesPerSecondStats.minimum)}/s`}
+                      value={`${formatBytes(channel.bytes_per_second_stats.minimum)}/s`}
                     />
                   )}
-                  {channel.bytesPerSecondStats.maximum !== null && (
+                  {channel.bytes_per_second_stats.maximum !== null && (
                     <StatsRow
                       label="Max B/s"
-                      value={`${formatBytes(channel.bytesPerSecondStats.maximum)}/s`}
+                      value={`${formatBytes(channel.bytes_per_second_stats.maximum)}/s`}
                     />
                   )}
-                  {channel.bytesPerSecondStats.median !== null && (
+                  {channel.bytes_per_second_stats.median !== null && (
                     <StatsRow
                       label="Median B/s"
-                      value={`${formatBytes(channel.bytesPerSecondStats.median)}/s`}
+                      value={`${formatBytes(channel.bytes_per_second_stats.median)}/s`}
                     />
                   )}
                 </>
               )}
-              {channel.bytesPerMessage !== null && (
+              {channel.bytes_per_message !== null && (
                 <StatsRow
                   label="B/msg"
-                  value={formatBytes(channel.bytesPerMessage)}
+                  value={formatBytes(channel.bytes_per_message)}
                 />
               )}
             </>
@@ -703,7 +703,7 @@ function ChannelDetail({
       </SimpleGrid>
 
       {/* Distribution chart */}
-      {channel.messageDistribution.length > 0 && (
+      {channel.message_distribution.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <Text size="sm" fw={600} mb={4}>
             Message distribution
@@ -720,7 +720,7 @@ function ChannelDetail({
 
 // ── Timestamp with TimeValue ──
 
-function TimestampDisplay({ ns }: { ns: bigint }) {
+function TimestampDisplay({ ns }: { ns: number }) {
   const date = nsToDate(ns);
   return (
     <Text size="xs">
@@ -769,7 +769,7 @@ function TopicDisplay({ topic }: { topic: string }) {
   );
 }
 
-function SchemaDisplay({ name }: { name: string | null }) {
+function SchemaDisplay({ name }: { name: string | null | undefined }) {
   if (!name) {
     return (
       <Text size="sm" c="dimmed">
@@ -806,10 +806,10 @@ function HzDisplay({
   hzChannel,
 }: {
   stats: PartialStats;
-  hzChannel: number | null;
+  hzChannel: number | null | undefined;
 }) {
   const hasDetails =
-    stats.minimum !== null || stats.maximum !== null || hzChannel !== null;
+    stats.minimum !== null || stats.maximum !== null || hzChannel != null;
 
   if (!hasDetails) {
     return <Text size="sm">{formatHz(stats.average)}</Text>;
@@ -837,7 +837,7 @@ function HzDisplay({
           {stats.median !== null && (
             <StatsRow label="Median" value={formatHz(stats.median)} />
           )}
-          {hzChannel !== null && (
+          {hzChannel != null && (
             <StatsRow label="Channel Hz" value={formatHz(hzChannel)} />
           )}
         </Stack>
@@ -888,7 +888,7 @@ function JitterDisplay({
   );
 }
 
-function BpsDisplay({ stats, estimated }: { stats: PartialStats | null; estimated?: boolean }) {
+function BpsDisplay({ stats, estimated }: { stats: PartialStats | null | undefined; estimated?: boolean }) {
   if (!stats) {
     return <Text size="sm">-</Text>;
   }

@@ -31,3 +31,9 @@ generate:
     api_arguments:
       additional_properties: Only explicit # Strict typing - no extra fields allowed
       get_name_properties: UpperFirst # Use UpperFirst for class names
+
+  # TypeScript types are generated via a separate npm script (json-schema-to-typescript)
+  # rather than jsonschema-gentypes (which is Python-only).
+  # See the generate-ts-types pre-commit hook and mcap-web-inspector/package.json.
+  # - source: pymcap-cli/schemas/mcap_info.json
+  #   destination: mcap-web-inspector/src/mcap/types.generated.ts

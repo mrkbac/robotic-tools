@@ -8,13 +8,13 @@ interface CompressionTableProps {
 }
 
 export function CompressionTable({ data }: CompressionTableProps) {
-  const { byCompression } = data.chunks;
-  const compressionTypes = Object.entries(byCompression);
+  const { by_compression } = data.chunks;
+  const compressionTypes = Object.entries(by_compression);
 
   if (compressionTypes.length === 0) return null;
 
   const hasMessageCounts = compressionTypes.some(
-    ([, stats]) => stats.messageCount > 0,
+    ([, stats]) => stats.message_count > 0,
   );
   const { overlaps } = data.chunks;
 
@@ -49,35 +49,35 @@ export function CompressionTable({ data }: CompressionTableProps) {
               <Table.Td fw={600}>{type}</Table.Td>
               <Table.Td style={{ textAlign: "right" }}>{stats.count}</Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatBytes(stats.compressedSize)}
+                {formatBytes(stats.compressed_size)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatBytes(stats.uncompressedSize)}
+                {formatBytes(stats.uncompressed_size)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {(stats.compressionRatio * 100).toFixed(1)}%
+                {(stats.compression_ratio * 100).toFixed(1)}%
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatBytes(stats.sizeStats.minimum)}
+                {formatBytes(stats.size_stats.minimum)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatBytes(stats.sizeStats.average)}
+                {formatBytes(stats.size_stats.average)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatBytes(stats.sizeStats.maximum)}
+                {formatBytes(stats.size_stats.maximum)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatDuration(stats.durationStats.minimum)}
+                {formatDuration(stats.duration_stats.minimum)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatDuration(stats.durationStats.average)}
+                {formatDuration(stats.duration_stats.average)}
               </Table.Td>
               <Table.Td style={{ textAlign: "right" }}>
-                {formatDuration(stats.durationStats.maximum)}
+                {formatDuration(stats.duration_stats.maximum)}
               </Table.Td>
               {hasMessageCounts && (
                 <Table.Td style={{ textAlign: "right" }}>
-                  {stats.messageCount.toLocaleString()}
+                  {stats.message_count.toLocaleString()}
                 </Table.Td>
               )}
             </Table.Tr>
@@ -85,14 +85,14 @@ export function CompressionTable({ data }: CompressionTableProps) {
         </Table.Tbody>
       </Table>
 
-      {overlaps.maxConcurrent > 1 && (
+      {overlaps.max_concurrent > 1 && (
         <Group mt="sm" gap="xs">
           <Text size="sm" fw={600} c="blue">
             Overlaps:
           </Text>
           <Text size="sm">
-            {overlaps.maxConcurrent} max concurrent,{" "}
-            {formatBytes(overlaps.maxConcurrentBytes)} max total size at once
+            {overlaps.max_concurrent} max concurrent,{" "}
+            {formatBytes(overlaps.max_concurrent_bytes)} max total size at once
           </Text>
         </Group>
       )}

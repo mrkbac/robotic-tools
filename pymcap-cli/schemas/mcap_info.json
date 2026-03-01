@@ -84,6 +84,7 @@
       "required": [
         "message_count",
         "chunk_count",
+        "message_index_count",
         "channel_count",
         "attachment_count",
         "metadata_count",
@@ -167,7 +168,10 @@
       "description": "Statistics where only average is always available; min/max/median are only available in rebuild mode.",
       "type": "object",
       "required": [
-        "average"
+        "average",
+        "minimum",
+        "maximum",
+        "median"
       ],
       "properties": {
         "average": {
@@ -286,9 +290,17 @@
         "id",
         "topic",
         "schema_id",
+        "schema_name",
         "message_count",
+        "size_bytes",
+        "duration_ns",
         "hz_stats",
-        "message_distribution"
+        "hz_channel",
+        "bytes_per_second_stats",
+        "bytes_per_message",
+        "message_distribution",
+        "message_start_time",
+        "message_end_time"
       ],
       "properties": {
         "id": {

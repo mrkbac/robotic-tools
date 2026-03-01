@@ -8,9 +8,9 @@ interface FileInfoProps {
 }
 
 export function FileInfo({ data }: FileInfoProps) {
-  const { file, header, statistics, messageDistribution } = data;
-  const durationSec = Number(statistics.durationNs) / 1_000_000_000;
-  const bytesPerSec = durationSec > 0 ? file.sizeBytes / durationSec : 0;
+  const { file, header, statistics, message_distribution } = data;
+  const durationSec = statistics.duration_ns / 1_000_000_000;
+  const bytesPerSec = durationSec > 0 ? file.size_bytes / durationSec : 0;
   const bytesPerHour = bytesPerSec * 3600;
 
   return (
@@ -19,13 +19,13 @@ export function FileInfo({ data }: FileInfoProps) {
         File Information
       </Title>
       <Grid gutter="xs">
-        <InfoRow label="File" value={file.name} />
+        <InfoRow label="File" value={file.path} />
         <InfoRow
           label="Size"
           value={
             <Group gap="xs">
               <Text span fw={500}>
-                {formatBytes(file.sizeBytes)}
+                {formatBytes(file.size_bytes)}
               </Text>
               <Badge variant="light" color="red" size="sm">
                 {formatBytes(bytesPerSec)}/s
@@ -40,53 +40,53 @@ export function FileInfo({ data }: FileInfoProps) {
         <InfoRow label="Profile" value={header.profile || "N/A"} />
         <InfoRow
           label="Messages"
-          value={statistics.messageCount.toLocaleString()}
+          value={statistics.message_count.toLocaleString()}
         />
         <InfoRow
           label="Chunks"
-          value={statistics.chunkCount.toLocaleString()}
+          value={statistics.chunk_count.toLocaleString()}
         />
         <InfoRow
           label="Duration"
-          value={`${(Number(statistics.durationNs) / 1_000_000).toFixed(2)} ms (${formatDuration(Number(statistics.durationNs))})`}
+          value={`${(statistics.duration_ns / 1_000_000).toFixed(2)} ms (${formatDuration(statistics.duration_ns)})`}
         />
         <InfoRow
           label="Start"
-          value={formatTimestamp(statistics.messageStartTime)}
+          value={formatTimestamp(statistics.message_start_time)}
         />
         <InfoRow
           label="End"
-          value={formatTimestamp(statistics.messageEndTime)}
+          value={formatTimestamp(statistics.message_end_time)}
         />
         <InfoRow
           label="Channels"
-          value={statistics.channelCount.toLocaleString()}
+          value={statistics.channel_count.toLocaleString()}
         />
         <InfoRow
           label="Attachments"
-          value={statistics.attachmentCount.toLocaleString()}
+          value={statistics.attachment_count.toLocaleString()}
         />
         <InfoRow
           label="Metadata"
-          value={statistics.metadataCount.toLocaleString()}
+          value={statistics.metadata_count.toLocaleString()}
         />
-        {statistics.messageIndexCount !== null && (
+        {statistics.message_index_count != null && (
           <InfoRow
             label="Indexed Messages"
-            value={statistics.messageIndexCount.toLocaleString()}
+            value={statistics.message_index_count.toLocaleString()}
           />
         )}
       </Grid>
 
-      {messageDistribution.maxCount > 0 && (
+      {message_distribution.max_count > 0 && (
         <>
           <Title order={5} mt="lg" mb="xs">
             Message Distribution
           </Title>
-          <DistributionChart distribution={messageDistribution} />
+          <DistributionChart distribution={message_distribution} />
           <Text size="xs" c="dimmed" mt={4}>
-            Max: {messageDistribution.maxCount.toLocaleString()} msgs/bucket |
-            Bucket size: {formatDuration(messageDistribution.bucketDurationNs)}
+            Max: {message_distribution.max_count.toLocaleString()} msgs/bucket |
+            Bucket size: {formatDuration(message_distribution.bucket_duration_ns)}
           </Text>
         </>
       )}

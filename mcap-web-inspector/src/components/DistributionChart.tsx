@@ -18,15 +18,15 @@ export function DistributionChart({
   distribution,
   height = 300,
 }: DistributionChartProps) {
-  const { messageCounts, bucketDurationNs } = distribution;
+  const { message_counts, bucket_duration_ns } = distribution;
 
   const data = useMemo(
     () =>
-      messageCounts.map((count, i) => ({
-        time: formatBucketTime(i * bucketDurationNs),
+      message_counts.map((count, i) => ({
+        time: formatBucketTime(i * bucket_duration_ns),
         messages: count,
       })),
-    [messageCounts, bucketDurationNs],
+    [message_counts, bucket_duration_ns],
   );
 
   return (

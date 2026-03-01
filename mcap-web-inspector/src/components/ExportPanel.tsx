@@ -29,7 +29,7 @@ const SLIDER_MAX = 1000;
 export function ExportPanel({ file, data }: ExportPanelProps) {
   const channels = data.channels;
   const hasTimeRange =
-    data.statistics.messageStartTime < data.statistics.messageEndTime;
+    data.statistics.message_start_time < data.statistics.message_end_time;
   const hasMetadata = data.metadata.length > 0;
   const hasAttachments = data.attachments.length > 0;
 
@@ -92,12 +92,12 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
   // Convert slider values to bigint nanosecond timestamps
   const sliderToTime = useCallback(
     (value: number): bigint => {
-      const start = data.statistics.messageStartTime;
-      const end = data.statistics.messageEndTime;
+      const start = BigInt(Math.round(data.statistics.message_start_time));
+      const end = BigInt(Math.round(data.statistics.message_end_time));
       const range = end - start;
       return start + (range * BigInt(value)) / BigInt(SLIDER_MAX);
     },
-    [data.statistics.messageStartTime, data.statistics.messageEndTime],
+    [data.statistics.message_start_time, data.statistics.message_end_time],
   );
 
   const timeFiltered =
@@ -110,7 +110,7 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
     let total = 0;
     for (const ch of channels) {
       if (selectedIds.has(ch.id)) {
-        total += ch.messageCount;
+        total += ch.message_count;
       }
     }
     return total;
@@ -124,11 +124,11 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
 
     try {
       const config: FilterConfig = {
-        includeChannelIds: allSelected ? null : new Set(selectedIds),
-        startTime,
-        endTime,
-        includeMetadata,
-        includeAttachments,
+        include_channel_ids: allSelected ? null : new Set(selectedIds),
+        start_time: startTime,
+        end_time: endTime,
+        include_metadata: includeMetadata,
+        include_attachments: includeAttachments,
       };
 
       const result = await exportFilteredMcap(file, config, (info) => {
@@ -160,6 +160,14 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
     includeMetadata,
     includeAttachments,
   ]);
+
+  // Convert number ns timestamps to display values
+  const displayStartTime = startTime !== null
+    ? Number(startTime)
+    : data.statistics.message_start_time;
+  const displayEndTime = endTime !== null
+    ? Number(endTime)
+    : data.statistics.message_end_time;
 
   return (
     <Paper p="md" withBorder>
@@ -209,8 +217,8 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
                               {ch.topic}
                             </Text>
                             <Text size="xs" c="dimmed">
-                              ({formatNumber(ch.messageCount)} msgs
-                              {ch.schemaName ? `, ${ch.schemaName}` : ""})
+                              ({formatNumber(ch.message_count)} msgs
+                              {ch.schema_name ? `, ${ch.schema_name}` : ""})
                             </Text>
                           </Group>
                         }
@@ -248,14 +256,10 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
                   />
                   <Group justify="space-between">
                     <Text size="xs" c="dimmed">
-                      {formatTimestamp(
-                        startTime ?? data.statistics.messageStartTime,
-                      )}
+                      {formatTimestamp(displayStartTime)}
                     </Text>
                     <Text size="xs" c="dimmed">
-                      {formatTimestamp(
-                        endTime ?? data.statistics.messageEndTime,
-                      )}
+                      {formatTimestamp(displayEndTime)}
                     </Text>
                   </Group>
                 </div>

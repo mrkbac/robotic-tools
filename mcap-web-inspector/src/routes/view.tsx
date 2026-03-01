@@ -314,7 +314,7 @@ function ViewPage() {
         <CompressionTable data={data} />
         <UnifiedDistributionChart
           channels={data.channels}
-          globalDistribution={data.messageDistribution}
+          globalDistribution={data.message_distribution}
         />
         <SchemasTable schemas={data.schemas} />
         <AttachmentsTable
@@ -323,8 +323,8 @@ function ViewPage() {
         />
         <ChannelsTable
           channels={data.channels}
-          bucketDurationNs={data.messageDistribution.bucketDurationNs}
-          fileSize={data.file.sizeBytes}
+          bucketDurationNs={data.message_distribution.bucket_duration_ns}
+          fileSize={data.file.size_bytes}
         />
       </Stack>
 

@@ -74,9 +74,9 @@ function calculateOptimalBucketCount(durationNs: number): number {
 
 function calculateChunkOverlaps(
   chunkIndexes: readonly { messageStartTime: bigint; messageEndTime: bigint; uncompressedSize: bigint }[],
-): { maxConcurrent: number; maxConcurrentBytes: number } {
+): { max_concurrent: number; max_concurrent_bytes: number } {
   if (chunkIndexes.length <= 1) {
-    return { maxConcurrent: 0, maxConcurrentBytes: 0 };
+    return { max_concurrent: 0, max_concurrent_bytes: 0 };
   }
 
   const sorted = [...chunkIndexes].sort((a, b) =>
@@ -115,7 +115,7 @@ function calculateChunkOverlaps(
     maxConcurrentBytes = Math.max(maxConcurrentBytes, totalBytes);
   }
 
-  return { maxConcurrent, maxConcurrentBytes };
+  return { max_concurrent: maxConcurrent, max_concurrent_bytes: maxConcurrentBytes };
 }
 
 // ── Channel statistics collection ──
@@ -238,9 +238,7 @@ function collectChannelStatistics(
 interface IntervalStatsResult {
   hzStats: { minimum: number; maximum: number; average: number; median: number };
   bpsStats?: { minimum: number; maximum: number; average: number; median: number };
-  /** Standard deviation of inter-message intervals in nanoseconds. */
   jitterNs: number;
-  /** Coefficient of variation (stddev / mean interval). */
   jitterCv: number;
 }
 
@@ -263,7 +261,6 @@ function calculateIntervalStats(
       median: median(hzValues),
     };
 
-    // Compute jitter: stddev and CV of inter-message intervals
     const meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
     const variance =
       intervals.reduce((sum, iv) => sum + (iv - meanInterval) ** 2, 0) /
@@ -388,26 +385,26 @@ export function computeStats(
 
   const maxCount = Math.max(0, maxOf(globalMessageCounts));
   const messageDistribution: MessageDistribution = {
-    bucketCount,
-    bucketDurationNs,
-    messageCounts: globalMessageCounts,
-    maxCount,
+    bucket_count: bucketCount,
+    bucket_duration_ns: bucketDurationNs,
+    message_counts: globalMessageCounts,
+    max_count: maxCount,
   };
 
   // Build compression stats
-  const byCompression: Record<string, CompressionStats> = {};
+  const by_compression: Record<string, CompressionStats> = {};
   for (const [compression, cs] of chunkStatsByCompression) {
-    byCompression[compression] = {
+    by_compression[compression] = {
       count: cs.count,
-      compressedSize: cs.compressedSize,
-      uncompressedSize: cs.uncompressedSize,
-      compressionRatio:
+      compressed_size: cs.compressedSize,
+      uncompressed_size: cs.uncompressedSize,
+      compression_ratio:
         cs.uncompressedSize > 0
           ? cs.compressedSize / cs.uncompressedSize
           : 0,
-      messageCount: cs.messageCount,
-      sizeStats: calculateStats(cs.uncompressedSizes),
-      durationStats: calculateStats(cs.durationsNs),
+      message_count: cs.messageCount,
+      size_stats: calculateStats(cs.uncompressedSizes),
+      duration_stats: calculateStats(cs.durationsNs),
     };
   }
 
@@ -455,46 +452,46 @@ export function computeStats(
     metadata: Object.fromEntries(m.metadata),
   }));
 
-  // Build attachment info
+  // Build attachment info (convert bigint → number at boundary)
   const attachments: AttachmentInfo[] = raw.attachmentIndexes.map((a) => ({
     name: a.name,
-    mediaType: a.mediaType,
-    dataSize: Number(a.dataSize),
-    logTime: a.logTime,
-    createTime: a.createTime,
-    offset: a.offset,
-    length: a.length,
+    media_type: a.mediaType,
+    data_size: Number(a.dataSize),
+    log_time: Number(a.logTime),
+    create_time: Number(a.createTime),
+    offset: Number(a.offset),
+    length: Number(a.length),
   }));
 
   // Count message indexes
-  let messageIndexCount: number | null = null;
+  let message_index_count: number | null = null;
   if (raw.chunkInformation) {
-    messageIndexCount = 0;
+    message_index_count = 0;
     for (const entries of raw.chunkInformation.values()) {
-      messageIndexCount += entries.length;
+      message_index_count += entries.length;
     }
   }
 
   return {
-    file: { name: fileName, sizeBytes: fileSize },
+    file: { path: fileName, size_bytes: fileSize },
     header: { library: header.library, profile: header.profile },
     statistics: {
-      messageCount: Number(statistics.messageCount),
-      chunkCount: statistics.chunkCount,
-      messageIndexCount,
-      channelCount: statistics.channelCount,
-      attachmentCount: statistics.attachmentCount,
-      metadataCount: statistics.metadataCount,
-      messageStartTime: statistics.messageStartTime,
-      messageEndTime: statistics.messageEndTime,
-      durationNs,
+      message_count: Number(statistics.messageCount),
+      chunk_count: statistics.chunkCount,
+      message_index_count,
+      channel_count: statistics.channelCount,
+      attachment_count: statistics.attachmentCount,
+      metadata_count: statistics.metadataCount,
+      message_start_time: Number(statistics.messageStartTime),
+      message_end_time: Number(statistics.messageEndTime),
+      duration_ns: durationNum,
     },
-    chunks: { byCompression, overlaps },
+    chunks: { by_compression, overlaps },
     channels,
     schemas,
     metadata,
     attachments,
-    messageDistribution,
+    message_distribution: messageDistribution,
   };
 }
 
@@ -520,7 +517,7 @@ function buildChannelInfo(
     hzChannel = messageCount / chDurSec;
   }
 
-  const hzStats: PartialStats = {
+  const hz_stats: PartialStats = {
     average: hzGlobal,
     minimum: intervalStats?.hzStats.minimum ?? null,
     maximum: intervalStats?.hzStats.maximum ?? null,
@@ -532,10 +529,10 @@ function buildChannelInfo(
       ? channelSize / messageCount
       : null;
 
-  let bpsStats: PartialStats | null = null;
+  let bytes_per_second_stats: PartialStats | null = null;
   if (channelSize !== null) {
     const bpsGlobal = globalDurSec > 0 ? channelSize / globalDurSec : 0;
-    bpsStats = {
+    bytes_per_second_stats = {
       average: bpsGlobal,
       minimum: intervalStats?.bpsStats?.minimum ?? null,
       maximum: intervalStats?.bpsStats?.maximum ?? null,
@@ -546,20 +543,20 @@ function buildChannelInfo(
   return {
     id: channel.id,
     topic: channel.topic,
-    schemaId: channel.schemaId,
-    schemaName,
-    messageCount,
-    sizeBytes: channelSize,
-    estimatedSizes,
-    durationNs: channelDurationNs,
-    hzStats,
-    hzChannel,
-    bytesPerSecondStats: bpsStats,
-    bytesPerMessage: bPerMsg,
-    messageDistribution,
-    messageStartTime,
-    messageEndTime,
-    jitterNs: intervalStats?.jitterNs ?? null,
-    jitterCv: intervalStats?.jitterCv ?? null,
+    schema_id: channel.schemaId,
+    schema_name: schemaName,
+    message_count: messageCount,
+    size_bytes: channelSize,
+    estimated_sizes: estimatedSizes,
+    duration_ns: channelDurationNs !== null ? Number(channelDurationNs) : null,
+    hz_stats,
+    hz_channel: hzChannel,
+    bytes_per_second_stats,
+    bytes_per_message: bPerMsg,
+    message_distribution: messageDistribution,
+    message_start_time: messageStartTime !== null ? Number(messageStartTime) : null,
+    message_end_time: messageEndTime !== null ? Number(messageEndTime) : null,
+    jitter_ns: intervalStats?.jitterNs ?? null,
+    jitter_cv: intervalStats?.jitterCv ?? null,
   };
 }

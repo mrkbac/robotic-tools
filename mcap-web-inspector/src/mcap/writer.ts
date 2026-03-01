@@ -81,7 +81,7 @@ export async function exportFilteredMcap(
           });
 
           // Check if this channel is included
-          if (config.includeChannelIds !== null && !config.includeChannelIds.has(record.id)) {
+          if (config.include_channel_ids !== null && !config.include_channel_ids.has(record.id)) {
             break;
           }
 
@@ -118,11 +118,11 @@ export async function exportFilteredMcap(
           }
 
           // Check time range
-          if (config.startTime !== null && record.logTime < config.startTime) {
+          if (config.start_time !== null && record.logTime < config.start_time) {
             messagesSkipped++;
             break;
           }
-          if (config.endTime !== null && record.logTime > config.endTime) {
+          if (config.end_time !== null && record.logTime > config.end_time) {
             messagesSkipped++;
             break;
           }
@@ -139,7 +139,7 @@ export async function exportFilteredMcap(
         }
 
         case "Attachment": {
-          if (config.includeAttachments) {
+          if (config.include_attachments) {
             await writer.addAttachment({
               name: record.name,
               logTime: record.logTime,
@@ -152,7 +152,7 @@ export async function exportFilteredMcap(
         }
 
         case "Metadata": {
-          if (config.includeMetadata) {
+          if (config.include_metadata) {
             await writer.addMetadata({
               name: record.name,
               metadata: record.metadata,

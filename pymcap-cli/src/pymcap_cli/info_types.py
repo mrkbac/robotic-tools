@@ -22,7 +22,9 @@ class ChannelInfo(TypedDict, total=False):
     schema_id: Required[int]
     r""" Required property """
 
-    schema_name: str | None
+    schema_name: Required[str | None]
+    r""" Required property """
+
     message_count: Required[int]
     r"""
     minimum: 0
@@ -30,11 +32,19 @@ class ChannelInfo(TypedDict, total=False):
     Required property
     """
 
-    size_bytes: int | None
-    r""" minimum: 0 """
+    size_bytes: Required[int | None]
+    r"""
+    minimum: 0
 
-    duration_ns: int | None
-    r""" minimum: 0 """
+    Required property
+    """
+
+    duration_ns: Required[int | None]
+    r"""
+    minimum: 0
+
+    Required property
+    """
 
     hz_stats: Required["PartialStats"]
     r"""
@@ -45,23 +55,43 @@ class ChannelInfo(TypedDict, total=False):
     Required property
     """
 
-    hz_channel: int | float | None
-    r""" minimum: 0 """
+    hz_channel: Required[int | float | None]
+    r"""
+    minimum: 0
 
-    bytes_per_second_stats: "_ChannelInfobytespersecondstats"
-    r""" Aggregation type: anyOf """
+    Required property
+    """
 
-    bytes_per_message: int | float | None
-    r""" minimum: 0 """
+    bytes_per_second_stats: Required["_ChannelInfobytespersecondstats"]
+    r"""
+    Aggregation type: anyOf
+
+    Required property
+    """
+
+    bytes_per_message: Required[int | float | None]
+    r"""
+    minimum: 0
+
+    Required property
+    """
 
     message_distribution: Required[list["_ChannelInfomessagedistributionitem"]]
     r""" Required property """
 
-    message_start_time: int | None
-    r""" minimum: 0 """
+    message_start_time: Required[int | None]
+    r"""
+    minimum: 0
 
-    message_end_time: int | None
-    r""" minimum: 0 """
+    Required property
+    """
+
+    message_end_time: Required[int | None]
+    r"""
+    minimum: 0
+
+    Required property
+    """
 
 
 class ChunkOverlaps(TypedDict, total=False):
@@ -305,14 +335,26 @@ class PartialStats(TypedDict, total=False):
     Required property
     """
 
-    minimum: int | float | None
-    r""" minimum: 0 """
+    minimum: Required[int | float | None]
+    r"""
+    minimum: 0
 
-    maximum: int | float | None
-    r""" minimum: 0 """
+    Required property
+    """
 
-    median: int | float | None
-    r""" minimum: 0 """
+    maximum: Required[int | float | None]
+    r"""
+    minimum: 0
+
+    Required property
+    """
+
+    median: Required[int | float | None]
+    r"""
+    minimum: 0
+
+    Required property
+    """
 
 
 class SchemaInfo(TypedDict, total=False):
@@ -350,8 +392,12 @@ class StatisticsInfo(TypedDict, total=False):
     Required property
     """
 
-    message_index_count: int | None
-    r""" minimum: 0 """
+    message_index_count: Required[int | None]
+    r"""
+    minimum: 0
+
+    Required property
+    """
 
     channel_count: Required[int]
     r"""

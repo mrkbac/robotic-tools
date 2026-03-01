@@ -19,6 +19,7 @@ from rich.text import Text
 from small_mcap import McapError, rebuild_summary
 
 from pymcap_cli.cmd.info_data import info_to_dict
+from pymcap_cli.cmd.info_link import ScanMode, generate_link
 from pymcap_cli.display_utils import (
     ChannelTableColumn,
     DistributionBar,
@@ -432,6 +433,13 @@ def info(
             group=PROCESSING_GROUP,
         ),
     ] = 0.5,
+    link: Annotated[
+        bool,
+        Parameter(
+            name=["-l", "--link"],
+            group=DISPLAY_GROUP,
+        ),
+    ] = False,
 ) -> int:
     """Report statistics about MCAP file(s).
 
@@ -477,6 +485,9 @@ def info(
         Requires exactly one local file. Incompatible with --json and --compress.
     watch_interval
         Polling interval in seconds for watch mode (default: 0.5).
+    link
+        Generate a shareable URL for the web inspector. Incompatible with
+        --json, --compress, and --watch.
 
     Examples
     --------
@@ -515,6 +526,17 @@ def info(
         console.print("[red]Error:[/] --compress requires --json")
         return 1
 
+    if link:
+        if json_output:
+            console.print("[red]Error:[/] --link is incompatible with --json")
+            return 1
+        if compress:
+            console.print("[red]Error:[/] --link is incompatible with --compress")
+            return 1
+        if watch:
+            console.print("[red]Error:[/] --link is incompatible with --watch")
+            return 1
+
     if watch:
         if json_output:
             console.print("[red]Error:[/] --watch is incompatible with --json")
@@ -528,6 +550,19 @@ def info(
         return _watch_file(
             files[0], sort.value, reverse, index_duration, median, tree, watch_interval
         )
+
+    # Link output mode
+    if link:
+        mode: ScanMode = "exact" if exact_sizes else ("rebuild" if rebuild else "summary")
+        for file in files:
+            with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
+                info_data = read_or_rebuild_info(
+                    f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
+                )
+            data = info_to_dict(info_data, str(file), file_size)
+            url = generate_link(data, str(file), file_size, mode)
+            print(url)  # noqa: T201
+        return 0
 
     # JSON output mode
     if json_output:
