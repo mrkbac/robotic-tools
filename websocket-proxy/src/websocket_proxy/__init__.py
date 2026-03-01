@@ -3,11 +3,11 @@
 from websocket_proxy.proxy import ProxyBridge
 from websocket_proxy.transformers import TransformerRegistry
 from websocket_proxy.transformers.image_to_video import ImageToVideoTransformer
-from websocket_proxy.transformers.pointcloud_voxel import PointCloudVoxelTransformer
+from websocket_proxy.transformers.pointcloud_pureini import PointCloudPureiniTransformer
 
 __all__ = [
     "ImageToVideoTransformer",
-    "PointCloudVoxelTransformer",
+    "PointCloudPureiniTransformer",
     "ProxyBridge",
     "TransformerRegistry",
 ]

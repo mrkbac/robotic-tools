@@ -25,14 +25,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "numpy>=2.0.0",
-    "pointcloud2>=0.2.3",
+    "pymcap-cli[video,pointcloud]",
     "websockets>=15.0.1",
     "typing-extensions>=4.12.2",
     "mcap-ros2-support-fast",
     "robo-ws-bridge",
     "rich>=14.2.0",
-    "av>=12.0.0",
 ]
 
 [project.urls]
@@ -49,7 +47,7 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 mcap-ros2-support-fast = { workspace = true }
-pointcloud2 = { workspace = true }
+pymcap-cli = { workspace = true }
 robo-ws-bridge = { workspace = true }
 
 [dependency-groups]

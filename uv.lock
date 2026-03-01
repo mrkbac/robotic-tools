@@ -2596,11 +2596,8 @@ name = "websocket-proxy"
 version = "0.1.2"
 source = { editable = "websocket-proxy" }
 dependencies = [
-    { name = "av" },
     { name = "mcap-ros2-support-fast" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "pointcloud2" },
+    { name = "pymcap-cli", extra = ["pointcloud", "video"] },
     { name = "rich" },
     { name = "robo-ws-bridge" },
     { name = "typing-extensions" },
@@ -2614,10 +2611,8 @@ example = [
 
 [package.metadata]
 requires-dist = [
-    { name = "av", specifier = ">=12.0.0" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
-    { name = "numpy", specifier = ">=2.0.0" },
-    { name = "pointcloud2", editable = "pointcloud2" },
+    { name = "pymcap-cli", extras = ["video", "pointcloud"], editable = "pymcap-cli" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "robo-ws-bridge", editable = "robo-ws-bridge" },
     { name = "typing-extensions", specifier = ">=4.12.2" },

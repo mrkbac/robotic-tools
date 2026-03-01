@@ -1,52 +1,15 @@
 """ROS2 and Foxglove message schema definitions."""
 
+from pymcap_cli.image_utils import COMPRESSED_POINTCLOUD2, FOXGLOVE_COMPRESSED_VIDEO
 
-# Foxglove message schemas (from foxglove_msgs)
-
-FOXGLOVE_COMPRESSED_VIDEO = """builtin_interfaces/Time timestamp
-string frame_id
-uint8[] data
-string format
-
-================================================================================
-MSG: builtin_interfaces/Time
-int32 sec
-uint32 nanosec"""
-
-SENSOR_MSGS_POINTCLOUD2 = """std_msgs/Header header
-uint32 height
-uint32 width
-sensor_msgs/PointField[] fields
-bool is_bigendian
-uint32 point_step
-uint32 row_step
-uint8[] data
-bool is_dense
-
-================================================================================
-MSG: std_msgs/Header
-builtin_interfaces/Time stamp
-string frame_id
-
-================================================================================
-MSG: builtin_interfaces/Time
-int32 sec
-uint32 nanosec
-
-================================================================================
-MSG: sensor_msgs/PointField
-string name
-uint32 offset
-uint8 datatype
-uint32 count"""
-
-
-# Schema registry mapping schema names to definitions
+# Schema registry mapping output schema names to definitions.
+# Only output schemas (produced by transformers) need to be registered here;
+# input schemas arrive from the upstream bridge.
 SCHEMA_REGISTRY: dict[str, str] = {
     "foxglove_msgs/msg/CompressedVideo": FOXGLOVE_COMPRESSED_VIDEO,
     "foxglove_msgs/CompressedVideo": FOXGLOVE_COMPRESSED_VIDEO,
-    "sensor_msgs/msg/PointCloud2": SENSOR_MSGS_POINTCLOUD2,
-    "sensor_msgs/PointCloud2": SENSOR_MSGS_POINTCLOUD2,
+    "point_cloud_interfaces/msg/CompressedPointCloud2": COMPRESSED_POINTCLOUD2,
+    "point_cloud_interfaces/CompressedPointCloud2": COMPRESSED_POINTCLOUD2,
 }
 
 

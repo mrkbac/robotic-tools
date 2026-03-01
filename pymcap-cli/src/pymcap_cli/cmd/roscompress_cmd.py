@@ -1,14 +1,10 @@
 """Command to compress image and point cloud topics in MCAP files."""
 
-import platform
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
-from fractions import Fraction
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import av
-import av.error
 from av.video.frame import VideoFrame
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -28,10 +24,17 @@ from small_mcap import McapWriter, get_summary
 from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.image_utils import (
+    COMPRESSED_POINTCLOUD2,
     COMPRESSED_SCHEMAS,
+    FOXGLOVE_COMPRESSED_VIDEO,
     IMAGE_SCHEMAS,
+    POINTCLOUD2_SCHEMAS,
+    PointCloudCompressor,
+    VideoEncoder,
     VideoEncoderError,
+    calculate_downscale_dimensions,
     decode_compressed_frame,
+    detect_encoder,
     raw_image_to_array,
     test_encoder,
 )
@@ -46,109 +49,14 @@ from pymcap_cli.utils import confirm_output_overwrite
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from av.video.codeccontext import VideoCodecContext
     from small_mcap.reader import DecodedMessage
 
-
-FOXGLOVE_COMPRESSED_VIDEO = """builtin_interfaces/Time timestamp
-string frame_id
-uint8[] data
-string format
-
-================================================================================
-MSG: builtin_interfaces/Time
-int32 sec
-uint32 nanosec"""
-
-POINTCLOUD2_SCHEMAS = {"sensor_msgs/msg/PointCloud2", "sensor_msgs/PointCloud2"}
-
-COMPRESSED_POINTCLOUD2 = """\
-std_msgs/Header header
-uint32 height
-uint32 width
-sensor_msgs/PointField[] fields
-bool is_bigendian
-uint32 point_step
-uint32 row_step
-uint8[] compressed_data
-bool is_dense
-string format
-
-================================================================================
-MSG: sensor_msgs/PointField
-uint8 INT8    = 1
-uint8 UINT8   = 2
-uint8 INT16   = 3
-uint8 UINT16  = 4
-uint8 INT32   = 5
-uint8 UINT32  = 6
-uint8 FLOAT32 = 7
-uint8 FLOAT64 = 8
-string name
-uint32 offset
-uint8  datatype
-uint32 count
-
-================================================================================
-MSG: std_msgs/Header
-builtin_interfaces/Time stamp
-string frame_id
-
-================================================================================
-MSG: builtin_interfaces/Time
-int32 sec
-uint32 nanosec"""
 
 console = Console()
 
 # Parameter groups
 ENCODING_GROUP = Group("Encoding")
 POINTCLOUD_GROUP = Group("Point Cloud")
-
-
-def _calculate_downscale_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
-    """Downscale dimensions to fit within max_dimension, preserving aspect ratio.
-
-    Ensures both dimensions are even (required for yuv420p).
-    """
-
-    def ensure_even(value: int) -> int:
-        return value if value % 2 == 0 else max(value - 1, 2)
-
-    if width <= max_dimension and height <= max_dimension:
-        return ensure_even(width), ensure_even(height)
-
-    aspect_ratio = width / height
-    if width > height:
-        new_width = max_dimension
-        new_height = int(new_width / aspect_ratio)
-    else:
-        new_height = max_dimension
-        new_width = int(new_height * aspect_ratio)
-
-    return ensure_even(new_width), ensure_even(new_height)
-
-
-def _detect_encoder(codec: Literal["h264", "h265"]) -> str:
-    """Detect the best available encoder for the given codec (h264 or h265)."""
-    system = platform.system()
-    if codec == "h264":
-        if system == "Darwin" and test_encoder("h264_videotoolbox"):
-            return "h264_videotoolbox"
-        if system == "Linux":
-            for enc in ["h264_nvenc", "h264_vaapi"]:
-                if test_encoder(enc):
-                    return enc
-        return "libx264"
-    if codec == "h265":
-        if system == "Darwin" and test_encoder("hevc_videotoolbox"):
-            return "hevc_videotoolbox"
-        if system == "Linux":
-            for enc in ["hevc_nvenc", "hevc_vaapi"]:
-                if test_encoder(enc):
-                    return enc
-        return "libx265"
-    raise ValueError(f"Unsupported codec: {codec}")
 
 
 def _decode_compressed_image(compressed_data: bytes) -> VideoFrame:
@@ -183,160 +91,6 @@ def _prefetch_image_decodes(
 
     while buffer:
         yield buffer.popleft()
-
-
-@dataclass(frozen=True, slots=True)
-class _EncoderConfig:
-    """Configuration for a video encoder."""
-
-    width: int
-    height: int
-    codec_name: str
-
-
-def _build_encoder_options(
-    codec_name: str, quality: int, width: int, height: int
-) -> tuple[dict[str, str], int | None]:
-    """Build codec-specific encoder options from user-facing quality (CRF).
-
-    Returns (options_dict, bit_rate_or_none).
-    """
-    if codec_name == "libx264":
-        return {
-            "crf": str(quality),
-            "preset": "superfast",
-            "tune": "zerolatency",
-        }, None
-    if codec_name == "libx265":
-        return {
-            "crf": str(quality),
-            "preset": "superfast",
-        }, None
-    if codec_name in {"h264_videotoolbox", "hevc_videotoolbox"}:
-        # CRF → bitrate: 5 Mbps baseline scaled by quality and resolution
-        pixel_scale = (width * height) / (1920 * 1080)
-        bit_rate = int(5_000_000 * (2 ** ((28 - quality) / 6)) * pixel_scale)
-        return {}, bit_rate
-    if codec_name in {"h264_nvenc", "hevc_nvenc"}:
-        return {"rc": "vbr", "cq": str(quality)}, None
-    if codec_name in {"h264_vaapi", "hevc_vaapi"}:
-        return {"qp": str(quality)}, None
-    return {}, None
-
-
-class _VideoEncoder:
-    """PyAV-based video encoder for converting images to compressed video."""
-
-    def __init__(
-        self,
-        width: int,
-        height: int,
-        codec_name: str,
-        quality: int = 28,
-        target_fps: float = 30.0,
-        gop_size: int = 30,
-    ) -> None:
-        self.config = _EncoderConfig(width=width, height=height, codec_name=codec_name)
-        self._target_fps = max(target_fps, 1.0)
-        self._frame_index = 0
-        self._quality = quality
-        self._gop_size = gop_size
-
-        try:
-            self._context: VideoCodecContext = cast(
-                "VideoCodecContext", av.CodecContext.create(codec_name, "w")
-            )
-        except av.error.FFmpegError as exc:
-            raise VideoEncoderError(f"Failed to create encoder {codec_name}: {exc}") from exc
-
-        # Configure encoder
-        fps_int = max(round(self._target_fps), 1)
-        self._context.width = width
-        self._context.height = height
-        self._context.pix_fmt = "yuv420p"
-        self._context.time_base = Fraction(1, fps_int)
-        self._context.framerate = Fraction(fps_int, 1)
-        self._context.gop_size = gop_size
-        self._context.max_b_frames = 0  # Ensure every frame produces immediate output
-
-        # Set codec-specific options
-        options, bit_rate = _build_encoder_options(codec_name, quality, width, height)
-        if bit_rate is not None:
-            self._context.bit_rate = bit_rate
-        if options:
-            self._context.options = options
-
-        try:
-            self._context.open()
-        except av.error.FFmpegError as exc:
-            raise VideoEncoderError(f"Failed to open encoder {codec_name}: {exc}") from exc
-
-    # Pixel formats that are plane-compatible with yuv420p (only color range differs)
-    # and can be passed directly to the encoder without an expensive sws_scale reformat.
-    _YUV420P_COMPAT = frozenset({"yuv420p", "yuvj420p"})
-
-    def encode(self, frame: VideoFrame) -> bytes | None:
-        """Encode a single frame and return compressed video bytes, or None if buffered."""
-        # Only reformat when dimensions differ or the format is truly incompatible.
-        # yuvj420p (full-range) is plane-compatible with yuv420p; FFmpeg handles the
-        # color-range flag internally so we can skip the costly sws_scale conversion.
-        needs_resize = frame.width != self.config.width or frame.height != self.config.height
-        needs_fmt = frame.format.name not in self._YUV420P_COMPAT
-        if needs_resize or needs_fmt:
-            frame = frame.reformat(
-                width=self.config.width, height=self.config.height, format=self._context.pix_fmt
-            )
-        frame.pts = self._frame_index
-        self._frame_index += 1
-
-        try:
-            packets = list(self._context.encode(frame))
-        except av.error.FFmpegError as exc:
-            raise VideoEncoderError(f"Encoding error: {exc}") from exc
-
-        if not packets:
-            return None
-
-        return b"".join(bytes(packet) for packet in packets)
-
-    def flush(self) -> bytes | None:
-        """Flush remaining buffered frames from the encoder."""
-        try:
-            packets = list(self._context.encode(None))
-        except av.error.FFmpegError:
-            return None
-        if not packets:
-            return None
-        return b"".join(bytes(packet) for packet in packets)
-
-
-def _build_encoding_info(
-    msg: object,
-    encoding_opt: "EncodingOptions",  # noqa: F821  # ty: ignore[unresolved-reference]
-    compression_opt: "CompressionOption",  # noqa: F821  # ty: ignore[unresolved-reference]
-    resolution: float,
-) -> "EncodingInfo":  # noqa: F821  # ty: ignore[unresolved-reference]
-    """Build pureini EncodingInfo from a decoded ROS2 PointCloud2 message."""
-    from pureini import EncodingInfo, FieldType, PointField  # noqa: PLC0415
-
-    info = EncodingInfo()
-    info.width = msg.width  # type: ignore[attr-defined]
-    info.height = msg.height  # type: ignore[attr-defined]
-    info.point_step = msg.point_step  # type: ignore[attr-defined]
-    info.encoding_opt = encoding_opt
-    info.compression_opt = compression_opt
-
-    info.fields = []
-    for ros_field in msg.fields:  # type: ignore[attr-defined]
-        field = PointField(
-            name=ros_field.name,
-            offset=ros_field.offset,
-            type=FieldType(ros_field.datatype),
-            resolution=resolution if ros_field.datatype == 7 else None,
-        )
-        info.fields.append(field)
-
-    return info
 
 
 def roscompress(
@@ -452,15 +206,14 @@ def roscompress(
                 return 1
             encoder_name = encoder
         else:
-            encoder_name = _detect_encoder(codec)
+            encoder_name = detect_encoder(codec)
 
-    # Lazy-import pureini for point cloud compression
+    # Create point cloud compressor
+    pc_compressor: PointCloudCompressor | None = None
     if pointcloud:
         try:
-            from pureini import (  # noqa: PLC0415
-                CompressionOption,
-                EncodingOptions,
-                PointcloudEncoder,
+            pc_compressor = PointCloudCompressor(
+                encoding=pc_encoding, compression=pc_compression, resolution=resolution
             )
         except ImportError:
             console.print(
@@ -468,21 +221,6 @@ def roscompress(
                 "Install with: uv add 'pymcap-cli[pointcloud]'"
             )
             return 1
-
-    # Map string options to pureini enums
-    if pointcloud:
-        encoding_map = {
-            "lossy": EncodingOptions.LOSSY,
-            "lossless": EncodingOptions.LOSSLESS,
-            "none": EncodingOptions.NONE,
-        }
-        compression_map = {
-            "zstd": CompressionOption.ZSTD,
-            "lz4": CompressionOption.LZ4,
-            "none": CompressionOption.NONE,
-        }
-        pc_encoding_opt = encoding_map[pc_encoding]
-        pc_compression_opt = compression_map[pc_compression]
 
     console.print(f"[cyan]Input:[/cyan] {file}")
     console.print(f"[cyan]Output:[/cyan] {output}")
@@ -512,8 +250,7 @@ def roscompress(
             total_message_count = sum(summary.statistics.channel_message_counts.values())
 
     # Track encoders per topic (lazy initialization)
-    encoders: dict[str, _VideoEncoder] = {}
-    pc_encoders: dict[str, tuple[EncodingInfo, PointcloudEncoder]] = {}  # noqa: F821  # ty: ignore[unresolved-reference]
+    encoders: dict[str, VideoEncoder] = {}
     decoder_factory = DecoderFactory()
     encoder_factory = ROS2EncoderFactory()
 
@@ -583,14 +320,14 @@ def roscompress(
 
                     # Downscale if --scale is set, and ensure even dimensions
                     if scale is not None:
-                        width, height = _calculate_downscale_dimensions(width, height, scale)
+                        width, height = calculate_downscale_dimensions(width, height, scale)
                     else:
                         width -= width % 2
                         height -= height % 2
 
                     # Create encoder for this topic
                     try:
-                        encoders[topic] = _VideoEncoder(
+                        encoders[topic] = VideoEncoder(
                             width=width,
                             height=height,
                             codec_name=encoder_name,
@@ -635,7 +372,7 @@ def roscompress(
                         width = encoders[topic].config.width
                         height = encoders[topic].config.height
                         try:
-                            encoders[topic] = _VideoEncoder(
+                            encoders[topic] = VideoEncoder(
                                 width=width,
                                 height=height,
                                 codec_name=sw_encoder,
@@ -709,16 +446,7 @@ def roscompress(
             elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
                 topic = msg.channel.topic
 
-                # Build encoding info and compress
-                info = _build_encoding_info(
-                    msg.decoded_message, pc_encoding_opt, pc_compression_opt, resolution
-                )
-                # Cache PointcloudEncoder per topic, recreate if info changes
-                cached = pc_encoders.get(topic)
-                if cached is None or cached[0] != info:
-                    pc_encoders[topic] = (info, PointcloudEncoder(info))
-                pc_encoder = pc_encoders[topic][1]
-                compressed = pc_encoder.encode(bytes(msg.decoded_message.data))
+                compressed = pc_compressor.compress(msg.decoded_message)  # type: ignore[union-attr]
 
                 if topic not in pointcloud_topics_converted:
                     pointcloud_topics_converted.add(topic)

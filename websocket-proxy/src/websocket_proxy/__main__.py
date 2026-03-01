@@ -12,7 +12,7 @@ from websocket_proxy.dashboard import DashboardRenderer
 from websocket_proxy.proxy import ProxyBridge
 from websocket_proxy.transformers import TransformerRegistry
 from websocket_proxy.transformers.image_to_video import ImageToVideoTransformer
-from websocket_proxy.transformers.pointcloud_voxel import PointCloudVoxelTransformer
+from websocket_proxy.transformers.pointcloud_pureini import PointCloudPureiniTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +86,22 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--pointcloud-voxel-size",
-        type=float,
-        default=0.1,
-        help="Voxel size (in meters) for point cloud downsampling (default: 0.1)",
+        "--pointcloud-encoding",
+        choices=["lossy", "lossless", "none"],
+        default="lossy",
+        help="Point cloud encoding mode (default: lossy)",
     )
     parser.add_argument(
-        "--pointcloud-keep-nans",
-        dest="pointcloud_skip_nans",
-        action="store_false",
-        help="Keep NaN points when voxelizing point clouds (default: drop NaNs)",
+        "--pointcloud-compression",
+        choices=["zstd", "lz4", "none"],
+        default="zstd",
+        help="Point cloud compression algorithm (default: zstd)",
+    )
+    parser.add_argument(
+        "--pointcloud-resolution",
+        type=float,
+        default=0.01,
+        help="Resolution for lossy float compression of point clouds (default: 0.01)",
     )
 
     parser.add_argument(
@@ -110,7 +116,7 @@ def parse_args() -> argparse.Namespace:
         help="Dashboard refresh rate in seconds (default: 1.0)",
     )
 
-    parser.set_defaults(image_use_hardware=True, pointcloud_skip_nans=True)
+    parser.set_defaults(image_use_hardware=True)
     return parser.parse_args()
 
 
@@ -132,9 +138,10 @@ async def main_async(args: argparse.Namespace) -> None:
     )
     registry.register(image_transformer)
 
-    pointcloud_transformer = PointCloudVoxelTransformer(
-        voxel_size=args.pointcloud_voxel_size,
-        skip_nans=args.pointcloud_skip_nans,
+    pointcloud_transformer = PointCloudPureiniTransformer(
+        encoding=args.pointcloud_encoding,
+        compression=args.pointcloud_compression,
+        resolution=args.pointcloud_resolution,
     )
     registry.register(pointcloud_transformer)
 
