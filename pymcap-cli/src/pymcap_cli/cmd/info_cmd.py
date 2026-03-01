@@ -630,4 +630,9 @@ def info(
             )
         )
 
+        # Show shareable web inspector link
+        mode: ScanMode = "exact" if exact_sizes else ("rebuild" if rebuild else "summary")
+        url = generate_link(data, str(file), file_size, mode)
+        console.print(f"\n[dim][link={url}]View in web inspector[/link][/dim]")
+
     return 0

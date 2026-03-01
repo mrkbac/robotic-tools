@@ -1,8 +1,5 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
 import {
-  Paper,
-  Title,
-  Accordion,
   Alert,
   Stack,
   Group,
@@ -170,166 +167,155 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
     : data.statistics.message_end_time;
 
   return (
-    <Paper p="md" withBorder>
-      <Accordion variant="default" chevronPosition="left">
-        <Accordion.Item value="export">
-          <Accordion.Control>
-            <Title order={4}>Export</Title>
-          </Accordion.Control>
-          <Accordion.Panel>
-            <Stack gap="md">
-              {/* Topic selector */}
-              <div>
-                <Group justify="space-between" mb="xs">
-                  <Text size="sm" fw={600}>
-                    Topics ({selectedIds.size}/{channels.length})
-                  </Text>
+    <Stack gap="md">
+      {/* Topic selector */}
+      <div>
+        <Group justify="space-between" mb="xs">
+          <Text size="sm" fw={600}>
+            Topics ({selectedIds.size}/{channels.length})
+          </Text>
+          <Group gap="xs">
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              onClick={selectAll}
+              disabled={allSelected}
+            >
+              All
+            </Button>
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              onClick={selectNone}
+              disabled={noneSelected}
+            >
+              None
+            </Button>
+          </Group>
+        </Group>
+        <ScrollArea.Autosize mah={200}>
+          <Stack gap={4}>
+            {channels.map((ch) => (
+              <Checkbox
+                key={ch.id}
+                size="xs"
+                checked={selectedIds.has(ch.id)}
+                onChange={() => toggleChannel(ch.id)}
+                label={
                   <Group gap="xs">
-                    <Button
-                      size="compact-xs"
-                      variant="subtle"
-                      onClick={selectAll}
-                      disabled={allSelected}
-                    >
-                      All
-                    </Button>
-                    <Button
-                      size="compact-xs"
-                      variant="subtle"
-                      onClick={selectNone}
-                      disabled={noneSelected}
-                    >
-                      None
-                    </Button>
-                  </Group>
-                </Group>
-                <ScrollArea.Autosize mah={200}>
-                  <Stack gap={4}>
-                    {channels.map((ch) => (
-                      <Checkbox
-                        key={ch.id}
-                        size="xs"
-                        checked={selectedIds.has(ch.id)}
-                        onChange={() => toggleChannel(ch.id)}
-                        label={
-                          <Group gap="xs">
-                            <Text size="xs" style={{ fontFamily: "monospace" }}>
-                              {ch.topic}
-                            </Text>
-                            <Text size="xs" c="dimmed">
-                              ({formatNumber(ch.message_count)} msgs
-                              {ch.schema_name ? `, ${ch.schema_name}` : ""})
-                            </Text>
-                          </Group>
-                        }
-                      />
-                    ))}
-                  </Stack>
-                </ScrollArea.Autosize>
-              </div>
-
-              {/* Time range */}
-              {hasTimeRange && (
-                <div>
-                  <Group justify="space-between" mb="xs">
-                    <Text size="sm" fw={600}>
-                      Time Range
-                    </Text>
-                    {timeFiltered && (
-                      <Button
-                        size="compact-xs"
-                        variant="subtle"
-                        onClick={() => setTimeRange([0, SLIDER_MAX])}
-                      >
-                        Reset
-                      </Button>
-                    )}
-                  </Group>
-                  <RangeSlider
-                    min={0}
-                    max={SLIDER_MAX}
-                    step={1}
-                    value={timeRange}
-                    onChange={setTimeRange}
-                    label={null}
-                    mb="xs"
-                  />
-                  <Group justify="space-between">
-                    <Text size="xs" c="dimmed">
-                      {formatTimestamp(displayStartTime)}
+                    <Text size="xs" style={{ fontFamily: "monospace" }}>
+                      {ch.topic}
                     </Text>
                     <Text size="xs" c="dimmed">
-                      {formatTimestamp(displayEndTime)}
+                      ({formatNumber(ch.message_count)} msgs
+                      {ch.schema_name ? `, ${ch.schema_name}` : ""})
                     </Text>
                   </Group>
-                </div>
-              )}
+                }
+              />
+            ))}
+          </Stack>
+        </ScrollArea.Autosize>
+      </div>
 
-              {/* Toggles */}
-              <Group gap="xl">
-                {hasMetadata && (
-                  <Switch
-                    size="xs"
-                    label="Include metadata"
-                    checked={includeMetadata}
-                    onChange={(e) =>
-                      setIncludeMetadata(e.currentTarget.checked)
-                    }
-                  />
-                )}
-                {hasAttachments && (
-                  <Switch
-                    size="xs"
-                    label="Include attachments"
-                    checked={includeAttachments}
-                    onChange={(e) =>
-                      setIncludeAttachments(e.currentTarget.checked)
-                    }
-                  />
-                )}
-              </Group>
+      {/* Time range */}
+      {hasTimeRange && (
+        <div>
+          <Group justify="space-between" mb="xs">
+            <Text size="sm" fw={600}>
+              Time Range
+            </Text>
+            {timeFiltered && (
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                onClick={() => setTimeRange([0, SLIDER_MAX])}
+              >
+                Reset
+              </Button>
+            )}
+          </Group>
+          <RangeSlider
+            min={0}
+            max={SLIDER_MAX}
+            step={1}
+            value={timeRange}
+            onChange={setTimeRange}
+            label={null}
+            mb="xs"
+          />
+          <Group justify="space-between">
+            <Text size="xs" c="dimmed">
+              {formatTimestamp(displayStartTime)}
+            </Text>
+            <Text size="xs" c="dimmed">
+              {formatTimestamp(displayEndTime)}
+            </Text>
+          </Group>
+        </div>
+      )}
 
-              {/* Summary */}
-              <Text size="xs" c="dimmed">
-                {selectedIds.size} channel{selectedIds.size !== 1 ? "s" : ""}
-                {" selected"}
-                {" \u00B7 ~"}
-                {formatNumber(estimatedMessages)} messages
-                {timeFiltered && " (before time filter)"}
-              </Text>
+      {/* Toggles */}
+      <Group gap="xl">
+        {hasMetadata && (
+          <Switch
+            size="xs"
+            label="Include metadata"
+            checked={includeMetadata}
+            onChange={(e) =>
+              setIncludeMetadata(e.currentTarget.checked)
+            }
+          />
+        )}
+        {hasAttachments && (
+          <Switch
+            size="xs"
+            label="Include attachments"
+            checked={includeAttachments}
+            onChange={(e) =>
+              setIncludeAttachments(e.currentTarget.checked)
+            }
+          />
+        )}
+      </Group>
 
-              {/* Export button + progress */}
-              <div>
-                <Button
-                  leftSection={<IconDownload size={16} />}
-                  onClick={handleExport}
-                  loading={exporting}
-                  disabled={noneSelected}
-                >
-                  Export filtered MCAP
-                </Button>
-              </div>
+      {/* Summary */}
+      <Text size="xs" c="dimmed">
+        {selectedIds.size} channel{selectedIds.size !== 1 ? "s" : ""}
+        {" selected"}
+        {" \u00B7 ~"}
+        {formatNumber(estimatedMessages)} messages
+        {timeFiltered && " (before time filter)"}
+      </Text>
 
-              {exportError && (
-                <Alert color="red" title="Export failed">
-                  {exportError}
-                </Alert>
-              )}
+      {/* Export button + progress */}
+      <div>
+        <Button
+          leftSection={<IconDownload size={16} />}
+          onClick={handleExport}
+          loading={exporting}
+          disabled={noneSelected}
+        >
+          Export filtered MCAP
+        </Button>
+      </div>
 
-              {exporting && (
-                <Stack gap="xs">
-                  <Progress value={progressPct} size="sm" />
-                  <Text size="xs" c="dimmed">
-                    {progressPct}% read
-                    {progressInfo &&
-                      ` \u00B7 ${formatNumber(progressInfo.messagesWritten)} written, ${formatNumber(progressInfo.messagesSkipped)} skipped`}
-                  </Text>
-                </Stack>
-              )}
-            </Stack>
-          </Accordion.Panel>
-        </Accordion.Item>
-      </Accordion>
-    </Paper>
+      {exportError && (
+        <Alert color="red" title="Export failed">
+          {exportError}
+        </Alert>
+      )}
+
+      {exporting && (
+        <Stack gap="xs">
+          <Progress value={progressPct} size="sm" />
+          <Text size="xs" c="dimmed">
+            {progressPct}% read
+            {progressInfo &&
+              ` \u00B7 ${formatNumber(progressInfo.messagesWritten)} written, ${formatNumber(progressInfo.messagesSkipped)} skipped`}
+          </Text>
+        </Stack>
+      )}
+    </Stack>
   );
 }

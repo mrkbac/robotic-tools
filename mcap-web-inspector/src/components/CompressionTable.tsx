@@ -1,4 +1,4 @@
-import { Table, Title, Paper, Text, Group } from "@mantine/core";
+import { Table, Title, Paper, Text, Group, Accordion } from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
 import { formatBytes, formatDuration } from "../format.ts";
 import { CompressionPieChart } from "./CompressionPieChart.tsx";
@@ -20,9 +20,15 @@ export function CompressionTable({ data }: CompressionTableProps) {
 
   return (
     <Paper p="md" withBorder>
-      <Title order={4} mb="md">
-        Compression
-      </Title>
+      <Accordion variant="default" chevronPosition="left">
+        <Accordion.Item value="compression">
+          <Accordion.Control>
+            <Title order={4}>
+              Compression ({compressionTypes.length}{" "}
+              {compressionTypes.length === 1 ? "type" : "types"})
+            </Title>
+          </Accordion.Control>
+          <Accordion.Panel>
       <CompressionPieChart chunks={data.chunks} />
       <Table striped highlightOnHover>
         <Table.Thead>
@@ -96,6 +102,9 @@ export function CompressionTable({ data }: CompressionTableProps) {
           </Text>
         </Group>
       )}
+          </Accordion.Panel>
+        </Accordion.Item>
+      </Accordion>
     </Paper>
   );
 }

@@ -1,4 +1,4 @@
-import { Grid, Text, Title, Paper, Badge, Group } from "@mantine/core";
+import { SimpleGrid, Text, Title, Paper, Badge, Group, Stack } from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
 import { formatBytes, formatDuration, formatTimestamp } from "../format.ts";
 import { DistributionChart } from "./DistributionChart.tsx";
@@ -18,13 +18,13 @@ export function FileInfo({ data }: FileInfoProps) {
       <Title order={4} mb="md">
         File Information
       </Title>
-      <Grid gutter="xs">
-        <InfoRow label="File" value={file.path} />
-        <InfoRow
+      <SimpleGrid cols={{ base: 2, sm: 3, lg: 4 }} spacing="sm">
+        <InfoItem label="File" value={file.path} />
+        <InfoItem
           label="Size"
           value={
-            <Group gap="xs">
-              <Text span fw={500}>
+            <Group gap="xs" wrap="wrap">
+              <Text size="sm" fw={500}>
                 {formatBytes(file.size_bytes)}
               </Text>
               <Badge variant="light" color="red" size="sm">
@@ -36,47 +36,47 @@ export function FileInfo({ data }: FileInfoProps) {
             </Group>
           }
         />
-        <InfoRow label="Library" value={header.library || "N/A"} />
-        <InfoRow label="Profile" value={header.profile || "N/A"} />
-        <InfoRow
+        <InfoItem label="Library" value={header.library || "N/A"} />
+        <InfoItem label="Profile" value={header.profile || "N/A"} />
+        <InfoItem
           label="Messages"
           value={statistics.message_count.toLocaleString()}
         />
-        <InfoRow
+        <InfoItem
           label="Chunks"
           value={statistics.chunk_count.toLocaleString()}
         />
-        <InfoRow
+        <InfoItem
           label="Duration"
           value={`${(statistics.duration_ns / 1_000_000).toFixed(2)} ms (${formatDuration(statistics.duration_ns)})`}
         />
-        <InfoRow
+        <InfoItem
           label="Start"
           value={formatTimestamp(statistics.message_start_time)}
         />
-        <InfoRow
+        <InfoItem
           label="End"
           value={formatTimestamp(statistics.message_end_time)}
         />
-        <InfoRow
+        <InfoItem
           label="Channels"
           value={statistics.channel_count.toLocaleString()}
         />
-        <InfoRow
+        <InfoItem
           label="Attachments"
           value={statistics.attachment_count.toLocaleString()}
         />
-        <InfoRow
+        <InfoItem
           label="Metadata"
           value={statistics.metadata_count.toLocaleString()}
         />
         {statistics.message_index_count != null && (
-          <InfoRow
+          <InfoItem
             label="Indexed Messages"
             value={statistics.message_index_count.toLocaleString()}
           />
         )}
-      </Grid>
+      </SimpleGrid>
 
       {message_distribution.max_count > 0 && (
         <>
@@ -94,7 +94,7 @@ export function FileInfo({ data }: FileInfoProps) {
   );
 }
 
-function InfoRow({
+function InfoItem({
   label,
   value,
 }: {
@@ -102,15 +102,17 @@ function InfoRow({
   value: React.ReactNode;
 }) {
   return (
-    <>
-      <Grid.Col span={3}>
-        <Text fw={600} c="blue" size="sm">
-          {label}:
+    <Stack gap={2}>
+      <Text size="xs" c="dimmed">
+        {label}
+      </Text>
+      {typeof value === "string" ? (
+        <Text size="sm" fw={500}>
+          {value}
         </Text>
-      </Grid.Col>
-      <Grid.Col span={9}>
-        {typeof value === "string" ? <Text size="sm">{value}</Text> : value}
-      </Grid.Col>
-    </>
+      ) : (
+        value
+      )}
+    </Stack>
   );
 }

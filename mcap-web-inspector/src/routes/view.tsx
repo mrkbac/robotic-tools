@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Stack, Progress, Alert, Text, Skeleton, Button } from "@mantine/core";
-import { IconInfoCircle, IconPlugConnected } from "@tabler/icons-react";
+import { Stack, Progress, Alert, Text, Skeleton, Button, Tabs } from "@mantine/core";
+import { IconInfoCircle, IconPlugConnected, IconFileAnalytics, IconDownload } from "@tabler/icons-react";
 import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
 import { computeStats } from "../mcap/stats.ts";
 import { FileInfo } from "../components/FileInfo.tsx";
@@ -13,13 +13,11 @@ import { AttachmentsTable } from "../components/AttachmentsTable.tsx";
 import { ExportPanel } from "../components/ExportPanel.tsx";
 import { UnifiedDistributionChart } from "../components/UnifiedDistributionChart.tsx";
 import { ScanStepper } from "../components/ScanStepper.tsx";
-import { FileDropzone } from "../components/FileDropzone.tsx";
 import { useMcapCache, MODE_LEVEL } from "../hooks/useMcapCache.ts";
 import { decodeFromHash, encodeToHash } from "../url/codec.ts";
 import { createFileId, fileMatchesId } from "../url/fileId.ts";
 import { getFileRef, setFileRef } from "../url/fileRef.ts";
 import { useFileHandleRecovery } from "../hooks/useFileHandleRecovery.ts";
-import { saveFileHandle } from "../stores/fileHandleStore.ts";
 import { saveHistoryEntry } from "../stores/historyStore.ts";
 
 function ViewPage() {
@@ -36,7 +34,7 @@ function ViewPage() {
   const [decodeError, setDecodeError] = useState(false);
 
   const generationRef = useRef(0);
-  const { tryGetCachedRaw, readAndCache, getCachedMode } = useMcapCache();
+  const { tryGetCachedRaw, readAndCache } = useMcapCache();
   const decodedRef = useRef(false);
 
   const { status: recoveryStatus, file: recoveredFile, requestAccess } =
@@ -80,92 +78,6 @@ function ViewPage() {
 
   const isSharedView = localFile == null;
   const fileUnavailable = isSharedView && recoveryStatus !== "granted";
-
-  const handleFileAssociation = useCallback(
-    async (file: File, handle?: FileSystemFileHandle) => {
-      // Matching file: associate for scan upgrades
-      if (fileId && fileMatchesId(file, fileId)) {
-        setFileRef(file);
-        setLocalFile(file);
-        if (handle) {
-          saveFileHandle(fileId, handle);
-        }
-        return;
-      }
-
-      // Different file: process as a brand new scan
-      const newFileId = createFileId(file);
-      setFileRef(file);
-      setLocalFile(file);
-      setError(null);
-      if (handle) {
-        saveFileHandle(newFileId, handle);
-      }
-
-      try {
-        const cachedMode = await getCachedMode(file);
-        const initialMode: ScanMode = cachedMode ?? "summary";
-
-        const cachedRaw = await tryGetCachedRaw(file, initialMode);
-        if (cachedRaw) {
-          const result = computeStats(cachedRaw, file.name, file.size);
-          setData(result);
-          setScanMode(initialMode);
-          setFileId(newFileId);
-          const newHash = await encodeToHash(result, initialMode, newFileId);
-          saveHistoryEntry({
-            fileId: newFileId,
-            fileName: file.name,
-            fileSize: file.size,
-            scanMode: initialMode,
-            hash: newHash,
-            scannedAt: Date.now(),
-          });
-          navigate({ to: "/view", hash: newHash });
-          return;
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load cached scan");
-        return;
-      }
-
-      const gen = ++generationRef.current;
-      setLoading(true);
-      setProgress(0);
-
-      try {
-        const raw = await readAndCache(file, "summary", (bytesRead, total) => {
-          setProgress(Math.round((bytesRead / total) * 100));
-        });
-
-        if (generationRef.current !== gen) return;
-
-        const result = computeStats(raw, file.name, file.size);
-        setData(result);
-        setScanMode("summary");
-        setFileId(newFileId);
-        const newHash = await encodeToHash(result, "summary", newFileId);
-        saveHistoryEntry({
-          fileId: newFileId,
-          fileName: file.name,
-          fileSize: file.size,
-          scanMode: "summary",
-          hash: newHash,
-          scannedAt: Date.now(),
-        });
-        navigate({ to: "/view", hash: newHash });
-      } catch (err) {
-        if (generationRef.current !== gen) return;
-        setError(err instanceof Error ? err.message : "Failed to scan MCAP file");
-      } finally {
-        if (generationRef.current === gen) {
-          setLoading(false);
-          setScanTarget(null);
-        }
-      }
-    },
-    [fileId, getCachedMode, tryGetCachedRaw, readAndCache, navigate],
-  );
 
   const handleScanTo = useCallback(
     async (mode: ScanMode) => {
@@ -274,16 +186,9 @@ function ViewPage() {
           icon={<IconInfoCircle size={18} />}
           title="Viewing shared data"
         >
-          Drop the .mcap file to enable scan upgrades, or drop a different file to inspect it.
+          Go to the home page to open an .mcap file and enable scan upgrades.
         </Alert>
       )}
-
-      <FileDropzone
-        onFileSelect={handleFileAssociation}
-        loading={false}
-        currentFile={localFile ?? null}
-        compact
-      />
 
       <ScanStepper
         scannedMode={scanMode}
@@ -308,27 +213,46 @@ function ViewPage() {
         </Alert>
       )}
 
-      <Stack gap="lg">
-        <FileInfo data={data} />
-        <MetadataTable metadata={data.metadata} />
-        <CompressionTable data={data} />
-        <UnifiedDistributionChart
-          channels={data.channels}
-          globalDistribution={data.message_distribution}
-        />
-        <SchemasTable schemas={data.schemas} />
-        <AttachmentsTable
-          attachments={data.attachments}
-          localFile={localFile}
-        />
-        <ChannelsTable
-          channels={data.channels}
-          bucketDurationNs={data.message_distribution.bucket_duration_ns}
-          fileSize={data.file.size_bytes}
-        />
-      </Stack>
+      <Tabs defaultValue="inspect">
+        <Tabs.List>
+          <Tabs.Tab value="inspect" leftSection={<IconFileAnalytics size={16} />}>
+            Inspect
+          </Tabs.Tab>
+          {localFile && (
+            <Tabs.Tab value="export" leftSection={<IconDownload size={16} />}>
+              Export
+            </Tabs.Tab>
+          )}
+        </Tabs.List>
 
-      {localFile && data && <ExportPanel file={localFile} data={data} />}
+        <Tabs.Panel value="inspect" pt="md">
+          <Stack gap="lg">
+            <FileInfo data={data} />
+            <MetadataTable metadata={data.metadata} />
+            <CompressionTable data={data} />
+            <UnifiedDistributionChart
+              channels={data.channels}
+              globalDistribution={data.message_distribution}
+            />
+            <SchemasTable schemas={data.schemas} />
+            <AttachmentsTable
+              attachments={data.attachments}
+              localFile={localFile}
+            />
+            <ChannelsTable
+              channels={data.channels}
+              bucketDurationNs={data.message_distribution.bucket_duration_ns}
+              fileSize={data.file.size_bytes}
+            />
+          </Stack>
+        </Tabs.Panel>
+
+        {localFile && (
+          <Tabs.Panel value="export" pt="md">
+            <ExportPanel file={localFile} data={data} />
+          </Tabs.Panel>
+        )}
+      </Tabs>
     </>
   );
 }
