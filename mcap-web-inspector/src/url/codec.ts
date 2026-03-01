@@ -15,6 +15,7 @@ interface UrlPayload {
   mode: ScanMode;
   fileId: string;
   data: McapInfoOutput;
+  thumbnail?: string;
 }
 
 /** Strip large/irrelevant data for URL encoding. */
@@ -39,8 +40,10 @@ export async function encodeToHash(
   data: McapInfoOutput,
   mode: ScanMode,
   fileId: string,
+  thumbnail?: string | null,
 ): Promise<string> {
   const payload: UrlPayload = { mode, fileId, data: stripForUrl(data) };
+  if (thumbnail) payload.thumbnail = thumbnail;
 
   let json = JSON.stringify(payload);
   let encoded = await compressToBase64url(json);
@@ -66,6 +69,13 @@ export async function encodeToHash(
     encoded = await compressToBase64url(json);
   }
 
+  // Strip thumbnail as last resort
+  if (encoded.length > MAX_HASH_BYTES && payload.thumbnail) {
+    delete payload.thumbnail;
+    json = JSON.stringify(payload);
+    encoded = await compressToBase64url(json);
+  }
+
   return encoded;
 }
 
@@ -75,7 +85,7 @@ export async function encodeToHash(
 
 export async function decodeFromHash(
   hash: string,
-): Promise<{ data: McapInfoOutput; scanMode: ScanMode; fileId: string }> {
+): Promise<{ data: McapInfoOutput; scanMode: ScanMode; fileId: string; thumbnail?: string }> {
   const json = await decompressFromBase64url(hash);
   const payload = JSON.parse(json) as UrlPayload;
 
@@ -94,5 +104,6 @@ export async function decodeFromHash(
     data,
     scanMode: payload.mode,
     fileId: payload.fileId,
+    thumbnail: payload.thumbnail,
   };
 }

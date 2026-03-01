@@ -12,6 +12,7 @@ import { encodeToHash } from "../url/codec.ts";
 import { createFileId } from "../url/fileId.ts";
 import { setFileRef } from "../url/fileRef.ts";
 import { setThumbnailRef } from "../url/thumbnailRef.ts";
+import { createMicroThumbFromMap } from "../url/thumbnail.ts";
 import { saveFileHandle } from "../stores/fileHandleStore.ts";
 
 function IndexPage() {
@@ -31,13 +32,14 @@ function IndexPage() {
       file: File,
       handle?: FileSystemFileHandle,
       thumbnailUrl?: string,
+      microThumb?: string | null,
     ) => {
       setFileRef(file);
       const fileId = createFileId(file);
       if (handle) {
         saveFileHandle(fileId, handle); // fire-and-forget
       }
-      const hash = await encodeToHash(data, mode, fileId);
+      const hash = await encodeToHash(data, mode, fileId, microThumb);
       addEntry({
         fileId,
         fileName: file.name,
@@ -62,8 +64,9 @@ function IndexPage() {
         const thumbs = await getThumbnails(selectedFile);
         setThumbnailRef(thumbs);
         const thumbUrl = pickRepresentativeThumbnailUrl(thumbs);
+        const microThumb = await createMicroThumbFromMap(thumbs);
         const result = computeStats(cachedRaw, selectedFile.name, selectedFile.size);
-        await navigateToView(result, mode, selectedFile, handle, thumbUrl);
+        await navigateToView(result, mode, selectedFile, handle, thumbUrl, microThumb);
         return;
       }
 
@@ -80,8 +83,9 @@ function IndexPage() {
 
         setThumbnailRef(thumbs);
         const thumbUrl = pickRepresentativeThumbnailUrl(thumbs);
+        const microThumb = await createMicroThumbFromMap(thumbs);
         const result = computeStats(raw, selectedFile.name, selectedFile.size);
-        await navigateToView(result, mode, selectedFile, handle, thumbUrl);
+        await navigateToView(result, mode, selectedFile, handle, thumbUrl, microThumb);
       } catch (err) {
         if (generationRef.current !== gen) return;
         setError(err instanceof Error ? err.message : "Failed to read MCAP file");

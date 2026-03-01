@@ -10,9 +10,10 @@ function thumbnailToUrl(data: Uint8Array, format: string): string {
 interface FileHeaderProps {
   fileName: string;
   thumbnails: ThumbnailMap;
+  fallbackThumbnailUrl?: string;
 }
 
-export function FileHeader({ fileName, thumbnails }: FileHeaderProps) {
+export function FileHeader({ fileName, thumbnails, fallbackThumbnailUrl }: FileHeaderProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const entries = useMemo(() => [...thumbnails.values()], [thumbnails]);
   const urlsRef = useRef<string[]>([]);
@@ -27,7 +28,7 @@ export function FileHeader({ fileName, thumbnails }: FileHeaderProps) {
     <>
       <Group gap="md" align="center">
         <Title order={2}>{fileName}</Title>
-        {entries.length > 0 && urlsRef.current.length > 0 && (
+        {entries.length > 0 && urlsRef.current.length > 0 ? (
           <UnstyledButton onClick={() => setModalOpen(true)}>
             <Image
               src={urlsRef.current[0]}
@@ -39,7 +40,16 @@ export function FileHeader({ fileName, thumbnails }: FileHeaderProps) {
               style={{ cursor: "pointer" }}
             />
           </UnstyledButton>
-        )}
+        ) : fallbackThumbnailUrl ? (
+          <Image
+            src={fallbackThumbnailUrl}
+            alt="Thumbnail"
+            h={36}
+            w={48}
+            fit="cover"
+            radius="sm"
+          />
+        ) : null}
       </Group>
 
       <Modal

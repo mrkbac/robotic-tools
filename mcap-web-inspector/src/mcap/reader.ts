@@ -503,37 +503,22 @@ export async function readMcapFile(
 
 /**
  * Read a single attachment's binary data from an MCAP file on demand.
- * Uses the offset/length from the AttachmentIndex to read only the
- * attachment record, then parses out the data payload.
+ * Uses the McapIndexedReader to locate and parse the attachment by name/time.
  */
 export async function readAttachment(
   file: File,
-  offset: bigint,
-  length: bigint,
+  name: string,
 ): Promise<{ name: string; mediaType: string; data: Uint8Array }> {
-  const blob = file.slice(Number(offset), Number(offset + length));
-  const buffer = new Uint8Array(await blob.arrayBuffer());
+  await ensureZstdInit();
+  const readable = new BlobReadable(file);
+  const reader = await McapIndexedReader.Initialize({ readable, decompressHandlers });
 
-  // MCAP attachment record layout (after opcode + record length):
-  //   [8 logTime] [8 createTime] [4+N name] [4+N mediaType] [8+N data] [4 CRC]
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  let pos = 1 + 8; // skip opcode + record length
-
-  pos += 8 + 8; // skip logTime + createTime
-
-  const nameLen = view.getUint32(pos, true);
-  pos += 4;
-  const name = new TextDecoder().decode(buffer.slice(pos, pos + nameLen));
-  pos += nameLen;
-
-  const mediaTypeLen = view.getUint32(pos, true);
-  pos += 4;
-  const mediaType = new TextDecoder().decode(buffer.slice(pos, pos + mediaTypeLen));
-  pos += mediaTypeLen;
-
-  const dataLen = Number(view.getBigUint64(pos, true));
-  pos += 8;
-  const data = buffer.slice(pos, pos + dataLen);
-
-  return { name, mediaType, data };
+  for await (const attachment of reader.readAttachments({ name })) {
+    return {
+      name: attachment.name,
+      mediaType: attachment.mediaType,
+      data: attachment.data,
+    };
+  }
+  throw new Error(`Attachment "${name}" not found`);
 }

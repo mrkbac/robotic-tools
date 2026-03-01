@@ -10,6 +10,7 @@ import {
   ScrollArea,
   Code,
   Collapse,
+  Box,
 } from "@mantine/core";
 import { IconDownload, IconEye } from "@tabler/icons-react";
 import type { AttachmentInfo } from "../mcap/types.ts";
@@ -104,14 +105,10 @@ function AttachmentRow({
 
   const loadData = useCallback(async () => {
     if (cachedData.current) return cachedData.current;
-    const result = await readAttachment(
-      localFile!,
-      BigInt(attachment.offset),
-      BigInt(attachment.length),
-    );
+    const result = await readAttachment(localFile!, attachment.name);
     cachedData.current = result;
     return result;
-  }, [localFile, attachment.offset, attachment.length]);
+  }, [localFile, attachment.name]);
 
   const handleView = useCallback(async () => {
     if (textContent != null) {
@@ -200,11 +197,11 @@ function AttachmentRow({
         <Table.Tr>
           <Table.Td colSpan={localFile ? 6 : 5} p={0} style={{ border: viewOpen ? undefined : "none" }}>
             <Collapse in={viewOpen}>
-              <ScrollArea mah={400} p="xs">
-                <Code block style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              <Box mah={400} style={{ overflow: "auto" }} p="xs">
+                <Code block>
                   {textContent}
                 </Code>
-              </ScrollArea>
+              </Box>
             </Collapse>
           </Table.Td>
         </Table.Tr>

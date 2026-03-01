@@ -18,6 +18,7 @@ import { decodeFromHash, encodeToHash } from "../url/codec.ts";
 import { createFileId, fileMatchesId } from "../url/fileId.ts";
 import { getFileRef, setFileRef } from "../url/fileRef.ts";
 import { getThumbnailRef, setThumbnailRef } from "../url/thumbnailRef.ts";
+import { createMicroThumbFromMap, thumbnailBase64ToDataUrl } from "../url/thumbnail.ts";
 import { useFileHandleRecovery } from "../hooks/useFileHandleRecovery.ts";
 import { saveHistoryEntry } from "../stores/historyStore.ts";
 
@@ -34,6 +35,7 @@ function ViewPage() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
+  const [hashThumbnail, setHashThumbnail] = useState<string | undefined>();
   const [detailSection, setDetailSection] = useState<DetailSection | null>(null);
 
   const generationRef = useRef(0);
@@ -67,6 +69,7 @@ function ViewPage() {
         setData(result.data);
         setScanMode(result.scanMode);
         setFileId(result.fileId);
+        if (result.thumbnail) setHashThumbnail(result.thumbnail);
 
         // Check if we have the file via WeakRef
         const ref = getFileRef();
@@ -98,9 +101,10 @@ function ViewPage() {
       setError(null);
       setScanTarget(mode);
 
-      const updateHash = async (result: McapInfoOutput, m: ScanMode) => {
+      const updateHash = async (result: McapInfoOutput, m: ScanMode, thumbs?: ThumbnailMap) => {
         const fid = createFileId(localFile);
-        const newHash = await encodeToHash(result, m, fid);
+        const microThumb = thumbs ? await createMicroThumbFromMap(thumbs) : hashThumbnail ?? null;
+        const newHash = await encodeToHash(result, m, fid, microThumb);
         saveHistoryEntry({
           fileId: fid,
           fileName: localFile.name,
@@ -141,7 +145,7 @@ function ViewPage() {
         const result = computeStats(raw, localFile.name, localFile.size);
         setData(result);
         setScanMode(mode);
-        await updateHash(result, mode);
+        await updateHash(result, mode, newThumbs.size > 0 ? newThumbs : undefined);
       } catch (err) {
         if (generationRef.current !== gen) return;
         setError(err instanceof Error ? err.message : "Failed to scan MCAP file");
@@ -152,7 +156,7 @@ function ViewPage() {
         }
       }
     },
-    [localFile, loading, scanMode, tryGetCachedRaw, readAndCache, navigate],
+    [localFile, loading, scanMode, hashThumbnail, thumbnails, tryGetCachedRaw, readAndCache, navigate],
   );
 
   if (decodeError) {
@@ -243,7 +247,11 @@ function ViewPage() {
 
         <Tabs.Panel value="inspect" pt="md">
           <Stack gap="lg">
-            <FileHeader fileName={data.file.path} thumbnails={thumbnails} />
+            <FileHeader
+              fileName={data.file.path}
+              thumbnails={thumbnails}
+              fallbackThumbnailUrl={hashThumbnail ? thumbnailBase64ToDataUrl(hashThumbnail) : undefined}
+            />
             <FileInfo data={data} onCountClick={setDetailSection} />
             <UnifiedDistributionChart
               channels={data.channels}
