@@ -2,6 +2,7 @@ import bisect
 import heapq
 import io
 import itertools
+import os
 import sys
 import threading
 import zlib
@@ -71,6 +72,7 @@ class _ThreadLocal(threading.local):
 
 
 _thread_local = _ThreadLocal()
+
 
 _OPCODE_SIZE = 1
 _RECORD_LENGTH_SIZE = 8
@@ -212,7 +214,7 @@ def _breakup_chunk_with_indexes(
             raise IllegalOpcodeInChunkError(opcode)
 
 
-def _read_chunk_and_indexes(data: bytes) -> tuple[Chunk, list[MessageIndex]]:
+def _read_chunk_and_indexes(data: bytes | memoryview) -> tuple[Chunk, list[MessageIndex]]:
     view = memoryview(data)
     # Read the chunk record header (opcode + length)
     opcode, chunk_length = OPCODE_AND_LEN_STRUCT.unpack_from(view, 0)
@@ -606,6 +608,53 @@ def _yield_chunk_messages(
         yield from breakup_chunk(chunk, validate_crc=validate_crc)
 
 
+def _decompress_chunk_data(
+    raw_data: bytes | memoryview,
+    validate_crc: bool,
+) -> tuple[Chunk, list[MessageIndex]]:
+    """Parse raw chunk+index bytes, decompress, validate CRC, return clean Chunk."""
+    chunk, message_indexes = _read_chunk_and_indexes(raw_data)
+    decompressed = _decompress_data_threadsafe(chunk)
+    if validate_crc and chunk.uncompressed_crc != 0:
+        calculated_crc = zlib.crc32(decompressed)
+        if calculated_crc != chunk.uncompressed_crc:
+            raise CRCValidationError(
+                expected=chunk.uncompressed_crc,
+                actual=calculated_crc,
+                record=chunk,
+            )
+    return (
+        Chunk(
+            compression="",
+            data=decompressed,
+            message_start_time=chunk.message_start_time,
+            message_end_time=chunk.message_end_time,
+            uncompressed_crc=0,
+            uncompressed_size=chunk.uncompressed_size,
+        ),
+        message_indexes,
+    )
+
+
+def _pread_and_decompress(
+    fd: int,
+    offset: int,
+    length: int,
+    validate_crc: bool,
+) -> tuple[Chunk, list[MessageIndex]]:
+    """Thread-safe: pread raw chunk bytes then decompress (no shared file position)."""
+    raw_data = os.pread(fd, length, offset)
+    return _decompress_chunk_data(raw_data, validate_crc)
+
+
+def _chunk_fully_excluded(chunk_index: ChunkIndex, exclude_channels: set[int]) -> bool:
+    """Check if all channels in a chunk are excluded."""
+    return bool(
+        chunk_index.message_index_offsets
+        and exclude_channels.issuperset(chunk_index.message_index_offsets)
+    )
+
+
 def _prefetch_chunks(
     stream: IO[bytes],
     sorted_chunks: list[ChunkIndex],
@@ -616,37 +665,15 @@ def _prefetch_chunks(
     reverse: bool,
     num_workers: int,
 ) -> Iterable[McapRecord]:
-    """Read raw chunk bytes sequentially and decompress in parallel using a thread pool.
+    """Read raw chunk bytes and decompress in parallel using a thread pool.
 
-    Main thread reads raw bytes from the shared file handle (sequential I/O).
-    Worker threads decompress chunks ahead in parallel (zstd/lz4 release the GIL).
-    At most num_workers futures are in-flight at once (bounded prefetch).
+    Dispatching strategy (from fastest to slowest):
+      1. **pread** — ``os.pread()`` from each worker thread (parallel I/O + decompress,
+         no shared file position).
+      2. **sequential fallback** — main thread ``seek+read``, workers decompress.
+
+    At most ``num_workers`` futures are in-flight at once (bounded prefetch).
     """
-
-    def _decompress_in_worker(
-        raw_data: bytes,
-    ) -> tuple[Chunk, list[MessageIndex]]:
-        chunk, message_indexes = _read_chunk_and_indexes(raw_data)
-        decompressed = _decompress_data_threadsafe(chunk)
-        if validate_crc and chunk.uncompressed_crc != 0:
-            calculated_crc = zlib.crc32(decompressed)
-            if calculated_crc != chunk.uncompressed_crc:
-                raise CRCValidationError(
-                    expected=chunk.uncompressed_crc,
-                    actual=calculated_crc,
-                    record=chunk,
-                )
-        return (
-            Chunk(
-                compression="",
-                data=decompressed,
-                message_start_time=chunk.message_start_time,
-                message_end_time=chunk.message_end_time,
-                uncompressed_crc=0,
-                uncompressed_size=chunk.uncompressed_size,
-            ),
-            message_indexes,
-        )
 
     def _drain(
         cidx: ChunkIndex,
@@ -654,7 +681,7 @@ def _prefetch_chunks(
     ) -> Iterable[McapRecord]:
         chunk, message_indexes = future.result()
         yield cidx
-        if cidx.message_index_offsets and exclude_channels.issuperset(cidx.message_index_offsets):
+        if _chunk_fully_excluded(cidx, exclude_channels):
             return
         yield from _yield_chunk_messages(
             chunk,
@@ -666,13 +693,44 @@ def _prefetch_chunks(
             reverse=reverse,
         )
 
+    # Choose dispatch strategy
+    fd: int | None = None
+    if hasattr(os, "pread"):
+        try:
+            fd = stream.fileno()
+        except (OSError, io.UnsupportedOperation):
+            fd = None
+
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         pending: list[tuple[ChunkIndex, Future[tuple[Chunk, list[MessageIndex]]]]] = []
 
         for cidx in sorted_chunks:
-            stream.seek(cidx.chunk_start_offset)
-            raw_data = stream.read(cidx.chunk_length + cidx.message_index_length)
-            pending.append((cidx, pool.submit(_decompress_in_worker, raw_data)))
+            total_len = cidx.chunk_length + cidx.message_index_length
+
+            if fd is not None:
+                # Strategy 1: pread (parallel I/O) → decompress in worker
+                pending.append(
+                    (
+                        cidx,
+                        pool.submit(
+                            _pread_and_decompress,
+                            fd,
+                            cidx.chunk_start_offset,
+                            total_len,
+                            validate_crc,
+                        ),
+                    )
+                )
+            else:
+                # Strategy 2: sequential read on main thread → decompress in worker
+                stream.seek(cidx.chunk_start_offset)
+                raw_data = stream.read(total_len)
+                pending.append(
+                    (
+                        cidx,
+                        pool.submit(_decompress_chunk_data, raw_data, validate_crc),
+                    )
+                )
 
             while len(pending) > num_workers:
                 yield from _drain(*pending.pop(0))
@@ -707,7 +765,7 @@ def _read_message_seeking(
 
     def _lazy_yield(stream: IO[bytes], index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
         yield index
-        if index.message_index_offsets and exclude_channels.issuperset(index.message_index_offsets):
+        if _chunk_fully_excluded(index, exclude_channels):
             return
         stream.seek(index.chunk_start_offset)
         raw = stream.read(index.chunk_length + index.message_index_length)
@@ -730,10 +788,7 @@ def _read_message_seeking(
         (
             cidx
             for cidx in summary.chunk_indexes
-            if not (
-                cidx.message_index_offsets
-                and exclude_channels.issuperset(cidx.message_index_offsets)
-            )
+            if not _chunk_fully_excluded(cidx, exclude_channels)
             and in_time_range(cidx.message_start_time, cidx.message_end_time)
         ),
         key=attrgetter("message_end_time") if reverse else attrgetter("message_start_time"),
