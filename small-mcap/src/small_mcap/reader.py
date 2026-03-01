@@ -2,7 +2,6 @@ import bisect
 import heapq
 import io
 import itertools
-import os
 import sys
 import threading
 import zlib
@@ -636,17 +635,6 @@ def _decompress_chunk_data(
     )
 
 
-def _pread_and_decompress(
-    fd: int,
-    offset: int,
-    length: int,
-    validate_crc: bool,
-) -> tuple[Chunk, list[MessageIndex]]:
-    """Thread-safe: pread raw chunk bytes then decompress (no shared file position)."""
-    raw_data = os.pread(fd, length, offset)
-    return _decompress_chunk_data(raw_data, validate_crc)
-
-
 def _chunk_fully_excluded(chunk_index: ChunkIndex, exclude_channels: set[int]) -> bool:
     """Check if all channels in a chunk are excluded."""
     return bool(
@@ -667,11 +655,7 @@ def _prefetch_chunks(
 ) -> Iterable[McapRecord]:
     """Read raw chunk bytes and decompress in parallel using a thread pool.
 
-    Dispatching strategy (from fastest to slowest):
-      1. **pread** — ``os.pread()`` from each worker thread (parallel I/O + decompress,
-         no shared file position).
-      2. **sequential fallback** — main thread ``seek+read``, workers decompress.
-
+    The main thread reads raw bytes sequentially, workers decompress.
     At most ``num_workers`` futures are in-flight at once (bounded prefetch).
     """
 
@@ -693,44 +677,20 @@ def _prefetch_chunks(
             reverse=reverse,
         )
 
-    # Choose dispatch strategy
-    fd: int | None = None
-    if hasattr(os, "pread"):
-        try:
-            fd = stream.fileno()
-        except (OSError, io.UnsupportedOperation):
-            fd = None
-
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         pending: list[tuple[ChunkIndex, Future[tuple[Chunk, list[MessageIndex]]]]] = []
 
         for cidx in sorted_chunks:
             total_len = cidx.chunk_length + cidx.message_index_length
 
-            if fd is not None:
-                # Strategy 1: pread (parallel I/O) → decompress in worker
-                pending.append(
-                    (
-                        cidx,
-                        pool.submit(
-                            _pread_and_decompress,
-                            fd,
-                            cidx.chunk_start_offset,
-                            total_len,
-                            validate_crc,
-                        ),
-                    )
+            stream.seek(cidx.chunk_start_offset)
+            raw_data = stream.read(total_len)
+            pending.append(
+                (
+                    cidx,
+                    pool.submit(_decompress_chunk_data, raw_data, validate_crc),
                 )
-            else:
-                # Strategy 2: sequential read on main thread → decompress in worker
-                stream.seek(cidx.chunk_start_offset)
-                raw_data = stream.read(total_len)
-                pending.append(
-                    (
-                        cidx,
-                        pool.submit(_decompress_chunk_data, raw_data, validate_crc),
-                    )
-                )
+            )
 
             while len(pending) > num_workers:
                 yield from _drain(*pending.pop(0))
@@ -746,7 +706,7 @@ def _read_message_seeking(
     end_time_ns: int,
     validate_crc: bool,
     reverse: bool,
-    num_workers: int = 0,
+    num_workers: int,
 ) -> _ReaderReturnType:
     summary = get_summary(stream)
     # No summary or chunk indexes exists
@@ -1041,7 +1001,13 @@ def read_message(
             *(
                 remap_schema_channel(
                     read_message(
-                        s, should_include, start_time_ns, end_time_ns, validate_crc, reverse
+                        s,
+                        should_include,
+                        start_time_ns,
+                        end_time_ns,
+                        validate_crc,
+                        reverse,
+                        num_workers,
                     )
                     if isinstance(s, io.IOBase)
                     else cast("_ReaderReturnType", s),

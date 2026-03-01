@@ -37,6 +37,7 @@ class BenchmarkConfig:
     topics: list[str] | None = None
     start_time_ms: int | None = None
     end_time_ms: int | None = None
+    num_workers: int = 0
 
 
 # Test configurations for all benchmark scenarios
@@ -71,16 +72,18 @@ def read_small_mcap(config: BenchmarkConfig) -> int:
     """Generic wrapper for small_mcap reading with configurable options."""
     count = 0
 
-    # Open stream based on seekable flag
+    # Open stream based on config
     if config.seekable:
-        stream = TEST_MCAP_FILE.open("rb")
+        stream: io.BytesIO | io.BufferedReader = TEST_MCAP_FILE.open("rb")
     else:
         data = TEST_MCAP_FILE.read_bytes()
         stream = io.BytesIO(data)
 
     try:
         # Build read_message arguments based on config
-        kwargs = {}
+        kwargs: dict[str, object] = {
+            "num_workers": config.num_workers,
+        }
 
         # Add topic filter if specified
         if config.topics is not None:
@@ -97,8 +100,7 @@ def read_small_mcap(config: BenchmarkConfig) -> int:
             count += 1
 
     finally:
-        if hasattr(stream, "close"):
-            stream.close()
+        stream.close()
 
     return count
 
@@ -236,3 +238,24 @@ def test_benchmark_read(benchmark, library, reader_func, config):
 
     result = benchmark(reader_func, config)
     assert result > 0, f"{library} should read at least one message"
+
+
+# ============================================================================
+# Parallel IO benchmarks (small-mcap only)
+# ============================================================================
+
+PARALLEL_CONFIGS = [
+    BenchmarkConfig(id="sequential", seekable=True, num_workers=0),
+    BenchmarkConfig(id="decompress-2w", seekable=True, num_workers=2),
+    BenchmarkConfig(id="decompress-4w", seekable=True, num_workers=4),
+    BenchmarkConfig(id="decompress-8w", seekable=True, num_workers=8),
+]
+
+
+@pytest.mark.parametrize("config", PARALLEL_CONFIGS, ids=lambda c: c.id)
+def test_benchmark_parallel(benchmark, config):
+    """Benchmark parallel decompression vs full parallel IO at different worker counts."""
+    benchmark.group = "parallel"
+
+    result = benchmark(read_small_mcap, config)
+    assert result > 0, "should read at least one message"
