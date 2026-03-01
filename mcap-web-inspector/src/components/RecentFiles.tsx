@@ -6,6 +6,7 @@ import {
   ActionIcon,
   Stack,
   Group,
+  Image,
   UnstyledButton,
 } from "@mantine/core";
 import { IconHistory, IconTrash, IconClock } from "@tabler/icons-react";
@@ -69,6 +70,17 @@ export function RecentFiles({ entries, onRemove, onClearAll }: RecentFilesProps)
           <Paper withBorder p="xs" radius="sm">
             <Group justify="space-between" wrap="nowrap">
               <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
+                {entry.thumbnailUrl && (
+                  <Image
+                    src={entry.thumbnailUrl}
+                    alt=""
+                    h={40}
+                    w={56}
+                    fit="cover"
+                    radius="xs"
+                    style={{ flexShrink: 0 }}
+                  />
+                )}
                 <div style={{ minWidth: 0 }}>
                   <Text size="sm" fw={500} truncate="end">
                     {entry.fileName}

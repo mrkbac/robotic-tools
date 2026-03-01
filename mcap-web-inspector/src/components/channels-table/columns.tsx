@@ -1,10 +1,11 @@
-import { Text, Group } from "@mantine/core";
+import { Text, Group, Tooltip } from "@mantine/core";
 import { Sparkline } from "@mantine/charts";
 import { createColumnHelper } from "@tanstack/react-table";
 import type { ColumnDef, RowData } from "@tanstack/react-table";
 import { formatNumber, formatBytes, formatHz } from "../../format.ts";
 import { TopicDisplay, SchemaDisplay, HzDisplay, JitterDisplay, BpsDisplay } from "./cells.tsx";
 import { stringToColor, formatPercent } from "./utils.ts";
+import { getSchemaIcon } from "./schema-icons.tsx";
 import type { ChannelRow } from "./types.ts";
 
 declare module "@tanstack/react-table" {
@@ -12,6 +13,8 @@ declare module "@tanstack/react-table" {
   interface ColumnMeta<TData extends RowData, TValue> {
     align?: "left" | "right" | "center";
     headerTitle?: string;
+    width?: number;
+    enableHiding?: boolean;
   }
 }
 
@@ -27,10 +30,11 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
   const estimatePrefix = (row: ChannelRow) => row.estimated_sizes ? "~" : "";
 
   return [
-    col.accessor("id", {
-      header: "ID",
-      enableSorting: true,
-      sortingFn: "basic",
+    col.display({
+      id: "expand",
+      header: "",
+      enableSorting: false,
+      meta: { enableHiding: false, width: 32 },
       cell: ({ row }) => {
         const isGroup = row.original._kind === "group";
         const isExpanded = isGroup
@@ -50,16 +54,43 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
             >
               ▶
             </Text>
-            {isGroup ? (
+            {isGroup && (
               <Text size="sm" fw={600} style={{ color: stringToColor(row.original._segment) }}>
                 /{row.original._segment}
               </Text>
-            ) : (
-              <Text size="sm" c="dimmed">
-                {row.original.id}
-              </Text>
             )}
           </Group>
+        );
+      },
+    }),
+
+    col.display({
+      id: "schemaIcon",
+      header: "",
+      enableSorting: false,
+      meta: { enableHiding: false, width: 32 },
+      cell: ({ row }) => {
+        if (row.original._kind === "group") return null;
+        const { Icon, label, color } = getSchemaIcon(row.original.schema_name);
+        return (
+          <Tooltip label={label} openDelay={300}>
+            <Icon size={16} color={color} style={{ display: "block" }} />
+          </Tooltip>
+        );
+      },
+    }),
+
+    col.accessor("id", {
+      header: "ID",
+      enableSorting: true,
+      sortingFn: "basic",
+      meta: { width: 52 },
+      cell: ({ row }) => {
+        if (row.original._kind === "group") return null;
+        return (
+          <Text size="sm" c="dimmed">
+            {row.original.id}
+          </Text>
         );
       },
     }),

@@ -34,6 +34,34 @@ export function jitterColor(cv: number): string {
   return "red";
 }
 
+/** Check if a single row matches a search filter (case-insensitive). */
+export function matchesFilter(row: { topic: string; schema_name: string | null; id: number }, lower: string): boolean {
+  return (
+    row.topic.toLowerCase().includes(lower) ||
+    (row.schema_name?.toLowerCase().includes(lower) ?? false) ||
+    String(row.id).includes(lower)
+  );
+}
+
+/** Recursively filter tree rows, keeping ancestors of matching children. */
+export function filterTree<T extends { _kind: string; topic: string; schema_name: string | null; id: number; subRows?: T[] }>(
+  rows: T[],
+  lower: string,
+): T[] {
+  const result: T[] = [];
+  for (const row of rows) {
+    if (row._kind === "group" && row.subRows) {
+      const filteredChildren = filterTree(row.subRows, lower);
+      if (filteredChildren.length > 0) {
+        result.push({ ...row, subRows: filteredChildren });
+      }
+    } else if (matchesFilter(row, lower)) {
+      result.push(row);
+    }
+  }
+  return result;
+}
+
 /** Hash a string to a deterministic color. */
 export function stringToColor(s: string): string {
   let hash = 0;

@@ -1,8 +1,9 @@
 import { useRef, useCallback } from "react";
 import { openDB, type IDBPDatabase } from "idb";
-import type { McapRawData, ProgressCallback } from "../mcap/reader.ts";
+import type { McapRawData, ProgressCallback, ReadResult } from "../mcap/reader.ts";
 import { readMcapFile } from "../mcap/reader.ts";
 import type { ScanMode } from "../mcap/types.ts";
+import type { ThumbnailMap } from "../mcap/image.ts";
 
 interface FileIdentity {
   name: string;
@@ -49,6 +50,7 @@ interface CacheEntry {
   fileIdentity: FileIdentity;
   mode: ScanMode;
   rawData: McapRawData;
+  thumbnails: ThumbnailMap;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ interface CacheEntry {
 
 const DB_NAME = "mcap-inspector-cache";
 const STORE_NAME = "raw-data";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 interface IDBCacheEntry extends CacheEntry {
   key: string;
@@ -145,8 +147,8 @@ export function useMcapCache() {
       file: File,
       mode: ScanMode,
       onProgress?: ProgressCallback,
-    ): Promise<McapRawData> => {
-      const raw = await readMcapFile(file, mode, onProgress);
+    ): Promise<ReadResult> => {
+      const result = await readMcapFile(file, mode, onProgress);
 
       const entry: CacheEntry = {
         fileIdentity: {
@@ -154,7 +156,8 @@ export function useMcapCache() {
           size: file.size,
         },
         mode,
-        rawData: raw,
+        rawData: result.rawData,
+        thumbnails: result.thumbnails,
       };
 
       cacheRef.current = entry;
@@ -162,7 +165,7 @@ export function useMcapCache() {
       // Fire-and-forget persist to IndexedDB
       saveToIDB(entry);
 
-      return raw;
+      return result;
     },
     [],
   );
@@ -172,10 +175,15 @@ export function useMcapCache() {
     return entry?.mode ?? null;
   }, []);
 
+  const getThumbnails = useCallback(async (file: File): Promise<ThumbnailMap> => {
+    const entry = await getOrHydrate(file);
+    return entry?.thumbnails ?? new Map();
+  }, []);
+
   const invalidate = useCallback(() => {
     cacheRef.current = null;
     clearIDB();
   }, []);
 
-  return { tryGetCachedRaw, readAndCache, getCachedMode, invalidate };
+  return { tryGetCachedRaw, readAndCache, getCachedMode, getThumbnails, invalidate };
 }

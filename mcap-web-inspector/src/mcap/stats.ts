@@ -145,7 +145,7 @@ function collectChannelStatistics(
   messageEndTimes: Map<number, bigint>;
 } {
   const channelStats = new Map<number, ChannelStatistics>();
-  const globalMessageCounts = new Array<number>(bucketCount).fill(0);
+  const globalMessageCounts = Array.from<number>({ length: bucketCount }).fill(0);
   const perChannelDistributions = new Map<number, number[]>();
 
   if (bucketDurationNs <= 0) {
@@ -176,7 +176,7 @@ function collectChannelStatistics(
         });
         perChannelDistributions.set(
           channelId,
-          new Array<number>(bucketCount).fill(0),
+          Array.from<number>({ length: bucketCount }).fill(0),
         );
       }
 
@@ -356,7 +356,7 @@ export function computeStats(
 
   let channelDurations = new Map<number, bigint>();
   let channelIntervals = new Map<number, number[]>();
-  let globalMessageCounts = new Array<number>(bucketCount).fill(0);
+  let globalMessageCounts = Array.from<number>({ length: bucketCount }).fill(0);
   let perChannelDistributions = new Map<number, number[]>();
   let messageStartTimes = new Map<number, bigint>();
   let messageEndTimes = new Map<number, bigint>();

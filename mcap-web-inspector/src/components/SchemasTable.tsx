@@ -26,12 +26,11 @@ function encodingToLanguage(encoding: string): string | undefined {
 
 interface SchemasTableProps {
   schemas: SchemaInfo[];
+  bare?: boolean;
 }
 
-export function SchemasTable({ schemas }: SchemasTableProps) {
+function SchemasContent({ schemas }: { schemas: SchemaInfo[] }) {
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
-
-  if (schemas.length === 0) return null;
 
   const toggleExpanded = (id: number) => {
     setExpandedIds((prev) => {
@@ -46,6 +45,85 @@ export function SchemasTable({ schemas }: SchemasTableProps) {
   };
 
   return (
+    <Table striped highlightOnHover>
+      <Table.Thead>
+        <Table.Tr>
+          <Table.Th>ID</Table.Th>
+          <Table.Th>Name</Table.Th>
+          <Table.Th>Encoding</Table.Th>
+        </Table.Tr>
+      </Table.Thead>
+      <Table.Tbody>
+        {schemas.map((s) => {
+          const expanded = expandedIds.has(s.id);
+          const hasData = s.data.length > 0;
+          return (
+            <Fragment key={s.id}>
+              <Table.Tr
+                onClick={hasData ? () => toggleExpanded(s.id) : undefined}
+                style={hasData ? { cursor: "pointer" } : undefined}
+              >
+                <Table.Td>
+                  <Group gap={4}>
+                    {hasData ? (
+                      <Text
+                        size="xs"
+                        c="dimmed"
+                        style={{
+                          transition: "transform 150ms",
+                          transform: expanded
+                            ? "rotate(90deg)"
+                            : "rotate(0deg)",
+                        }}
+                      >
+                        ▶
+                      </Text>
+                    ) : (
+                      <Text size="xs" c="dimmed" style={{ width: 10 }}>
+                        {" "}
+                      </Text>
+                    )}
+                    <Text size="sm" c="dimmed">
+                      {s.id}
+                    </Text>
+                  </Group>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm">{s.name}</Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm" c="dimmed">
+                    {s.encoding || "-"}
+                  </Text>
+                </Table.Td>
+              </Table.Tr>
+              {hasData && expanded && (
+                <Table.Tr style={{ backgroundColor: "transparent" }}>
+                  <Table.Td colSpan={3} style={{ padding: 0 }}>
+                    <CodeHighlight
+                      code={s.data}
+                      language={encodingToLanguage(s.encoding)}
+                      withExpandButton
+                      defaultExpanded={false}
+                      maxCollapsedHeight="400px"
+                    />
+                  </Table.Td>
+                </Table.Tr>
+              )}
+            </Fragment>
+          );
+        })}
+      </Table.Tbody>
+    </Table>
+  );
+}
+
+export function SchemasTable({ schemas, bare }: SchemasTableProps) {
+  if (schemas.length === 0) return null;
+
+  if (bare) return <SchemasContent schemas={schemas} />;
+
+  return (
     <Paper p="md" withBorder>
       <Accordion variant="default" chevronPosition="left">
         <Accordion.Item value="schemas">
@@ -53,76 +131,7 @@ export function SchemasTable({ schemas }: SchemasTableProps) {
             <Title order={4}>Schemas ({schemas.length})</Title>
           </Accordion.Control>
           <Accordion.Panel>
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>ID</Table.Th>
-                  <Table.Th>Name</Table.Th>
-                  <Table.Th>Encoding</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {schemas.map((s) => {
-                  const expanded = expandedIds.has(s.id);
-                  const hasData = s.data.length > 0;
-                  return (
-                    <Fragment key={s.id}>
-                      <Table.Tr
-                        onClick={hasData ? () => toggleExpanded(s.id) : undefined}
-                        style={hasData ? { cursor: "pointer" } : undefined}
-                      >
-                        <Table.Td>
-                          <Group gap={4}>
-                            {hasData ? (
-                              <Text
-                                size="xs"
-                                c="dimmed"
-                                style={{
-                                  transition: "transform 150ms",
-                                  transform: expanded
-                                    ? "rotate(90deg)"
-                                    : "rotate(0deg)",
-                                }}
-                              >
-                                ▶
-                              </Text>
-                            ) : (
-                              <Text size="xs" c="dimmed" style={{ width: 10 }}>
-                                {" "}
-                              </Text>
-                            )}
-                            <Text size="sm" c="dimmed">
-                              {s.id}
-                            </Text>
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm">{s.name}</Text>
-                        </Table.Td>
-                        <Table.Td>
-                          <Text size="sm" c="dimmed">
-                            {s.encoding || "-"}
-                          </Text>
-                        </Table.Td>
-                      </Table.Tr>
-                      {hasData && expanded && (
-                        <Table.Tr style={{ backgroundColor: "transparent" }}>
-                          <Table.Td colSpan={3} style={{ padding: 0 }}>
-                            <CodeHighlight
-                              code={s.data}
-                              language={encodingToLanguage(s.encoding)}
-                              withExpandButton
-                              defaultExpanded={false}
-                              maxCollapsedHeight="400px"
-                            />
-                          </Table.Td>
-                        </Table.Tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
+            <SchemasContent schemas={schemas} />
           </Accordion.Panel>
         </Accordion.Item>
       </Accordion>

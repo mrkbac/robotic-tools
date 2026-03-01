@@ -3,7 +3,7 @@ import type { ScanMode } from "../mcap/types.ts";
 
 const DB_NAME = "mcap-history";
 const STORE_NAME = "entries";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface HistoryEntry {
   fileId: string;
@@ -12,15 +12,19 @@ export interface HistoryEntry {
   scanMode: ScanMode;
   hash: string;
   scannedAt: number;
+  /** Data URL of a representative thumbnail image (if available). */
+  thumbnailUrl?: string;
 }
 
 function getDB() {
   return openDB(DB_NAME, DB_VERSION, {
     upgrade(db) {
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, { keyPath: "fileId" });
-        store.createIndex("scannedAt", "scannedAt");
+      // Recreate store on any version bump (thumbnailUrl added in v2)
+      if (db.objectStoreNames.contains(STORE_NAME)) {
+        db.deleteObjectStore(STORE_NAME);
       }
+      const store = db.createObjectStore(STORE_NAME, { keyPath: "fileId" });
+      store.createIndex("scannedAt", "scannedAt");
     },
   });
 }

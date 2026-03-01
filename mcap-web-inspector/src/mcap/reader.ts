@@ -14,6 +14,8 @@ import type {
 import { ZSTDDecoder } from "zstddec";
 import lz4 from "lz4js";
 import type { ScanMode } from "./types.ts";
+import type { ThumbnailMap } from "./image.ts";
+import { findImageChannels, extractImage } from "./image.ts";
 
 const zstdDecoder = new ZSTDDecoder();
 const zstdReady = zstdDecoder.init();
@@ -68,6 +70,12 @@ export interface McapRawData {
   metadata: (Metadata & { type: "Metadata" })[];
   /** Attachment indexes (lightweight — no binary data). */
   attachmentIndexes: (AttachmentIndex & { type: "AttachmentIndex" })[];
+}
+
+/** Result of reading an MCAP file, including raw data and any extracted image thumbnails. */
+export interface ReadResult {
+  rawData: McapRawData;
+  thumbnails: ThumbnailMap;
 }
 
 export type ProgressCallback = (bytesRead: number, totalBytes: number) => void;
@@ -165,7 +173,7 @@ async function estimateSizesFromIndexes(
 }
 
 /** Read MCAP file using the indexed reader (fast path - reads footer/summary). */
-async function readIndexed(file: File): Promise<McapRawData> {
+async function readIndexed(file: File): Promise<ReadResult> {
   const readable = new BlobReadable(file);
   const reader = await McapIndexedReader.Initialize({ readable, decompressHandlers });
 
@@ -184,7 +192,7 @@ async function readIndexed(file: File): Promise<McapRawData> {
     ? await estimateSizesFromIndexes(readable, reader.chunkIndexes)
     : null;
 
-  return {
+  const rawData: McapRawData = {
     header: reader.header,
     statistics: reader.statistics,
     channelsById: reader.channelsById,
@@ -196,13 +204,58 @@ async function readIndexed(file: File): Promise<McapRawData> {
     metadata,
     attachmentIndexes: [...reader.attachmentIndexes],
   };
+
+  // Extract image thumbnails via targeted message reads
+  const thumbnails = await readImageThumbnails(reader, rawData);
+
+  return { rawData, thumbnails };
+}
+
+/**
+ * Read one thumbnail per image channel using the indexed reader.
+ * Uses readMessages with topic filtering to grab just the first message per image topic.
+ */
+async function readImageThumbnails(
+  reader: McapIndexedReader,
+  rawData: McapRawData,
+): Promise<ThumbnailMap> {
+  const thumbnails: ThumbnailMap = new Map();
+  const imageChannels = findImageChannels(rawData.channelsById, rawData.schemasById);
+  if (imageChannels.length === 0) return thumbnails;
+
+  const topics = imageChannels.map((ch) => ch.topic);
+  const channelsByTopic = new Map(imageChannels.map((ch) => [ch.topic, ch]));
+  const found = new Set<string>();
+
+  for await (const msg of reader.readMessages({ topics })) {
+    const channel = rawData.channelsById.get(msg.channelId);
+    if (!channel || found.has(channel.topic)) continue;
+
+    const info = channelsByTopic.get(channel.topic);
+    if (!info) continue;
+
+    const extracted = extractImage(msg.data, info.encoding);
+    if (extracted) {
+      thumbnails.set(msg.channelId, {
+        channelId: msg.channelId,
+        topic: channel.topic,
+        format: extracted.format,
+        data: extracted.imageData,
+        logTimeNs: msg.logTime,
+      });
+    }
+    found.add(channel.topic);
+    if (found.size === topics.length) break;
+  }
+
+  return thumbnails;
 }
 
 /** Read MCAP file using streaming reader (rebuild path - full file scan). */
 async function readStream(
   file: File,
   onProgress?: ProgressCallback,
-): Promise<McapRawData> {
+): Promise<ReadResult> {
   const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
   const totalBytes = file.size;
 
@@ -226,6 +279,10 @@ async function readStream(
   const channelSizes = new Map<number, number>();
   const metadata: TypedMcapRecords["Metadata"][] = [];
   const attachmentIndexes: TypedMcapRecords["AttachmentIndex"][] = [];
+
+  // Image thumbnail extraction
+  const thumbnails: ThumbnailMap = new Map();
+  const pendingImageChannels = new Set<number>();
 
   // Track chunk information for interval stats
   // Map from chunk start offset -> list of message indexes
@@ -261,6 +318,19 @@ async function readStream(
           break;
         case "Channel":
           channelsById.set(record.id, record);
+          // Check if this is an image channel
+          {
+            const schema = schemasById.get(record.schemaId);
+            if (schema) {
+              const imageChannels = findImageChannels(
+                new Map([[record.id, record]]),
+                new Map([[schema.id, schema]]),
+              );
+              if (imageChannels.length > 0) {
+                pendingImageChannels.add(record.id);
+              }
+            }
+          }
           break;
         case "Chunk":
           // Start tracking messages for this chunk
@@ -281,6 +351,24 @@ async function readStream(
             record.logTime,
             msgSize,
           ]);
+          // Extract first image from pending image channels
+          if (pendingImageChannels.has(record.channelId)) {
+            const channel = channelsById.get(record.channelId);
+            if (channel) {
+              const encoding = channel.messageEncoding || "";
+              const extracted = extractImage(record.data, encoding);
+              if (extracted) {
+                thumbnails.set(record.channelId, {
+                  channelId: record.channelId,
+                  topic: channel.topic,
+                  format: extracted.format,
+                  data: extracted.imageData,
+                  logTimeNs: record.logTime,
+                });
+              }
+            }
+            pendingImageChannels.delete(record.channelId);
+          }
           break;
         }
         case "MessageIndex":
@@ -377,16 +465,19 @@ async function readStream(
   }
 
   return {
-    header: header!,
-    statistics: statistics!,
-    channelsById,
-    schemasById,
-    chunkIndexes,
-    channelSizes: channelSizes.size > 0 ? channelSizes : null,
-    estimatedSizes: false,
-    chunkInformation: chunkInformation.size > 0 ? chunkInformation : null,
-    metadata,
-    attachmentIndexes,
+    rawData: {
+      header: header!,
+      statistics: statistics!,
+      channelsById,
+      schemasById,
+      chunkIndexes,
+      channelSizes: channelSizes.size > 0 ? channelSizes : null,
+      estimatedSizes: false,
+      chunkInformation: chunkInformation.size > 0 ? chunkInformation : null,
+      metadata,
+      attachmentIndexes,
+    },
+    thumbnails,
   };
 }
 
@@ -395,7 +486,7 @@ export async function readMcapFile(
   file: File,
   mode: ScanMode,
   onProgress?: ProgressCallback,
-): Promise<McapRawData> {
+): Promise<ReadResult> {
   await ensureZstdInit();
 
   if (mode === "summary") {
@@ -420,35 +511,20 @@ export async function readAttachment(
   offset: bigint,
   length: bigint,
 ): Promise<{ name: string; mediaType: string; data: Uint8Array }> {
-  await ensureZstdInit();
-  const readable = new BlobReadable(file);
-  const reader = await McapIndexedReader.Initialize({ readable, decompressHandlers });
-
-  for await (const attachment of reader.readAttachments()) {
-    // Match by checking if the attachment index at the given offset matches
-    // We iterate all and return the one we need since readAttachments doesn't take offset
-    // Instead, use raw read approach
-    void attachment;
-    break;
-  }
-
-  // Direct read approach: read the raw bytes and parse the attachment record
   const blob = file.slice(Number(offset), Number(offset + length));
   const buffer = new Uint8Array(await blob.arrayBuffer());
 
-  // MCAP attachment record layout:
-  // [1 byte opcode] [8 bytes record length] [record content]
-  // Record content: [4 bytes name length] [name] [8 bytes logTime] [8 bytes createTime]
-  //                 [4 bytes mediaType length] [mediaType] [8 bytes data length] [data] [4 bytes CRC]
+  // MCAP attachment record layout (after opcode + record length):
+  //   [8 logTime] [8 createTime] [4+N name] [4+N mediaType] [8+N data] [4 CRC]
   const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   let pos = 1 + 8; // skip opcode + record length
+
+  pos += 8 + 8; // skip logTime + createTime
 
   const nameLen = view.getUint32(pos, true);
   pos += 4;
   const name = new TextDecoder().decode(buffer.slice(pos, pos + nameLen));
   pos += nameLen;
-
-  pos += 8 + 8; // skip logTime + createTime
 
   const mediaTypeLen = view.getUint32(pos, true);
   pos += 4;

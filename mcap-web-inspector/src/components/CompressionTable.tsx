@@ -5,30 +5,18 @@ import { CompressionPieChart } from "./CompressionPieChart.tsx";
 
 interface CompressionTableProps {
   data: McapInfoOutput;
+  bare?: boolean;
 }
 
-export function CompressionTable({ data }: CompressionTableProps) {
-  const { by_compression } = data.chunks;
+function CompressionContent({ data }: { data: McapInfoOutput }) {
+  const { by_compression, overlaps } = data.chunks;
   const compressionTypes = Object.entries(by_compression);
-
-  if (compressionTypes.length === 0) return null;
-
   const hasMessageCounts = compressionTypes.some(
     ([, stats]) => stats.message_count > 0,
   );
-  const { overlaps } = data.chunks;
 
   return (
-    <Paper p="md" withBorder>
-      <Accordion variant="default" chevronPosition="left">
-        <Accordion.Item value="compression">
-          <Accordion.Control>
-            <Title order={4}>
-              Compression ({compressionTypes.length}{" "}
-              {compressionTypes.length === 1 ? "type" : "types"})
-            </Title>
-          </Accordion.Control>
-          <Accordion.Panel>
+    <>
       <CompressionPieChart chunks={data.chunks} />
       <Table striped highlightOnHover>
         <Table.Thead>
@@ -102,6 +90,30 @@ export function CompressionTable({ data }: CompressionTableProps) {
           </Text>
         </Group>
       )}
+    </>
+  );
+}
+
+export function CompressionTable({ data, bare }: CompressionTableProps) {
+  const { by_compression } = data.chunks;
+  const compressionTypes = Object.entries(by_compression);
+
+  if (compressionTypes.length === 0) return null;
+
+  if (bare) return <CompressionContent data={data} />;
+
+  return (
+    <Paper p="md" withBorder>
+      <Accordion variant="default" chevronPosition="left">
+        <Accordion.Item value="compression">
+          <Accordion.Control>
+            <Title order={4}>
+              Compression ({compressionTypes.length}{" "}
+              {compressionTypes.length === 1 ? "type" : "types"})
+            </Title>
+          </Accordion.Control>
+          <Accordion.Panel>
+            <CompressionContent data={data} />
           </Accordion.Panel>
         </Accordion.Item>
       </Accordion>

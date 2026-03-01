@@ -1,25 +1,37 @@
-import { SimpleGrid, Text, Title, Paper, Badge, Group, Stack } from "@mantine/core";
+import { SimpleGrid, Text, Title, Paper, Badge, Group, Stack, UnstyledButton } from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
+import type { DetailSection } from "./DetailModal.tsx";
 import { formatBytes, formatDuration, formatTimestamp } from "../format.ts";
 import { DistributionChart } from "./DistributionChart.tsx";
 
 interface FileInfoProps {
   data: McapInfoOutput;
+  onCountClick?: (section: DetailSection) => void;
 }
 
-export function FileInfo({ data }: FileInfoProps) {
+export function FileInfo({ data, onCountClick }: FileInfoProps) {
   const { file, header, statistics, message_distribution } = data;
   const durationSec = statistics.duration_ns / 1_000_000_000;
   const bytesPerSec = durationSec > 0 ? file.size_bytes / durationSec : 0;
   const bytesPerHour = bytesPerSec * 3600;
 
+  const clickableValue = (count: number, section: DetailSection) => {
+    const text = count.toLocaleString();
+    if (count > 0 && onCountClick) {
+      return (
+        <UnstyledButton onClick={() => onCountClick(section)}>
+          <Text size="sm" fw={500} td="underline" c="blue">
+            {text}
+          </Text>
+        </UnstyledButton>
+      );
+    }
+    return text;
+  };
+
   return (
     <Paper p="md" withBorder>
-      <Title order={4} mb="md">
-        File Information
-      </Title>
       <SimpleGrid cols={{ base: 2, sm: 3, lg: 4 }} spacing="sm">
-        <InfoItem label="File" value={file.path} />
         <InfoItem
           label="Size"
           value={
@@ -44,7 +56,7 @@ export function FileInfo({ data }: FileInfoProps) {
         />
         <InfoItem
           label="Chunks"
-          value={statistics.chunk_count.toLocaleString()}
+          value={clickableValue(statistics.chunk_count, "chunks")}
         />
         <InfoItem
           label="Duration"
@@ -63,12 +75,16 @@ export function FileInfo({ data }: FileInfoProps) {
           value={statistics.channel_count.toLocaleString()}
         />
         <InfoItem
+          label="Schemas"
+          value={clickableValue(data.schemas.length, "schemas")}
+        />
+        <InfoItem
           label="Attachments"
-          value={statistics.attachment_count.toLocaleString()}
+          value={clickableValue(statistics.attachment_count, "attachments")}
         />
         <InfoItem
           label="Metadata"
-          value={statistics.metadata_count.toLocaleString()}
+          value={clickableValue(statistics.metadata_count, "metadata")}
         />
         {statistics.message_index_count != null && (
           <InfoItem

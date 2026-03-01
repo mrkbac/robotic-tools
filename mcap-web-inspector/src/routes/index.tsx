@@ -3,6 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Stack, Progress, Alert, Text, Skeleton } from "@mantine/core";
 import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
 import { computeStats } from "../mcap/stats.ts";
+import { pickRepresentativeThumbnailUrl } from "../mcap/image.ts";
 import { FileDropzone } from "../components/FileDropzone.tsx";
 import { RecentFiles } from "../components/RecentFiles.tsx";
 import { useMcapCache } from "../hooks/useMcapCache.ts";
@@ -10,6 +11,7 @@ import { useHistory } from "../hooks/useHistory.ts";
 import { encodeToHash } from "../url/codec.ts";
 import { createFileId } from "../url/fileId.ts";
 import { setFileRef } from "../url/fileRef.ts";
+import { setThumbnailRef } from "../url/thumbnailRef.ts";
 import { saveFileHandle } from "../stores/fileHandleStore.ts";
 
 function IndexPage() {
@@ -19,11 +21,17 @@ function IndexPage() {
   const [error, setError] = useState<string | null>(null);
   const [scanMode, setScanMode] = useState<ScanMode>("summary");
   const generationRef = useRef(0);
-  const { tryGetCachedRaw, readAndCache, getCachedMode } = useMcapCache();
+  const { tryGetCachedRaw, readAndCache, getCachedMode, getThumbnails } = useMcapCache();
   const { entries, addEntry, removeEntry, clearAll } = useHistory();
 
   const navigateToView = useCallback(
-    async (data: McapInfoOutput, mode: ScanMode, file: File, handle?: FileSystemFileHandle) => {
+    async (
+      data: McapInfoOutput,
+      mode: ScanMode,
+      file: File,
+      handle?: FileSystemFileHandle,
+      thumbnailUrl?: string,
+    ) => {
       setFileRef(file);
       const fileId = createFileId(file);
       if (handle) {
@@ -37,6 +45,7 @@ function IndexPage() {
         scanMode: mode,
         hash,
         scannedAt: Date.now(),
+        thumbnailUrl,
       });
       navigate({ to: "/view", hash });
     },
@@ -50,8 +59,11 @@ function IndexPage() {
 
       const cachedRaw = await tryGetCachedRaw(selectedFile, mode);
       if (cachedRaw) {
+        const thumbs = await getThumbnails(selectedFile);
+        setThumbnailRef(thumbs);
+        const thumbUrl = pickRepresentativeThumbnailUrl(thumbs);
         const result = computeStats(cachedRaw, selectedFile.name, selectedFile.size);
-        await navigateToView(result, mode, selectedFile, handle);
+        await navigateToView(result, mode, selectedFile, handle, thumbUrl);
         return;
       }
 
@@ -60,14 +72,16 @@ function IndexPage() {
       setProgress(0);
 
       try {
-        const raw = await readAndCache(selectedFile, mode, (bytesRead, total) => {
+        const { rawData: raw, thumbnails: thumbs } = await readAndCache(selectedFile, mode, (bytesRead, total) => {
           setProgress(Math.round((bytesRead / total) * 100));
         });
 
         if (generationRef.current !== gen) return;
 
+        setThumbnailRef(thumbs);
+        const thumbUrl = pickRepresentativeThumbnailUrl(thumbs);
         const result = computeStats(raw, selectedFile.name, selectedFile.size);
-        await navigateToView(result, mode, selectedFile, handle);
+        await navigateToView(result, mode, selectedFile, handle, thumbUrl);
       } catch (err) {
         if (generationRef.current !== gen) return;
         setError(err instanceof Error ? err.message : "Failed to read MCAP file");
@@ -77,7 +91,7 @@ function IndexPage() {
         }
       }
     },
-    [tryGetCachedRaw, readAndCache, navigateToView],
+    [tryGetCachedRaw, readAndCache, getThumbnails, navigateToView],
   );
 
   const handleFileSelect = useCallback(

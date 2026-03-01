@@ -1,4 +1,4 @@
-import { useState, useMemo, Fragment, useCallback } from "react";
+import { useState, useMemo, useEffect, Fragment, useCallback } from "react";
 import {
   Table,
   Title,
@@ -11,6 +11,8 @@ import {
   Menu,
   ActionIcon,
   Checkbox,
+  TextInput,
+  CloseButton,
 } from "@mantine/core";
 import {
   useReactTable,
@@ -21,15 +23,17 @@ import {
   type SortingState,
   type VisibilityState,
   type ExpandedState,
+  type ColumnOrderState,
   type Header,
 } from "@tanstack/react-table";
-import { IconColumns } from "@tabler/icons-react";
+import { IconColumns, IconSearch, IconArrowUp, IconArrowDown } from "@tabler/icons-react";
 import type { ChannelInfo } from "../../mcap/types.ts";
 import type { ChannelRow } from "./types.ts";
 import { getColumns } from "./columns.tsx";
 import { ChannelDetail } from "./ChannelDetail.tsx";
 import { buildTreeData, toFlatRows } from "./tree-data.ts";
-import { stringToColor } from "./utils.ts";
+import { stringToColor, filterTree, matchesFilter } from "./utils.ts";
+import { loadTableState, saveTableState } from "./persistence.ts";
 
 type ViewMode = "flat" | "tree";
 
@@ -61,32 +65,61 @@ interface ChannelsTableProps {
 
 export function ChannelsTable({ channels, bucketDurationNs, fileSize }: ChannelsTableProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("flat");
-  const [sorting, setSorting] = useState<SortingState>([{ id: "topic", desc: false }]);
   const [detailExpandedIds, setDetailExpandedIds] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<ExpandedState>(true);
+  const [globalFilter, setGlobalFilter] = useState("");
 
   const hasSizeData = channels.some((ch) => ch.size_bytes !== null);
   const hasEstimatedSizes = channels.some((ch) => ch.estimated_sizes && ch.size_bytes !== null);
   const hasDistribution = channels.some((ch) => ch.message_distribution.length > 0);
   const hasJitter = channels.some((ch) => ch.jitter_cv !== null);
 
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(() => ({
+  // Data-driven default visibility
+  const dataDefaults = useMemo<VisibilityState>(() => ({
+    id: false,
+    schema_name: false,
     jitter: hasJitter,
     size: hasSizeData,
     bps: hasSizeData,
     bPerMsg: hasSizeData,
     distribution: hasDistribution,
-  }));
+  }), [hasJitter, hasSizeData, hasDistribution]);
+
+  // Load persisted state on mount, merge with data-driven defaults
+  const persisted = useMemo(() => loadTableState(), []);
+
+  const [sorting, setSorting] = useState<SortingState>(
+    persisted?.sorting ?? [{ id: "topic", desc: false }],
+  );
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(
+    () => ({ ...dataDefaults, ...persisted?.columnVisibility }),
+  );
+  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(
+    persisted?.columnOrder ?? [],
+  );
+
+  // Persist changes
+  useEffect(() => {
+    saveTableState({ columnVisibility, sorting, columnOrder });
+  }, [columnVisibility, sorting, columnOrder]);
 
   const columns = useMemo(
     () => getColumns({ fileSize, hasEstimatedSizes, detailExpandedIds }),
     [fileSize, hasEstimatedSizes, detailExpandedIds],
   );
 
-  const data = useMemo(() => {
+  const rawData = useMemo(() => {
     if (viewMode === "tree") return buildTreeData(channels);
     return toFlatRows(channels);
   }, [channels, viewMode]);
+
+  // Apply global filter
+  const filterLower = globalFilter.trim().toLowerCase();
+  const data = useMemo(() => {
+    if (!filterLower) return rawData;
+    if (viewMode === "tree") return filterTree(rawData, filterLower);
+    return rawData.filter((row) => matchesFilter(row, filterLower));
+  }, [rawData, filterLower, viewMode]);
 
   const toggleDetail = useCallback((id: number) => {
     setDetailExpandedIds((prev) => {
@@ -97,12 +130,21 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
     });
   }, []);
 
+  // Force all expanded when filtering in tree mode
+  const effectiveExpanded = filterLower && viewMode === "tree" ? true : expanded;
+
   const table = useReactTable<ChannelRow>({
     data,
     columns,
-    state: { sorting, columnVisibility, expanded },
+    state: {
+      sorting,
+      columnVisibility,
+      columnOrder,
+      expanded: effectiveExpanded,
+    },
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
+    onColumnOrderChange: setColumnOrder,
     onExpandedChange: setExpanded,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -120,6 +162,19 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
       <Group justify="space-between" mb="md">
         <Title order={4}>Channels</Title>
         <Group gap="xs">
+          <TextInput
+            size="xs"
+            placeholder="Filter channels…"
+            leftSection={<IconSearch size={14} />}
+            rightSection={
+              globalFilter ? (
+                <CloseButton size="xs" onClick={() => setGlobalFilter("")} />
+              ) : null
+            }
+            value={globalFilter}
+            onChange={(e) => setGlobalFilter(e.currentTarget.value)}
+            style={{ width: 200 }}
+          />
           <ColumnsMenu table={table} />
           {channels.length > 0 && (
             <SegmentedControl
@@ -167,14 +222,17 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
                       style={{ cursor: "pointer" }}
                     >
                       {row.getVisibleCells().map((cell) => {
-                        const railStyle = isTree && cell.column.id === "id"
+                        const meta = cell.column.columnDef.meta;
+                        const railStyle = isTree && cell.column.id === "expand"
                           ? getRailStyle(row.original.topic, row.depth)
                           : undefined;
                         return (
                           <Table.Td
                             key={cell.id}
                             style={{
-                              textAlign: cell.column.columnDef.meta?.align,
+                              textAlign: meta?.align,
+                              width: meta?.width,
+                              maxWidth: meta?.width,
                               ...railStyle,
                               ...(isGroup
                                 ? { fontWeight: 500, opacity: 0.8 }
@@ -231,6 +289,8 @@ function SortableHeader({ header }: { header: Header<ChannelRow, unknown> }) {
         cursor: canSort ? "pointer" : undefined,
         userSelect: canSort ? "none" : undefined,
         textAlign: meta?.align,
+        width: meta?.width,
+        maxWidth: meta?.width,
       }}
       title={meta?.headerTitle}
     >
@@ -242,6 +302,23 @@ function SortableHeader({ header }: { header: Header<ChannelRow, unknown> }) {
 }
 
 function ColumnsMenu({ table }: { table: ReturnType<typeof useReactTable<ChannelRow>> }) {
+  const hideable = table.getAllLeafColumns().filter(
+    (col) => col.columnDef.meta?.enableHiding !== false,
+  );
+
+  const moveColumn = (id: string, direction: -1 | 1) => {
+    const currentOrder = table.getState().columnOrder.length > 0
+      ? table.getState().columnOrder
+      : table.getAllLeafColumns().map((c) => c.id);
+    const idx = currentOrder.indexOf(id);
+    if (idx < 0) return;
+    const swapIdx = idx + direction;
+    if (swapIdx < 0 || swapIdx >= currentOrder.length) return;
+    const next = [...currentOrder];
+    [next[idx], next[swapIdx]] = [next[swapIdx]!, next[idx]!];
+    table.setColumnOrder(next);
+  };
+
   return (
     <Menu shadow="md" closeOnItemClick={false}>
       <Menu.Target>
@@ -250,14 +327,33 @@ function ColumnsMenu({ table }: { table: ReturnType<typeof useReactTable<Channel
         </ActionIcon>
       </Menu.Target>
       <Menu.Dropdown>
-        {table.getAllLeafColumns().map((column) => (
+        {hideable.map((column) => (
           <Menu.Item key={column.id}>
-            <Checkbox
-              size="xs"
-              label={typeof column.columnDef.header === "string" ? column.columnDef.header : column.id}
-              checked={column.getIsVisible()}
-              onChange={column.getToggleVisibilityHandler()}
-            />
+            <Group gap={4} wrap="nowrap">
+              <Checkbox
+                size="xs"
+                label={typeof column.columnDef.header === "string" ? column.columnDef.header : column.id}
+                checked={column.getIsVisible()}
+                onChange={column.getToggleVisibilityHandler()}
+                style={{ flex: 1 }}
+              />
+              <ActionIcon
+                variant="subtle"
+                size="xs"
+                onClick={(e) => { e.stopPropagation(); moveColumn(column.id, -1); }}
+                title="Move up"
+              >
+                <IconArrowUp size={12} />
+              </ActionIcon>
+              <ActionIcon
+                variant="subtle"
+                size="xs"
+                onClick={(e) => { e.stopPropagation(); moveColumn(column.id, 1); }}
+                title="Move down"
+              >
+                <IconArrowDown size={12} />
+              </ActionIcon>
+            </Group>
           </Menu.Item>
         ))}
       </Menu.Dropdown>

@@ -3,13 +3,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Stack, Progress, Alert, Text, Skeleton, Button, Tabs } from "@mantine/core";
 import { IconInfoCircle, IconPlugConnected, IconFileAnalytics, IconDownload } from "@tabler/icons-react";
 import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
+import type { ThumbnailMap } from "../mcap/image.ts";
+import { pickRepresentativeThumbnailUrl } from "../mcap/image.ts";
 import { computeStats } from "../mcap/stats.ts";
+import { FileHeader } from "../components/FileHeader.tsx";
 import { FileInfo } from "../components/FileInfo.tsx";
-import { CompressionTable } from "../components/CompressionTable.tsx";
-import { ChannelsTable } from "../components/ChannelsTable.tsx";
-import { SchemasTable } from "../components/SchemasTable.tsx";
-import { MetadataTable } from "../components/MetadataTable.tsx";
-import { AttachmentsTable } from "../components/AttachmentsTable.tsx";
+import { DetailModal, type DetailSection } from "../components/DetailModal.tsx";
+import { ChannelsTable } from "../components/channels-table/index.ts";
 import { ExportPanel } from "../components/ExportPanel.tsx";
 import { UnifiedDistributionChart } from "../components/UnifiedDistributionChart.tsx";
 import { ScanStepper } from "../components/ScanStepper.tsx";
@@ -17,6 +17,7 @@ import { useMcapCache, MODE_LEVEL } from "../hooks/useMcapCache.ts";
 import { decodeFromHash, encodeToHash } from "../url/codec.ts";
 import { createFileId, fileMatchesId } from "../url/fileId.ts";
 import { getFileRef, setFileRef } from "../url/fileRef.ts";
+import { getThumbnailRef, setThumbnailRef } from "../url/thumbnailRef.ts";
 import { useFileHandleRecovery } from "../hooks/useFileHandleRecovery.ts";
 import { saveHistoryEntry } from "../stores/historyStore.ts";
 
@@ -27,14 +28,16 @@ function ViewPage() {
   const [fileId, setFileId] = useState<string>("");
   const [localFile, setLocalFile] = useState<File | undefined>(getFileRef());
 
+  const [thumbnails, setThumbnails] = useState<ThumbnailMap>(() => getThumbnailRef() ?? new Map());
   const [loading, setLoading] = useState(false);
   const [scanTarget, setScanTarget] = useState<ScanMode | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
+  const [detailSection, setDetailSection] = useState<DetailSection | null>(null);
 
   const generationRef = useRef(0);
-  const { tryGetCachedRaw, readAndCache } = useMcapCache();
+  const { tryGetCachedRaw, readAndCache, getThumbnails } = useMcapCache();
   const decodedRef = useRef(false);
 
   const { status: recoveryStatus, file: recoveredFile, requestAccess } =
@@ -76,6 +79,14 @@ function ViewPage() {
       });
   }, []);
 
+  // Load thumbnails from IDB cache if not already available from ref
+  useEffect(() => {
+    if (!localFile || thumbnails.size > 0) return;
+    getThumbnails(localFile).then((t) => {
+      if (t.size > 0) setThumbnails(t);
+    });
+  }, [localFile, thumbnails.size, getThumbnails]);
+
   const isSharedView = localFile == null;
   const fileUnavailable = isSharedView && recoveryStatus !== "granted";
 
@@ -97,6 +108,7 @@ function ViewPage() {
           scanMode: m,
           hash: newHash,
           scannedAt: Date.now(),
+          thumbnailUrl: pickRepresentativeThumbnailUrl(thumbnails),
         });
         navigate({ to: "/view", hash: newHash, replace: true });
       };
@@ -116,12 +128,16 @@ function ViewPage() {
       setProgress(0);
 
       try {
-        const raw = await readAndCache(localFile, mode, (bytesRead, total) => {
+        const { rawData: raw, thumbnails: newThumbs } = await readAndCache(localFile, mode, (bytesRead, total) => {
           setProgress(Math.round((bytesRead / total) * 100));
         });
 
         if (generationRef.current !== gen) return;
 
+        if (newThumbs.size > 0) {
+          setThumbnails(newThumbs);
+          setThumbnailRef(newThumbs);
+        }
         const result = computeStats(raw, localFile.name, localFile.size);
         setData(result);
         setScanMode(mode);
@@ -227,17 +243,11 @@ function ViewPage() {
 
         <Tabs.Panel value="inspect" pt="md">
           <Stack gap="lg">
-            <FileInfo data={data} />
-            <MetadataTable metadata={data.metadata} />
-            <CompressionTable data={data} />
+            <FileHeader fileName={data.file.path} thumbnails={thumbnails} />
+            <FileInfo data={data} onCountClick={setDetailSection} />
             <UnifiedDistributionChart
               channels={data.channels}
               globalDistribution={data.message_distribution}
-            />
-            <SchemasTable schemas={data.schemas} />
-            <AttachmentsTable
-              attachments={data.attachments}
-              localFile={localFile}
             />
             <ChannelsTable
               channels={data.channels}
@@ -253,6 +263,13 @@ function ViewPage() {
           </Tabs.Panel>
         )}
       </Tabs>
+
+      <DetailModal
+        section={detailSection}
+        onClose={() => setDetailSection(null)}
+        data={data}
+        localFile={localFile}
+      />
     </>
   );
 }
