@@ -37,9 +37,8 @@ if [ ${#members[@]} -eq 0 ]; then
     exit 1
 fi
 
-bumped=0
 skipped=0
-bumped_pkgs=()
+to_bump=()
 
 for pkg in "${members[@]}"; do
     if [ ! -f "$pkg/pyproject.toml" ]; then
@@ -84,10 +83,8 @@ for pkg in "${members[@]}"; do
     fi
 
     if $needs_bump; then
-        echo "⬆ Bumping $pkg..."
-        uv version --bump minor --package "$pkg" --frozen
-        bumped=$((bumped + 1))
-        bumped_pkgs+=("$pkg")
+        echo "⬆ $pkg ($current_version) has changes"
+        to_bump+=("$pkg")
     else
         echo "— $pkg: no changes, skipping"
         skipped=$((skipped + 1))
@@ -95,11 +92,28 @@ for pkg in "${members[@]}"; do
 done
 
 echo
-echo "Done: $bumped bumped, $skipped skipped"
-
-if [ $bumped -eq 0 ]; then
+if [ ${#to_bump[@]} -eq 0 ]; then
+    echo "Nothing to bump ($skipped skipped)"
     exit 0
 fi
+
+echo "Will bump minor version for: ${to_bump[*]}"
+read -rp "Proceed? [y/N] " confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+echo
+bumped_pkgs=()
+for pkg in "${to_bump[@]}"; do
+    echo "⬆ Bumping $pkg..."
+    uv version --bump minor --package "$pkg" --frozen
+    bumped_pkgs+=("$pkg")
+done
+
+echo
+echo "Done: ${#bumped_pkgs[@]} bumped, $skipped skipped"
 
 uv lock
 
