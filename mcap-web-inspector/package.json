@@ -22,6 +22,7 @@
     "@mcap/core": "^2.2.0",
     "@tabler/icons-react": "^3.37.1",
     "@tanstack/react-router": "^1.163.3",
+    "@tanstack/react-table": "^8.21.3",
     "highlight.js": "^11.11.1",
     "idb": "^8.0.3",
     "lz4js": "^0.2.0",
