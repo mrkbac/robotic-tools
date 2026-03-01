@@ -5,6 +5,12 @@ set -euo pipefail
 # Uses per-package git tags (pkg@version) as the reference point for detecting changes.
 # Guards against double-bumps when pyproject.toml already has an uncommitted version change.
 
+# Ensure working tree is clean before bumping
+if [ -n "$(git status --porcelain)" ]; then
+    echo "Error: working tree is dirty. Commit or stash your changes first."
+    exit 1
+fi
+
 # Run pre-commit checks before bumping to avoid lint failures after version change.
 echo "Running pre-commit checks..."
 pre-commit run --all-files
@@ -33,6 +39,7 @@ fi
 
 bumped=0
 skipped=0
+bumped_pkgs=()
 
 for pkg in "${members[@]}"; do
     if [ ! -f "$pkg/pyproject.toml" ]; then
@@ -59,9 +66,10 @@ for pkg in "${members[@]}"; do
     needs_bump=false
 
     if [ -z "$tag_commit" ]; then
-        # No tag exists — check for any uncommitted changes in the package (excluding pyproject.toml)
+        # No tag for current version — check for any committed or uncommitted changes
+        committed_files=$(git log --oneline -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null | head -1 || true)
         uncommitted_diff=$(git diff HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
-        if [ -n "$uncommitted_diff" ]; then
+        if [ -n "$committed_files" ] || [ -n "$uncommitted_diff" ]; then
             needs_bump=true
         fi
     else
@@ -77,8 +85,9 @@ for pkg in "${members[@]}"; do
 
     if $needs_bump; then
         echo "⬆ Bumping $pkg..."
-        uv version --bump patch --package "$pkg" --frozen
+        uv version --bump minor --package "$pkg" --frozen
         bumped=$((bumped + 1))
+        bumped_pkgs+=("$pkg")
     else
         echo "— $pkg: no changes, skipping"
         skipped=$((skipped + 1))
@@ -87,4 +96,16 @@ done
 
 echo
 echo "Done: $bumped bumped, $skipped skipped"
+
+if [ $bumped -eq 0 ]; then
+    exit 0
+fi
+
 uv lock
+
+# Commit version bumps
+git add uv.lock
+for pkg in "${bumped_pkgs[@]}"; do
+    git add "$pkg/pyproject.toml"
+done
+git commit -m "chore: bump versions for ${bumped_pkgs[*]}"
