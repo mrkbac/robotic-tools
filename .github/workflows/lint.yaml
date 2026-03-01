@@ -32,4 +32,11 @@ jobs:
       - name: Install Python
         run: |
           uv pip install pip
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install JS dependencies
+        run: bun install
+        working-directory: mcap-web-inspector
+
       - uses: pre-commit/action@v3.0.1
