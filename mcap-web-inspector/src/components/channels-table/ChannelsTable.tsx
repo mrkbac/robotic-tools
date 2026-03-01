@@ -28,7 +28,12 @@ import {
   type Header,
   type Row,
 } from "@tanstack/react-table";
-import { IconColumns, IconSearch, IconArrowUp, IconArrowDown } from "@tabler/icons-react";
+import {
+  IconColumns,
+  IconSearch,
+  IconArrowUp,
+  IconArrowDown,
+} from "@tabler/icons-react";
 import type { ChannelInfo } from "../../mcap/types.ts";
 import type { ChannelRow } from "./types.ts";
 import { getColumns } from "./columns.tsx";
@@ -41,11 +46,14 @@ type ViewMode = "flat" | "tree";
 
 // Tree rail layout constants
 const RAIL_START = 10; // px from cell left edge to first rail
-const RAIL_GAP = 14;   // px between rail centers
-const RAIL_WIDTH = 3;  // px width of each rail line
+const RAIL_GAP = 14; // px between rail centers
+const RAIL_WIDTH = 3; // px width of each rail line
 
 /** Build CSS background + paddingLeft for vertical tree rail lines on a cell. */
-function getRailStyle(topic: string, depth: number): React.CSSProperties | undefined {
+function getRailStyle(
+  topic: string,
+  depth: number,
+): React.CSSProperties | undefined {
   if (depth <= 0) return undefined;
   const segments = topic.split("/").filter(Boolean);
   const gradients = Array.from({ length: depth }, (_, i) => {
@@ -98,25 +106,34 @@ export function ChannelsTable({
   compact,
 }: ChannelsTableProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("flat");
-  const [detailExpandedIds, setDetailExpandedIds] = useState<Set<number>>(new Set());
+  const [detailExpandedIds, setDetailExpandedIds] = useState<Set<number>>(
+    new Set(),
+  );
   const [expanded, setExpanded] = useState<ExpandedState>(true);
   const [globalFilter, setGlobalFilter] = useState("");
 
   const hasSizeData = channels.some((ch) => ch.size_bytes !== null);
-  const hasEstimatedSizes = channels.some((ch) => ch.estimated_sizes && ch.size_bytes !== null);
-  const hasDistribution = channels.some((ch) => ch.message_distribution.length > 0);
+  const hasEstimatedSizes = channels.some(
+    (ch) => ch.estimated_sizes && ch.size_bytes !== null,
+  );
+  const hasDistribution = channels.some(
+    (ch) => ch.message_distribution.length > 0,
+  );
   const hasJitter = channels.some((ch) => ch.jitter_cv !== null);
 
   // Data-driven default visibility
-  const dataDefaults = useMemo<VisibilityState>(() => ({
-    id: false,
-    schema_name: false,
-    jitter: hasJitter,
-    size: hasSizeData,
-    bps: hasSizeData,
-    bPerMsg: hasSizeData,
-    distribution: hasDistribution,
-  }), [hasJitter, hasSizeData, hasDistribution]);
+  const dataDefaults = useMemo<VisibilityState>(
+    () => ({
+      id: false,
+      schema_name: false,
+      jitter: hasJitter,
+      size: hasSizeData,
+      bps: hasSizeData,
+      bPerMsg: hasSizeData,
+      distribution: hasDistribution,
+    }),
+    [hasJitter, hasSizeData, hasDistribution],
+  );
 
   // Load persisted state on mount, merge with data-driven defaults
   const persisted = useMemo(() => loadTableState(), []);
@@ -137,7 +154,14 @@ export function ChannelsTable({
   }, [columnVisibility, sorting, columnOrder]);
 
   const columns = useMemo(
-    () => getColumns({ fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact }),
+    () =>
+      getColumns({
+        fileSize,
+        hasEstimatedSizes,
+        detailExpandedIds,
+        selectable,
+        compact,
+      }),
     [fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact],
   );
 
@@ -166,7 +190,8 @@ export function ChannelsTable({
   }, []);
 
   // Force all expanded when filtering in tree mode
-  const effectiveExpanded = filterLower && effectiveViewMode === "tree" ? true : expanded;
+  const effectiveExpanded =
+    filterLower && effectiveViewMode === "tree" ? true : expanded;
 
   // Selection state: convert between Set<number> and TanStack RowSelectionState
   const rowSelection = useMemo((): RowSelectionState => {
@@ -176,17 +201,22 @@ export function ChannelsTable({
     const state: RowSelectionState = {};
     function walkData(rows: ChannelRow[]) {
       for (const row of rows) {
-        const rowId = row._kind === "group" ? `g:${row._fullPath}` : `c:${row.id}`;
+        const rowId =
+          row._kind === "group" ? `g:${row._fullPath}` : `c:${row.id}`;
         if (row._kind === "channel" && selectedChannelIds!.has(row.id)) {
           state[rowId] = true;
         }
         if (row.subRows) {
           walkData(row.subRows);
           // Mark group selected if all children are selected
-          if (row.subRows.length > 0 && row.subRows.every((sub) => {
-            const subId = sub._kind === "group" ? `g:${sub._fullPath}` : `c:${sub.id}`;
-            return state[subId];
-          })) {
+          if (
+            row.subRows.length > 0 &&
+            row.subRows.every((sub) => {
+              const subId =
+                sub._kind === "group" ? `g:${sub._fullPath}` : `c:${sub.id}`;
+              return state[subId];
+            })
+          ) {
             state[rowId] = true;
           }
         }
@@ -210,22 +240,29 @@ export function ChannelsTable({
     onColumnVisibilityChange: setColumnVisibility,
     onColumnOrderChange: setColumnOrder,
     onExpandedChange: setExpanded,
-    ...(selectable ? {
-      enableRowSelection: true,
-      enableSubRowSelection: true,
-      onRowSelectionChange: (updater) => {
-        const next = typeof updater === "function" ? updater(rowSelection) : updater;
-        if (onSelectedChannelIdsChange) {
-          const ids = rowSelectionToChannelIds(next, table.getRowModel().rows);
-          onSelectedChannelIdsChange(ids);
+    ...(selectable
+      ? {
+          enableRowSelection: true,
+          enableSubRowSelection: true,
+          onRowSelectionChange: (updater) => {
+            const next =
+              typeof updater === "function" ? updater(rowSelection) : updater;
+            if (onSelectedChannelIdsChange) {
+              const ids = rowSelectionToChannelIds(
+                next,
+                table.getRowModel().rows,
+              );
+              onSelectedChannelIdsChange(ids);
+            }
+          },
         }
-      },
-    } : {}),
+      : {}),
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getExpandedRowModel: getExpandedRowModel(),
     getSubRows: (row) => row.subRows,
-    getRowId: (row) => row._kind === "group" ? `g:${row._fullPath}` : `c:${row.id}`,
+    getRowId: (row) =>
+      row._kind === "group" ? `g:${row._fullPath}` : `c:${row.id}`,
     enableSortingRemoval: false,
   });
 
@@ -252,83 +289,89 @@ export function ChannelsTable({
     [selectable, toggleDetail],
   );
 
-  const tableContent = channels.length === 0 ? (
-    <Text c="dimmed">No channels found</Text>
-  ) : (
-    <ScrollArea scrollbars="x">
-      <Table striped={!isTree} highlightOnHover>
-        <Table.Thead>
-          {table.getHeaderGroups().map((headerGroup) => (
-            <Table.Tr key={headerGroup.id}>
-              {headerGroup.headers.map((header) => (
-                <SortableHeader key={header.id} header={header} />
-              ))}
-            </Table.Tr>
-          ))}
-        </Table.Thead>
-        <Table.Tbody>
-          {table.getRowModel().rows.map((row) => {
-            const isGroup = row.original._kind === "group";
-            const detailExpanded = !compact && !isGroup && detailExpandedIds.has(row.original.id);
+  const tableContent =
+    channels.length === 0 ? (
+      <Text c="dimmed">No channels found</Text>
+    ) : (
+      <ScrollArea scrollbars="x">
+        <Table striped={!isTree} highlightOnHover>
+          <Table.Thead>
+            {table.getHeaderGroups().map((headerGroup) => (
+              <Table.Tr key={headerGroup.id}>
+                {headerGroup.headers.map((header) => (
+                  <SortableHeader key={header.id} header={header} />
+                ))}
+              </Table.Tr>
+            ))}
+          </Table.Thead>
+          <Table.Tbody>
+            {table.getRowModel().rows.map((row) => {
+              const isGroup = row.original._kind === "group";
+              const detailExpanded =
+                !compact && !isGroup && detailExpandedIds.has(row.original.id);
 
-            return (
-              <Fragment key={row.id}>
-                <Table.Tr
-                  onClick={() => handleRowClick(row)}
-                  style={{ cursor: "pointer" }}
-                >
-                  {row.getVisibleCells().map((cell) => {
-                    const meta = cell.column.columnDef.meta;
-                    const railStyle = isTree && cell.column.id === "expand"
-                      ? getRailStyle(row.original.topic, row.depth)
-                      : undefined;
-                    return (
+              return (
+                <Fragment key={row.id}>
+                  <Table.Tr
+                    onClick={() => handleRowClick(row)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    {row.getVisibleCells().map((cell) => {
+                      const meta = cell.column.columnDef.meta;
+                      const railStyle =
+                        isTree && cell.column.id === "expand"
+                          ? getRailStyle(row.original.topic, row.depth)
+                          : undefined;
+                      return (
+                        <Table.Td
+                          key={cell.id}
+                          style={{
+                            textAlign: meta?.align,
+                            width: meta?.width,
+                            maxWidth: meta?.width,
+                            ...railStyle,
+                            ...(isGroup
+                              ? { fontWeight: 500, opacity: 0.8 }
+                              : {}),
+                          }}
+                        >
+                          {flexRender(
+                            cell.column.columnDef.cell,
+                            cell.getContext(),
+                          )}
+                        </Table.Td>
+                      );
+                    })}
+                  </Table.Tr>
+
+                  {!compact && !isGroup && (
+                    <Table.Tr style={{ backgroundColor: "transparent" }}>
                       <Table.Td
-                        key={cell.id}
+                        colSpan={visibleCellCount}
                         style={{
-                          textAlign: meta?.align,
-                          width: meta?.width,
-                          maxWidth: meta?.width,
-                          ...railStyle,
-                          ...(isGroup
-                            ? { fontWeight: 500, opacity: 0.8 }
-                            : {}),
+                          padding: 0,
+                          border: detailExpanded ? undefined : "none",
                         }}
                       >
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        <Collapse in={detailExpanded}>
+                          {detailExpanded && (
+                            <ChannelDetail
+                              channel={row.original}
+                              bucketDurationNs={bucketDurationNs}
+                              fileSize={fileSize}
+                            />
+                          )}
+                        </Collapse>
                       </Table.Td>
-                    );
-                  })}
-                </Table.Tr>
-
-                {!compact && !isGroup && (
-                  <Table.Tr style={{ backgroundColor: "transparent" }}>
-                    <Table.Td
-                      colSpan={visibleCellCount}
-                      style={{
-                        padding: 0,
-                        border: detailExpanded ? undefined : "none",
-                      }}
-                    >
-                      <Collapse in={detailExpanded}>
-                        {detailExpanded && (
-                          <ChannelDetail
-                            channel={row.original}
-                            bucketDurationNs={bucketDurationNs}
-                            fileSize={fileSize}
-                          />
-                        )}
-                      </Collapse>
-                    </Table.Td>
-                  </Table.Tr>
-                )}
-              </Fragment>
-            );
-          })}
-        </Table.Tbody>
-      </Table>
-    </ScrollArea>
-  );
+                    </Table.Tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </Table.Tbody>
+        </Table>
+      </ScrollArea>
+    );
 
   if (selectable) {
     return (
@@ -432,15 +475,20 @@ function SortableHeader({ header }: { header: Header<ChannelRow, unknown> }) {
   );
 }
 
-function ColumnsMenu({ table }: { table: ReturnType<typeof useReactTable<ChannelRow>> }) {
-  const hideable = table.getAllLeafColumns().filter(
-    (col) => col.columnDef.meta?.enableHiding !== false,
-  );
+function ColumnsMenu({
+  table,
+}: {
+  table: ReturnType<typeof useReactTable<ChannelRow>>;
+}) {
+  const hideable = table
+    .getAllLeafColumns()
+    .filter((col) => col.columnDef.meta?.enableHiding !== false);
 
   const moveColumn = (id: string, direction: -1 | 1) => {
-    const currentOrder = table.getState().columnOrder.length > 0
-      ? table.getState().columnOrder
-      : table.getAllLeafColumns().map((c) => c.id);
+    const currentOrder =
+      table.getState().columnOrder.length > 0
+        ? table.getState().columnOrder
+        : table.getAllLeafColumns().map((c) => c.id);
     const idx = currentOrder.indexOf(id);
     if (idx < 0) return;
     const swapIdx = idx + direction;
@@ -463,7 +511,11 @@ function ColumnsMenu({ table }: { table: ReturnType<typeof useReactTable<Channel
             <Group gap={4} wrap="nowrap">
               <Checkbox
                 size="xs"
-                label={typeof column.columnDef.header === "string" ? column.columnDef.header : column.id}
+                label={
+                  typeof column.columnDef.header === "string"
+                    ? column.columnDef.header
+                    : column.id
+                }
                 checked={column.getIsVisible()}
                 onChange={column.getToggleVisibilityHandler()}
                 style={{ flex: 1 }}
@@ -471,7 +523,10 @@ function ColumnsMenu({ table }: { table: ReturnType<typeof useReactTable<Channel
               <ActionIcon
                 variant="subtle"
                 size="xs"
-                onClick={(e) => { e.stopPropagation(); moveColumn(column.id, -1); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  moveColumn(column.id, -1);
+                }}
                 title="Move up"
               >
                 <IconArrowUp size={12} />
@@ -479,7 +534,10 @@ function ColumnsMenu({ table }: { table: ReturnType<typeof useReactTable<Channel
               <ActionIcon
                 variant="subtle"
                 size="xs"
-                onClick={(e) => { e.stopPropagation(); moveColumn(column.id, 1); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  moveColumn(column.id, 1);
+                }}
                 title="Move down"
               >
                 <IconArrowDown size={12} />

@@ -3,7 +3,13 @@ import { Sparkline } from "@mantine/charts";
 import { createColumnHelper } from "@tanstack/react-table";
 import type { ColumnDef, RowData } from "@tanstack/react-table";
 import { formatNumber, formatBytes, formatHz } from "../../format.ts";
-import { TopicDisplay, SchemaDisplay, HzDisplay, JitterDisplay, BpsDisplay } from "./cells.tsx";
+import {
+  TopicDisplay,
+  SchemaDisplay,
+  HzDisplay,
+  JitterDisplay,
+  BpsDisplay,
+} from "./cells.tsx";
 import { stringToColor, formatPercent } from "./utils.ts";
 import { getSchemaIcon } from "./schema-icons.tsx";
 import type { ChannelRow } from "./types.ts";
@@ -28,10 +34,19 @@ interface ColumnContext {
   compact?: boolean;
 }
 
-const COMPACT_HIDDEN = new Set(["hz", "jitter", "size", "bps", "bPerMsg", "distribution"]);
+const COMPACT_HIDDEN = new Set([
+  "hz",
+  "jitter",
+  "size",
+  "bps",
+  "bPerMsg",
+  "distribution",
+]);
 
-export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[] {
-  const estimatePrefix = (row: ChannelRow) => row.estimated_sizes ? "~" : "";
+export function getColumns(
+  ctx: ColumnContext,
+): ColumnDef<ChannelRow, unknown>[] {
+  const estimatePrefix = (row: ChannelRow) => (row.estimated_sizes ? "~" : "");
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cols: ColumnDef<ChannelRow, any>[] = [];
@@ -90,7 +105,11 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
               ▶
             </Text>
             {isGroup && (
-              <Text size="sm" fw={600} style={{ color: stringToColor(row.original._segment) }}>
+              <Text
+                size="sm"
+                fw={600}
+                style={{ color: stringToColor(row.original._segment) }}
+              >
                 /{row.original._segment}
               </Text>
             )}
@@ -108,7 +127,10 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
         if (row.original._kind === "group") return null;
         const { Icon, color } = getSchemaIcon(row.original.schema_name);
         return (
-          <Tooltip label={row.original.schema_name ?? "Unknown"} openDelay={300}>
+          <Tooltip
+            label={row.original.schema_name ?? "Unknown"}
+            openDelay={300}
+          >
             <Icon size={16} color={color} style={{ display: "block" }} />
           </Tooltip>
         );
@@ -161,7 +183,11 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
       meta: { align: "right" },
       cell: ({ row }) => {
         if (row.original._kind === "group") {
-          return <Text size="sm" c="dimmed">{formatNumber(row.original.message_count)}</Text>;
+          return (
+            <Text size="sm" c="dimmed">
+              {formatNumber(row.original.message_count)}
+            </Text>
+          );
         }
         return formatNumber(row.original.message_count);
       },
@@ -176,8 +202,10 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
       meta: { align: "right" },
       cell: ({ row }) => {
         if (row.original._kind === "group") {
-          const min = row.original.hz_stats.minimum ?? row.original.hz_stats.average;
-          const max = row.original.hz_stats.maximum ?? row.original.hz_stats.average;
+          const min =
+            row.original.hz_stats.minimum ?? row.original.hz_stats.average;
+          const max =
+            row.original.hz_stats.maximum ?? row.original.hz_stats.average;
           return (
             <Text size="sm" c="dimmed">
               {min === max
@@ -221,7 +249,9 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
         (rowA.original.size_bytes ?? 0) - (rowB.original.size_bytes ?? 0),
       meta: {
         align: "right",
-        headerTitle: ctx.hasEstimatedSizes ? "Estimated from message index offsets" : undefined,
+        headerTitle: ctx.hasEstimatedSizes
+          ? "Estimated from message index offsets"
+          : undefined,
       },
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
@@ -229,9 +259,11 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
         if (ch.size_bytes === null) return "-";
         return (
           <Text size="sm">
-            {estimatePrefix(ch)}{formatBytes(ch.size_bytes)}{" "}
+            {estimatePrefix(ch)}
+            {formatBytes(ch.size_bytes)}{" "}
             <Text span size="xs" c="dimmed">
-              ({estimatePrefix(ch)}{formatPercent(ch.size_bytes, ctx.fileSize)})
+              ({estimatePrefix(ch)}
+              {formatPercent(ch.size_bytes, ctx.fileSize)})
             </Text>
           </Text>
         );
@@ -247,7 +279,9 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
         (rowB.original.bytes_per_second_stats?.average ?? 0),
       meta: {
         align: "right",
-        headerTitle: ctx.hasEstimatedSizes ? "Estimated from message index offsets" : undefined,
+        headerTitle: ctx.hasEstimatedSizes
+          ? "Estimated from message index offsets"
+          : undefined,
       },
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
@@ -265,10 +299,13 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
       header: ctx.hasEstimatedSizes ? "~B/msg" : "B/msg",
       enableSorting: true,
       sortingFn: (rowA, rowB) =>
-        (rowA.original.bytes_per_message ?? 0) - (rowB.original.bytes_per_message ?? 0),
+        (rowA.original.bytes_per_message ?? 0) -
+        (rowB.original.bytes_per_message ?? 0),
       meta: {
         align: "right",
-        headerTitle: ctx.hasEstimatedSizes ? "Estimated from message index offsets" : undefined,
+        headerTitle: ctx.hasEstimatedSizes
+          ? "Estimated from message index offsets"
+          : undefined,
       },
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
@@ -302,7 +339,10 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
   );
 
   if (ctx.compact) {
-    return cols.filter((c) => !("id" in c && typeof c.id === "string" && COMPACT_HIDDEN.has(c.id)));
+    return cols.filter(
+      (c) =>
+        !("id" in c && typeof c.id === "string" && COMPACT_HIDDEN.has(c.id)),
+    );
   }
   return cols;
 }

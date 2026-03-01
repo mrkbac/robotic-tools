@@ -1,10 +1,4 @@
-import {
-  Table,
-  Title,
-  Paper,
-  Text,
-  Accordion,
-} from "@mantine/core";
+import { Table, Title, Paper, Text, Accordion } from "@mantine/core";
 import type { MetadataInfo } from "../mcap/types.ts";
 
 interface MetadataTableProps {
@@ -44,7 +38,13 @@ function MetadataContent({ metadata }: { metadata: MetadataInfo[] }) {
                         </Text>
                       </Table.Td>
                       <Table.Td>
-                        <Text size="sm" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                        <Text
+                          size="sm"
+                          style={{
+                            fontFamily: "monospace",
+                            wordBreak: "break-all",
+                          }}
+                        >
                           {value}
                         </Text>
                       </Table.Td>

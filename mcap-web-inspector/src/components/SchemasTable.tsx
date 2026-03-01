@@ -1,12 +1,5 @@
 import { Fragment, useState } from "react";
-import {
-  Table,
-  Title,
-  Paper,
-  Text,
-  Accordion,
-  Group,
-} from "@mantine/core";
+import { Table, Title, Paper, Text, Accordion, Group } from "@mantine/core";
 import { CodeHighlight } from "@mantine/code-highlight";
 import type { SchemaInfo } from "../mcap/types.ts";
 

@@ -136,7 +136,13 @@ export function JitterDisplay({
   );
 }
 
-export function BpsDisplay({ stats, estimated }: { stats: PartialStats | null | undefined; estimated?: boolean }) {
+export function BpsDisplay({
+  stats,
+  estimated,
+}: {
+  stats: PartialStats | null | undefined;
+  estimated?: boolean;
+}) {
   if (!stats) {
     return <Text size="sm">-</Text>;
   }
@@ -145,7 +151,12 @@ export function BpsDisplay({ stats, estimated }: { stats: PartialStats | null | 
   const hasDetails = stats.minimum !== null || stats.maximum !== null;
 
   if (!hasDetails) {
-    return <Text size="sm">{prefix}{formatBytes(stats.average)}</Text>;
+    return (
+      <Text size="sm">
+        {prefix}
+        {formatBytes(stats.average)}
+      </Text>
+    );
   }
 
   return (
@@ -155,7 +166,8 @@ export function BpsDisplay({ stats, estimated }: { stats: PartialStats | null | 
           size="sm"
           style={{ textDecoration: "underline dotted", cursor: "default" }}
         >
-          {prefix}{formatBytes(stats.average)}
+          {prefix}
+          {formatBytes(stats.average)}
         </Text>
       </HoverCard.Target>
       <HoverCard.Dropdown>

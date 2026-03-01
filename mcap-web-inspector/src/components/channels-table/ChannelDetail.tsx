@@ -1,24 +1,21 @@
-import {
-  Text,
-  Stack,
-  Group,
-  Progress,
-  SimpleGrid,
-  Box,
-} from "@mantine/core";
+import { Text, Stack, Group, Progress, SimpleGrid, Box } from "@mantine/core";
 import { TimeValue } from "@mantine/dates";
 import type { ChannelInfo } from "../../mcap/types.ts";
 import { formatBytes, formatHz, formatDuration } from "../../format.ts";
 import { DistributionChart } from "../DistributionChart.tsx";
 import { StatsRow } from "./cells.tsx";
-import { channelToDistribution, formatPercent, formatJitterNs, nsToDate } from "./utils.ts";
+import {
+  channelToDistribution,
+  formatPercent,
+  formatJitterNs,
+  nsToDate,
+} from "./utils.ts";
 
 function TimestampDisplay({ ns }: { ns: number }) {
   const date = nsToDate(ns);
   return (
     <Text size="xs">
-      {date.toLocaleDateString()}{" "}
-      <TimeValue value={date} withSeconds />
+      {date.toLocaleDateString()} <TimeValue value={date} withSeconds />
     </Text>
   );
 }
@@ -105,10 +102,7 @@ export function ChannelDetail({
             </>
           )}
           {channel.hz_channel !== null && (
-            <StatsRow
-              label="Channel Hz"
-              value={formatHz(channel.hz_channel)}
-            />
+            <StatsRow label="Channel Hz" value={formatHz(channel.hz_channel)} />
           )}
           {channel.jitter_cv !== null && channel.jitter_ns !== null && (
             <>

@@ -68,10 +68,17 @@ function AttachmentsContent({
   );
 }
 
-export function AttachmentsTable({ attachments, localFile, bare }: AttachmentsTableProps) {
+export function AttachmentsTable({
+  attachments,
+  localFile,
+  bare,
+}: AttachmentsTableProps) {
   if (attachments.length === 0) return null;
 
-  if (bare) return <AttachmentsContent attachments={attachments} localFile={localFile} />;
+  if (bare)
+    return (
+      <AttachmentsContent attachments={attachments} localFile={localFile} />
+    );
 
   return (
     <Paper p="md" withBorder>
@@ -81,7 +88,10 @@ export function AttachmentsTable({ attachments, localFile, bare }: AttachmentsTa
             <Title order={4}>Attachments ({attachments.length})</Title>
           </Accordion.Control>
           <Accordion.Panel>
-            <AttachmentsContent attachments={attachments} localFile={localFile} />
+            <AttachmentsContent
+              attachments={attachments}
+              localFile={localFile}
+            />
           </Accordion.Panel>
         </Accordion.Item>
       </Accordion>
@@ -99,7 +109,11 @@ function AttachmentRow({
   const [loading, setLoading] = useState(false);
   const [textContent, setTextContent] = useState<string | null>(null);
   const [viewOpen, setViewOpen] = useState(false);
-  const cachedData = useRef<{ name: string; mediaType: string; data: Uint8Array } | null>(null);
+  const cachedData = useRef<{
+    name: string;
+    mediaType: string;
+    data: Uint8Array;
+  } | null>(null);
 
   const isText = isTextType(attachment.media_type);
 
@@ -130,7 +144,9 @@ function AttachmentRow({
     setLoading(true);
     try {
       const result = await loadData();
-      const blob = new Blob([result.data as BlobPart], { type: result.mediaType });
+      const blob = new Blob([result.data as BlobPart], {
+        type: result.mediaType,
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -161,10 +177,18 @@ function AttachmentRow({
           <Text size="sm">{formatBytes(attachment.data_size)}</Text>
         </Table.Td>
         <Table.Td>
-          <Text size="xs">{attachment.log_time > 0 ? formatTimestamp(attachment.log_time) : "-"}</Text>
+          <Text size="xs">
+            {attachment.log_time > 0
+              ? formatTimestamp(attachment.log_time)
+              : "-"}
+          </Text>
         </Table.Td>
         <Table.Td>
-          <Text size="xs">{attachment.create_time > 0 ? formatTimestamp(attachment.create_time) : "-"}</Text>
+          <Text size="xs">
+            {attachment.create_time > 0
+              ? formatTimestamp(attachment.create_time)
+              : "-"}
+          </Text>
         </Table.Td>
         {localFile && (
           <Table.Td>
@@ -195,12 +219,14 @@ function AttachmentRow({
       </Table.Tr>
       {isText && (
         <Table.Tr>
-          <Table.Td colSpan={localFile ? 6 : 5} p={0} style={{ border: viewOpen ? undefined : "none" }}>
+          <Table.Td
+            colSpan={localFile ? 6 : 5}
+            p={0}
+            style={{ border: viewOpen ? undefined : "none" }}
+          >
             <Collapse in={viewOpen}>
               <Box mah={400} style={{ overflow: "auto" }} p="xs">
-                <Code block>
-                  {textContent}
-                </Code>
+                <Code block>{textContent}</Code>
               </Box>
             </Collapse>
           </Table.Td>

@@ -149,15 +149,18 @@ async function estimateSizesFromIndexes(
     if (allOffsets.length === 0) continue;
 
     // Sort by offset within uncompressed chunk data
-    allOffsets.sort((a, b) => (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0));
+    allOffsets.sort((a, b) =>
+      a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0,
+    );
 
     // Compute data sizes from gaps between consecutive offsets
     const uncompressedSize = chunkIndex.uncompressedSize;
     for (let i = 0; i < allOffsets.length; i++) {
       const entry = allOffsets[i]!;
-      const nextOffset = i + 1 < allOffsets.length
-        ? allOffsets[i + 1]!.offset
-        : uncompressedSize;
+      const nextOffset =
+        i + 1 < allOffsets.length
+          ? allOffsets[i + 1]!.offset
+          : uncompressedSize;
 
       const recordSize = Number(nextOffset - entry.offset);
       const dataSize = Math.max(0, recordSize - MESSAGE_RECORD_OVERHEAD);
@@ -175,7 +178,10 @@ async function estimateSizesFromIndexes(
 /** Read MCAP file using the indexed reader (fast path - reads footer/summary). */
 async function readIndexed(file: File): Promise<ReadResult> {
   const readable = new BlobReadable(file);
-  const reader = await McapIndexedReader.Initialize({ readable, decompressHandlers });
+  const reader = await McapIndexedReader.Initialize({
+    readable,
+    decompressHandlers,
+  });
 
   if (!reader.statistics) {
     throw new Error("MCAP file has no statistics in summary section");
@@ -188,9 +194,10 @@ async function readIndexed(file: File): Promise<ReadResult> {
   }
 
   // Estimate channel sizes from MessageIndex offsets (no decompression needed)
-  const channelSizes = reader.chunkIndexes.length > 0
-    ? await estimateSizesFromIndexes(readable, reader.chunkIndexes)
-    : null;
+  const channelSizes =
+    reader.chunkIndexes.length > 0
+      ? await estimateSizesFromIndexes(readable, reader.chunkIndexes)
+      : null;
 
   const rawData: McapRawData = {
     header: reader.header,
@@ -220,7 +227,10 @@ async function readImageThumbnails(
   rawData: McapRawData,
 ): Promise<ThumbnailMap> {
   const thumbnails: ThumbnailMap = new Map();
-  const imageChannels = findImageChannels(rawData.channelsById, rawData.schemasById);
+  const imageChannels = findImageChannels(
+    rawData.channelsById,
+    rawData.schemasById,
+  );
   if (imageChannels.length === 0) return thumbnails;
 
   const topics = imageChannels.map((ch) => ch.topic);
@@ -267,14 +277,8 @@ async function readStream(
 
   let header: Header | null = null;
   let statistics: Statistics | null = null;
-  const channelsById = new Map<
-    number,
-    TypedMcapRecords["Channel"]
-  >();
-  const schemasById = new Map<
-    number,
-    TypedMcapRecords["Schema"]
-  >();
+  const channelsById = new Map<number, TypedMcapRecords["Channel"]>();
+  const schemasById = new Map<number, TypedMcapRecords["Schema"]>();
   const chunkIndexes: TypedMcapRecords["ChunkIndex"][] = [];
   const channelSizes = new Map<number, number>();
   const metadata: TypedMcapRecords["Metadata"][] = [];
@@ -293,10 +297,7 @@ async function readStream(
 
   // Track current chunk context for mapping messages to chunks
   let currentChunkOffset: bigint | null = null;
-  let currentChunkMessages = new Map<
-    number,
-    [bigint, number][]
-  >();
+  let currentChunkMessages = new Map<number, [bigint, number][]>();
 
   let bytesRead = 0;
 
@@ -347,10 +348,9 @@ async function readStream(
           if (!currentChunkMessages.has(record.channelId)) {
             currentChunkMessages.set(record.channelId, []);
           }
-          currentChunkMessages.get(record.channelId)!.push([
-            record.logTime,
-            msgSize,
-          ]);
+          currentChunkMessages
+            .get(record.channelId)!
+            .push([record.logTime, msgSize]);
           // Extract first image from pending image channels
           if (pendingImageChannels.has(record.channelId)) {
             const channel = channelsById.get(record.channelId);
@@ -374,10 +374,7 @@ async function readStream(
         case "MessageIndex":
           // After all messages in a chunk are processed, we get MessageIndex records
           // Store the chunk information we've been tracking
-          if (
-            currentChunkOffset !== null &&
-            currentChunkMessages.size > 0
-          ) {
+          if (currentChunkOffset !== null && currentChunkMessages.size > 0) {
             const entries: {
               channelId: number;
               records: [bigint, number][];
@@ -511,7 +508,10 @@ export async function readAttachment(
 ): Promise<{ name: string; mediaType: string; data: Uint8Array }> {
   await ensureZstdInit();
   const readable = new BlobReadable(file);
-  const reader = await McapIndexedReader.Initialize({ readable, decompressHandlers });
+  const reader = await McapIndexedReader.Initialize({
+    readable,
+    decompressHandlers,
+  });
 
   for await (const attachment of reader.readAttachments({ name })) {
     return {

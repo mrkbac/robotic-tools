@@ -54,7 +54,10 @@ export function findImageChannels(
  * Read a CDR-encoded uint32 from a DataView at the given position,
  * advancing past any alignment padding.
  */
-function readCdrUint32(view: DataView, pos: number): [value: number, next: number] {
+function readCdrUint32(
+  view: DataView,
+  pos: number,
+): [value: number, next: number] {
   const aligned = (pos + 3) & ~3;
   return [view.getUint32(aligned, true), aligned + 4];
 }
@@ -63,7 +66,11 @@ function readCdrUint32(view: DataView, pos: number): [value: number, next: numbe
  * Read a CDR string (4-byte length prefix including NUL, then chars).
  * Returns the string and the position after the string bytes.
  */
-function readCdrString(view: DataView, data: Uint8Array, pos: number): [value: string, next: number] {
+function readCdrString(
+  view: DataView,
+  data: Uint8Array,
+  pos: number,
+): [value: string, next: number] {
   const [len, start] = readCdrUint32(view, pos);
   // len includes trailing NUL
   const strBytes = data.subarray(start, start + Math.max(0, len - 1));
@@ -75,7 +82,11 @@ function readCdrString(view: DataView, data: Uint8Array, pos: number): [value: s
  * Read a CDR byte sequence (4-byte length, then raw bytes).
  * Returns the bytes and the position after.
  */
-function readCdrBytes(view: DataView, data: Uint8Array, pos: number): [value: Uint8Array, next: number] {
+function readCdrBytes(
+  view: DataView,
+  data: Uint8Array,
+  pos: number,
+): [value: Uint8Array, next: number] {
   const [len, start] = readCdrUint32(view, pos);
   return [data.slice(start, start + len), start + len];
 }
@@ -91,7 +102,9 @@ function readCdrBytes(view: DataView, data: Uint8Array, pos: number): [value: Ui
  *   format: string (4B len + chars)
  *   data: sequence<uint8> (4B len + bytes)
  */
-export function extractFromCdr(data: Uint8Array): { format: string; imageData: Uint8Array } | null {
+export function extractFromCdr(
+  data: Uint8Array,
+): { format: string; imageData: Uint8Array } | null {
   if (data.byteLength < 16) return null;
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -125,7 +138,9 @@ export function extractFromCdr(data: Uint8Array): { format: string; imageData: U
  *   3: data (bytes)
  *   4: format (string)
  */
-export function extractFromProtobuf(data: Uint8Array): { format: string; imageData: Uint8Array } | null {
+export function extractFromProtobuf(
+  data: Uint8Array,
+): { format: string; imageData: Uint8Array } | null {
   let format = "";
   let imageData: Uint8Array | null = null;
   let pos = 0;
@@ -146,7 +161,9 @@ export function extractFromProtobuf(data: Uint8Array): { format: string; imageDa
 
     if (wireType === 0) {
       // varint — skip
-      while (pos < data.byteLength && (data[pos++]! & 0x80) !== 0) { /* skip */ }
+      while (pos < data.byteLength && (data[pos++]! & 0x80) !== 0) {
+        /* skip */
+      }
     } else if (wireType === 2) {
       // length-delimited
       let len = 0;
@@ -204,7 +221,9 @@ export function thumbnailToDataUrl(thumb: ImageThumbnail): string {
 }
 
 /** Pick one representative thumbnail from the map (first entry). */
-export function pickRepresentativeThumbnailUrl(thumbnails: ThumbnailMap): string | undefined {
+export function pickRepresentativeThumbnailUrl(
+  thumbnails: ThumbnailMap,
+): string | undefined {
   const first = thumbnails.values().next();
   if (first.done) return undefined;
   return thumbnailToDataUrl(first.value);

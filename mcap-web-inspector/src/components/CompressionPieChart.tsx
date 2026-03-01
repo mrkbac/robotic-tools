@@ -44,7 +44,9 @@ export function CompressionPieChart({ chunks }: CompressionPieChartProps) {
   }));
 
   return (
-    <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+    <div
+      style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}
+    >
       <PieChart
         data={data}
         withTooltip

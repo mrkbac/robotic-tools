@@ -1,6 +1,10 @@
 import { useRef, useCallback } from "react";
 import { openDB, type IDBPDatabase } from "idb";
-import type { McapRawData, ProgressCallback, ReadResult } from "../mcap/reader.ts";
+import type {
+  McapRawData,
+  ProgressCallback,
+  ReadResult,
+} from "../mcap/reader.ts";
 import { readMcapFile } from "../mcap/reader.ts";
 import type { ScanMode } from "../mcap/types.ts";
 import type { ThumbnailMap } from "../mcap/image.ts";
@@ -11,10 +15,7 @@ interface FileIdentity {
 }
 
 function isSameFile(file: File, identity: FileIdentity): boolean {
-  return (
-    file.name === identity.name &&
-    file.size === identity.size
-  );
+  return file.name === identity.name && file.size === identity.size;
 }
 
 export const MODE_LEVEL: Record<ScanMode, number> = {
@@ -23,7 +24,11 @@ export const MODE_LEVEL: Record<ScanMode, number> = {
   exact: 2,
 };
 
-function deriveRawData(raw: McapRawData, from: ScanMode, to: ScanMode): McapRawData {
+function deriveRawData(
+  raw: McapRawData,
+  from: ScanMode,
+  to: ScanMode,
+): McapRawData {
   if (from === to) return raw;
 
   const fromLevel = MODE_LEVEL[from];
@@ -83,7 +88,9 @@ function cacheKey(identity: FileIdentity): string {
 async function loadFromIDB(identity: FileIdentity): Promise<CacheEntry | null> {
   try {
     const db = await getDB();
-    const stored = await db.get(STORE_NAME, cacheKey(identity)) as IDBCacheEntry | undefined;
+    const stored = (await db.get(STORE_NAME, cacheKey(identity))) as
+      | IDBCacheEntry
+      | undefined;
     return stored ?? null;
   } catch {
     return null;
@@ -170,20 +177,32 @@ export function useMcapCache() {
     [],
   );
 
-  const getCachedMode = useCallback(async (file: File): Promise<ScanMode | null> => {
-    const entry = await getOrHydrate(file);
-    return entry?.mode ?? null;
-  }, []);
+  const getCachedMode = useCallback(
+    async (file: File): Promise<ScanMode | null> => {
+      const entry = await getOrHydrate(file);
+      return entry?.mode ?? null;
+    },
+    [],
+  );
 
-  const getThumbnails = useCallback(async (file: File): Promise<ThumbnailMap> => {
-    const entry = await getOrHydrate(file);
-    return entry?.thumbnails ?? new Map();
-  }, []);
+  const getThumbnails = useCallback(
+    async (file: File): Promise<ThumbnailMap> => {
+      const entry = await getOrHydrate(file);
+      return entry?.thumbnails ?? new Map();
+    },
+    [],
+  );
 
   const invalidate = useCallback(() => {
     cacheRef.current = null;
     clearIDB();
   }, []);
 
-  return { tryGetCachedRaw, readAndCache, getCachedMode, getThumbnails, invalidate };
+  return {
+    tryGetCachedRaw,
+    readAndCache,
+    getCachedMode,
+    getThumbnails,
+    invalidate,
+  };
 }

@@ -22,7 +22,10 @@ interface UrlPayload {
 function stripForUrl(data: McapInfoOutput): McapInfoOutput {
   return {
     ...data,
-    schemas: data.schemas.map(({ data: _data, ...rest }) => ({ ...rest, data: "" })),
+    schemas: data.schemas.map(({ data: _data, ...rest }) => ({
+      ...rest,
+      data: "",
+    })),
     // Strip offset/length from attachments — meaningless without the file
     attachments: data.attachments.map(({ offset: _, length: __, ...rest }) => ({
       ...rest,
@@ -50,13 +53,19 @@ export async function encodeToHash(
 
   // Progressive stripping if too large (clone channels to avoid mutating caller's data)
   if (encoded.length > MAX_HASH_BYTES) {
-    payload.data.channels = payload.data.channels.map(ch => ({ ...ch, message_distribution: [] }));
+    payload.data.channels = payload.data.channels.map((ch) => ({
+      ...ch,
+      message_distribution: [],
+    }));
     json = JSON.stringify(payload);
     encoded = await compressToBase64url(json);
   }
 
   if (encoded.length > MAX_HASH_BYTES) {
-    payload.data.channels = payload.data.channels.map(ch => ({ ...ch, bytes_per_second_stats: null }));
+    payload.data.channels = payload.data.channels.map((ch) => ({
+      ...ch,
+      bytes_per_second_stats: null,
+    }));
     json = JSON.stringify(payload);
     encoded = await compressToBase64url(json);
   }
@@ -85,7 +94,12 @@ export async function encodeToHash(
 
 export async function decodeFromHash(
   hash: string,
-): Promise<{ data: McapInfoOutput; scanMode: ScanMode; fileId: string; thumbnail?: string }> {
+): Promise<{
+  data: McapInfoOutput;
+  scanMode: ScanMode;
+  fileId: string;
+  thumbnail?: string;
+}> {
   const json = await decompressFromBase64url(hash);
   const payload = JSON.parse(json) as UrlPayload;
 

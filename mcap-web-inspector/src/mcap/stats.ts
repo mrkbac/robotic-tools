@@ -48,9 +48,9 @@ function calculateStats(values: number[]): Stats {
 const ROUND_DURATIONS_NS = [
   1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 50_000_000,
   100_000_000, 200_000_000, 500_000_000, 1_000_000_000, 2_000_000_000,
-  5_000_000_000, 10_000_000_000, 20_000_000_000, 30_000_000_000,
-  60_000_000_000, 120_000_000_000, 300_000_000_000, 600_000_000_000,
-  1_200_000_000_000, 1_800_000_000_000, 3_600_000_000_000,
+  5_000_000_000, 10_000_000_000, 20_000_000_000, 30_000_000_000, 60_000_000_000,
+  120_000_000_000, 300_000_000_000, 600_000_000_000, 1_200_000_000_000,
+  1_800_000_000_000, 3_600_000_000_000,
 ];
 
 function calculateOptimalBucketCount(durationNs: number): number {
@@ -73,7 +73,11 @@ function calculateOptimalBucketCount(durationNs: number): number {
 // ── Chunk overlaps ──
 
 function calculateChunkOverlaps(
-  chunkIndexes: readonly { messageStartTime: bigint; messageEndTime: bigint; uncompressedSize: bigint }[],
+  chunkIndexes: readonly {
+    messageStartTime: bigint;
+    messageEndTime: bigint;
+    uncompressedSize: bigint;
+  }[],
 ): { max_concurrent: number; max_concurrent_bytes: number } {
   if (chunkIndexes.length <= 1) {
     return { max_concurrent: 0, max_concurrent_bytes: 0 };
@@ -94,10 +98,7 @@ function calculateChunkOverlaps(
 
   for (const chunk of sorted) {
     // Remove chunks that have ended
-    while (
-      active.length > 0 &&
-      active[0]!.endTime < chunk.messageStartTime
-    ) {
+    while (active.length > 0 && active[0]!.endTime < chunk.messageStartTime) {
       active.shift();
     }
 
@@ -115,7 +116,10 @@ function calculateChunkOverlaps(
     maxConcurrentBytes = Math.max(maxConcurrentBytes, totalBytes);
   }
 
-  return { max_concurrent: maxConcurrent, max_concurrent_bytes: maxConcurrentBytes };
+  return {
+    max_concurrent: maxConcurrent,
+    max_concurrent_bytes: maxConcurrentBytes,
+  };
 }
 
 // ── Channel statistics collection ──
@@ -145,7 +149,9 @@ function collectChannelStatistics(
   messageEndTimes: Map<number, bigint>;
 } {
   const channelStats = new Map<number, ChannelStatistics>();
-  const globalMessageCounts = Array.from<number>({ length: bucketCount }).fill(0);
+  const globalMessageCounts = Array.from<number>({ length: bucketCount }).fill(
+    0,
+  );
   const perChannelDistributions = new Map<number, number[]>();
 
   if (bucketDurationNs <= 0) {
@@ -236,8 +242,18 @@ function collectChannelStatistics(
 // ── Interval stats (Hz, bps) ──
 
 interface IntervalStatsResult {
-  hzStats: { minimum: number; maximum: number; average: number; median: number };
-  bpsStats?: { minimum: number; maximum: number; average: number; median: number };
+  hzStats: {
+    minimum: number;
+    maximum: number;
+    average: number;
+    median: number;
+  };
+  bpsStats?: {
+    minimum: number;
+    maximum: number;
+    average: number;
+    median: number;
+  };
   jitterNs: number;
   jitterCv: number;
 }
@@ -261,7 +277,8 @@ function calculateIntervalStats(
       median: median(hzValues),
     };
 
-    const meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const meanInterval =
+      intervals.reduce((a, b) => a + b, 0) / intervals.length;
     const variance =
       intervals.reduce((sum, iv) => sum + (iv - meanInterval) ** 2, 0) /
       intervals.length;
@@ -399,9 +416,7 @@ export function computeStats(
       compressed_size: cs.compressedSize,
       uncompressed_size: cs.uncompressedSize,
       compression_ratio:
-        cs.uncompressedSize > 0
-          ? cs.compressedSize / cs.uncompressedSize
-          : 0,
+        cs.uncompressedSize > 0 ? cs.compressedSize / cs.uncompressedSize : 0,
       message_count: cs.messageCount,
       size_stats: calculateStats(cs.uncompressedSizes),
       duration_stats: calculateStats(cs.durationsNs),
@@ -554,7 +569,8 @@ function buildChannelInfo(
     bytes_per_second_stats,
     bytes_per_message: bPerMsg,
     message_distribution: messageDistribution,
-    message_start_time: messageStartTime !== null ? Number(messageStartTime) : null,
+    message_start_time:
+      messageStartTime !== null ? Number(messageStartTime) : null,
     message_end_time: messageEndTime !== null ? Number(messageEndTime) : null,
     jitter_ns: intervalStats?.jitterNs ?? null,
     jitter_cv: intervalStats?.jitterCv ?? null,

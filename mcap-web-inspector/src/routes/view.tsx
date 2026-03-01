@@ -1,7 +1,20 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Stack, Progress, Alert, Text, Skeleton, Button, Tabs } from "@mantine/core";
-import { IconInfoCircle, IconPlugConnected, IconFileAnalytics, IconDownload } from "@tabler/icons-react";
+import {
+  Stack,
+  Progress,
+  Alert,
+  Text,
+  Skeleton,
+  Button,
+  Tabs,
+} from "@mantine/core";
+import {
+  IconInfoCircle,
+  IconPlugConnected,
+  IconFileAnalytics,
+  IconDownload,
+} from "@tabler/icons-react";
 import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
 import type { ThumbnailMap } from "../mcap/image.ts";
 import { pickRepresentativeThumbnailUrl } from "../mcap/image.ts";
@@ -18,7 +31,10 @@ import { decodeFromHash, encodeToHash } from "../url/codec.ts";
 import { createFileId, fileMatchesId } from "../url/fileId.ts";
 import { getFileRef, setFileRef } from "../url/fileRef.ts";
 import { getThumbnailRef, setThumbnailRef } from "../url/thumbnailRef.ts";
-import { createMicroThumbFromMap, thumbnailBase64ToDataUrl } from "../url/thumbnail.ts";
+import {
+  createMicroThumbFromMap,
+  thumbnailBase64ToDataUrl,
+} from "../url/thumbnail.ts";
 import { useFileHandleRecovery } from "../hooks/useFileHandleRecovery.ts";
 import { saveHistoryEntry } from "../stores/historyStore.ts";
 
@@ -29,21 +45,28 @@ function ViewPage() {
   const [fileId, setFileId] = useState<string>("");
   const [localFile, setLocalFile] = useState<File | undefined>(getFileRef());
 
-  const [thumbnails, setThumbnails] = useState<ThumbnailMap>(() => getThumbnailRef() ?? new Map());
+  const [thumbnails, setThumbnails] = useState<ThumbnailMap>(
+    () => getThumbnailRef() ?? new Map(),
+  );
   const [loading, setLoading] = useState(false);
   const [scanTarget, setScanTarget] = useState<ScanMode | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
   const [hashThumbnail, setHashThumbnail] = useState<string | undefined>();
-  const [detailSection, setDetailSection] = useState<DetailSection | null>(null);
+  const [detailSection, setDetailSection] = useState<DetailSection | null>(
+    null,
+  );
 
   const generationRef = useRef(0);
   const { tryGetCachedRaw, readAndCache, getThumbnails } = useMcapCache();
   const decodedRef = useRef(false);
 
-  const { status: recoveryStatus, file: recoveredFile, requestAccess } =
-    useFileHandleRecovery(fileId || null);
+  const {
+    status: recoveryStatus,
+    file: recoveredFile,
+    requestAccess,
+  } = useFileHandleRecovery(fileId || null);
 
   // Apply recovered file
   useEffect(() => {
@@ -101,9 +124,15 @@ function ViewPage() {
       setError(null);
       setScanTarget(mode);
 
-      const updateHash = async (result: McapInfoOutput, m: ScanMode, thumbs?: ThumbnailMap) => {
+      const updateHash = async (
+        result: McapInfoOutput,
+        m: ScanMode,
+        thumbs?: ThumbnailMap,
+      ) => {
         const fid = createFileId(localFile);
-        const microThumb = thumbs ? await createMicroThumbFromMap(thumbs) : hashThumbnail ?? null;
+        const microThumb = thumbs
+          ? await createMicroThumbFromMap(thumbs)
+          : (hashThumbnail ?? null);
         const newHash = await encodeToHash(result, m, fid, microThumb);
         saveHistoryEntry({
           fileId: fid,
@@ -132,9 +161,13 @@ function ViewPage() {
       setProgress(0);
 
       try {
-        const { rawData: raw, thumbnails: newThumbs } = await readAndCache(localFile, mode, (bytesRead, total) => {
-          setProgress(Math.round((bytesRead / total) * 100));
-        });
+        const { rawData: raw, thumbnails: newThumbs } = await readAndCache(
+          localFile,
+          mode,
+          (bytesRead, total) => {
+            setProgress(Math.round((bytesRead / total) * 100));
+          },
+        );
 
         if (generationRef.current !== gen) return;
 
@@ -145,10 +178,16 @@ function ViewPage() {
         const result = computeStats(raw, localFile.name, localFile.size);
         setData(result);
         setScanMode(mode);
-        await updateHash(result, mode, newThumbs.size > 0 ? newThumbs : undefined);
+        await updateHash(
+          result,
+          mode,
+          newThumbs.size > 0 ? newThumbs : undefined,
+        );
       } catch (err) {
         if (generationRef.current !== gen) return;
-        setError(err instanceof Error ? err.message : "Failed to scan MCAP file");
+        setError(
+          err instanceof Error ? err.message : "Failed to scan MCAP file",
+        );
       } finally {
         if (generationRef.current === gen) {
           setLoading(false);
@@ -156,13 +195,23 @@ function ViewPage() {
         }
       }
     },
-    [localFile, loading, scanMode, hashThumbnail, thumbnails, tryGetCachedRaw, readAndCache, navigate],
+    [
+      localFile,
+      loading,
+      scanMode,
+      hashThumbnail,
+      thumbnails,
+      tryGetCachedRaw,
+      readAndCache,
+      navigate,
+    ],
   );
 
   if (decodeError) {
     return (
       <Alert color="red" title="Invalid URL">
-        Could not decode data from the URL. The link may be corrupted or incomplete.
+        Could not decode data from the URL. The link may be corrupted or
+        incomplete.
       </Alert>
     );
   }
@@ -235,7 +284,10 @@ function ViewPage() {
 
       <Tabs defaultValue="inspect">
         <Tabs.List>
-          <Tabs.Tab value="inspect" leftSection={<IconFileAnalytics size={16} />}>
+          <Tabs.Tab
+            value="inspect"
+            leftSection={<IconFileAnalytics size={16} />}
+          >
             Inspect
           </Tabs.Tab>
           {localFile && (
@@ -250,7 +302,11 @@ function ViewPage() {
             <FileHeader
               fileName={data.file.path}
               thumbnails={thumbnails}
-              fallbackThumbnailUrl={hashThumbnail ? thumbnailBase64ToDataUrl(hashThumbnail) : undefined}
+              fallbackThumbnailUrl={
+                hashThumbnail
+                  ? thumbnailBase64ToDataUrl(hashThumbnail)
+                  : undefined
+              }
             />
             <FileInfo data={data} onCountClick={setDetailSection} />
             <UnifiedDistributionChart

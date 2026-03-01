@@ -24,7 +24,12 @@ const TITLES: Record<DetailSection, (data: McapInfoOutput) => string> = {
   attachments: (d) => `Attachments (${d.attachments.length})`,
 };
 
-export function DetailModal({ section, onClose, data, localFile }: DetailModalProps) {
+export function DetailModal({
+  section,
+  onClose,
+  data,
+  localFile,
+}: DetailModalProps) {
   return (
     <Modal
       opened={section != null}
@@ -35,9 +40,15 @@ export function DetailModal({ section, onClose, data, localFile }: DetailModalPr
       <ScrollArea.Autosize mah="70vh">
         {section === "chunks" && <CompressionTable data={data} bare />}
         {section === "schemas" && <SchemasTable schemas={data.schemas} bare />}
-        {section === "metadata" && <MetadataTable metadata={data.metadata} bare />}
+        {section === "metadata" && (
+          <MetadataTable metadata={data.metadata} bare />
+        )}
         {section === "attachments" && (
-          <AttachmentsTable attachments={data.attachments} localFile={localFile} bare />
+          <AttachmentsTable
+            attachments={data.attachments}
+            localFile={localFile}
+            bare
+          />
         )}
       </ScrollArea.Autosize>
     </Modal>

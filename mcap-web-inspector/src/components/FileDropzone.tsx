@@ -51,8 +51,8 @@ export function FileDropzone({
           // Drag-and-drop: handle attached by file-selector as file.handle
           const handle =
             capturedHandle ??
-            ((file as unknown as { handle?: FileSystemFileHandle }).handle ??
-              undefined);
+            (file as unknown as { handle?: FileSystemFileHandle }).handle ??
+            undefined;
           capturedHandle = undefined;
           onFileSelect(file, handle);
         }
@@ -62,7 +62,12 @@ export function FileDropzone({
       multiple={false}
       loading={loading}
     >
-      <Group justify="center" gap="sm" mih={compact ? 60 : currentFile ? 60 : 300} style={{ pointerEvents: "none" }}>
+      <Group
+        justify="center"
+        gap="sm"
+        mih={compact ? 60 : currentFile ? 60 : 300}
+        style={{ pointerEvents: "none" }}
+      >
         <div>
           <Text size="lg" fw={500} c="dimmed" ta="center">
             {currentFile

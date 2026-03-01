@@ -54,7 +54,10 @@ export interface AttachmentInfo {
 }
 
 /** Full McapInfoOutput with TS-only arrays and extended types. */
-export interface McapInfoOutput extends Omit<McapInfoOutputGenerated, "channels" | "schemas"> {
+export interface McapInfoOutput extends Omit<
+  McapInfoOutputGenerated,
+  "channels" | "schemas"
+> {
   channels: ChannelInfo[];
   schemas: SchemaInfo[];
   metadata: MetadataInfo[];

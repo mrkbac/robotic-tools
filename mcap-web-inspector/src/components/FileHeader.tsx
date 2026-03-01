@@ -1,9 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Group, Image, Modal, SimpleGrid, Stack, Text, Title, UnstyledButton } from "@mantine/core";
+import {
+  Group,
+  Image,
+  Modal,
+  SimpleGrid,
+  Stack,
+  Text,
+  Title,
+  UnstyledButton,
+} from "@mantine/core";
 import type { ThumbnailMap } from "../mcap/image.ts";
 
 function thumbnailToUrl(data: Uint8Array, format: string): string {
-  const mime = format.startsWith("image/") ? format : `image/${format || "jpeg"}`;
+  const mime = format.startsWith("image/")
+    ? format
+    : `image/${format || "jpeg"}`;
   return URL.createObjectURL(new Blob([data as BlobPart], { type: mime }));
 }
 
@@ -13,7 +24,11 @@ interface FileHeaderProps {
   fallbackThumbnailUrl?: string;
 }
 
-export function FileHeader({ fileName, thumbnails, fallbackThumbnailUrl }: FileHeaderProps) {
+export function FileHeader({
+  fileName,
+  thumbnails,
+  fallbackThumbnailUrl,
+}: FileHeaderProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const entries = useMemo(() => [...thumbnails.values()], [thumbnails]);
   const urlsRef = useRef<string[]>([]);

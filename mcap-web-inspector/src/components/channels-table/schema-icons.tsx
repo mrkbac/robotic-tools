@@ -157,21 +157,42 @@ const SUFFIX_MAP: [string, Icon, string][] = [
 
 // std_msgs types → generic box icon
 const STD_MSGS_TYPES = new Set([
-  "Bool", "Byte", "Char",
-  "Float32", "Float64",
-  "Int8", "Int16", "Int32", "Int64",
-  "UInt8", "UInt16", "UInt32", "UInt64",
-  "String", "ColorRGBA", "Header",
+  "Bool",
+  "Byte",
+  "Char",
+  "Float32",
+  "Float64",
+  "Int8",
+  "Int16",
+  "Int32",
+  "Int64",
+  "UInt8",
+  "UInt16",
+  "UInt32",
+  "UInt64",
+  "String",
+  "ColorRGBA",
+  "Header",
   "Empty",
-  "Float32MultiArray", "Float64MultiArray",
-  "Int8MultiArray", "Int16MultiArray", "Int32MultiArray", "Int64MultiArray",
-  "UInt8MultiArray", "UInt16MultiArray", "UInt32MultiArray", "UInt64MultiArray",
+  "Float32MultiArray",
+  "Float64MultiArray",
+  "Int8MultiArray",
+  "Int16MultiArray",
+  "Int32MultiArray",
+  "Int64MultiArray",
+  "UInt8MultiArray",
+  "UInt16MultiArray",
+  "UInt32MultiArray",
+  "UInt64MultiArray",
   "ByteMultiArray",
-  "MultiArrayDimension", "MultiArrayLayout",
+  "MultiArrayDimension",
+  "MultiArrayLayout",
 ]);
 
 /** Map a schema name to a Tabler icon using suffix matching. */
-export function getSchemaIcon(schemaName: string | null | undefined): SchemaIcon {
+export function getSchemaIcon(
+  schemaName: string | null | undefined,
+): SchemaIcon {
   if (!schemaName) return { Icon: IconDatabase, color: "#adb5bd" };
 
   // Support both `/` (ROS) and `.` (Foxglove) separators

@@ -41,7 +41,11 @@ function buildTopicTree(channels: ChannelInfo[]): TopicTreeNode {
   return root;
 }
 
-function aggregateNode(node: TopicTreeNode): { totalMessages: number; minHz: number; maxHz: number } {
+function aggregateNode(node: TopicTreeNode): {
+  totalMessages: number;
+  minHz: number;
+  maxHz: number;
+} {
   let totalMessages = 0;
   let minHz = Infinity;
   let maxHz = -Infinity;
@@ -59,14 +63,21 @@ function aggregateNode(node: TopicTreeNode): { totalMessages: number; minHz: num
     maxHz = Math.max(maxHz, agg.maxHz);
   }
 
-  return { totalMessages, minHz: minHz === Infinity ? 0 : minHz, maxHz: maxHz === -Infinity ? 0 : maxHz };
+  return {
+    totalMessages,
+    minHz: minHz === Infinity ? 0 : minHz,
+    maxHz: maxHz === -Infinity ? 0 : maxHz,
+  };
 }
 
 function channelToRow(ch: ChannelInfo): ChannelRow {
   return { ...ch, _kind: "channel", _segment: "", _fullPath: "" };
 }
 
-function nodeToGroupRow(node: TopicTreeNode, subRows: ChannelRow[]): ChannelRow {
+function nodeToGroupRow(
+  node: TopicTreeNode,
+  subRows: ChannelRow[],
+): ChannelRow {
   const agg = aggregateNode(node);
   return {
     id: -Math.abs(hashString(node.fullPath)),
@@ -77,7 +88,8 @@ function nodeToGroupRow(node: TopicTreeNode, subRows: ChannelRow[]): ChannelRow 
     size_bytes: null,
     duration_ns: null,
     hz_stats: {
-      average: agg.minHz === agg.maxHz ? agg.minHz : (agg.minHz + agg.maxHz) / 2,
+      average:
+        agg.minHz === agg.maxHz ? agg.minHz : (agg.minHz + agg.maxHz) / 2,
       minimum: agg.minHz,
       maximum: agg.maxHz,
       median: null,

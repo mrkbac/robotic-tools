@@ -164,7 +164,8 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
         totalUncompressed += byCompression[type]!.uncompressed_size;
       }
       if (totalUncompressed > 0) {
-        compressedSize = uncompressedSum * (totalCompressed / totalUncompressed);
+        compressedSize =
+          uncompressedSum * (totalCompressed / totalUncompressed);
       }
     }
 
@@ -200,9 +201,7 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
       };
 
       const result = await exportFilteredMcap(file, config, (info) => {
-        setProgressPct(
-          Math.round((info.bytesRead / info.totalBytes) * 100),
-        );
+        setProgressPct(Math.round((info.bytesRead / info.totalBytes) * 100));
         setProgressInfo({
           messagesWritten: info.messagesWritten,
           messagesSkipped: info.messagesSkipped,
@@ -213,9 +212,7 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
       const baseName = file.name.replace(/\.mcap$/i, "");
       downloadMcap(result, `${baseName}_filtered.mcap`);
     } catch (err) {
-      setExportError(
-        err instanceof Error ? err.message : "Export failed",
-      );
+      setExportError(err instanceof Error ? err.message : "Export failed");
     } finally {
       setExporting(false);
     }
@@ -230,12 +227,10 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
   ]);
 
   // Convert number ns timestamps to display values
-  const displayStartTime = startTime !== null
-    ? Number(startTime)
-    : data.statistics.message_start_time;
-  const displayEndTime = endTime !== null
-    ? Number(endTime)
-    : data.statistics.message_end_time;
+  const displayStartTime =
+    startTime !== null ? Number(startTime) : data.statistics.message_start_time;
+  const displayEndTime =
+    endTime !== null ? Number(endTime) : data.statistics.message_end_time;
 
   return (
     <Stack gap="md">
@@ -319,9 +314,7 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
             size="xs"
             label="Include metadata"
             checked={includeMetadata}
-            onChange={(e) =>
-              setIncludeMetadata(e.currentTarget.checked)
-            }
+            onChange={(e) => setIncludeMetadata(e.currentTarget.checked)}
           />
         )}
         {hasAttachments && (
@@ -329,9 +322,7 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
             size="xs"
             label="Include attachments"
             checked={includeAttachments}
-            onChange={(e) =>
-              setIncludeAttachments(e.currentTarget.checked)
-            }
+            onChange={(e) => setIncludeAttachments(e.currentTarget.checked)}
           />
         )}
       </Group>

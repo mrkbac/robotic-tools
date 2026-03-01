@@ -22,7 +22,10 @@ export async function decompressFromBase64url(b64: string): Promise<string> {
 
 function arrayBufferToBase64url(bytes: Uint8Array): string {
   const binary = String.fromCharCode(...bytes);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 function base64urlToUint8Array(b64: string): Uint8Array {

@@ -39,9 +39,7 @@ export async function loadFileHandle(
 ): Promise<FileSystemFileHandle | null> {
   try {
     const db = await getDB();
-    const entry = (await db.get(STORE_NAME, fileId)) as
-      | HandleEntry
-      | undefined;
+    const entry = (await db.get(STORE_NAME, fileId)) as HandleEntry | undefined;
     return entry?.handle ?? null;
   } catch {
     return null;

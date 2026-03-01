@@ -1,6 +1,9 @@
 import type { ChannelInfo, MessageDistribution } from "../../mcap/types.ts";
 
-export function channelToDistribution(channel: ChannelInfo, bucketDurationNs: number): MessageDistribution {
+export function channelToDistribution(
+  channel: ChannelInfo,
+  bucketDurationNs: number,
+): MessageDistribution {
   const counts = channel.message_distribution;
   return {
     bucket_count: counts.length,
@@ -35,7 +38,10 @@ export function jitterColor(cv: number): string {
 }
 
 /** Check if a single row matches a search filter (case-insensitive). */
-export function matchesFilter(row: { topic: string; schema_name: string | null; id: number }, lower: string): boolean {
+export function matchesFilter(
+  row: { topic: string; schema_name: string | null; id: number },
+  lower: string,
+): boolean {
   return (
     row.topic.toLowerCase().includes(lower) ||
     (row.schema_name?.toLowerCase().includes(lower) ?? false) ||
@@ -44,10 +50,15 @@ export function matchesFilter(row: { topic: string; schema_name: string | null; 
 }
 
 /** Recursively filter tree rows, keeping ancestors of matching children. */
-export function filterTree<T extends { _kind: string; topic: string; schema_name: string | null; id: number; subRows?: T[] }>(
-  rows: T[],
-  lower: string,
-): T[] {
+export function filterTree<
+  T extends {
+    _kind: string;
+    topic: string;
+    schema_name: string | null;
+    id: number;
+    subRows?: T[];
+  },
+>(rows: T[], lower: string): T[] {
   const result: T[] = [];
   for (const row of rows) {
     if (row._kind === "group" && row.subRows) {

@@ -37,7 +37,11 @@ interface RecentFilesProps {
   onClearAll: () => void;
 }
 
-export function RecentFiles({ entries, onRemove, onClearAll }: RecentFilesProps) {
+export function RecentFiles({
+  entries,
+  onRemove,
+  onClearAll,
+}: RecentFilesProps) {
   if (entries.length === 0) return null;
 
   return (

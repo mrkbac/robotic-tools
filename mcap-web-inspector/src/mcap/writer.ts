@@ -29,10 +29,18 @@ export async function exportFilteredMcap(
   const oldToNewSchemaId = new Map<number, number>();
   const oldToNewChannelId = new Map<number, number>();
   // Collect source schemas and channels to register in correct order
-  const sourceSchemas = new Map<number, { name: string; encoding: string; data: Uint8Array }>();
+  const sourceSchemas = new Map<
+    number,
+    { name: string; encoding: string; data: Uint8Array }
+  >();
   const sourceChannels = new Map<
     number,
-    { schemaId: number; topic: string; messageEncoding: string; metadata: Map<string, string> }
+    {
+      schemaId: number;
+      topic: string;
+      messageEncoding: string;
+      metadata: Map<string, string>;
+    }
   >();
 
   let headerWritten = false;
@@ -81,7 +89,10 @@ export async function exportFilteredMcap(
           });
 
           // Check if this channel is included
-          if (config.include_channel_ids !== null && !config.include_channel_ids.has(record.id)) {
+          if (
+            config.include_channel_ids !== null &&
+            !config.include_channel_ids.has(record.id)
+          ) {
             break;
           }
 
@@ -95,9 +106,10 @@ export async function exportFilteredMcap(
           }
 
           // Register channel with remapped schema ID
-          const newSchemaId = record.schemaId === 0
-            ? 0
-            : (oldToNewSchemaId.get(record.schemaId) ?? 0);
+          const newSchemaId =
+            record.schemaId === 0
+              ? 0
+              : (oldToNewSchemaId.get(record.schemaId) ?? 0);
 
           const newChannelId = await writer.registerChannel({
             schemaId: newSchemaId,
@@ -118,7 +130,10 @@ export async function exportFilteredMcap(
           }
 
           // Check time range
-          if (config.start_time !== null && record.logTime < config.start_time) {
+          if (
+            config.start_time !== null &&
+            record.logTime < config.start_time
+          ) {
             messagesSkipped++;
             break;
           }
@@ -185,7 +200,9 @@ export async function exportFilteredMcap(
 
 /** Trigger a browser download of the given data as an MCAP file. */
 export function downloadMcap(data: Uint8Array, filename: string): void {
-  const blob = new Blob([data as BlobPart], { type: "application/octet-stream" });
+  const blob = new Blob([data as BlobPart], {
+    type: "application/octet-stream",
+  });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

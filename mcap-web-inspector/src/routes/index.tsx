@@ -22,7 +22,8 @@ function IndexPage() {
   const [error, setError] = useState<string | null>(null);
   const [scanMode, setScanMode] = useState<ScanMode>("summary");
   const generationRef = useRef(0);
-  const { tryGetCachedRaw, readAndCache, getCachedMode, getThumbnails } = useMcapCache();
+  const { tryGetCachedRaw, readAndCache, getCachedMode, getThumbnails } =
+    useMcapCache();
   const { entries, addEntry, removeEntry, clearAll } = useHistory();
 
   const navigateToView = useCallback(
@@ -55,7 +56,11 @@ function IndexPage() {
   );
 
   const processFile = useCallback(
-    async (selectedFile: File, mode: ScanMode, handle?: FileSystemFileHandle) => {
+    async (
+      selectedFile: File,
+      mode: ScanMode,
+      handle?: FileSystemFileHandle,
+    ) => {
       setError(null);
       setScanMode(mode);
 
@@ -65,8 +70,19 @@ function IndexPage() {
         setThumbnailRef(thumbs);
         const thumbUrl = pickRepresentativeThumbnailUrl(thumbs);
         const microThumb = await createMicroThumbFromMap(thumbs);
-        const result = computeStats(cachedRaw, selectedFile.name, selectedFile.size);
-        await navigateToView(result, mode, selectedFile, handle, thumbUrl, microThumb);
+        const result = computeStats(
+          cachedRaw,
+          selectedFile.name,
+          selectedFile.size,
+        );
+        await navigateToView(
+          result,
+          mode,
+          selectedFile,
+          handle,
+          thumbUrl,
+          microThumb,
+        );
         return;
       }
 
@@ -75,9 +91,13 @@ function IndexPage() {
       setProgress(0);
 
       try {
-        const { rawData: raw, thumbnails: thumbs } = await readAndCache(selectedFile, mode, (bytesRead, total) => {
-          setProgress(Math.round((bytesRead / total) * 100));
-        });
+        const { rawData: raw, thumbnails: thumbs } = await readAndCache(
+          selectedFile,
+          mode,
+          (bytesRead, total) => {
+            setProgress(Math.round((bytesRead / total) * 100));
+          },
+        );
 
         if (generationRef.current !== gen) return;
 
@@ -85,10 +105,19 @@ function IndexPage() {
         const thumbUrl = pickRepresentativeThumbnailUrl(thumbs);
         const microThumb = await createMicroThumbFromMap(thumbs);
         const result = computeStats(raw, selectedFile.name, selectedFile.size);
-        await navigateToView(result, mode, selectedFile, handle, thumbUrl, microThumb);
+        await navigateToView(
+          result,
+          mode,
+          selectedFile,
+          handle,
+          thumbUrl,
+          microThumb,
+        );
       } catch (err) {
         if (generationRef.current !== gen) return;
-        setError(err instanceof Error ? err.message : "Failed to read MCAP file");
+        setError(
+          err instanceof Error ? err.message : "Failed to read MCAP file",
+        );
       } finally {
         if (generationRef.current === gen) {
           setLoading(false);
@@ -108,22 +137,29 @@ function IndexPage() {
 
   return (
     <>
-      <FileDropzone onFileSelect={handleFileSelect} loading={loading} currentFile={null} />
+      <FileDropzone
+        onFileSelect={handleFileSelect}
+        loading={loading}
+        currentFile={null}
+      />
 
-      {loading && (() => {
-        const isIndeterminate = scanMode === "summary" && progress === 0;
-        return (
-          <Stack gap="xs">
-            <Text size="sm" c="dimmed">
-              {isIndeterminate ? "Reading summary..." : `Scanning file... ${progress}%`}
-            </Text>
-            <Progress
-              value={isIndeterminate ? 100 : progress}
-              animated={isIndeterminate}
-            />
-          </Stack>
-        );
-      })()}
+      {loading &&
+        (() => {
+          const isIndeterminate = scanMode === "summary" && progress === 0;
+          return (
+            <Stack gap="xs">
+              <Text size="sm" c="dimmed">
+                {isIndeterminate
+                  ? "Reading summary..."
+                  : `Scanning file... ${progress}%`}
+              </Text>
+              <Progress
+                value={isIndeterminate ? 100 : progress}
+                animated={isIndeterminate}
+              />
+            </Stack>
+          );
+        })()}
 
       {error && (
         <Alert color="red" title="Error">
@@ -141,7 +177,11 @@ function IndexPage() {
       )}
 
       {!loading && (
-        <RecentFiles entries={entries} onRemove={removeEntry} onClearAll={clearAll} />
+        <RecentFiles
+          entries={entries}
+          onRemove={removeEntry}
+          onClearAll={clearAll}
+        />
       )}
     </>
   );

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "prettier --write . && tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
     "generate-types": "json2ts -i ../pymcap-cli/schemas/mcap_info.json -o src/mcap/types.generated.ts --no-additionalProperties --style.singleQuote --style.semi"

@@ -1,4 +1,13 @@
-import { SimpleGrid, Text, Title, Paper, Badge, Group, Stack, UnstyledButton } from "@mantine/core";
+import {
+  SimpleGrid,
+  Text,
+  Title,
+  Paper,
+  Badge,
+  Group,
+  Stack,
+  UnstyledButton,
+} from "@mantine/core";
 import type { McapInfoOutput } from "../mcap/types.ts";
 import type { DetailSection } from "./DetailModal.tsx";
 import { formatBytes, formatDuration, formatTimestamp } from "../format.ts";
@@ -102,7 +111,8 @@ export function FileInfo({ data, onCountClick }: FileInfoProps) {
           <DistributionChart distribution={message_distribution} />
           <Text size="xs" c="dimmed" mt={4}>
             Max: {message_distribution.max_count.toLocaleString()} msgs/bucket |
-            Bucket size: {formatDuration(message_distribution.bucket_duration_ns)}
+            Bucket size:{" "}
+            {formatDuration(message_distribution.bucket_duration_ns)}
           </Text>
         </>
       )}
@@ -110,13 +120,7 @@ export function FileInfo({ data, onCountClick }: FileInfoProps) {
   );
 }
 
-function InfoItem({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
+function InfoItem({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <Stack gap={2}>
       <Text size="xs" c="dimmed">
