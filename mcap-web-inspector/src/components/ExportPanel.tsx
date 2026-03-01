@@ -3,18 +3,17 @@ import {
   Alert,
   Stack,
   Group,
-  Checkbox,
   Button,
   Switch,
   Text,
   Progress,
   RangeSlider,
-  ScrollArea,
 } from "@mantine/core";
 import { IconDownload } from "@tabler/icons-react";
 import type { McapInfoOutput, FilterConfig } from "../mcap/types.ts";
 import { exportFilteredMcap, downloadMcap } from "../mcap/writer.ts";
 import { formatTimestamp, formatNumber, formatBytes } from "../format.ts";
+import { ChannelsTable } from "./channels-table/ChannelsTable.tsx";
 
 interface ExportPanelProps {
   file: File;
@@ -68,15 +67,6 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
 
   const allSelected = selectedIds.size === allChannelIds.size;
   const noneSelected = selectedIds.size === 0;
-
-  const toggleChannel = useCallback((id: number) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
 
   const selectAll = useCallback(() => {
     setSelectedIds(new Set(allChannelIds));
@@ -274,29 +264,15 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
             </Button>
           </Group>
         </Group>
-        <ScrollArea.Autosize mah={200}>
-          <Stack gap={4}>
-            {channels.map((ch) => (
-              <Checkbox
-                key={ch.id}
-                size="xs"
-                checked={selectedIds.has(ch.id)}
-                onChange={() => toggleChannel(ch.id)}
-                label={
-                  <Group gap="xs">
-                    <Text size="xs" style={{ fontFamily: "monospace" }}>
-                      {ch.topic}
-                    </Text>
-                    <Text size="xs" c="dimmed">
-                      ({formatNumber(ch.message_count)} msgs
-                      {ch.schema_name ? `, ${ch.schema_name}` : ""})
-                    </Text>
-                  </Group>
-                }
-              />
-            ))}
-          </Stack>
-        </ScrollArea.Autosize>
+        <ChannelsTable
+          channels={channels}
+          bucketDurationNs={data.message_distribution.bucket_duration_ns}
+          fileSize={data.file.size_bytes}
+          selectable
+          selectedChannelIds={selectedIds}
+          onSelectedChannelIdsChange={setSelectedIds}
+          compact
+        />
       </div>
 
       {/* Time range */}

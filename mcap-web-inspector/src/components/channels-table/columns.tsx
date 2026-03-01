@@ -1,4 +1,4 @@
-import { Text, Group, Tooltip } from "@mantine/core";
+import { Text, Group, Tooltip, Checkbox } from "@mantine/core";
 import { Sparkline } from "@mantine/charts";
 import { createColumnHelper } from "@tanstack/react-table";
 import type { ColumnDef, RowData } from "@tanstack/react-table";
@@ -24,12 +24,47 @@ interface ColumnContext {
   fileSize: number;
   hasEstimatedSizes: boolean;
   detailExpandedIds: Set<number>;
+  selectable?: boolean;
+  compact?: boolean;
 }
+
+const COMPACT_HIDDEN = new Set(["hz", "jitter", "size", "bps", "bPerMsg", "distribution"]);
 
 export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[] {
   const estimatePrefix = (row: ChannelRow) => row.estimated_sizes ? "~" : "";
 
-  return [
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cols: ColumnDef<ChannelRow, any>[] = [];
+
+  if (ctx.selectable) {
+    cols.push(
+      col.display({
+        id: "select",
+        enableSorting: false,
+        meta: { enableHiding: false, width: 32 },
+        header: ({ table }) => (
+          <Checkbox
+            size="xs"
+            checked={table.getIsAllRowsSelected()}
+            indeterminate={table.getIsSomeRowsSelected()}
+            onChange={table.getToggleAllRowsSelectedHandler()}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ),
+        cell: ({ row }) => (
+          <Checkbox
+            size="xs"
+            checked={row.getIsSelected()}
+            indeterminate={row.getIsSomeSelected()}
+            onChange={row.getToggleSelectedHandler()}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ),
+      }),
+    );
+  }
+
+  cols.push(
     col.display({
       id: "expand",
       header: "",
@@ -71,9 +106,9 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
       meta: { enableHiding: false, width: 32 },
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
-        const { Icon, label, color } = getSchemaIcon(row.original.schema_name);
+        const { Icon, color } = getSchemaIcon(row.original.schema_name);
         return (
-          <Tooltip label={label} openDelay={300}>
+          <Tooltip label={row.original.schema_name ?? "Unknown"} openDelay={300}>
             <Icon size={16} color={color} style={{ display: "block" }} />
           </Tooltip>
         );
@@ -264,5 +299,10 @@ export function getColumns(ctx: ColumnContext): ColumnDef<ChannelRow, unknown>[]
         );
       },
     }),
-  ] as ColumnDef<ChannelRow, unknown>[];
+  );
+
+  if (ctx.compact) {
+    return cols.filter((c) => !("id" in c && typeof c.id === "string" && COMPACT_HIDDEN.has(c.id)));
+  }
+  return cols;
 }

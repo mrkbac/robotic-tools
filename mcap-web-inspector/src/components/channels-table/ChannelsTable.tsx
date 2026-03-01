@@ -24,7 +24,9 @@ import {
   type VisibilityState,
   type ExpandedState,
   type ColumnOrderState,
+  type RowSelectionState,
   type Header,
+  type Row,
 } from "@tanstack/react-table";
 import { IconColumns, IconSearch, IconArrowUp, IconArrowDown } from "@tabler/icons-react";
 import type { ChannelInfo } from "../../mcap/types.ts";
@@ -61,9 +63,40 @@ interface ChannelsTableProps {
   channels: ChannelInfo[];
   bucketDurationNs: number;
   fileSize: number;
+  selectable?: boolean;
+  selectedChannelIds?: Set<number>;
+  onSelectedChannelIdsChange?: (ids: Set<number>) => void;
+  compact?: boolean;
 }
 
-export function ChannelsTable({ channels, bucketDurationNs, fileSize }: ChannelsTableProps) {
+/** Extract channel IDs from a RowSelectionState. */
+function rowSelectionToChannelIds(
+  state: RowSelectionState,
+  rows: Row<ChannelRow>[],
+): Set<number> {
+  const ids = new Set<number>();
+  for (const row of rows) {
+    if (row.original._kind === "channel" && state[row.id]) {
+      ids.add(row.original.id);
+    }
+    if (row.subRows.length > 0) {
+      for (const id of rowSelectionToChannelIds(state, row.subRows)) {
+        ids.add(id);
+      }
+    }
+  }
+  return ids;
+}
+
+export function ChannelsTable({
+  channels,
+  bucketDurationNs,
+  fileSize,
+  selectable,
+  selectedChannelIds,
+  onSelectedChannelIdsChange,
+  compact,
+}: ChannelsTableProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("flat");
   const [detailExpandedIds, setDetailExpandedIds] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<ExpandedState>(true);
@@ -104,22 +137,24 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
   }, [columnVisibility, sorting, columnOrder]);
 
   const columns = useMemo(
-    () => getColumns({ fileSize, hasEstimatedSizes, detailExpandedIds }),
-    [fileSize, hasEstimatedSizes, detailExpandedIds],
+    () => getColumns({ fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact }),
+    [fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact],
   );
 
+  const effectiveViewMode = viewMode;
+
   const rawData = useMemo(() => {
-    if (viewMode === "tree") return buildTreeData(channels);
+    if (effectiveViewMode === "tree") return buildTreeData(channels);
     return toFlatRows(channels);
-  }, [channels, viewMode]);
+  }, [channels, effectiveViewMode]);
 
   // Apply global filter
   const filterLower = globalFilter.trim().toLowerCase();
   const data = useMemo(() => {
     if (!filterLower) return rawData;
-    if (viewMode === "tree") return filterTree(rawData, filterLower);
+    if (effectiveViewMode === "tree") return filterTree(rawData, filterLower);
     return rawData.filter((row) => matchesFilter(row, filterLower));
-  }, [rawData, filterLower, viewMode]);
+  }, [rawData, filterLower, effectiveViewMode]);
 
   const toggleDetail = useCallback((id: number) => {
     setDetailExpandedIds((prev) => {
@@ -131,7 +166,35 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
   }, []);
 
   // Force all expanded when filtering in tree mode
-  const effectiveExpanded = filterLower && viewMode === "tree" ? true : expanded;
+  const effectiveExpanded = filterLower && effectiveViewMode === "tree" ? true : expanded;
+
+  // Selection state: convert between Set<number> and TanStack RowSelectionState
+  const rowSelection = useMemo((): RowSelectionState => {
+    if (!selectable || !selectedChannelIds) return {};
+    // We need the table's row model, but it's not available yet during config.
+    // Instead, build selection from data rows directly — the getRowId is deterministic.
+    const state: RowSelectionState = {};
+    function walkData(rows: ChannelRow[]) {
+      for (const row of rows) {
+        const rowId = row._kind === "group" ? `g:${row._fullPath}` : `c:${row.id}`;
+        if (row._kind === "channel" && selectedChannelIds!.has(row.id)) {
+          state[rowId] = true;
+        }
+        if (row.subRows) {
+          walkData(row.subRows);
+          // Mark group selected if all children are selected
+          if (row.subRows.length > 0 && row.subRows.every((sub) => {
+            const subId = sub._kind === "group" ? `g:${sub._fullPath}` : `c:${sub.id}`;
+            return state[subId];
+          })) {
+            state[rowId] = true;
+          }
+        }
+      }
+    }
+    walkData(data);
+    return state;
+  }, [selectable, selectedChannelIds, data]);
 
   const table = useReactTable<ChannelRow>({
     data,
@@ -141,11 +204,23 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
       columnVisibility,
       columnOrder,
       expanded: effectiveExpanded,
+      ...(selectable ? { rowSelection } : {}),
     },
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
     onColumnOrderChange: setColumnOrder,
     onExpandedChange: setExpanded,
+    ...(selectable ? {
+      enableRowSelection: true,
+      enableSubRowSelection: true,
+      onRowSelectionChange: (updater) => {
+        const next = typeof updater === "function" ? updater(rowSelection) : updater;
+        if (onSelectedChannelIdsChange) {
+          const ids = rowSelectionToChannelIds(next, table.getRowModel().rows);
+          onSelectedChannelIdsChange(ids);
+        }
+      },
+    } : {}),
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getExpandedRowModel: getExpandedRowModel(),
@@ -155,7 +230,143 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
   });
 
   const visibleCellCount = table.getVisibleLeafColumns().length;
-  const isTree = viewMode === "tree";
+  const isTree = effectiveViewMode === "tree";
+
+  const handleRowClick = useCallback(
+    (row: Row<ChannelRow>) => {
+      const isGroup = row.original._kind === "group";
+      if (selectable) {
+        if (isGroup) {
+          row.toggleExpanded();
+        } else {
+          row.toggleSelected();
+        }
+      } else {
+        if (isGroup) {
+          row.toggleExpanded();
+        } else {
+          toggleDetail(row.original.id);
+        }
+      }
+    },
+    [selectable, toggleDetail],
+  );
+
+  const tableContent = channels.length === 0 ? (
+    <Text c="dimmed">No channels found</Text>
+  ) : (
+    <ScrollArea scrollbars="x">
+      <Table striped={!isTree} highlightOnHover>
+        <Table.Thead>
+          {table.getHeaderGroups().map((headerGroup) => (
+            <Table.Tr key={headerGroup.id}>
+              {headerGroup.headers.map((header) => (
+                <SortableHeader key={header.id} header={header} />
+              ))}
+            </Table.Tr>
+          ))}
+        </Table.Thead>
+        <Table.Tbody>
+          {table.getRowModel().rows.map((row) => {
+            const isGroup = row.original._kind === "group";
+            const detailExpanded = !compact && !isGroup && detailExpandedIds.has(row.original.id);
+
+            return (
+              <Fragment key={row.id}>
+                <Table.Tr
+                  onClick={() => handleRowClick(row)}
+                  style={{ cursor: "pointer" }}
+                >
+                  {row.getVisibleCells().map((cell) => {
+                    const meta = cell.column.columnDef.meta;
+                    const railStyle = isTree && cell.column.id === "expand"
+                      ? getRailStyle(row.original.topic, row.depth)
+                      : undefined;
+                    return (
+                      <Table.Td
+                        key={cell.id}
+                        style={{
+                          textAlign: meta?.align,
+                          width: meta?.width,
+                          maxWidth: meta?.width,
+                          ...railStyle,
+                          ...(isGroup
+                            ? { fontWeight: 500, opacity: 0.8 }
+                            : {}),
+                        }}
+                      >
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </Table.Td>
+                    );
+                  })}
+                </Table.Tr>
+
+                {!compact && !isGroup && (
+                  <Table.Tr style={{ backgroundColor: "transparent" }}>
+                    <Table.Td
+                      colSpan={visibleCellCount}
+                      style={{
+                        padding: 0,
+                        border: detailExpanded ? undefined : "none",
+                      }}
+                    >
+                      <Collapse in={detailExpanded}>
+                        {detailExpanded && (
+                          <ChannelDetail
+                            channel={row.original}
+                            bucketDurationNs={bucketDurationNs}
+                            fileSize={fileSize}
+                          />
+                        )}
+                      </Collapse>
+                    </Table.Td>
+                  </Table.Tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </Table.Tbody>
+      </Table>
+    </ScrollArea>
+  );
+
+  if (selectable) {
+    return (
+      <>
+        <Group justify="flex-end" mb="xs" gap="xs">
+          <TextInput
+            size="xs"
+            placeholder="Filter channels…"
+            leftSection={<IconSearch size={14} />}
+            rightSection={
+              globalFilter ? (
+                <CloseButton size="xs" onClick={() => setGlobalFilter("")} />
+              ) : null
+            }
+            value={globalFilter}
+            onChange={(e) => setGlobalFilter(e.currentTarget.value)}
+            style={{ width: 200 }}
+          />
+          <ColumnsMenu table={table} />
+          {channels.length > 0 && (
+            <SegmentedControl
+              size="xs"
+              value={viewMode}
+              onChange={(v) => {
+                setViewMode(v as ViewMode);
+                setExpanded(v === "tree" ? true : {});
+              }}
+              data={[
+                { label: "Flat", value: "flat" },
+                { label: "Tree", value: "tree" },
+              ]}
+            />
+          )}
+        </Group>
+        {tableContent}
+      </>
+    );
+  }
 
   return (
     <Paper p="md" withBorder>
@@ -192,87 +403,7 @@ export function ChannelsTable({ channels, bucketDurationNs, fileSize }: Channels
           )}
         </Group>
       </Group>
-      {channels.length === 0 ? (
-        <Text c="dimmed">No channels found</Text>
-      ) : (
-        <ScrollArea scrollbars="x">
-          <Table striped={!isTree} highlightOnHover>
-            <Table.Thead>
-              {table.getHeaderGroups().map((headerGroup) => (
-                <Table.Tr key={headerGroup.id}>
-                  {headerGroup.headers.map((header) => (
-                    <SortableHeader key={header.id} header={header} />
-                  ))}
-                </Table.Tr>
-              ))}
-            </Table.Thead>
-            <Table.Tbody>
-              {table.getRowModel().rows.map((row) => {
-                const isGroup = row.original._kind === "group";
-                const detailExpanded = !isGroup && detailExpandedIds.has(row.original.id);
-
-                return (
-                  <Fragment key={row.id}>
-                    <Table.Tr
-                      onClick={() =>
-                        isGroup
-                          ? row.toggleExpanded()
-                          : toggleDetail(row.original.id)
-                      }
-                      style={{ cursor: "pointer" }}
-                    >
-                      {row.getVisibleCells().map((cell) => {
-                        const meta = cell.column.columnDef.meta;
-                        const railStyle = isTree && cell.column.id === "expand"
-                          ? getRailStyle(row.original.topic, row.depth)
-                          : undefined;
-                        return (
-                          <Table.Td
-                            key={cell.id}
-                            style={{
-                              textAlign: meta?.align,
-                              width: meta?.width,
-                              maxWidth: meta?.width,
-                              ...railStyle,
-                              ...(isGroup
-                                ? { fontWeight: 500, opacity: 0.8 }
-                                : {}),
-                            }}
-                          >
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                          </Table.Td>
-                        );
-                      })}
-                    </Table.Tr>
-
-                    {!isGroup && (
-                      <Table.Tr style={{ backgroundColor: "transparent" }}>
-                        <Table.Td
-                          colSpan={visibleCellCount}
-                          style={{
-                            padding: 0,
-                            border: detailExpanded ? undefined : "none",
-                          }}
-                        >
-                          <Collapse in={detailExpanded}>
-                            {detailExpanded && (
-                              <ChannelDetail
-                                channel={row.original}
-                                bucketDurationNs={bucketDurationNs}
-                                fileSize={fileSize}
-                              />
-                            )}
-                          </Collapse>
-                        </Table.Td>
-                      </Table.Tr>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </Table.Tbody>
-          </Table>
-        </ScrollArea>
-      )}
+      {tableContent}
     </Paper>
   );
 }
