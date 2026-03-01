@@ -6,7 +6,6 @@ import {
   Text,
   Group,
   Collapse,
-
   SegmentedControl,
   Menu,
   ActionIcon,
@@ -165,7 +164,14 @@ export function ChannelsTable({
         compact,
         isTreeView,
       }),
-    [fileSize, hasEstimatedSizes, detailExpandedIds, selectable, compact, isTreeView],
+    [
+      fileSize,
+      hasEstimatedSizes,
+      detailExpandedIds,
+      selectable,
+      compact,
+      isTreeView,
+    ],
   );
 
   const rawData = useMemo(() => {
@@ -191,8 +197,7 @@ export function ChannelsTable({
   }, []);
 
   // Force all expanded when filtering in tree mode
-  const effectiveExpanded =
-    filterLower && isTreeView ? true : expanded;
+  const effectiveExpanded = filterLower && isTreeView ? true : expanded;
 
   // Selection state: convert between Set<number> and TanStack RowSelectionState
   const rowSelection = useMemo((): RowSelectionState => {
@@ -294,7 +299,12 @@ export function ChannelsTable({
       <Text c="dimmed">No channels found</Text>
     ) : (
       <Table.ScrollContainer type="native" minWidth={500}>
-        <Table striped={!isTreeView} highlightOnHover stickyHeader stickyHeaderOffset={0}>
+        <Table
+          striped={!isTreeView}
+          highlightOnHover
+          stickyHeader
+          stickyHeaderOffset={0}
+        >
           <Table.Thead>
             {table.getHeaderGroups().map((headerGroup) => (
               <Table.Tr key={headerGroup.id}>

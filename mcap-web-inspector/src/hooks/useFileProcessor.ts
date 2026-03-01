@@ -134,10 +134,7 @@ export function useFileProcessor() {
 
   /** Process multiple files. All get cached/historied; the first one navigates to /view. */
   const handleFilesSelect = useCallback(
-    async (
-      files: File[],
-      handles?: Map<File, FileSystemFileHandle>,
-    ) => {
+    async (files: File[], handles?: Map<File, FileSystemFileHandle>) => {
       for (let i = 0; i < files.length; i++) {
         const file = files[i]!;
         const handle = handles?.get(file);

@@ -162,10 +162,7 @@ export function getColumns(
       cell: ({ row }) => {
         if (row.original._kind === "group") return null;
         return (
-          <TopicDisplay
-            topic={row.original.topic}
-            leafOnly={ctx.isTreeView}
-          />
+          <TopicDisplay topic={row.original.topic} leafOnly={ctx.isTreeView} />
         );
       },
     }),

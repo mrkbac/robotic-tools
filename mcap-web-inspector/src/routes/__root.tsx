@@ -10,7 +10,10 @@ import {
   useComputedColorScheme,
 } from "@mantine/core";
 import { IconSun, IconMoon } from "@tabler/icons-react";
-import { FileProcessorProvider, useFileProcessorContext } from "../contexts/FileProcessorContext.tsx";
+import {
+  FileProcessorProvider,
+  useFileProcessorContext,
+} from "../contexts/FileProcessorContext.tsx";
 import { GlobalDropZone } from "../components/GlobalDropZone.tsx";
 
 function ColorSchemeToggle() {

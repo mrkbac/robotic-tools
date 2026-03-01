@@ -24,8 +24,10 @@ import type {
 // ── App-level types ──
 
 /** McapInfoOutput with metadata/attachments always present (defaulted to []). */
-export interface McapInfoOutput
-  extends Omit<McapInfoOutputGenerated, "metadata" | "attachments"> {
+export interface McapInfoOutput extends Omit<
+  McapInfoOutputGenerated,
+  "metadata" | "attachments"
+> {
   metadata: NonNullable<McapInfoOutputGenerated["metadata"]>;
   attachments: NonNullable<McapInfoOutputGenerated["attachments"]>;
 }

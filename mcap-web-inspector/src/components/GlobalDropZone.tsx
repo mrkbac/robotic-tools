@@ -79,9 +79,7 @@ export function GlobalDropZone({ onFilesSelect }: GlobalDropZoneProps) {
               }
             }
 
-            const file = handle
-              ? await handle.getFile()
-              : item.getAsFile();
+            const file = handle ? await handle.getFile() : item.getAsFile();
             if (!file) return;
             if (!file.name.endsWith(".mcap")) return;
 

@@ -158,63 +158,65 @@ export function FileInfo({
 
   return (
     <>
-    <Paper p="md" withBorder>
-      {hasThumbnail ? (
-        <Group align="stretch" gap="md" wrap="nowrap">
-          <UnstyledButton
-            onClick={hasFullThumbnail ? () => setModalOpen(true) : undefined}
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              cursor: hasFullThumbnail ? "pointer" : "default",
-            }}
-          >
-            <Image
-              src={thumbnailSrc}
-              alt="Thumbnail"
-              h={hasFullThumbnail ? "100%" : undefined}
-              miw={hasFullThumbnail ? undefined : 64}
-              mih={hasFullThumbnail ? undefined : 48}
-              mah={160}
-              w="auto"
-              maw={200}
-              fit={hasFullThumbnail ? "contain" : "cover"}
-              radius="sm"
-              style={hasFullThumbnail ? undefined : { imageRendering: "pixelated" }}
-            />
-          </UnstyledButton>
-          <div style={{ flex: 1, minWidth: 0 }}>{statsGrid}</div>
-        </Group>
-      ) : (
-        statsGrid
-      )}
-    </Paper>
+      <Paper p="md" withBorder>
+        {hasThumbnail ? (
+          <Group align="stretch" gap="md" wrap="nowrap">
+            <UnstyledButton
+              onClick={hasFullThumbnail ? () => setModalOpen(true) : undefined}
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                cursor: hasFullThumbnail ? "pointer" : "default",
+              }}
+            >
+              <Image
+                src={thumbnailSrc}
+                alt="Thumbnail"
+                h={hasFullThumbnail ? "100%" : undefined}
+                miw={hasFullThumbnail ? undefined : 64}
+                mih={hasFullThumbnail ? undefined : 48}
+                mah={160}
+                w="auto"
+                maw={200}
+                fit={hasFullThumbnail ? "contain" : "cover"}
+                radius="sm"
+                style={
+                  hasFullThumbnail ? undefined : { imageRendering: "pixelated" }
+                }
+              />
+            </UnstyledButton>
+            <div style={{ flex: 1, minWidth: 0 }}>{statsGrid}</div>
+          </Group>
+        ) : (
+          statsGrid
+        )}
+      </Paper>
 
-    <Modal
-      opened={modalOpen}
-      onClose={() => setModalOpen(false)}
-      title="Image Topics"
-      size="xl"
-    >
-      <SimpleGrid cols={{ base: 1, xs: 2, sm: 3, md: 4 }} spacing="sm">
-        {entries.map((entry, i) => (
-          <Stack key={entry.channelId} gap={4} align="center">
-            <Image
-              src={urlsRef.current[i]}
-              alt={entry.topic}
-              h={100}
-              w="auto"
-              fit="contain"
-              radius="sm"
-            />
-            <Text size="xs" c="dimmed" ta="center" truncate="end" maw="100%">
-              {entry.topic}
-            </Text>
-          </Stack>
-        ))}
-      </SimpleGrid>
-    </Modal>
+      <Modal
+        opened={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title="Image Topics"
+        size="xl"
+      >
+        <SimpleGrid cols={{ base: 1, xs: 2, sm: 3, md: 4 }} spacing="sm">
+          {entries.map((entry, i) => (
+            <Stack key={entry.channelId} gap={4} align="center">
+              <Image
+                src={urlsRef.current[i]}
+                alt={entry.topic}
+                h={100}
+                w="auto"
+                fit="contain"
+                radius="sm"
+              />
+              <Text size="xs" c="dimmed" ta="center" truncate="end" maw="100%">
+                {entry.topic}
+              </Text>
+            </Stack>
+          ))}
+        </SimpleGrid>
+      </Modal>
     </>
   );
 }
