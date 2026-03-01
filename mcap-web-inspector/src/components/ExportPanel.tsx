@@ -14,7 +14,7 @@ import {
 import { IconDownload } from "@tabler/icons-react";
 import type { McapInfoOutput, FilterConfig } from "../mcap/types.ts";
 import { exportFilteredMcap, downloadMcap } from "../mcap/writer.ts";
-import { formatTimestamp, formatNumber } from "../format.ts";
+import { formatTimestamp, formatNumber, formatBytes } from "../format.ts";
 
 interface ExportPanelProps {
   file: File;
@@ -102,16 +102,97 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
   const startTime = timeFiltered ? sliderToTime(timeRange[0]) : null;
   const endTime = timeFiltered ? sliderToTime(timeRange[1]) : null;
 
-  // Estimate selected message count
-  const estimatedMessages = useMemo(() => {
-    let total = 0;
+  // Estimate messages, sizes, and compression for selected channels + time range
+  const estimates = useMemo(() => {
+    const bucketDurationNs = data.message_distribution.bucket_duration_ns;
+    const globalStartNs = data.statistics.message_start_time;
+
+    let totalMessages = 0;
+    let hasAnySizeData = false;
+    let uncompressedSum = 0;
+
     for (const ch of channels) {
-      if (selectedIds.has(ch.id)) {
-        total += ch.message_count;
+      if (!selectedIds.has(ch.id)) continue;
+
+      if (!timeFiltered) {
+        totalMessages += ch.message_count;
+        if (ch.size_bytes != null) {
+          hasAnySizeData = true;
+          uncompressedSum += ch.size_bytes;
+        }
+      } else {
+        const filterStartNs = Number(startTime!);
+        const filterEndNs = Number(endTime!);
+
+        let channelMessages: number;
+        if (ch.message_distribution.length > 0) {
+          // Bucket interpolation (rebuild mode has per-channel distributions)
+          channelMessages = 0;
+          for (let i = 0; i < ch.message_distribution.length; i++) {
+            const bucketStart = globalStartNs + i * bucketDurationNs;
+            const bucketEnd = bucketStart + bucketDurationNs;
+            if (bucketEnd <= filterStartNs || bucketStart >= filterEndNs)
+              continue;
+            const overlapStart = Math.max(bucketStart, filterStartNs);
+            const overlapEnd = Math.min(bucketEnd, filterEndNs);
+            const fraction = (overlapEnd - overlapStart) / bucketDurationNs;
+            channelMessages += ch.message_distribution[i]! * fraction;
+          }
+        } else {
+          // No per-channel distribution (summary mode): assume uniform
+          const totalDuration =
+            data.statistics.message_end_time -
+            data.statistics.message_start_time;
+          const selectedDuration = filterEndNs - filterStartNs;
+          const timeFraction =
+            totalDuration > 0 ? selectedDuration / totalDuration : 0;
+          channelMessages = ch.message_count * timeFraction;
+        }
+
+        const roundedMessages = Math.round(channelMessages);
+        totalMessages += roundedMessages;
+        if (ch.bytes_per_message != null) {
+          hasAnySizeData = true;
+          uncompressedSum += roundedMessages * ch.bytes_per_message;
+        }
       }
     }
-    return total;
-  }, [channels, selectedIds]);
+
+    // Weighted compression ratio from chunk data
+    const byCompression = data.chunks.by_compression;
+    const compressionTypes = Object.keys(byCompression);
+    const hasRealCompression = compressionTypes.some(
+      (t) => t !== "" && t !== "none",
+    );
+
+    let compressedSize: number | null = null;
+    if (hasAnySizeData && hasRealCompression) {
+      let totalCompressed = 0;
+      let totalUncompressed = 0;
+      for (const type of compressionTypes) {
+        totalCompressed += byCompression[type]!.compressed_size;
+        totalUncompressed += byCompression[type]!.uncompressed_size;
+      }
+      if (totalUncompressed > 0) {
+        compressedSize = uncompressedSum * (totalCompressed / totalUncompressed);
+      }
+    }
+
+    return {
+      messages: totalMessages,
+      uncompressedSize: hasAnySizeData ? uncompressedSum : null,
+      compressedSize,
+    };
+  }, [
+    channels,
+    selectedIds,
+    timeFiltered,
+    startTime,
+    endTime,
+    data.message_distribution.bucket_duration_ns,
+    data.statistics.message_start_time,
+    data.chunks.by_compression,
+  ]);
 
   const handleExport = useCallback(async () => {
     setExporting(true);
@@ -282,10 +363,15 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
       {/* Summary */}
       <Text size="xs" c="dimmed">
         {selectedIds.size} channel{selectedIds.size !== 1 ? "s" : ""}
-        {" selected"}
-        {" \u00B7 ~"}
-        {formatNumber(estimatedMessages)} messages
-        {timeFiltered && " (before time filter)"}
+        {" · "}
+        {timeFiltered ? "~" : ""}
+        {formatNumber(estimates.messages)} messages
+        {estimates.uncompressedSize != null && (
+          <> · ~{formatBytes(estimates.uncompressedSize)}</>
+        )}
+        {estimates.compressedSize != null && (
+          <> → ~{formatBytes(estimates.compressedSize)} compressed</>
+        )}
       </Text>
 
       {/* Export button + progress */}
