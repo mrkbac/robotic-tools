@@ -179,41 +179,33 @@
         }
       }
     },
-    "PartialStats": {
-      "title": "PartialStats",
-      "description": "Statistics where only average is always available; min/max/median are only available in rebuild mode.",
+    "IntervalStats": {
+      "title": "IntervalStats",
+      "description": "Min/max/median statistics from per-interval measurements (rebuild-only).",
       "type": "object",
       "required": [
-        "average",
         "minimum",
         "maximum",
         "median"
       ],
       "properties": {
-        "average": {
-          "type": "number",
-          "minimum": 0
-        },
         "minimum": {
           "type": [
             "number",
             "null"
-          ],
-          "minimum": 0
+          ]
         },
         "maximum": {
           "type": [
             "number",
             "null"
-          ],
-          "minimum": 0
+          ]
         },
         "median": {
           "type": [
             "number",
             "null"
-          ],
-          "minimum": 0
+          ]
         }
       }
     },
@@ -306,20 +298,10 @@
         "id",
         "topic",
         "schema_id",
-        "schema_name",
         "message_count",
         "size_bytes",
         "duration_ns",
-        "hz_stats",
-        "hz_channel",
-        "bytes_per_second_stats",
-        "bytes_per_message",
-        "message_distribution",
-        "message_start_time",
-        "message_end_time",
-        "estimated_sizes",
-        "jitter_ns",
-        "jitter_cv"
+        "estimated_sizes"
       ],
       "properties": {
         "id": {
@@ -330,12 +312,6 @@
         },
         "schema_id": {
           "type": "integer"
-        },
-        "schema_name": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "message_count": {
           "type": "integer",
@@ -356,31 +332,14 @@
           "minimum": 0
         },
         "hz_stats": {
-          "$ref": "#/definitions/PartialStats"
-        },
-        "hz_channel": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "minimum": 0
-        },
-        "bytes_per_second_stats": {
           "anyOf": [
             {
-              "$ref": "#/definitions/PartialStats"
+              "$ref": "#/definitions/IntervalStats"
             },
             {
               "type": "null"
             }
           ]
-        },
-        "bytes_per_message": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "minimum": 0
         },
         "message_distribution": {
           "type": "array",
@@ -413,13 +372,6 @@
             "null"
           ],
           "description": "Standard deviation of inter-message intervals in nanoseconds."
-        },
-        "jitter_cv": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "description": "Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable."
         }
       }
     },

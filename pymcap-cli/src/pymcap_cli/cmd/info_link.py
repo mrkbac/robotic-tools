@@ -12,7 +12,6 @@ from pymcap_cli.info_types import McapInfoOutput
 ScanMode = Literal["summary", "rebuild", "exact"]
 
 BASE_URL = "https://mrkbac.github.io/robotic-tools/view#"
-MAX_HASH_BYTES = 8 * 1024
 
 
 class _UrlPayload(TypedDict):
@@ -51,47 +50,40 @@ def _encode(payload: _UrlPayload) -> str:
     return _compress_to_base64url(json_str)
 
 
-def _progressive_strip(payload: _UrlPayload) -> str:
-    encoded = _encode(payload)
-    if len(encoded) <= MAX_HASH_BYTES:
-        return encoded
+def _strip_for_url(data: McapInfoOutput) -> McapInfoOutput:
+    """Create a lean copy of data suitable for URL encoding.
 
-    channels = payload["data"].get("channels", [])
+    Keeps overview info (file, header, statistics, schemas) and slim channels.
+    Strips per-channel distributions, chunks detail, metadata, attachments, thumbnail.
+    """
+    stripped = McapInfoOutput(**data)
 
-    # Strip per-channel message distributions
-    for ch in channels:
-        ch["message_distribution"] = []
-    encoded = _encode(payload)
-    if len(encoded) <= MAX_HASH_BYTES:
-        return encoded
+    # Clear schema data content (keep id, name, encoding)
+    for s in stripped.get("schemas", []):
+        s["data"] = ""
 
-    # Strip bytes_per_second_stats
-    for ch in channels:
-        ch["bytes_per_second_stats"] = None
-    encoded = _encode(payload)
-    if len(encoded) <= MAX_HASH_BYTES:
-        return encoded
+    # Slim channels: strip message_distribution (large arrays)
+    for ch in stripped.get("channels", []):
+        ch.pop("message_distribution", None)
 
-    # Strip metadata and attachments
-    data = payload["data"]
-    data.pop("metadata", None)
-    data.pop("attachments", None)
-    encoded = _encode(payload)
-    if len(encoded) <= MAX_HASH_BYTES:
-        return encoded
+    # Keep only chunk overlaps, drop by_compression
+    chunks = stripped.get("chunks")
+    if chunks:
+        stripped["chunks"] = {
+            "by_compression": {},
+            "overlaps": chunks["overlaps"],
+        }
 
-    # Strip thumbnail as last resort
-    data.pop("thumbnail", None)
-    return _encode(payload)
+    # Strip heavy top-level fields
+    stripped.pop("metadata", None)
+    stripped.pop("attachments", None)
+    stripped.pop("thumbnail", None)
+
+    return stripped
 
 
 def generate_link(data: McapInfoOutput, file_path: str, file_size: int, mode: ScanMode) -> str:
     file_id = _create_file_id(file_path, file_size)
-
-    # Strip schema data for URL (keep only id, name, encoding; clear data content)
-    stripped = McapInfoOutput(**data)
-    for s in stripped.get("schemas", []):
-        s["data"] = ""
-
+    stripped = _strip_for_url(data)
     payload = _UrlPayload(mode=mode, fileId=file_id, data=stripped)
-    return f"{BASE_URL}{_progressive_strip(payload)}"
+    return f"{BASE_URL}{_encode(payload)}"

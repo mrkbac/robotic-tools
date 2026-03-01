@@ -16,10 +16,10 @@ from pymcap_cli.info_types import (
     AttachmentInfo,
     ChannelInfo,
     CompressionStats,
+    IntervalStats,
     McapInfoOutput,
     MessageDistribution,
     MetadataInfo,
-    PartialStats,
     SchemaInfo,
     Stats,
 )
@@ -190,27 +190,21 @@ def _collect_channel_statistics(
 
 @dataclass(slots=True)
 class IntervalStatsResult:
-    hz_stats: dict[str, float]
+    hz_stats: IntervalStats
     jitter_ns: float
-    jitter_cv: float
-    bps_stats: dict[str, float] | None = None
 
 
 def _calculate_interval_stats(
     channel_intervals: dict[int, list[int]],
-    channel_sizes: dict[int, int] | None,
-    message_counts: dict[int, int],
 ) -> dict[int, IntervalStatsResult]:
     """Calculate statistical rate information from message intervals.
 
     Args:
         channel_intervals: Dict mapping channel_id -> list of intervals (ns)
-        channel_sizes: Optional dict mapping channel_id -> total bytes
-        message_counts: Dict mapping channel_id -> message count
 
     Returns:
-        Dict mapping channel_id -> IntervalStatsResult with hz_stats,
-        jitter_ns, jitter_cv, and optional bps_stats.
+        Dict mapping channel_id -> IntervalStatsResult with hz_stats (min/max/median)
+        and jitter_ns.
     """
     interval_stats: dict[int, IntervalStatsResult] = {}
 
@@ -221,39 +215,19 @@ def _calculate_interval_stats(
         # Convert intervals to Hz values (no sorting needed)
         hz_values = [1_000_000_000 / interval for interval in intervals]
 
-        # Calculate Hz statistics using fast operations
-        # Note: statistics.median() handles unsorted data efficiently
-        hz_stats = {
+        # Calculate Hz statistics (min/max/median only — average is derived)
+        hz_stats: IntervalStats = {
             "minimum": min(hz_values),
             "maximum": max(hz_values),
-            "average": sum(hz_values) / len(hz_values),
             "median": statistics.median(hz_values),
         }
 
-        # Calculate jitter (stddev and coefficient of variation of intervals)
+        # Calculate jitter (stddev of intervals)
         mean_interval = sum(intervals) / len(intervals)
         variance = sum((iv - mean_interval) ** 2 for iv in intervals) / len(intervals)
         jitter_ns = math.sqrt(variance)
-        jitter_cv = jitter_ns / mean_interval if mean_interval > 0 else 0.0
 
-        result = IntervalStatsResult(hz_stats=hz_stats, jitter_ns=jitter_ns, jitter_cv=jitter_cv)
-
-        # Calculate bytes per second statistics if size data is available
-        if channel_sizes and channel_id in channel_sizes:
-            channel_size = channel_sizes[channel_id]
-            message_count = message_counts.get(channel_id, 0)
-
-            if message_count > 0:
-                # bytes/sec = Hz * average bytes per message
-                avg_bytes_per_msg = channel_size / message_count
-                result.bps_stats = {
-                    "minimum": hz_stats["minimum"] * avg_bytes_per_msg,
-                    "maximum": hz_stats["maximum"] * avg_bytes_per_msg,
-                    "average": hz_stats["average"] * avg_bytes_per_msg,
-                    "median": hz_stats["median"] * avg_bytes_per_msg,
-                }
-
-        interval_stats[channel_id] = result
+        interval_stats[channel_id] = IntervalStatsResult(hz_stats=hz_stats, jitter_ns=jitter_ns)
 
     return interval_stats
 
@@ -378,9 +352,7 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
             bucket_count,
             bucket_duration_ns,
         )
-        interval_stats = _calculate_interval_stats(
-            channel_intervals, info.channel_sizes, statistics_rec.channel_message_counts
-        )
+        interval_stats = _calculate_interval_stats(channel_intervals)
     else:
         global_message_counts = [0] * bucket_count
 
@@ -438,7 +410,6 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     for channel in summary.channels.values():
         channel_id = channel.id
         count = statistics_rec.channel_message_counts.get(channel_id, 0)
-        schema = summary.schemas.get(channel.schema_id)
         channel_size = info.channel_sizes.get(channel_id) if info.channel_sizes else None
         ch_duration_ns = channel_durations.get(channel_id)
         ch_distribution = per_channel_distributions.get(channel_id, [])
@@ -450,11 +421,9 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
             _build_channel_dict(
                 channel=channel,
                 message_count=count,
-                schema_name=schema.name if schema else None,
                 channel_size=channel_size,
                 estimated_sizes=info.estimated_channel_sizes,
                 channel_duration_ns=ch_duration_ns,
-                global_duration_ns=duration_ns,
                 message_distribution=ch_distribution,
                 interval_stats=ch_interval_stats,
                 message_start_time=ch_first_time,
@@ -521,90 +490,33 @@ def _build_chunk_compression_stats(chunk_stats: ChunkStats) -> CompressionStats:
 def _build_channel_dict(
     channel: Channel,
     message_count: int,
-    schema_name: str | None,
     channel_size: int | None,
     estimated_sizes: bool,
     channel_duration_ns: int | None,
-    global_duration_ns: int,
     message_distribution: list[int],
     interval_stats: IntervalStatsResult | None = None,
     message_start_time: int | None = None,
     message_end_time: int | None = None,
 ) -> ChannelInfo:
-    """Build channel information dict for JSON output with calculated metrics."""
-    # Calculate global Hz (average based on global duration)
-    hz_global = (
-        message_count / (global_duration_ns / 1_000_000_000) if global_duration_ns > 0 else 0
-    )
-
-    # Calculate Hz based on channel duration (first to last message)
-    hz_channel = None
-    if channel_duration_ns is not None and channel_duration_ns > 0:
-        hz_channel = message_count / (channel_duration_ns / 1_000_000_000)
-
-    # Build hz_stats (PartialStats)
-    # Average is always available (from global duration)
-    # Min/max/median only available from interval stats (rebuild mode)
-    hz_stats: PartialStats = {
-        "average": hz_global,
-        "minimum": None,
-        "maximum": None,
-        "median": None,
-    }
-    if interval_stats:
-        hz_stats["minimum"] = interval_stats.hz_stats["minimum"]
-        hz_stats["maximum"] = interval_stats.hz_stats["maximum"]
-        hz_stats["median"] = interval_stats.hz_stats["median"]
-
-    # Calculate bytes per message
-    b_per_msg = None
-    if channel_size is not None and message_count > 0:
-        b_per_msg = channel_size / message_count
-
-    # Build bytes_per_second_stats (PartialStats | None)
-    # Only available if we have channel size data
-    bps_stats: PartialStats | None = None
-    if channel_size is not None:
-        bps_global = (
-            channel_size / (global_duration_ns / 1_000_000_000) if global_duration_ns > 0 else 0
-        )
-        bps_stats = {
-            "average": bps_global,
-            "minimum": None,
-            "maximum": None,
-            "median": None,
-        }
-        if interval_stats and interval_stats.bps_stats:
-            bps_stats["minimum"] = interval_stats.bps_stats["minimum"]
-            bps_stats["maximum"] = interval_stats.bps_stats["maximum"]
-            bps_stats["median"] = interval_stats.bps_stats["median"]
-
-    # Extract jitter values from interval_stats (only available in rebuild mode)
-    jitter_ns: float | None = None
-    jitter_cv: float | None = None
-    if interval_stats:
-        jitter_ns = interval_stats.jitter_ns
-        jitter_cv = interval_stats.jitter_cv
-
-    return {
+    """Build channel information dict for JSON output with base metrics only."""
+    result: ChannelInfo = {
         "id": channel.id,
         "topic": channel.topic,
         "schema_id": channel.schema_id,
-        "schema_name": schema_name,
         "message_count": message_count,
         "size_bytes": channel_size,
         "estimated_sizes": estimated_sizes,
         "duration_ns": channel_duration_ns,
-        "hz_stats": hz_stats,
-        "hz_channel": hz_channel,
-        "bytes_per_second_stats": bps_stats,
-        "bytes_per_message": b_per_msg,
         "message_distribution": message_distribution,
         "message_start_time": message_start_time,
         "message_end_time": message_end_time,
-        "jitter_ns": jitter_ns,
-        "jitter_cv": jitter_cv,
     }
+
+    if interval_stats:
+        result["hz_stats"] = interval_stats.hz_stats
+        result["jitter_ns"] = interval_stats.jitter_ns
+
+    return result
 
 
 def _build_schema_dict(schema_id: int, schema: Schema) -> SchemaInfo:

@@ -255,7 +255,6 @@ interface IntervalStatsResult {
     median: number;
   };
   jitterNs: number;
-  jitterCv: number;
 }
 
 function calculateIntervalStats(
@@ -283,9 +282,8 @@ function calculateIntervalStats(
       intervals.reduce((sum, iv) => sum + (iv - meanInterval) ** 2, 0) /
       intervals.length;
     const jitterNs = Math.sqrt(variance);
-    const jitterCv = meanInterval > 0 ? jitterNs / meanInterval : 0;
 
-    const entry: IntervalStatsResult = { hzStats, jitterNs, jitterCv };
+    const entry: IntervalStatsResult = { hzStats, jitterNs };
 
     if (channelSizes?.has(channelId)) {
       const channelSize = channelSizes.get(channelId)!;
@@ -532,6 +530,7 @@ function buildChannelInfo(
     hzChannel = messageCount / chDurSec;
   }
 
+  // hz_stats: PartialStats (average computed from global duration, min/max/median from intervals)
   const hz_stats: PartialStats = {
     average: hzGlobal,
     minimum: intervalStats?.hzStats.minimum ?? null,
@@ -544,6 +543,7 @@ function buildChannelInfo(
       ? channelSize / messageCount
       : null;
 
+  // Derived: bytes_per_second_stats (PartialStats with average)
   let bytes_per_second_stats: PartialStats | null = null;
   if (channelSize !== null) {
     const bpsGlobal = globalDurSec > 0 ? channelSize / globalDurSec : 0;
@@ -555,6 +555,16 @@ function buildChannelInfo(
     };
   }
 
+  const durationNsNum = channelDurationNs !== null ? Number(channelDurationNs) : null;
+  const jitterNs = intervalStats?.jitterNs ?? null;
+
+  // Derived: jitter_cv = jitter_ns / mean_interval
+  let jitterCv: number | null = null;
+  if (jitterNs !== null && durationNsNum !== null && messageCount > 1) {
+    const meanInterval = durationNsNum / (messageCount - 1);
+    jitterCv = meanInterval > 0 ? jitterNs / meanInterval : null;
+  }
+
   return {
     id: channel.id,
     topic: channel.topic,
@@ -563,7 +573,7 @@ function buildChannelInfo(
     message_count: messageCount,
     size_bytes: channelSize,
     estimated_sizes: estimatedSizes,
-    duration_ns: channelDurationNs !== null ? Number(channelDurationNs) : null,
+    duration_ns: durationNsNum,
     hz_stats,
     hz_channel: hzChannel,
     bytes_per_second_stats,
@@ -572,7 +582,7 @@ function buildChannelInfo(
     message_start_time:
       messageStartTime !== null ? Number(messageStartTime) : null,
     message_end_time: messageEndTime !== null ? Number(messageEndTime) : null,
-    jitter_ns: intervalStats?.jitterNs ?? null,
-    jitter_cv: intervalStats?.jitterCv ?? null,
+    jitter_ns: jitterNs,
+    jitter_cv: jitterCv,
   };
 }

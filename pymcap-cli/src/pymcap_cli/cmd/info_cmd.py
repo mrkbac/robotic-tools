@@ -601,7 +601,7 @@ def info(
             console.print()
 
         # Warn if --index-duration is enabled but no per-channel duration data available
-        has_channel_durations = any(ch.get("hz_channel") is not None for ch in data["channels"])
+        has_channel_durations = any(ch.get("duration_ns") is not None for ch in data["channels"])
         if index_duration and not has_channel_durations:
             console.print(
                 "[yellow]Warning:[/] --index-duration requires message index data. "
@@ -633,6 +633,6 @@ def info(
         # Show shareable web inspector link
         mode: ScanMode = "exact" if exact_sizes else ("rebuild" if rebuild else "summary")
         url = generate_link(data, str(file), file_size, mode)
-        console.print(f"\n[dim][link={url}]View in web inspector[/link][/dim]")
+        console.print(f"\n[link={url}][dim]View in web inspector[/dim][/]")
 
     return 0

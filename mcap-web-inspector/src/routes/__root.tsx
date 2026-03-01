@@ -1,4 +1,4 @@
-import { createRootRoute, Outlet } from "@tanstack/react-router";
+import { createRootRoute, Link, Outlet } from "@tanstack/react-router";
 import {
   Container,
   Stack,
@@ -47,7 +47,7 @@ function RootLayoutInner() {
       <Container size="xl" py="xl">
         <Stack gap="lg">
           <Group justify="space-between" align="flex-end">
-            <Title order={2}>MCAP Web Inspector</Title>
+            <Title order={2}><Link to="/">MCAP Web Inspector</Link></Title>
             <ColorSchemeToggle />
           </Group>
           <Outlet />

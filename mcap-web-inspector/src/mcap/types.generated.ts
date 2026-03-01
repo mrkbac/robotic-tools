@@ -14,7 +14,7 @@
  * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
  * via the `definition` "ScanMode".
  */
-export type ScanMode = "summary" | "rebuild" | "exact";
+export type ScanMode = 'summary' | 'rebuild' | 'exact';
 
 /**
  * Complete MCAP info output structure.
@@ -154,17 +154,13 @@ export interface ChannelInfo {
   id: number;
   topic: string;
   schema_id: number;
-  schema_name: string | null;
   message_count: number;
   size_bytes: number | null;
   duration_ns: number | null;
-  hz_stats: PartialStats;
-  hz_channel: number | null;
-  bytes_per_second_stats: PartialStats | null;
-  bytes_per_message: number | null;
-  message_distribution: number[];
-  message_start_time: number | null;
-  message_end_time: number | null;
+  hz_stats?: IntervalStats | null;
+  message_distribution?: number[];
+  message_start_time?: number | null;
+  message_end_time?: number | null;
   /**
    * Whether size_bytes is estimated from MessageIndex offsets (true) or measured from actual data (false).
    */
@@ -172,23 +168,18 @@ export interface ChannelInfo {
   /**
    * Standard deviation of inter-message intervals in nanoseconds.
    */
-  jitter_ns: number | null;
-  /**
-   * Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable.
-   */
-  jitter_cv: number | null;
+  jitter_ns?: number | null;
 }
 /**
- * Statistics where only average is always available; min/max/median are only available in rebuild mode.
+ * Min/max/median statistics from per-interval measurements (rebuild-only).
  *
  * This interface was referenced by `McapInfoOutput`'s JSON-Schema
- * via the `definition` "PartialStats".
+ * via the `definition` "IntervalStats".
  *
  * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
- * via the `definition` "PartialStats".
+ * via the `definition` "IntervalStats".
  */
-export interface PartialStats {
-  average: number;
+export interface IntervalStats {
   minimum: number | null;
   maximum: number | null;
   median: number | null;

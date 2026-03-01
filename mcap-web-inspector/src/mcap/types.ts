@@ -4,11 +4,10 @@ export type {
   HeaderInfo,
   StatisticsInfo,
   Stats,
-  PartialStats,
+  IntervalStats,
   CompressionStats,
   ChunkOverlaps,
   ChunksInfo,
-  ChannelInfo,
   SchemaInfo,
   MessageDistribution,
   MetadataInfo,
@@ -17,19 +16,41 @@ export type {
 } from "./types.generated.ts";
 
 import type {
+  ChannelInfo as ChannelInfoGenerated,
   McapInfoOutput as McapInfoOutputGenerated,
   ScanMode,
 } from "./types.generated.ts";
 
-// ── App-level types ──
+// ── Derived types (not in schema, computed by consumers) ──
+
+/** PartialStats: average + optional min/max/median (used by display layer). */
+export interface PartialStats {
+  average: number;
+  minimum: number | null;
+  maximum: number | null;
+  median: number | null;
+}
+
+/** ChannelInfo with all fields filled in, including derived ones computed at hydration. */
+export interface ChannelInfo extends Required<ChannelInfoGenerated> {
+  hz_stats: PartialStats;
+  message_distribution: number[];
+  // Derived fields — not in schema, hydrated by codec or stats builder
+  schema_name: string | null;
+  hz_channel: number | null;
+  bytes_per_message: number | null;
+  bytes_per_second_stats: PartialStats | null;
+  jitter_cv: number | null;
+}
 
 /** McapInfoOutput with metadata/attachments always present (defaulted to []). */
 export interface McapInfoOutput extends Omit<
   McapInfoOutputGenerated,
-  "metadata" | "attachments"
+  "metadata" | "attachments" | "channels"
 > {
   metadata: NonNullable<McapInfoOutputGenerated["metadata"]>;
   attachments: NonNullable<McapInfoOutputGenerated["attachments"]>;
+  channels: ChannelInfo[];
 }
 
 /** Shareable URL payload wrapping McapInfoOutput with scan metadata. */

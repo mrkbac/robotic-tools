@@ -12,8 +12,43 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-from pymcap_cli.info_types import ChannelInfo, McapInfoOutput
+from pymcap_cli.info_types import ChannelInfo, McapInfoOutput, SchemaInfo
 from pymcap_cli.utils import bytes_to_human
+
+
+def _build_schema_map(schemas: list[SchemaInfo]) -> dict[int, str]:
+    """Build a lookup from schema_id to schema name."""
+    return {s["id"]: s["name"] for s in schemas}
+
+
+def _hz_average(ch: ChannelInfo, global_dur_sec: float) -> float:
+    """Compute average Hz from global duration."""
+    return ch["message_count"] / global_dur_sec if global_dur_sec > 0 else 0
+
+
+def _hz_channel(ch: ChannelInfo) -> float | None:
+    """Compute Hz from per-channel duration."""
+    dur = ch.get("duration_ns")
+    if dur is not None and dur > 0:
+        return ch["message_count"] / (dur / 1_000_000_000)
+    return None
+
+
+def _bytes_per_message(ch: ChannelInfo) -> float | None:
+    """Compute bytes per message."""
+    size = ch.get("size_bytes")
+    if size is not None and ch["message_count"] > 0:
+        return size / ch["message_count"]
+    return None
+
+
+def _bps_average(ch: ChannelInfo, global_dur_sec: float) -> float | None:
+    """Compute average bytes per second from global duration."""
+    size = ch.get("size_bytes")
+    if size is not None and global_dur_sec > 0:
+        return size / global_dur_sec
+    return None
+
 
 # Common color palette used for deterministic color assignment
 # Works well on both light and dark terminal backgrounds
@@ -418,20 +453,32 @@ def display_channels_table(
             | ChannelTableColumn.DISTRIBUTION
         )
 
+    # Compute global duration for derived values
+    global_dur_sec = data["statistics"]["duration_ns"] / 1_000_000_000
+
+    # Schema lookup map
+    schema_map = _build_schema_map(data["schemas"])
+
     # Dictionary of sort key functions
     def hz_sort_key(c: ChannelInfo) -> float:
-        hz_stats = c["hz_stats"]
-        if use_median and hz_stats and (median := hz_stats.get("median")) is not None:
-            return median
-        if index_duration and (hz_channel := c.get("hz_channel")) is not None:
-            return hz_channel
-        return hz_stats["average"]
+        hz_stats = c.get("hz_stats")
+        if use_median and hz_stats and (med := hz_stats.get("median")) is not None:
+            return med
+        if index_duration:
+            hz_ch = _hz_channel(c)
+            if hz_ch is not None:
+                return hz_ch
+        return _hz_average(c, global_dur_sec)
 
     def bps_sort_key(c: ChannelInfo) -> float:
-        bps_stats = c.get("bytes_per_second_stats")
-        if use_median and bps_stats and (median := bps_stats.get("median")) is not None:
-            return median
-        return bps_stats["average"] if bps_stats else 0
+        hz_stats = c.get("hz_stats")
+        b_per_msg = _bytes_per_message(c)
+        if use_median and hz_stats and b_per_msg is not None:
+            med = hz_stats.get("median")
+            if med is not None:
+                return med * b_per_msg
+        bps = _bps_average(c, global_dur_sec)
+        return bps if bps is not None else 0
 
     sort_keys: dict[str, Callable[[ChannelInfo], float | str]] = {
         "topic": lambda c: c["topic"],
@@ -440,8 +487,8 @@ def display_channels_table(
         "size": lambda c: c.get("size_bytes") or 0,
         "hz": hz_sort_key,
         "bps": bps_sort_key,
-        "b_per_msg": lambda c: c.get("bytes_per_message") or 0,
-        "schema": lambda c: c.get("schema_name") or "",
+        "b_per_msg": lambda c: _bytes_per_message(c) or 0,
+        "schema": lambda c: schema_map.get(c["schema_id"], ""),
         "percent": lambda c: c.get("size_bytes") or 0,  # Same as size for sorting purposes
     }
     get_sort_key = sort_keys.get(sort_key, sort_keys["topic"])
@@ -545,18 +592,19 @@ def display_channels_table(
             row.append(str(channel["id"]))
         row.append(colored_topic)
         if show_schema:
-            row.append(_format_schema_with_link(channel.get("schema_name")))
+            schema_name = schema_map.get(channel["schema_id"])
+            row.append(_format_schema_with_link(schema_name))
         if columns & ChannelTableColumn.MSGS:
             row.append(f"{channel['message_count']:,}")
         if columns & ChannelTableColumn.HZ:
-            # Determine Hz value to display
             hz_stats = channel.get("hz_stats")
-            if use_median and hz_stats and (hz_median := hz_stats.get("median")) is not None:
-                hz = hz_median
-            elif index_duration and (hz_channel := channel.get("hz_channel")) is not None:
-                hz = hz_channel
+            if use_median and hz_stats and (hz_med := hz_stats.get("median")) is not None:
+                hz = hz_med
+            elif index_duration:
+                hz_ch = _hz_channel(channel)
+                hz = hz_ch if hz_ch is not None else _hz_average(channel, global_dur_sec)
             else:
-                hz = hz_stats["average"] if hz_stats else 0
+                hz = _hz_average(channel, global_dur_sec)
             row.append(f"{hz:.2f}")
         if show_size:
             size = channel.get("size_bytes") or 0
@@ -566,17 +614,16 @@ def display_channels_table(
             percentage = (size / total_size * 100) if total_size > 0 else 0
             row.append(f"{percentage:.2f}%")
         if show_bps:
-            # Use median bytes per second if available and requested
-            bps_stats = channel.get("bytes_per_second_stats")
-            if use_median and bps_stats and (bps_median := bps_stats.get("median")) is not None:
-                bps = bps_median
-            elif bps_stats:
-                bps = bps_stats["average"]
+            b_per_msg = _bytes_per_message(channel)
+            hz_stats = channel.get("hz_stats")
+            if use_median and hz_stats and b_per_msg is not None:
+                hz_med = hz_stats.get("median")
+                bps = hz_med * b_per_msg if hz_med is not None else None
             else:
-                bps = None
+                bps = _bps_average(channel, global_dur_sec)
             row.append(bytes_to_human(bps))
         if show_b_per_msg:
-            row.append(bytes_to_human(channel.get("bytes_per_message")))
+            row.append(bytes_to_human(_bytes_per_message(channel)))
         if show_distribution:
             distribution = channel.get("message_distribution", [])
             # Use fixed bar width in watch mode to prevent jitter

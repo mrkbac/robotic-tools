@@ -71,9 +71,6 @@ class ChannelInfo(TypedDict, total=False):
     schema_id: Required[int]
     r""" Required property """
 
-    schema_name: Required[str | None]
-    r""" Required property """
-
     message_count: Required[int]
     r"""
     minimum: 0
@@ -95,52 +92,15 @@ class ChannelInfo(TypedDict, total=False):
     Required property
     """
 
-    hz_stats: Required["PartialStats"]
-    r"""
-    PartialStats.
+    hz_stats: "_ChannelInfohzstats"
+    r""" Aggregation type: anyOf """
 
-    Statistics where only average is always available; min/max/median are only available in rebuild mode.
+    message_distribution: list["_ChannelInfomessagedistributionitem"]
+    message_start_time: int | None
+    r""" minimum: 0 """
 
-    Required property
-    """
-
-    hz_channel: Required[int | float | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
-
-    bytes_per_second_stats: Required["_ChannelInfobytespersecondstats"]
-    r"""
-    Aggregation type: anyOf
-
-    Required property
-    """
-
-    bytes_per_message: Required[int | float | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
-
-    message_distribution: Required[list["_ChannelInfomessagedistributionitem"]]
-    r""" Required property """
-
-    message_start_time: Required[int | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
-
-    message_end_time: Required[int | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
+    message_end_time: int | None
+    r""" minimum: 0 """
 
     estimated_sizes: Required[bool]
     r"""
@@ -149,19 +109,8 @@ class ChannelInfo(TypedDict, total=False):
     Required property
     """
 
-    jitter_ns: Required[int | float | None]
-    r"""
-    Standard deviation of inter-message intervals in nanoseconds.
-
-    Required property
-    """
-
-    jitter_cv: Required[int | float | None]
-    r"""
-    Coefficient of variation (stddev / mean) — 0 = perfect, 1 = very unstable.
-
-    Required property
-    """
+    jitter_ns: int | float | None
+    r""" Standard deviation of inter-message intervals in nanoseconds. """
 
 
 class ChunkOverlaps(TypedDict, total=False):
@@ -299,6 +248,23 @@ class HeaderInfo(TypedDict, total=False):
     r""" Required property """
 
 
+class IntervalStats(TypedDict, total=False):
+    r"""
+    IntervalStats.
+
+    Min/max/median statistics from per-interval measurements (rebuild-only).
+    """
+
+    minimum: Required[int | float | None]
+    r""" Required property """
+
+    maximum: Required[int | float | None]
+    r""" Required property """
+
+    median: Required[int | float | None]
+    r""" Required property """
+
+
 class McapInfoOutput(TypedDict, total=False):
     r"""
     McapInfoOutput.
@@ -407,43 +373,6 @@ class MetadataInfo(TypedDict, total=False):
 
     metadata: Required[dict[str, str]]
     r""" Required property """
-
-
-class PartialStats(TypedDict, total=False):
-    r"""
-    PartialStats.
-
-    Statistics where only average is always available; min/max/median are only available in rebuild
-    mode.
-    """
-
-    average: Required[int | float]
-    r"""
-    minimum: 0
-
-    Required property
-    """
-
-    minimum: Required[int | float | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
-
-    maximum: Required[int | float | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
-
-    median: Required[int | float | None]
-    r"""
-    minimum: 0
-
-    Required property
-    """
 
 
 class SchemaInfo(TypedDict, total=False):
@@ -573,7 +502,7 @@ class Stats(TypedDict, total=False):
     """
 
 
-_ChannelInfobytespersecondstats = Union["PartialStats", None]
+_ChannelInfohzstats = Union["IntervalStats", None]
 r""" Aggregation type: anyOf """
 
 
