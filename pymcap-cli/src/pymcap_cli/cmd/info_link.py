@@ -7,7 +7,7 @@ import zlib
 from pathlib import Path
 from typing import Literal, TypedDict
 
-from pymcap_cli.info_types import McapInfoOutput
+from pymcap_cli.info_types import ChannelInfo, ChunksInfo, McapInfoOutput, SchemaInfo
 
 ScanMode = Literal["summary", "rebuild", "exact"]
 
@@ -55,31 +55,33 @@ def _strip_for_url(data: McapInfoOutput) -> McapInfoOutput:
 
     Keeps overview info (file, header, statistics, schemas) and slim channels.
     Strips per-channel distributions, chunks detail, metadata, attachments, thumbnail.
+
+    Builds new dicts instead of mutating, so the caller's data is never modified.
     """
-    stripped = McapInfoOutput(**data)
+    schemas: list[SchemaInfo] = []
+    for s in data.get("schemas", []):
+        copy = SchemaInfo(**s)
+        copy["data"] = ""
+        schemas.append(copy)
 
-    # Clear schema data content (keep id, name, encoding)
-    for s in stripped.get("schemas", []):
-        s["data"] = ""
+    channels: list[ChannelInfo] = []
+    for ch in data.get("channels", []):
+        copy = ChannelInfo(**ch)
+        copy.pop("message_distribution", None)
+        channels.append(copy)
 
-    # Slim channels: strip message_distribution (large arrays)
-    for ch in stripped.get("channels", []):
-        ch.pop("message_distribution", None)
-
-    # Keep only chunk overlaps, drop by_compression
-    chunks = stripped.get("chunks")
-    if chunks:
-        stripped["chunks"] = {
-            "by_compression": {},
-            "overlaps": chunks["overlaps"],
-        }
-
-    # Strip heavy top-level fields
-    stripped.pop("metadata", None)
-    stripped.pop("attachments", None)
-    stripped.pop("thumbnail", None)
-
-    return stripped
+    return McapInfoOutput(
+        file=data["file"],
+        header=data["header"],
+        statistics=data["statistics"],
+        schemas=schemas,
+        channels=channels,
+        message_distribution=data["message_distribution"],
+        chunks=ChunksInfo(
+            by_compression={},
+            overlaps=data["chunks"]["overlaps"],
+        ),
+    )
 
 
 def generate_link(data: McapInfoOutput, file_path: str, file_size: int, mode: ScanMode) -> str:

@@ -4,7 +4,6 @@ export type {
   HeaderInfo,
   StatisticsInfo,
   Stats,
-  IntervalStats,
   CompressionStats,
   ChunkOverlaps,
   ChunksInfo,
