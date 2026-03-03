@@ -30,8 +30,8 @@ import { FileInfo } from "../components/FileInfo.tsx";
 import { DetailModal, type DetailSection } from "../components/DetailModal.tsx";
 import { ChannelsTable } from "../components/channels-table/index.ts";
 import { ExportPanel } from "../components/ExportPanel.tsx";
-import { UnifiedDistributionChart } from "../components/UnifiedDistributionChart.tsx";
 import { TfTreeViewer } from "../components/TfTreeViewer.tsx";
+import { TimelapseViewer } from "../components/TimelapseViewer.tsx";
 import { ScanLevelIndicator } from "../components/ScanStepper.tsx";
 import { useMcapCache, MODE_LEVEL } from "../hooks/useMcapCache.ts";
 import { decodeFromHash, encodeToHash } from "../url/codec.ts";
@@ -66,6 +66,9 @@ function ViewPage() {
   );
 
   const [tfData, setTfData] = useState<TfTreeData | null>(null);
+  const [timelapseVideos, setTimelapseVideos] = useState<Map<number, Blob>>(
+    () => new Map(),
+  );
 
   const generationRef = useRef(0);
   const {
@@ -74,6 +77,7 @@ function ViewPage() {
     getThumbnails,
     getTfData,
     getTfDataByIdentity,
+    getTimelapseVideos,
   } = useMcapCache();
   const [decodedHash, setDecodedHash] = useState<string>("");
 
@@ -153,6 +157,14 @@ function ViewPage() {
     }
   }, [localFile, data, tfData, getTfData, getTfDataByIdentity]);
 
+  // Load timelapse videos from cache if not already available
+  useEffect(() => {
+    if (!localFile || timelapseVideos.size > 0) return;
+    getTimelapseVideos(localFile).then((vids) => {
+      if (vids.size > 0) setTimelapseVideos(vids);
+    });
+  }, [localFile, timelapseVideos.size, getTimelapseVideos]);
+
   const isSharedView = localFile == null;
   const fileUnavailable = isSharedView && recoveryStatus !== "granted";
 
@@ -205,6 +217,7 @@ function ViewPage() {
           rawData: raw,
           thumbnails: newThumbs,
           tfData: newTfData,
+          timelapseVideos: newTimelapseVideos,
         } = await readAndCache(localFile, mode, (bytesRead, total) => {
           setProgress(Math.round((bytesRead / total) * 100));
         });
@@ -217,6 +230,9 @@ function ViewPage() {
         }
         if (newTfData) {
           setTfData(newTfData);
+        }
+        if (newTimelapseVideos.size > 0) {
+          setTimelapseVideos(newTimelapseVideos);
         }
         const result = computeStats(raw, localFile.name, localFile.size);
         setData(result);
@@ -340,12 +356,18 @@ function ViewPage() {
                   : undefined
               }
             />
-            <UnifiedDistributionChart
-              channels={data.channels}
-              globalDistribution={data.message_distribution}
-            />
             {tfData !== null && tfData.transforms.size > 0 && (
               <TfTreeViewer data={tfData} />
+            )}
+            {timelapseVideos.size > 0 && (
+              <TimelapseViewer
+                videos={timelapseVideos}
+                channelNames={
+                  new Map(
+                    data.channels.map((ch) => [ch.id, ch.topic]),
+                  )
+                }
+              />
             )}
             <ChannelsTable
               channels={data.channels}

@@ -3,6 +3,7 @@ import { TimeValue } from "@mantine/dates";
 import type { ChannelInfo } from "../../mcap/types.ts";
 import { formatBytes, formatHz, formatDuration } from "../../format.ts";
 import { DistributionChart } from "../DistributionChart.tsx";
+import { SparklineModal } from "../SparklineModal.tsx";
 import { StatsRow } from "./cells.tsx";
 import {
   channelToDistribution,
@@ -185,15 +186,20 @@ export function ChannelDetail({
 
       {/* Distribution chart */}
       {channel.message_distribution.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <Text size="sm" fw={600} mb={4}>
-            Message distribution
+        <Group gap="sm" mt="sm" align="center">
+          <Text size="sm" fw={600}>
+            Distribution
           </Text>
-          <DistributionChart
-            distribution={channelToDistribution(channel, bucketDurationNs)}
-            height={200}
-          />
-        </div>
+          <SparklineModal
+            data={channel.message_distribution}
+            title={`${channel.topic} — Message Distribution`}
+          >
+            <DistributionChart
+              distribution={channelToDistribution(channel, bucketDurationNs)}
+              height={400}
+            />
+          </SparklineModal>
+        </Group>
       )}
     </div>
   );

@@ -58,6 +58,7 @@ interface CacheEntry {
   rawData: McapRawData;
   thumbnails: ThumbnailMap;
   tfData: TfTreeData | null;
+  timelapseVideos: Map<number, Blob>;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +67,7 @@ interface CacheEntry {
 
 const DB_NAME = "mcap-inspector-cache";
 const STORE_NAME = "raw-data";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 interface IDBCacheEntry extends CacheEntry {
   key: string;
@@ -168,6 +169,7 @@ export function useMcapCache() {
         rawData: result.rawData,
         thumbnails: result.thumbnails,
         tfData: result.tfData,
+        timelapseVideos: result.timelapseVideos,
       };
 
       cacheRef.current = entry;
@@ -225,6 +227,14 @@ export function useMcapCache() {
     [],
   );
 
+  const getTimelapseVideos = useCallback(
+    async (file: File): Promise<Map<number, Blob>> => {
+      const entry = await getOrHydrate(file);
+      return entry?.timelapseVideos ?? new Map();
+    },
+    [],
+  );
+
   const invalidate = useCallback(() => {
     cacheRef.current = null;
     clearIDB();
@@ -237,6 +247,7 @@ export function useMcapCache() {
     getThumbnails,
     getTfData,
     getTfDataByIdentity,
+    getTimelapseVideos,
     invalidate,
   };
 }

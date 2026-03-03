@@ -23,6 +23,10 @@ import {
   parseTfMessage,
   buildTfTreeData,
 } from "./tf.ts";
+import {
+  createTimelapseSampler,
+  encodeAllTimelapses,
+} from "./timelapse.ts";
 import type { MessageReader } from "@foxglove/rosmsg2-serialization";
 
 const zstdDecoder = new ZSTDDecoder();
@@ -85,6 +89,8 @@ export interface ReadResult {
   rawData: McapRawData;
   thumbnails: ThumbnailMap;
   tfData: TfTreeData | null;
+  /** channelId → WebM video blob for timelapse previews. */
+  timelapseVideos: Map<number, Blob>;
 }
 
 export type ProgressCallback = (bytesRead: number, totalBytes: number) => void;
@@ -224,7 +230,7 @@ async function readIndexed(file: File): Promise<ReadResult> {
   // Extract image thumbnails via targeted message reads
   const thumbnails = await readImageThumbnails(reader, rawData);
 
-  return { rawData, thumbnails, tfData: null };
+  return { rawData, thumbnails, tfData: null, timelapseVideos: new Map() };
 }
 
 /**
@@ -305,7 +311,14 @@ async function readStream(
   // Image thumbnail extraction
   const thumbnails: ThumbnailMap = new Map();
   const pendingImageChannels = new Set<number>();
+  const imageChannelIds = new Set<number>();
   const imageReaders = new Map<number, MessageReader | null>();
+
+  // Timelapse sampling (uses 1fps default; duration unknown in stream mode)
+  const timelapseSampler = createTimelapseSampler({
+    startTimeNs: 0n,
+    endTimeNs: 0n,
+  });
 
   // TF extraction
   const tfChannelIds = new Set<number>();
@@ -356,6 +369,7 @@ async function readStream(
               );
               if (imgChannels.length > 0) {
                 pendingImageChannels.add(record.id);
+                imageChannelIds.add(record.id);
                 const info = imgChannels[0]!;
                 if (
                   info.encoding.toLowerCase() !== "protobuf" &&
@@ -435,6 +449,25 @@ async function readStream(
                 tfUpdateCounts.set(key, (tfUpdateCounts.get(key) ?? 0) + 1);
                 if (!tfTransformsByKey.has(key)) tfTransformsByKey.set(key, []);
                 tfTransformsByKey.get(key)!.push(tf);
+              }
+            }
+          }
+          // Collect timelapse samples from image channels
+          if (
+            imageChannelIds.has(record.channelId) &&
+            timelapseSampler.shouldSample(record.channelId, record.logTime)
+          ) {
+            const channel = channelsById.get(record.channelId);
+            if (channel) {
+              const encoding = channel.messageEncoding || "";
+              const msgReader = imageReaders.get(record.channelId);
+              const extracted = extractImage(record.data, encoding, msgReader);
+              if (extracted) {
+                timelapseSampler.addSample(record.channelId, {
+                  imageData: extracted.imageData,
+                  format: extracted.format,
+                  logTimeNs: record.logTime,
+                });
               }
             }
           }
@@ -536,6 +569,17 @@ async function readStream(
       ? buildTfTreeData(tfTransforms, tfUpdateCounts, tfTransformsByKey)
       : null;
 
+  // Encode timelapse videos from collected samples
+  const timelapseSamplesMap = timelapseSampler.getSamples();
+  let timelapseVideos = new Map<number, Blob>();
+  if (timelapseSamplesMap.size > 0) {
+    try {
+      timelapseVideos = await encodeAllTimelapses(timelapseSamplesMap);
+    } catch (err) {
+      console.warn("[timelapse] Encoding failed:", err);
+    }
+  }
+
   return {
     rawData: {
       header: header!,
@@ -551,6 +595,7 @@ async function readStream(
     },
     thumbnails,
     tfData,
+    timelapseVideos,
   };
 }
 
