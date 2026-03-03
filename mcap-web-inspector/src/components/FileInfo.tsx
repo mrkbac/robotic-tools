@@ -101,7 +101,7 @@ export function FileInfo({
         />
         <InfoItem
           label="Duration"
-          value={`${(statistics.duration_ns / 1_000_000).toFixed(2)} ms (${formatDuration(statistics.duration_ns)})`}
+          value={formatDuration(statistics.duration_ns)}
         />
         <InfoItem
           label="Start"

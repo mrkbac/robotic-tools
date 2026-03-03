@@ -57,7 +57,14 @@ export function RecentFiles({
           variant="subtle"
           color="red"
           size="sm"
-          onClick={onClearAll}
+          onClick={() => {
+            if (
+              entries.length > 0 &&
+              window.confirm("Clear all recent files?")
+            ) {
+              onClearAll();
+            }
+          }}
           title="Clear all"
         >
           <IconTrash size={14} />

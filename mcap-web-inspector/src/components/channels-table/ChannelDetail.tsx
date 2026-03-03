@@ -37,7 +37,7 @@ export function ChannelDetail({
 
   return (
     <div style={{ padding: "12px 16px" }}>
-      <SimpleGrid cols={3} spacing="xl">
+      <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="xl">
         {/* Time section */}
         <Stack gap={4}>
           <Text size="sm" fw={600}>

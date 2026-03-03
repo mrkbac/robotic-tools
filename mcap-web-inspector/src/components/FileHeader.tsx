@@ -5,5 +5,5 @@ interface FileHeaderProps {
 }
 
 export function FileHeader({ fileName }: FileHeaderProps) {
-  return <Title order={2}>{fileName}</Title>;
+  return <Title order={3}>{fileName}</Title>;
 }

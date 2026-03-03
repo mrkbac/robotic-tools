@@ -391,38 +391,27 @@ export function ChannelsTable({
       </Table.ScrollContainer>
     );
 
+  const handleViewModeChange = useCallback((mode: ViewMode) => {
+    setViewMode(mode);
+    setExpanded(mode === "tree" ? true : {});
+  }, []);
+
+  const toolbar = (
+    <Toolbar
+      globalFilter={globalFilter}
+      onFilterChange={setGlobalFilter}
+      table={table}
+      viewMode={viewMode}
+      onViewModeChange={handleViewModeChange}
+      showToggle={channels.length > 0}
+    />
+  );
+
   if (selectable) {
     return (
       <>
-        <Group justify="flex-end" mb="xs" gap="xs">
-          <TextInput
-            size="xs"
-            placeholder="Filter channels…"
-            leftSection={<IconSearch size={14} />}
-            rightSection={
-              globalFilter ? (
-                <CloseButton size="xs" onClick={() => setGlobalFilter("")} />
-              ) : null
-            }
-            value={globalFilter}
-            onChange={(e) => setGlobalFilter(e.currentTarget.value)}
-            style={{ width: 200 }}
-          />
-          <ColumnsMenu table={table} />
-          {channels.length > 0 && (
-            <SegmentedControl
-              size="xs"
-              value={viewMode}
-              onChange={(v) => {
-                setViewMode(v as ViewMode);
-                setExpanded(v === "tree" ? true : {});
-              }}
-              data={[
-                { label: "Flat", value: "flat" },
-                { label: "Tree", value: "tree" },
-              ]}
-            />
-          )}
+        <Group justify="flex-end" mb="xs">
+          {toolbar}
         </Group>
         {tableContent}
       </>
@@ -433,39 +422,56 @@ export function ChannelsTable({
     <Paper p="md" withBorder>
       <Group justify="space-between" mb="md">
         <Title order={4}>Channels</Title>
-        <Group gap="xs">
-          <TextInput
-            size="xs"
-            placeholder="Filter channels…"
-            leftSection={<IconSearch size={14} />}
-            rightSection={
-              globalFilter ? (
-                <CloseButton size="xs" onClick={() => setGlobalFilter("")} />
-              ) : null
-            }
-            value={globalFilter}
-            onChange={(e) => setGlobalFilter(e.currentTarget.value)}
-            style={{ width: 200 }}
-          />
-          <ColumnsMenu table={table} />
-          {channels.length > 0 && (
-            <SegmentedControl
-              size="xs"
-              value={viewMode}
-              onChange={(v) => {
-                setViewMode(v as ViewMode);
-                setExpanded(v === "tree" ? true : {});
-              }}
-              data={[
-                { label: "Flat", value: "flat" },
-                { label: "Tree", value: "tree" },
-              ]}
-            />
-          )}
-        </Group>
+        {toolbar}
       </Group>
       {tableContent}
     </Paper>
+  );
+}
+
+function Toolbar({
+  globalFilter,
+  onFilterChange,
+  table,
+  viewMode,
+  onViewModeChange,
+  showToggle,
+}: {
+  globalFilter: string;
+  onFilterChange: (value: string) => void;
+  table: ReturnType<typeof useReactTable<ChannelRow>>;
+  viewMode: ViewMode;
+  onViewModeChange: (mode: ViewMode) => void;
+  showToggle: boolean;
+}) {
+  return (
+    <Group gap="xs">
+      <TextInput
+        size="xs"
+        placeholder="Filter channels…"
+        leftSection={<IconSearch size={14} />}
+        rightSection={
+          globalFilter ? (
+            <CloseButton size="xs" onClick={() => onFilterChange("")} />
+          ) : null
+        }
+        value={globalFilter}
+        onChange={(e) => onFilterChange(e.currentTarget.value)}
+        style={{ width: 200 }}
+      />
+      <ColumnsMenu table={table} />
+      {showToggle && (
+        <SegmentedControl
+          size="xs"
+          value={viewMode}
+          onChange={(v) => onViewModeChange(v as ViewMode)}
+          data={[
+            { label: "Flat", value: "flat" },
+            { label: "Tree", value: "tree" },
+          ]}
+        />
+      )}
+    </Group>
   );
 }
 
@@ -487,8 +493,18 @@ function SortableHeader({ header }: { header: Header<ChannelRow, unknown> }) {
       title={meta?.headerTitle}
     >
       {flexRender(header.column.columnDef.header, header.getContext())}
-      {sorted === "asc" && " \u25B2"}
-      {sorted === "desc" && " \u25BC"}
+      {sorted === "asc" && (
+        <IconArrowUp
+          size={12}
+          style={{ verticalAlign: "middle", marginLeft: 2 }}
+        />
+      )}
+      {sorted === "desc" && (
+        <IconArrowDown
+          size={12}
+          style={{ verticalAlign: "middle", marginLeft: 2 }}
+        />
+      )}
     </Table.Th>
   );
 }

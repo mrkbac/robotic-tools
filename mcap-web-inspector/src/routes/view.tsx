@@ -290,22 +290,8 @@ function ViewPage() {
         </Alert>
       )}
 
-      <Tabs defaultValue="inspect">
-        <Tabs.List>
-          <Tabs.Tab
-            value="inspect"
-            leftSection={<IconFileAnalytics size={16} />}
-          >
-            Inspect
-          </Tabs.Tab>
-          {localFile && (
-            <Tabs.Tab value="export" leftSection={<IconDownload size={16} />}>
-              Export
-            </Tabs.Tab>
-          )}
-        </Tabs.List>
-
-        <Tabs.Panel value="inspect" pt="md">
+      {(() => {
+        const inspectContent = (
           <Stack gap="lg">
             <Group justify="space-between" align="center">
               <FileHeader fileName={data.file.path} />
@@ -337,14 +323,32 @@ function ViewPage() {
               fileSize={data.file.size_bytes}
             />
           </Stack>
-        </Tabs.Panel>
+        );
 
-        {localFile && (
-          <Tabs.Panel value="export" pt="md">
-            <ExportPanel file={localFile} data={data} />
-          </Tabs.Panel>
-        )}
-      </Tabs>
+        return localFile ? (
+          <Tabs defaultValue="inspect">
+            <Tabs.List>
+              <Tabs.Tab
+                value="inspect"
+                leftSection={<IconFileAnalytics size={16} />}
+              >
+                Inspect
+              </Tabs.Tab>
+              <Tabs.Tab value="export" leftSection={<IconDownload size={16} />}>
+                Export
+              </Tabs.Tab>
+            </Tabs.List>
+            <Tabs.Panel value="inspect" pt="md">
+              {inspectContent}
+            </Tabs.Panel>
+            <Tabs.Panel value="export" pt="md">
+              <ExportPanel file={localFile} data={data} />
+            </Tabs.Panel>
+          </Tabs>
+        ) : (
+          inspectContent
+        );
+      })()}
 
       <DetailModal
         section={detailSection}

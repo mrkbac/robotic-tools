@@ -1,4 +1,4 @@
-import { Badge, Anchor, Loader, Group, Text } from "@mantine/core";
+import { Badge, Anchor, Loader, Group, Text, Tooltip } from "@mantine/core";
 import type { ScanMode } from "../mcap/types.ts";
 
 interface ScanLevelIndicatorProps {
@@ -13,6 +13,12 @@ const BADGE_COLOR: Record<ScanMode, string> = {
   summary: "gray",
   rebuild: "blue",
   exact: "green",
+};
+
+const BADGE_TOOLTIP: Record<ScanMode, string> = {
+  summary: "Header-only scan: file overview and schema info",
+  rebuild: "Full scan: per-channel stats, timing, and sizes",
+  exact: "Exact scan: precise message counts from index data",
 };
 
 const NEXT_MODE: Partial<Record<ScanMode, ScanMode>> = {
@@ -37,14 +43,16 @@ export function ScanLevelIndicator({
 
   return (
     <Group gap="xs" wrap="nowrap">
-      <Badge
-        color={BADGE_COLOR[scannedMode]}
-        variant="light"
-        size="sm"
-        tt="capitalize"
-      >
-        {scannedMode}
-      </Badge>
+      <Tooltip label={BADGE_TOOLTIP[scannedMode]} withArrow>
+        <Badge
+          color={BADGE_COLOR[scannedMode]}
+          variant="light"
+          size="sm"
+          tt="capitalize"
+        >
+          {scannedMode}
+        </Badge>
+      </Tooltip>
 
       {isScanning ? (
         <Group gap={4} wrap="nowrap">

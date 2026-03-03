@@ -47,8 +47,21 @@ function RootLayoutInner() {
       <Container size="xl" py="xl">
         <Stack gap="lg">
           <Group justify="space-between" align="flex-end">
-            <Title order={2}>
-              <Link to="/">MCAP Web Inspector</Link>
+            <Title
+              order={2}
+              renderRoot={(props) => (
+                <Link
+                  to="/"
+                  {...props}
+                  style={{
+                    ...props.style,
+                    textDecoration: "none",
+                    color: "inherit",
+                  }}
+                />
+              )}
+            >
+              MCAP Web Inspector
             </Title>
             <ColorSchemeToggle />
           </Group>
