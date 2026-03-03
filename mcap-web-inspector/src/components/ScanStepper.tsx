@@ -1,4 +1,12 @@
-import { Badge, Anchor, Loader, Group, Text, Tooltip } from "@mantine/core";
+import {
+  Badge,
+  Anchor,
+  Button,
+  Loader,
+  Group,
+  Text,
+  Tooltip,
+} from "@mantine/core";
 import type { ScanMode } from "../mcap/types.ts";
 
 interface ScanLevelIndicatorProps {
@@ -24,11 +32,6 @@ const BADGE_TOOLTIP: Record<ScanMode, string> = {
 const NEXT_MODE: Partial<Record<ScanMode, ScanMode>> = {
   summary: "rebuild",
   rebuild: "exact",
-};
-
-const UPGRADE_LABEL: Record<string, string> = {
-  rebuild: "Upgrade to rebuild",
-  exact: "Run exact scan",
 };
 
 export function ScanLevelIndicator({
@@ -58,20 +61,37 @@ export function ScanLevelIndicator({
         <Group gap={4} wrap="nowrap">
           <Loader size="xs" />
           <Text size="xs" c="dimmed">
-            {scanTarget === "exact" ? "Exact scan..." : "Rebuilding..."}
+            {scanTarget === "exact" ? "Exact scan..." : "Full scan..."}
           </Text>
         </Group>
       ) : (
-        next &&
         !disabled && (
-          <Anchor
-            size="xs"
-            c="dimmed"
-            component="button"
-            onClick={() => onScanTo(next)}
-          >
-            {UPGRADE_LABEL[next]}
-          </Anchor>
+          <Group gap="xs" wrap="nowrap">
+            {scannedMode === "summary" && (
+              <Tooltip
+                label="TF tree, thumbnails, per-channel timing"
+                withArrow
+              >
+                <Button
+                  variant="light"
+                  size="compact-xs"
+                  onClick={() => onScanTo("rebuild")}
+                >
+                  Full scan
+                </Button>
+              </Tooltip>
+            )}
+            {next === "exact" && (
+              <Anchor
+                size="xs"
+                c="dimmed"
+                component="button"
+                onClick={() => onScanTo("exact")}
+              >
+                Exact scan
+              </Anchor>
+            )}
+          </Group>
         )
       )}
     </Group>

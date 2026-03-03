@@ -15,7 +15,15 @@ import { ZSTDDecoder } from "zstddec";
 import lz4 from "lz4js";
 import type { ScanMode } from "./types.ts";
 import type { ThumbnailMap } from "./image.ts";
-import { findImageChannels, extractImage } from "./image.ts";
+import { findImageChannels, extractImage, createImageReader } from "./image.ts";
+import type { TfTreeData } from "./tf.ts";
+import {
+  findTfChannels,
+  createTfReader,
+  parseTfMessage,
+  buildTfTreeData,
+} from "./tf.ts";
+import type { MessageReader } from "@foxglove/rosmsg2-serialization";
 
 const zstdDecoder = new ZSTDDecoder();
 const zstdReady = zstdDecoder.init();
@@ -76,6 +84,7 @@ export interface McapRawData {
 export interface ReadResult {
   rawData: McapRawData;
   thumbnails: ThumbnailMap;
+  tfData: TfTreeData | null;
 }
 
 export type ProgressCallback = (bytesRead: number, totalBytes: number) => void;
@@ -215,7 +224,7 @@ async function readIndexed(file: File): Promise<ReadResult> {
   // Extract image thumbnails via targeted message reads
   const thumbnails = await readImageThumbnails(reader, rawData);
 
-  return { rawData, thumbnails };
+  return { rawData, thumbnails, tfData: null };
 }
 
 /**
@@ -237,6 +246,14 @@ async function readImageThumbnails(
   const channelsByTopic = new Map(imageChannels.map((ch) => [ch.topic, ch]));
   const found = new Set<string>();
 
+  // Pre-create MessageReaders for CDR-encoded image channels
+  const readersByTopic = new Map<string, MessageReader | null>();
+  for (const info of imageChannels) {
+    if (info.encoding.toLowerCase() !== "protobuf" && info.schemaData) {
+      readersByTopic.set(info.topic, createImageReader(info.schemaData));
+    }
+  }
+
   for await (const msg of reader.readMessages({ topics })) {
     const channel = rawData.channelsById.get(msg.channelId);
     if (!channel || found.has(channel.topic)) continue;
@@ -244,7 +261,8 @@ async function readImageThumbnails(
     const info = channelsByTopic.get(channel.topic);
     if (!info) continue;
 
-    const extracted = extractImage(msg.data, info.encoding);
+    const msgReader = readersByTopic.get(channel.topic);
+    const extracted = extractImage(msg.data, info.encoding, msgReader);
     if (extracted) {
       thumbnails.set(msg.channelId, {
         channelId: msg.channelId,
@@ -287,6 +305,15 @@ async function readStream(
   // Image thumbnail extraction
   const thumbnails: ThumbnailMap = new Map();
   const pendingImageChannels = new Set<number>();
+  const imageReaders = new Map<number, MessageReader | null>();
+
+  // TF extraction
+  const tfChannelIds = new Set<number>();
+  const tfReaders = new Map<number, MessageReader | null>();
+  const tfIsStatic = new Map<number, boolean>();
+  const tfTransforms = new Map<string, import("./tf.ts").TfTransform>();
+  const tfUpdateCounts = new Map<string, number>();
+  const tfTransformsByKey = new Map<string, import("./tf.ts").TfTransform[]>();
 
   // Track chunk information for interval stats
   // Map from chunk start offset -> list of message indexes
@@ -319,16 +346,37 @@ async function readStream(
           break;
         case "Channel":
           channelsById.set(record.id, record);
-          // Check if this is an image channel
           {
             const schema = schemasById.get(record.schemaId);
             if (schema) {
-              const imageChannels = findImageChannels(
+              // Check if this is an image channel
+              const imgChannels = findImageChannels(
                 new Map([[record.id, record]]),
                 new Map([[schema.id, schema]]),
               );
-              if (imageChannels.length > 0) {
+              if (imgChannels.length > 0) {
                 pendingImageChannels.add(record.id);
+                const info = imgChannels[0]!;
+                if (
+                  info.encoding.toLowerCase() !== "protobuf" &&
+                  info.schemaData
+                ) {
+                  imageReaders.set(
+                    record.id,
+                    createImageReader(info.schemaData),
+                  );
+                }
+              }
+              // Check if this is a TF channel
+              const tfChannels = findTfChannels(
+                new Map([[record.id, record]]),
+                new Map([[schema.id, schema]]),
+              );
+              if (tfChannels.length > 0) {
+                const tfInfo = tfChannels[0]!;
+                tfChannelIds.add(record.id);
+                tfIsStatic.set(record.id, tfInfo.isStatic);
+                tfReaders.set(record.id, createTfReader(tfInfo.schemaData));
               }
             }
           }
@@ -356,7 +404,8 @@ async function readStream(
             const channel = channelsById.get(record.channelId);
             if (channel) {
               const encoding = channel.messageEncoding || "";
-              const extracted = extractImage(record.data, encoding);
+              const msgReader = imageReaders.get(record.channelId);
+              const extracted = extractImage(record.data, encoding, msgReader);
               if (extracted) {
                 thumbnails.set(record.channelId, {
                   channelId: record.channelId,
@@ -368,6 +417,26 @@ async function readStream(
               }
             }
             pendingImageChannels.delete(record.channelId);
+          }
+          // Extract TF transforms
+          if (tfChannelIds.has(record.channelId)) {
+            const tfReader = tfReaders.get(record.channelId);
+            if (tfReader) {
+              const isStatic = tfIsStatic.get(record.channelId) ?? false;
+              const transforms = parseTfMessage(
+                tfReader,
+                record.data,
+                isStatic,
+                record.logTime,
+              );
+              for (const tf of transforms) {
+                const key = `${tf.parentFrame}→${tf.childFrame}`;
+                tfTransforms.set(key, tf);
+                tfUpdateCounts.set(key, (tfUpdateCounts.get(key) ?? 0) + 1);
+                if (!tfTransformsByKey.has(key)) tfTransformsByKey.set(key, []);
+                tfTransformsByKey.get(key)!.push(tf);
+              }
+            }
           }
           break;
         }
@@ -461,6 +530,12 @@ async function readStream(
     header = { profile: "", library: "" } as Header & { type: "Header" };
   }
 
+  // Build TF tree data if any transforms were found
+  const tfData =
+    tfTransforms.size > 0
+      ? buildTfTreeData(tfTransforms, tfUpdateCounts, tfTransformsByKey)
+      : null;
+
   return {
     rawData: {
       header: header!,
@@ -475,6 +550,7 @@ async function readStream(
       attachmentIndexes,
     },
     thumbnails,
+    tfData,
   };
 }
 

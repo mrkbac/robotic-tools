@@ -8,6 +8,7 @@ import type {
 import { readMcapFile } from "../mcap/reader.ts";
 import type { ScanMode } from "../mcap/types.ts";
 import type { ThumbnailMap } from "../mcap/image.ts";
+import type { TfTreeData } from "../mcap/tf.ts";
 
 interface FileIdentity {
   name: string;
@@ -56,6 +57,7 @@ interface CacheEntry {
   mode: ScanMode;
   rawData: McapRawData;
   thumbnails: ThumbnailMap;
+  tfData: TfTreeData | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +167,7 @@ export function useMcapCache() {
         mode,
         rawData: result.rawData,
         thumbnails: result.thumbnails,
+        tfData: result.tfData,
       };
 
       cacheRef.current = entry;
@@ -193,6 +196,35 @@ export function useMcapCache() {
     [],
   );
 
+  const getTfData = useCallback(
+    async (file: File): Promise<TfTreeData | null> => {
+      const entry = await getOrHydrate(file);
+      return entry?.tfData ?? null;
+    },
+    [],
+  );
+
+  const getTfDataByIdentity = useCallback(
+    async (name: string, size: number): Promise<TfTreeData | null> => {
+      const identity = { name, size };
+      const entry = cacheRef.current;
+      if (
+        entry &&
+        entry.fileIdentity.name === name &&
+        entry.fileIdentity.size === size
+      ) {
+        return entry.tfData ?? null;
+      }
+      const idbEntry = await loadFromIDB(identity);
+      if (idbEntry) {
+        cacheRef.current = idbEntry;
+        return idbEntry.tfData ?? null;
+      }
+      return null;
+    },
+    [],
+  );
+
   const invalidate = useCallback(() => {
     cacheRef.current = null;
     clearIDB();
@@ -203,6 +235,8 @@ export function useMcapCache() {
     readAndCache,
     getCachedMode,
     getThumbnails,
+    getTfData,
+    getTfDataByIdentity,
     invalidate,
   };
 }

@@ -12,6 +12,7 @@ import {
   Checkbox,
   TextInput,
   CloseButton,
+  Tooltip,
 } from "@mantine/core";
 import {
   useReactTable,
@@ -32,6 +33,8 @@ import {
   IconSearch,
   IconArrowUp,
   IconArrowDown,
+  IconFoldDown,
+  IconFold,
 } from "@tabler/icons-react";
 import type { ChannelInfo } from "../../mcap/types.ts";
 import type { ChannelRow } from "./types.ts";
@@ -396,6 +399,16 @@ export function ChannelsTable({
     setExpanded(mode === "tree" ? true : {});
   }, []);
 
+  const handleCollapseAll = useCallback(() => {
+    table.toggleAllRowsExpanded(false);
+    setExpanded({});
+  }, [table]);
+
+  const handleExpandAll = useCallback(() => {
+    table.toggleAllRowsExpanded(true);
+    setExpanded(true);
+  }, [table]);
+
   const toolbar = (
     <Toolbar
       globalFilter={globalFilter}
@@ -404,6 +417,8 @@ export function ChannelsTable({
       viewMode={viewMode}
       onViewModeChange={handleViewModeChange}
       showToggle={channels.length > 0}
+      onCollapseAll={handleCollapseAll}
+      onExpandAll={handleExpandAll}
     />
   );
 
@@ -436,6 +451,8 @@ function Toolbar({
   viewMode,
   onViewModeChange,
   showToggle,
+  onCollapseAll,
+  onExpandAll,
 }: {
   globalFilter: string;
   onFilterChange: (value: string) => void;
@@ -443,7 +460,11 @@ function Toolbar({
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
   showToggle: boolean;
+  onCollapseAll: () => void;
+  onExpandAll: () => void;
 }) {
+  const isTreeView = viewMode === "tree";
+
   return (
     <Group gap="xs">
       <TextInput
@@ -470,6 +491,20 @@ function Toolbar({
             { label: "Tree", value: "tree" },
           ]}
         />
+      )}
+      {isTreeView && showToggle && (
+        <>
+          <Tooltip label="Collapse all">
+            <ActionIcon variant="subtle" size="sm" onClick={onCollapseAll}>
+              <IconFold size={16} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label="Expand all">
+            <ActionIcon variant="subtle" size="sm" onClick={onExpandAll}>
+              <IconFoldDown size={16} />
+            </ActionIcon>
+          </Tooltip>
+        </>
       )}
     </Group>
   );

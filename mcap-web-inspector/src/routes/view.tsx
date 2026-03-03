@@ -22,6 +22,7 @@ import {
 } from "@tabler/icons-react";
 import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
 import type { ThumbnailMap } from "../mcap/image.ts";
+import type { TfTreeData } from "../mcap/tf.ts";
 import { pickRepresentativeThumbnailUrl } from "../mcap/image.ts";
 import { computeStats } from "../mcap/stats.ts";
 import { FileHeader } from "../components/FileHeader.tsx";
@@ -30,6 +31,7 @@ import { DetailModal, type DetailSection } from "../components/DetailModal.tsx";
 import { ChannelsTable } from "../components/channels-table/index.ts";
 import { ExportPanel } from "../components/ExportPanel.tsx";
 import { UnifiedDistributionChart } from "../components/UnifiedDistributionChart.tsx";
+import { TfTreeViewer } from "../components/TfTreeViewer.tsx";
 import { ScanLevelIndicator } from "../components/ScanStepper.tsx";
 import { useMcapCache, MODE_LEVEL } from "../hooks/useMcapCache.ts";
 import { decodeFromHash, encodeToHash } from "../url/codec.ts";
@@ -63,8 +65,16 @@ function ViewPage() {
     null,
   );
 
+  const [tfData, setTfData] = useState<TfTreeData | null>(null);
+
   const generationRef = useRef(0);
-  const { tryGetCachedRaw, readAndCache, getThumbnails } = useMcapCache();
+  const {
+    tryGetCachedRaw,
+    readAndCache,
+    getThumbnails,
+    getTfData,
+    getTfDataByIdentity,
+  } = useMcapCache();
   const [decodedHash, setDecodedHash] = useState<string>("");
 
   const {
@@ -129,6 +139,20 @@ function ViewPage() {
     });
   }, [localFile, thumbnails.size, getThumbnails]);
 
+  // Load TF data from cache if not already available
+  useEffect(() => {
+    if (tfData !== null) return;
+    if (localFile) {
+      getTfData(localFile).then((tf) => {
+        if (tf) setTfData(tf);
+      });
+    } else if (data) {
+      getTfDataByIdentity(data.file.path, data.file.size_bytes).then((tf) => {
+        if (tf) setTfData(tf);
+      });
+    }
+  }, [localFile, data, tfData, getTfData, getTfDataByIdentity]);
+
   const isSharedView = localFile == null;
   const fileUnavailable = isSharedView && recoveryStatus !== "granted";
 
@@ -177,19 +201,22 @@ function ViewPage() {
       setProgress(0);
 
       try {
-        const { rawData: raw, thumbnails: newThumbs } = await readAndCache(
-          localFile,
-          mode,
-          (bytesRead, total) => {
-            setProgress(Math.round((bytesRead / total) * 100));
-          },
-        );
+        const {
+          rawData: raw,
+          thumbnails: newThumbs,
+          tfData: newTfData,
+        } = await readAndCache(localFile, mode, (bytesRead, total) => {
+          setProgress(Math.round((bytesRead / total) * 100));
+        });
 
         if (generationRef.current !== gen) return;
 
         if (newThumbs.size > 0) {
           setThumbnails(newThumbs);
           setThumbnailRef(newThumbs);
+        }
+        if (newTfData) {
+          setTfData(newTfData);
         }
         const result = computeStats(raw, localFile.name, localFile.size);
         setData(result);
@@ -317,6 +344,9 @@ function ViewPage() {
               channels={data.channels}
               globalDistribution={data.message_distribution}
             />
+            {tfData !== null && tfData.transforms.size > 0 && (
+              <TfTreeViewer data={tfData} />
+            )}
             <ChannelsTable
               channels={data.channels}
               bucketDurationNs={data.message_distribution.bucket_duration_ns}

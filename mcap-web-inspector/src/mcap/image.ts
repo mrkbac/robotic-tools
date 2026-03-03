@@ -1,4 +1,6 @@
 import type { Channel, Schema } from "@mcap/core";
+import { parse } from "@foxglove/rosmsg";
+import { MessageReader } from "@foxglove/rosmsg2-serialization";
 
 /** A single thumbnail extracted from a CompressedImage message. */
 export interface ImageThumbnail {
@@ -18,6 +20,7 @@ export interface ImageChannelInfo {
   channelId: number;
   topic: string;
   encoding: string; // "cdr" | "protobuf" | etc.
+  schemaData: string; // raw schema definition text (for creating MessageReader)
 }
 
 const COMPRESSED_IMAGE_SCHEMAS = new Set([
@@ -44,10 +47,35 @@ export function findImageChannels(
         channelId,
         topic: channel.topic,
         encoding: channel.messageEncoding || schema.encoding,
+        schemaData: new TextDecoder().decode(schema.data),
       });
     }
   }
   return result;
+}
+
+/** Create a Foxglove MessageReader from a ROS 2 schema definition string. */
+export function createImageReader(schemaData: string): MessageReader | null {
+  try {
+    const defs = parse(schemaData, { ros2: true });
+    return new MessageReader(defs);
+  } catch {
+    return null;
+  }
+}
+
+/** Extract image data from CDR using a Foxglove MessageReader. */
+export function extractFromCdrFoxglove(
+  reader: MessageReader,
+  data: Uint8Array,
+): { format: string; imageData: Uint8Array } | null {
+  try {
+    const msg = reader.readMessage<{ format: string; data: Uint8Array }>(data);
+    if (!msg.data || msg.data.byteLength === 0) return null;
+    return { format: msg.format ?? "", imageData: msg.data };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -199,12 +227,16 @@ export function extractFromProtobuf(
 export function extractImage(
   messageData: Uint8Array,
   encoding: string,
+  reader?: MessageReader | null,
 ): { format: string; imageData: Uint8Array } | null {
   const enc = encoding.toLowerCase();
   if (enc === "protobuf") {
     return extractFromProtobuf(messageData);
   }
-  // Default to CDR for cdr, ros2, or anything else (most common)
+  // Use Foxglove reader if available, otherwise fall back to handrolled CDR parser
+  if (reader) {
+    return extractFromCdrFoxglove(reader, messageData);
+  }
   return extractFromCdr(messageData);
 }
 
