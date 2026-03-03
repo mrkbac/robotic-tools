@@ -260,9 +260,18 @@ export function getColumns(
           : undefined,
       },
       cell: ({ row }) => {
-        if (row.original._kind === "group") return null;
         const ch = row.original;
         if (ch.size_bytes === null) return "-";
+        if (ch._kind === "group") {
+          return (
+            <Text size="sm" c="dimmed">
+              {formatBytes(ch.size_bytes)}{" "}
+              <Text span size="xs" c="dimmed">
+                ({formatPercent(ch.size_bytes, ctx.fileSize)})
+              </Text>
+            </Text>
+          );
+        }
         return (
           <Text size="sm">
             {estimatePrefix(ch)}
@@ -290,7 +299,15 @@ export function getColumns(
           : undefined,
       },
       cell: ({ row }) => {
-        if (row.original._kind === "group") return null;
+        if (row.original._kind === "group") {
+          const bps = row.original.bytes_per_second_stats;
+          if (!bps) return null;
+          return (
+            <Text size="sm" c="dimmed">
+              {formatBytes(bps.average)}
+            </Text>
+          );
+        }
         return (
           <BpsDisplay
             stats={row.original.bytes_per_second_stats}
@@ -314,8 +331,14 @@ export function getColumns(
           : undefined,
       },
       cell: ({ row }) => {
-        if (row.original._kind === "group") return null;
         const ch = row.original;
+        if (ch._kind === "group") {
+          return ch.bytes_per_message !== null ? (
+            <Text size="sm" c="dimmed">
+              {formatBytes(ch.bytes_per_message)}
+            </Text>
+          ) : null;
+        }
         return ch.bytes_per_message !== null
           ? `${estimatePrefix(ch)}${formatBytes(ch.bytes_per_message)}`
           : "-";
@@ -327,8 +350,21 @@ export function getColumns(
       header: "Distribution",
       enableSorting: false,
       cell: ({ row }) => {
-        if (row.original._kind === "group") return null;
         if (row.original.message_distribution.length === 0) return null;
+        if (row.original._kind === "group") {
+          return (
+            <Sparkline
+              w={120}
+              h={20}
+              data={row.original.message_distribution}
+              curveType="monotone"
+              color="blue"
+              fillOpacity={0.1}
+              strokeWidth={1}
+              style={{ opacity: 0.5 }}
+            />
+          );
+        }
         return (
           <Sparkline
             w={120}

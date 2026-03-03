@@ -404,16 +404,27 @@ def fold_tree(node: TreeNode) -> TreeNode:
     return folded
 
 
+def _collect_leaf_channels(node: TreeNode) -> list[ChannelInfo]:
+    """Recursively collect all ChannelInfo leaves from a TreeNode subtree."""
+    leaves: list[ChannelInfo] = []
+    for leaf_value, children in node.values():
+        if leaf_value is not None:
+            leaves.append(leaf_value)
+        leaves.extend(_collect_leaf_channels(children))
+    return leaves
+
+
 def tree_iter(
     node: TreeNode,
     prefix: str = "",
     is_root: bool = True,
-) -> Iterator[tuple[str, ChannelInfo | str, str]]:
+) -> Iterator[tuple[str, ChannelInfo | str, str, list[ChannelInfo] | None]]:
     """Iterate over a folded tree structure, yielding display information.
 
-    Yields (tree_prefix, channel_or_string, display_path) tuples where:
+    Yields (tree_prefix, channel_or_string, display_path, descendants) tuples where:
     - tree_prefix contains the tree drawing characters for proper indentation
     - display_path is the node key (may be a collapsed path like "a/b/c" or just "leaf")
+    - descendants is a list of leaf ChannelInfo for folder nodes, or None for leaf nodes
     """
     # The input channels are already sorted, so the tree preserves that order
     items = list(node.items())
@@ -432,14 +443,15 @@ def tree_iter(
         if leaf_value:
             # This node has channel data
             # Display the key as-is (which may be a collapsed path or a single segment)
-            yield (prefix + connector, leaf_value, key)
+            yield (prefix + connector, leaf_value, key, None)
 
             # If it has children, recurse into them
             if children:
                 yield from tree_iter(children, new_prefix, is_root=False)
         else:
-            # Folder name
-            yield (prefix + connector, key, key)
+            # Folder name — collect all descendant channels for aggregation
+            descendants = _collect_leaf_channels(children)
+            yield (prefix + connector, key, key, descendants)
             yield from tree_iter(children, new_prefix, is_root=False)
 
 
@@ -579,11 +591,11 @@ def display_channels_table(
         channel_iter = tree_iter(folded_node)
     else:
         # List mode: sort channels and iterate directly
-        channel_iter = (("", channel, channel["topic"]) for channel in sorted_channels)
+        channel_iter = (("", channel, channel["topic"], None) for channel in sorted_channels)
 
-    for tree_prefix, channel, display_path in channel_iter:
+    for tree_prefix, channel, display_path, descendants in channel_iter:
         if isinstance(channel, str):
-            # Intermediate node (folder) - create a row that spans with just the folder name
+            # Intermediate node (folder) - aggregate descendant data
             hrow: list[RenderableType] = []
 
             # Add empty cell for ID column if it exists
@@ -591,6 +603,49 @@ def display_channels_table(
                 hrow.append("")
 
             hrow.append(f"{tree_prefix}{_format_parts_with_colors(channel)}")
+
+            if show_schema:
+                hrow.append("")
+
+            if descendants:
+                agg_msgs = sum(ch["message_count"] for ch in descendants)
+                agg_size = sum(ch.get("size_bytes") or 0 for ch in descendants)
+                agg_hz = sum(
+                    _hz_value(ch, use_median, index_duration, global_dur_sec) for ch in descendants
+                )
+                agg_bps = sum(_bps_value(ch, use_median, global_dur_sec) for ch in descendants)
+
+                if columns & ChannelTableColumn.MSGS:
+                    hrow.append(Text(f"{agg_msgs:,}", style="dim"))
+                if columns & ChannelTableColumn.HZ:
+                    hrow.append(Text(f"{agg_hz:.2f}", style="dim"))
+                if show_size:
+                    hrow.append(Text(bytes_to_human(agg_size), style="dim"))
+                if show_percent:
+                    pct = (agg_size / total_size * 100) if total_size > 0 else 0
+                    hrow.append(Text(f"{pct:.2f}%", style="dim"))
+                if show_bps:
+                    hrow.append(Text(bytes_to_human(agg_bps or None), style="dim"))
+                if show_b_per_msg:
+                    b_per_msg = agg_size / agg_msgs if agg_msgs > 0 else None
+                    hrow.append(Text(bytes_to_human(b_per_msg), style="dim"))
+                if show_distribution:
+                    # Element-wise sum of descendant distributions
+                    max_len = max(
+                        (len(ch.get("message_distribution", [])) for ch in descendants),
+                        default=0,
+                    )
+                    if max_len > 0:
+                        agg_dist = [0] * max_len
+                        for ch in descendants:
+                            for j, v in enumerate(ch.get("message_distribution", [])):
+                                agg_dist[j] += v
+                        bar_width = (
+                            max(20, effective_width // 4) if terminal_width is not None else None
+                        )
+                        hrow.append(DistributionBar(agg_dist, width=bar_width))
+                    else:
+                        hrow.append("")
 
             channels_table.add_row(*hrow, end_section=False)
             continue

@@ -12,6 +12,7 @@ import {
   Skeleton,
   Button,
   Tabs,
+  Group,
 } from "@mantine/core";
 import {
   IconInfoCircle,
@@ -29,7 +30,7 @@ import { DetailModal, type DetailSection } from "../components/DetailModal.tsx";
 import { ChannelsTable } from "../components/channels-table/index.ts";
 import { ExportPanel } from "../components/ExportPanel.tsx";
 import { UnifiedDistributionChart } from "../components/UnifiedDistributionChart.tsx";
-import { ScanStepper } from "../components/ScanStepper.tsx";
+import { ScanLevelIndicator } from "../components/ScanStepper.tsx";
 import { useMcapCache, MODE_LEVEL } from "../hooks/useMcapCache.ts";
 import { decodeFromHash, encodeToHash } from "../url/codec.ts";
 import { createFileId, fileMatchesId } from "../url/fileId.ts";
@@ -274,14 +275,6 @@ function ViewPage() {
         </Alert>
       )}
 
-      <ScanStepper
-        scannedMode={scanMode}
-        loading={loading}
-        scanTarget={scanTarget}
-        onScanTo={handleScanTo}
-        disabled={fileUnavailable}
-      />
-
       {loading && (
         <Stack gap="xs">
           <Text size="sm" c="dimmed">
@@ -314,7 +307,16 @@ function ViewPage() {
 
         <Tabs.Panel value="inspect" pt="md">
           <Stack gap="lg">
-            <FileHeader fileName={data.file.path} />
+            <Group justify="space-between" align="center">
+              <FileHeader fileName={data.file.path} />
+              <ScanLevelIndicator
+                scannedMode={scanMode}
+                loading={loading}
+                scanTarget={scanTarget}
+                onScanTo={handleScanTo}
+                disabled={fileUnavailable}
+              />
+            </Group>
             <FileInfo
               data={data}
               onCountClick={setDetailSection}

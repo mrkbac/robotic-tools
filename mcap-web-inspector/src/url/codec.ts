@@ -6,7 +6,12 @@
  * No bigint handling needed — all fields are plain numbers.
  */
 
-import type { McapInfoOutput, PartialStats, ScanMode, UrlPayload } from "../mcap/types.ts";
+import type {
+  McapInfoOutput,
+  PartialStats,
+  ScanMode,
+  UrlPayload,
+} from "../mcap/types.ts";
 import { compressToBase64url, decompressFromBase64url } from "./compress.ts";
 
 const MAX_HASH_BYTES = 512 * 1024;
@@ -55,9 +60,16 @@ function hydrateChannels(data: McapInfoOutput): void {
         const hz = ch.hz_stats;
         const bpsStats: PartialStats = {
           average: bpsAvg,
-          minimum: hz?.minimum != null && bPerMsg != null ? hz.minimum * bPerMsg : null,
-          maximum: hz?.maximum != null && bPerMsg != null ? hz.maximum * bPerMsg : null,
-          median: hz?.median != null && bPerMsg != null ? hz.median * bPerMsg : null,
+          minimum:
+            hz?.minimum != null && bPerMsg != null
+              ? hz.minimum * bPerMsg
+              : null,
+          maximum:
+            hz?.maximum != null && bPerMsg != null
+              ? hz.maximum * bPerMsg
+              : null,
+          median:
+            hz?.median != null && bPerMsg != null ? hz.median * bPerMsg : null,
         };
         ch.bytes_per_second_stats = bpsStats;
       } else {
@@ -100,20 +112,26 @@ function stripForUrl(data: McapInfoOutput): McapInfoOutput {
       length: 0,
     })),
     // Strip derived fields from channels (they'll be rehydrated on decode)
-    channels: data.channels.map(({
-      schema_name: _sn,
-      hz_channel: _hc,
-      bytes_per_message: _bpm,
-      bytes_per_second_stats: _bps,
-      jitter_cv: _jcv,
-      ...rest
-    }) => ({
-      ...rest,
-      // Strip average from hz_stats (it's derived from global duration)
-      hz_stats: rest.hz_stats
-        ? { minimum: rest.hz_stats.minimum, maximum: rest.hz_stats.maximum, median: rest.hz_stats.median }
-        : rest.hz_stats,
-    })) as McapInfoOutput["channels"],
+    channels: data.channels.map(
+      ({
+        schema_name: _sn,
+        hz_channel: _hc,
+        bytes_per_message: _bpm,
+        bytes_per_second_stats: _bps,
+        jitter_cv: _jcv,
+        ...rest
+      }) => ({
+        ...rest,
+        // Strip average from hz_stats (it's derived from global duration)
+        hz_stats: rest.hz_stats
+          ? {
+              minimum: rest.hz_stats.minimum,
+              maximum: rest.hz_stats.maximum,
+              median: rest.hz_stats.median,
+            }
+          : rest.hz_stats,
+      }),
+    ) as McapInfoOutput["channels"],
   };
 }
 

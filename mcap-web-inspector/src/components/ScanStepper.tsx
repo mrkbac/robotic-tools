@@ -1,8 +1,7 @@
-import { Stepper, Anchor, Text, Group } from "@mantine/core";
-import { IconFileAnalytics, IconRefresh } from "@tabler/icons-react";
+import { Badge, Anchor, Loader, Group, Text } from "@mantine/core";
 import type { ScanMode } from "../mcap/types.ts";
 
-interface ScanStepperProps {
+interface ScanLevelIndicatorProps {
   scannedMode: ScanMode;
   loading: boolean;
   scanTarget: ScanMode | null;
@@ -10,74 +9,63 @@ interface ScanStepperProps {
   disabled?: boolean;
 }
 
-const MODES: ScanMode[] = ["summary", "rebuild"];
+const BADGE_COLOR: Record<ScanMode, string> = {
+  summary: "gray",
+  rebuild: "blue",
+  exact: "green",
+};
 
-const STEPS = [
-  {
-    label: "Summary",
-    description: "Overview & schema info",
-    icon: <IconFileAnalytics size={18} />,
-  },
-  {
-    label: "Rebuild",
-    description: "Per-channel stats & timing",
-    icon: <IconRefresh size={18} />,
-  },
-] as const;
+const NEXT_MODE: Partial<Record<ScanMode, ScanMode>> = {
+  summary: "rebuild",
+  rebuild: "exact",
+};
 
-export function ScanStepper({
+const UPGRADE_LABEL: Record<string, string> = {
+  rebuild: "Upgrade to rebuild",
+  exact: "Run exact scan",
+};
+
+export function ScanLevelIndicator({
   scannedMode,
   loading,
   scanTarget,
   onScanTo,
   disabled,
-}: ScanStepperProps) {
-  const activeIndex = Math.min(MODES.indexOf(scannedMode), MODES.length - 1);
-  const rebuildDone = scannedMode === "rebuild" || scannedMode === "exact";
-  const exactRunning = loading && scanTarget === "exact";
-  const exactDone = scannedMode === "exact";
+}: ScanLevelIndicatorProps) {
+  const next = NEXT_MODE[scannedMode];
+  const isScanning = loading && scanTarget != null;
 
   return (
-    <>
-      <Stepper
-        active={activeIndex}
-        onStepClick={(index) => onScanTo(MODES[index]!)}
+    <Group gap="xs" wrap="nowrap">
+      <Badge
+        color={BADGE_COLOR[scannedMode]}
+        variant="light"
         size="sm"
+        tt="capitalize"
       >
-        {STEPS.map((step, i) => (
-          <Stepper.Step
-            key={step.label}
-            label={step.label}
-            description={step.description}
-            icon={step.icon}
-            allowStepSelect={!loading && !disabled && i > activeIndex}
-            loading={loading && scanTarget === MODES[i]}
-          />
-        ))}
-      </Stepper>
+        {scannedMode}
+      </Badge>
 
-      {rebuildDone && !disabled && (
-        <Group justify="flex-end">
-          {exactRunning ? (
-            <Text size="xs" c="dimmed">
-              Running exact scan...
-            </Text>
-          ) : exactDone ? (
-            <Text size="xs" c="dimmed">
-              Exact scan complete
-            </Text>
-          ) : (
-            <Anchor
-              size="xs"
-              c="dimmed"
-              component="button"
-              onClick={() => onScanTo("exact")}
-            >
-              Run exact scan...
-            </Anchor>
-          )}
+      {isScanning ? (
+        <Group gap={4} wrap="nowrap">
+          <Loader size="xs" />
+          <Text size="xs" c="dimmed">
+            {scanTarget === "exact" ? "Exact scan..." : "Rebuilding..."}
+          </Text>
         </Group>
+      ) : (
+        next &&
+        !disabled && (
+          <Anchor
+            size="xs"
+            c="dimmed"
+            component="button"
+            onClick={() => onScanTo(next)}
+          >
+            {UPGRADE_LABEL[next]}
+          </Anchor>
+        )
       )}
-    </>
+    </Group>
   );
 }

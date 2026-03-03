@@ -45,15 +45,39 @@ function aggregateNode(node: TopicTreeNode): {
   totalMessages: number;
   minHz: number;
   maxHz: number;
+  totalSize: number | null;
+  totalBps: number | null;
+  distribution: number[];
 } {
   let totalMessages = 0;
   let minHz = Infinity;
   let maxHz = -Infinity;
+  let totalSize: number | null = null;
+  let totalBps: number | null = null;
+  let distribution: number[] = [];
 
   for (const ch of node.channels) {
     totalMessages += ch.message_count;
     minHz = Math.min(minHz, ch.hz_stats.average);
     maxHz = Math.max(maxHz, ch.hz_stats.average);
+    if (ch.size_bytes !== null) {
+      totalSize = (totalSize ?? 0) + ch.size_bytes;
+    }
+    if (ch.bytes_per_second_stats?.average != null) {
+      totalBps = (totalBps ?? 0) + ch.bytes_per_second_stats.average;
+    }
+    if (ch.message_distribution.length > 0) {
+      if (distribution.length < ch.message_distribution.length) {
+        distribution = distribution.concat(
+          new Array(ch.message_distribution.length - distribution.length).fill(
+            0,
+          ),
+        );
+      }
+      for (let i = 0; i < ch.message_distribution.length; i++) {
+        distribution[i]! += ch.message_distribution[i]!;
+      }
+    }
   }
 
   for (const child of node.children.values()) {
@@ -61,12 +85,31 @@ function aggregateNode(node: TopicTreeNode): {
     totalMessages += agg.totalMessages;
     minHz = Math.min(minHz, agg.minHz);
     maxHz = Math.max(maxHz, agg.maxHz);
+    if (agg.totalSize !== null) {
+      totalSize = (totalSize ?? 0) + agg.totalSize;
+    }
+    if (agg.totalBps !== null) {
+      totalBps = (totalBps ?? 0) + agg.totalBps;
+    }
+    if (agg.distribution.length > 0) {
+      if (distribution.length < agg.distribution.length) {
+        distribution = distribution.concat(
+          new Array(agg.distribution.length - distribution.length).fill(0),
+        );
+      }
+      for (let i = 0; i < agg.distribution.length; i++) {
+        distribution[i]! += agg.distribution[i]!;
+      }
+    }
   }
 
   return {
     totalMessages,
     minHz: minHz === Infinity ? 0 : minHz,
     maxHz: maxHz === -Infinity ? 0 : maxHz,
+    totalSize,
+    totalBps,
+    distribution,
   };
 }
 
@@ -85,7 +128,7 @@ function nodeToGroupRow(
     schema_id: 0,
     schema_name: null,
     message_count: agg.totalMessages,
-    size_bytes: null,
+    size_bytes: agg.totalSize,
     duration_ns: null,
     hz_stats: {
       average:
@@ -95,9 +138,15 @@ function nodeToGroupRow(
       median: null,
     },
     hz_channel: null,
-    bytes_per_second_stats: null,
-    bytes_per_message: null,
-    message_distribution: [],
+    bytes_per_second_stats:
+      agg.totalBps !== null
+        ? { average: agg.totalBps, minimum: null, maximum: null, median: null }
+        : null,
+    bytes_per_message:
+      agg.totalSize !== null && agg.totalMessages > 0
+        ? agg.totalSize / agg.totalMessages
+        : null,
+    message_distribution: agg.distribution,
     message_start_time: null,
     message_end_time: null,
     estimated_sizes: false,

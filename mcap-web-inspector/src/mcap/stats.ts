@@ -555,7 +555,8 @@ function buildChannelInfo(
     };
   }
 
-  const durationNsNum = channelDurationNs !== null ? Number(channelDurationNs) : null;
+  const durationNsNum =
+    channelDurationNs !== null ? Number(channelDurationNs) : null;
   const jitterNs = intervalStats?.jitterNs ?? null;
 
   // Derived: jitter_cv = jitter_ns / mean_interval
