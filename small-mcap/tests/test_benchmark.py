@@ -68,16 +68,30 @@ TEST_CONFIGS = [
 # ============================================================================
 
 
+class NonSeekableIO(io.RawIOBase):
+    """Wrapper that disables seeking, forcing the non-seeking reader path."""
+
+    def __init__(self, data: bytes):
+        self._stream = io.BytesIO(data)
+
+    def readinto(self, b: bytearray | memoryview) -> int:  # type: ignore[override]
+        return self._stream.readinto(b)
+
+    def readable(self) -> bool:
+        return True
+
+
 def read_small_mcap(config: BenchmarkConfig) -> int:
     """Generic wrapper for small_mcap reading with configurable options."""
     count = 0
 
     # Open stream based on config
+    stream: io.IOBase
     if config.seekable:
-        stream: io.BytesIO | io.BufferedReader = TEST_MCAP_FILE.open("rb")
+        stream = TEST_MCAP_FILE.open("rb")
     else:
         data = TEST_MCAP_FILE.read_bytes()
-        stream = io.BytesIO(data)
+        stream = io.BufferedReader(NonSeekableIO(data))
 
     try:
         # Build read_message arguments based on config
@@ -256,6 +270,23 @@ PARALLEL_CONFIGS = [
 def test_benchmark_parallel(benchmark, config):
     """Benchmark parallel decompression vs full parallel IO at different worker counts."""
     benchmark.group = "parallel"
+
+    result = benchmark(read_small_mcap, config)
+    assert result > 0, "should read at least one message"
+
+
+PARALLEL_NONSEEKABLE_CONFIGS = [
+    BenchmarkConfig(id="nonseek-seq", seekable=False, num_workers=0),
+    BenchmarkConfig(id="nonseek-2w", seekable=False, num_workers=2),
+    BenchmarkConfig(id="nonseek-4w", seekable=False, num_workers=4),
+    BenchmarkConfig(id="nonseek-8w", seekable=False, num_workers=8),
+]
+
+
+@pytest.mark.parametrize("config", PARALLEL_NONSEEKABLE_CONFIGS, ids=lambda c: c.id)
+def test_benchmark_parallel_nonseekable(benchmark, config):
+    """Benchmark parallel decompression on non-seekable streams."""
+    benchmark.group = "parallel-nonseekable"
 
     result = benchmark(read_small_mcap, config)
     assert result > 0, "should read at least one message"
