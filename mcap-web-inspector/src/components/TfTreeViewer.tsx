@@ -1,4 +1,10 @@
-import { useState, useMemo } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useState,
+  useMemo,
+  useCallback,
+} from "react";
 import {
   Paper,
   Title,
@@ -8,8 +14,10 @@ import {
   Alert,
   Group,
   Slider,
+  ActionIcon,
+  Tooltip,
 } from "@mantine/core";
-import { IconAlertTriangle } from "@tabler/icons-react";
+import { IconAlertTriangle, IconFoldDown, IconFold } from "@tabler/icons-react";
 import type { TfTreeData, TfTransform } from "../mcap/tf.ts";
 import { quaternionToEuler, getTransformsAtTime } from "../mcap/tf.ts";
 import { formatBucketTime } from "../format.ts";
@@ -33,6 +41,11 @@ function fmt(n: number): string {
 function fmtDeg(n: number): string {
   return n.toFixed(1);
 }
+
+const monoRightStyle: CSSProperties = {
+  textAlign: "right",
+  fontFamily: "monospace",
+};
 
 const SLIDER_MAX = 1000;
 
@@ -91,12 +104,28 @@ function buildTree(
   return roots;
 }
 
-function flattenTree(nodes: TreeNode[]): TreeNode[] {
+function collectAllFrames(nodes: TreeNode[]): Set<string> {
+  const frames = new Set<string>();
+  function walk(node: TreeNode) {
+    frames.add(node.frame);
+    for (const child of node.children) {
+      walk(child);
+    }
+  }
+  for (const root of nodes) {
+    walk(root);
+  }
+  return frames;
+}
+
+function flattenTree(nodes: TreeNode[], expanded: Set<string>): TreeNode[] {
   const result: TreeNode[] = [];
   function walk(node: TreeNode) {
     result.push(node);
-    for (const child of node.children) {
-      walk(child);
+    if (expanded.has(node.frame)) {
+      for (const child of node.children) {
+        walk(child);
+      }
     }
   }
   for (const root of nodes) {
@@ -105,16 +134,53 @@ function flattenTree(nodes: TreeNode[]): TreeNode[] {
   return result;
 }
 
+interface TreeRowIndicatorProps {
+  node: TreeNode;
+  isExpanded: boolean;
+}
+
+function TreeRowIndicator({
+  node,
+  isExpanded,
+}: TreeRowIndicatorProps): ReactNode {
+  if (node.children.length > 0) {
+    return (
+      <Text
+        component="span"
+        size="xs"
+        c="dimmed"
+        mr={4}
+        style={{
+          display: "inline-block",
+          transition: "transform 150ms",
+          transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+        }}
+      >
+        ▶
+      </Text>
+    );
+  }
+  if (node.depth > 0) {
+    return (
+      <Text component="span" c="dimmed" mr={4}>
+        {"└ "}
+      </Text>
+    );
+  }
+  return null;
+}
+
 export function TfTreeViewer({ data }: TfTreeViewerProps) {
   const [sliderValue, setSliderValue] = useState(SLIDER_MAX);
+  const [expanded, setExpanded] = useState<Set<string> | null>(null);
 
   const hasTimeRange = data.startTimeNs < data.endTimeNs;
 
-  const sliderToTimeNs = (value: number): bigint => {
+  function sliderToTimeNs(value: number): bigint {
     if (!hasTimeRange) return data.endTimeNs;
     const range = data.endTimeNs - data.startTimeNs;
     return data.startTimeNs + (range * BigInt(value)) / BigInt(SLIDER_MAX);
-  };
+  }
 
   const currentTimeNs = sliderToTimeNs(sliderValue);
   const isAtEnd = sliderValue === SLIDER_MAX;
@@ -128,16 +194,49 @@ export function TfTreeViewer({ data }: TfTreeViewerProps) {
     () => buildTree(activeTransforms, data.updateCounts),
     [activeTransforms, data.updateCounts],
   );
-  const flatNodes = useMemo(() => flattenTree(tree), [tree]);
 
-  const staticCount = [...data.transforms.values()].filter(
-    (t) => t.isStatic,
-  ).length;
+  const allFrames = useMemo(() => collectAllFrames(tree), [tree]);
+
+  // Initialize expanded set with all frames on first render or when tree changes
+  const effectiveExpanded = useMemo(
+    () => expanded ?? allFrames,
+    [expanded, allFrames],
+  );
+
+  const flatNodes = useMemo(
+    () => flattenTree(tree, effectiveExpanded),
+    [tree, effectiveExpanded],
+  );
+
+  const toggleExpanded = useCallback(
+    (frame: string) => {
+      setExpanded((prev) => {
+        const next = new Set(prev ?? allFrames);
+        if (next.has(frame)) {
+          next.delete(frame);
+        } else {
+          next.add(frame);
+        }
+        return next;
+      });
+    },
+    [allFrames],
+  );
+
+  const expandAll = useCallback(() => setExpanded(null), []);
+  const collapseAll = useCallback(() => setExpanded(new Set()), []);
+
+  const { staticCount, frameCount } = useMemo(() => {
+    let statics = 0;
+    const frames = new Set<string>();
+    for (const tf of data.transforms.values()) {
+      if (tf.isStatic) statics++;
+      frames.add(tf.parentFrame);
+      frames.add(tf.childFrame);
+    }
+    return { staticCount: statics, frameCount: frames.size };
+  }, [data.transforms]);
   const dynamicCount = data.transforms.size - staticCount;
-  const frameCount = new Set([
-    ...[...data.transforms.values()].map((t) => t.parentFrame),
-    ...[...data.transforms.values()].map((t) => t.childFrame),
-  ]).size;
 
   const timeLabel = hasTimeRange
     ? formatBucketTime(Number(currentTimeNs - data.startTimeNs))
@@ -191,7 +290,25 @@ export function TfTreeViewer({ data }: TfTreeViewerProps) {
         <Table striped highlightOnHover>
           <Table.Thead>
             <Table.Tr>
-              <Table.Th>Frame</Table.Th>
+              <Table.Th>
+                <Group gap={4} wrap="nowrap">
+                  Frame
+                  <Tooltip label="Expand all">
+                    <ActionIcon variant="subtle" size="xs" onClick={expandAll}>
+                      <IconFoldDown size={14} />
+                    </ActionIcon>
+                  </Tooltip>
+                  <Tooltip label="Collapse all">
+                    <ActionIcon
+                      variant="subtle"
+                      size="xs"
+                      onClick={collapseAll}
+                    >
+                      <IconFold size={14} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+              </Table.Th>
               <Table.Th style={{ textAlign: "center" }}>Type</Table.Th>
               <Table.Th style={{ textAlign: "right" }}>Count</Table.Th>
               <Table.Th style={{ textAlign: "right" }}>tx</Table.Th>
@@ -204,8 +321,8 @@ export function TfTreeViewer({ data }: TfTreeViewerProps) {
           </Table.Thead>
           <Table.Tbody>
             {flatNodes.map((node, i) => {
-              const isRoot = node.transform === null;
               const tf = node.transform;
+              const hasChildren = node.children.length > 0;
               const [roll, pitch, yaw] = tf
                 ? quaternionToEuler(...tf.rotation)
                 : [0, 0, 0];
@@ -215,60 +332,51 @@ export function TfTreeViewer({ data }: TfTreeViewerProps) {
                   <Table.Td
                     style={{
                       paddingLeft: 12 + node.depth * 20,
-                      fontWeight: isRoot ? 600 : 400,
+                      fontWeight: tf === null ? 600 : 400,
                       fontFamily: "monospace",
                       fontSize: "0.85em",
+                      cursor: hasChildren ? "pointer" : "default",
                     }}
+                    onClick={
+                      hasChildren ? () => toggleExpanded(node.frame) : undefined
+                    }
                   >
-                    {node.depth > 0 && (
-                      <Text component="span" c="dimmed" mr={4}>
-                        {"└ "}
-                      </Text>
-                    )}
+                    <TreeRowIndicator
+                      node={node}
+                      isExpanded={effectiveExpanded.has(node.frame)}
+                    />
                     {node.frame}
                   </Table.Td>
                   <Table.Td style={{ textAlign: "center" }}>
-                    {!isRoot && (
+                    {tf && (
                       <Badge
                         size="xs"
-                        color={tf!.isStatic ? "green" : "red"}
+                        color={tf.isStatic ? "green" : "red"}
                         variant="light"
                       >
-                        {tf!.isStatic ? "static" : "dynamic"}
+                        {tf.isStatic ? "static" : "dynamic"}
                       </Badge>
                     )}
                   </Table.Td>
                   <Table.Td style={{ textAlign: "right" }}>
                     {node.count > 0 ? node.count.toLocaleString() : ""}
                   </Table.Td>
-                  <Table.Td
-                    style={{ textAlign: "right", fontFamily: "monospace" }}
-                  >
+                  <Table.Td style={monoRightStyle}>
                     {tf ? fmt(tf.translation[0]) : ""}
                   </Table.Td>
-                  <Table.Td
-                    style={{ textAlign: "right", fontFamily: "monospace" }}
-                  >
+                  <Table.Td style={monoRightStyle}>
                     {tf ? fmt(tf.translation[1]) : ""}
                   </Table.Td>
-                  <Table.Td
-                    style={{ textAlign: "right", fontFamily: "monospace" }}
-                  >
+                  <Table.Td style={monoRightStyle}>
                     {tf ? fmt(tf.translation[2]) : ""}
                   </Table.Td>
-                  <Table.Td
-                    style={{ textAlign: "right", fontFamily: "monospace" }}
-                  >
+                  <Table.Td style={monoRightStyle}>
                     {tf ? fmtDeg(roll) : ""}
                   </Table.Td>
-                  <Table.Td
-                    style={{ textAlign: "right", fontFamily: "monospace" }}
-                  >
+                  <Table.Td style={monoRightStyle}>
                     {tf ? fmtDeg(pitch) : ""}
                   </Table.Td>
-                  <Table.Td
-                    style={{ textAlign: "right", fontFamily: "monospace" }}
-                  >
+                  <Table.Td style={monoRightStyle}>
                     {tf ? fmtDeg(yaw) : ""}
                   </Table.Td>
                 </Table.Tr>
