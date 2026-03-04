@@ -23,10 +23,7 @@ import {
   parseTfMessage,
   buildTfTreeData,
 } from "./tf.ts";
-import {
-  createTimelapseSampler,
-  encodeAllTimelapses,
-} from "./timelapse.ts";
+import { createTimelapseSampler, encodeAllTimelapses } from "./timelapse.ts";
 import type { MessageReader } from "@foxglove/rosmsg2-serialization";
 
 const zstdDecoder = new ZSTDDecoder();

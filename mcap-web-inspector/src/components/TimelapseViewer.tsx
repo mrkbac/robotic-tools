@@ -16,7 +16,10 @@ interface TimelapseViewerProps {
   channelNames: Map<number, string>;
 }
 
-export function TimelapseViewer({ videos, channelNames }: TimelapseViewerProps) {
+export function TimelapseViewer({
+  videos,
+  channelNames,
+}: TimelapseViewerProps) {
   const channelIds = useMemo(() => [...videos.keys()], [videos]);
   const [selectedChannel, setSelectedChannel] = useState<number | null>(null);
 
@@ -27,7 +30,8 @@ export function TimelapseViewer({ videos, channelNames }: TimelapseViewerProps) 
     }
   }, [channelIds, selectedChannel]);
 
-  const blob = selectedChannel !== null ? videos.get(selectedChannel) : undefined;
+  const blob =
+    selectedChannel !== null ? videos.get(selectedChannel) : undefined;
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -49,8 +53,10 @@ export function TimelapseViewer({ videos, channelNames }: TimelapseViewerProps) 
 
   const handleDownload = () => {
     if (!blob || selectedChannel === null) return;
-    const topic = channelNames.get(selectedChannel) ?? `channel_${selectedChannel}`;
-    const safeName = topic.replace(/\//g, "_").replace(/^_/, "") + "_timelapse.webm";
+    const topic =
+      channelNames.get(selectedChannel) ?? `channel_${selectedChannel}`;
+    const safeName =
+      topic.replace(/\//g, "_").replace(/^_/, "") + "_timelapse.webm";
     const a = document.createElement("a");
     a.href = videoUrl;
     a.download = safeName;

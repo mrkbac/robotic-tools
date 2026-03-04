@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   SimpleGrid,
   Text,
-  Title,
   Paper,
   Badge,
   Group,
@@ -16,7 +15,6 @@ import type { ThumbnailMap } from "../mcap/image.ts";
 import type { DetailSection } from "./DetailModal.tsx";
 import { formatBytes, formatDuration, formatTimestamp } from "../format.ts";
 import { DistributionChart } from "./DistributionChart.tsx";
-import { UnifiedDistributionChart } from "./UnifiedDistributionChart.tsx";
 import { SparklineModal } from "./SparklineModal.tsx";
 
 function thumbnailToUrl(data: Uint8Array, format: string): string {
@@ -135,46 +133,25 @@ export function FileInfo({
             value={statistics.message_index_count.toLocaleString()}
           />
         )}
-      </SimpleGrid>
-
-      {message_distribution.max_count > 0 && (
-        <Group gap="sm" mt="sm" align="center">
-          <Text size="xs" c="dimmed">
-            Distribution
-          </Text>
-          <SparklineModal
-            data={message_distribution.message_counts}
-            title="Message Distribution"
-          >
-            <DistributionChart distribution={message_distribution} />
-            <Text size="xs" c="dimmed" mt={4}>
-              Max: {message_distribution.max_count.toLocaleString()} msgs/bucket
-              | Bucket size:{" "}
-              {formatDuration(message_distribution.bucket_duration_ns)}
-            </Text>
-          </SparklineModal>
-        </Group>
-      )}
-
-      {message_distribution.message_counts.length > 0 &&
-        data.channels.length > 0 && (
-          <Group gap="sm" mt="xs" align="center">
-            <Text size="xs" c="dimmed">
-              Channels
-            </Text>
-            <SparklineModal
-              data={message_distribution.message_counts}
-              title="Channel Distributions"
-              w={200}
-              h={30}
-            >
-              <UnifiedDistributionChart
-                channels={data.channels}
-                globalDistribution={message_distribution}
-              />
-            </SparklineModal>
-          </Group>
+        {message_distribution.max_count > 0 && (
+          <InfoItem
+            label="Distribution"
+            value={
+              <SparklineModal
+                data={message_distribution.message_counts}
+                title="Message Distribution"
+              >
+                <DistributionChart distribution={message_distribution} />
+                <Text size="xs" c="dimmed" mt={4}>
+                  Max: {message_distribution.max_count.toLocaleString()}{" "}
+                  msgs/bucket | Bucket size:{" "}
+                  {formatDuration(message_distribution.bucket_duration_ns)}
+                </Text>
+              </SparklineModal>
+            }
+          />
         )}
+      </SimpleGrid>
     </>
   );
 

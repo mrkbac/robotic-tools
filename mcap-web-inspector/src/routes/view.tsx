@@ -356,6 +356,11 @@ function ViewPage() {
                   : undefined
               }
             />
+            <ChannelsTable
+              channels={data.channels}
+              bucketDurationNs={data.message_distribution.bucket_duration_ns}
+              fileSize={data.file.size_bytes}
+            />
             {tfData !== null && tfData.transforms.size > 0 && (
               <TfTreeViewer data={tfData} />
             )}
@@ -363,17 +368,10 @@ function ViewPage() {
               <TimelapseViewer
                 videos={timelapseVideos}
                 channelNames={
-                  new Map(
-                    data.channels.map((ch) => [ch.id, ch.topic]),
-                  )
+                  new Map(data.channels.map((ch) => [ch.id, ch.topic]))
                 }
               />
             )}
-            <ChannelsTable
-              channels={data.channels}
-              bucketDurationNs={data.message_distribution.bucket_duration_ns}
-              fileSize={data.file.size_bytes}
-            />
           </Stack>
         );
 
