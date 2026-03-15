@@ -1,12 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Stack, Progress, Alert, Text, Skeleton } from "@mantine/core";
+import { Stack, Alert, Text, Skeleton } from "@mantine/core";
 import { FileDropzone } from "../components/FileDropzone.tsx";
 import { RecentFiles } from "../components/RecentFiles.tsx";
 import { useFileProcessorContext } from "../contexts/FileProcessorContext.tsx";
+import { formatScanStats } from "../format.ts";
 
 function IndexPage() {
-  const { loading, progress, error, scanMode, handleFileSelect, history } =
-    useFileProcessorContext();
+  const {
+    loading,
+    progress,
+    scanStats,
+    error,
+    scanMode,
+    handleFileSelect,
+    history,
+  } = useFileProcessorContext();
 
   return (
     <>
@@ -19,18 +27,13 @@ function IndexPage() {
       {loading &&
         (() => {
           const isIndeterminate = scanMode === "summary" && progress === 0;
+          const stats = scanStats ? formatScanStats(scanStats) : "";
           return (
-            <Stack gap="xs">
-              <Text size="sm" c="dimmed">
-                {isIndeterminate
-                  ? "Reading summary..."
-                  : `Scanning file... ${progress}%`}
-              </Text>
-              <Progress
-                value={isIndeterminate ? 100 : progress}
-                animated={isIndeterminate}
-              />
-            </Stack>
+            <Text size="sm" c="dimmed">
+              {isIndeterminate
+                ? "Reading summary..."
+                : `Scanning file... ${progress}%${stats ? ` · ${stats}` : ""}`}
+            </Text>
           );
         })()}
 

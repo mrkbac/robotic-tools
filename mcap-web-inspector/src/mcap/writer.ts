@@ -1,6 +1,11 @@
 import { McapStreamReader, McapWriter, TempBuffer } from "@mcap/core";
 import { ensureZstdInit, decompressHandlers } from "./reader.ts";
-import type { FilterConfig, ExportProgressCallback } from "./types.ts";
+import { ensureZstdCompressInit, buildCompressChunk } from "./compress.ts";
+import type {
+  FilterConfig,
+  OutputConfig,
+  ExportProgressCallback,
+} from "./types.ts";
 
 /**
  * Export an MCAP file with filtering applied.
@@ -10,11 +15,15 @@ import type { FilterConfig, ExportProgressCallback } from "./types.ts";
 export async function exportFilteredMcap(
   file: File,
   config: FilterConfig,
+  outputConfig: OutputConfig,
   onProgress?: ExportProgressCallback,
 ): Promise<Uint8Array> {
   await ensureZstdInit();
+  if (outputConfig.compression === "zstd") {
+    await ensureZstdCompressInit();
+  }
 
-  const CHUNK_SIZE = 1024 * 1024; // 1MB
+  const READ_CHUNK_SIZE = 1024 * 1024; // 1MB read chunks
   const totalBytes = file.size;
 
   const reader = new McapStreamReader({
@@ -23,7 +32,11 @@ export async function exportFilteredMcap(
   });
 
   const buffer = new TempBuffer();
-  const writer = new McapWriter({ writable: buffer });
+  const writer = new McapWriter({
+    writable: buffer,
+    chunkSize: outputConfig.chunk_size,
+    compressChunk: buildCompressChunk(outputConfig.compression),
+  });
 
   // ID remapping tables
   const oldToNewSchemaId = new Map<number, number>();
@@ -48,8 +61,8 @@ export async function exportFilteredMcap(
   let messagesSkipped = 0;
   let bytesRead = 0;
 
-  for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
-    const end = Math.min(offset + CHUNK_SIZE, totalBytes);
+  for (let offset = 0; offset < totalBytes; offset += READ_CHUNK_SIZE) {
+    const end = Math.min(offset + READ_CHUNK_SIZE, totalBytes);
     const slice = file.slice(offset, end);
     const buf = new Uint8Array(await slice.arrayBuffer());
     reader.append(buf);

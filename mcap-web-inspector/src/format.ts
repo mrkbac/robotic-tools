@@ -53,6 +53,29 @@ export function formatBucketTime(ns: number): string {
   return `${hr.toFixed(1)}h`;
 }
 
+export interface ScanProgress {
+  bytesRead: number;
+  totalBytes: number;
+  startTime: number;
+}
+
+/** Format scan speed and ETA from progress stats. Returns empty string if too early to estimate. */
+export function formatScanStats(stats: ScanProgress): string {
+  const elapsed = (Date.now() - stats.startTime) / 1000;
+  if (elapsed < 0.5 || stats.bytesRead === 0) return "";
+  const speed = stats.bytesRead / elapsed;
+  const remaining = (stats.totalBytes - stats.bytesRead) / speed;
+  return `${formatBytes(speed)}/s · ~${formatEta(remaining)} remaining`;
+}
+
+function formatEta(seconds: number): string {
+  if (seconds < 1) return "<1s";
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  const min = Math.floor(seconds / 60);
+  const sec = Math.ceil(seconds % 60);
+  return `${min}m ${sec}s`;
+}
+
 /** Format Hz value. */
 export function formatHz(hz: number): string {
   if (hz >= 1000) return `${(hz / 1000).toFixed(1)}k`;

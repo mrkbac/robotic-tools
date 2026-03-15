@@ -73,3 +73,15 @@ export type ExportProgressCallback = (info: {
   messagesWritten: number;
   messagesSkipped: number;
 }) => void;
+
+export type CompressionAlgorithm = "zstd" | "lz4" | "none";
+
+export interface OutputConfig {
+  compression: CompressionAlgorithm;
+  chunk_size: number; // bytes
+}
+
+export const DEFAULT_OUTPUT_CONFIG: OutputConfig = {
+  compression: "zstd",
+  chunk_size: 4 * 1024 * 1024, // 4 MiB
+};

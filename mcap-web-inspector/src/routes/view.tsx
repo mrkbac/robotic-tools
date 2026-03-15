@@ -6,7 +6,6 @@ import {
 } from "@tanstack/react-router";
 import {
   Stack,
-  Progress,
   Alert,
   Text,
   Skeleton,
@@ -14,6 +13,7 @@ import {
   Tabs,
   Group,
 } from "@mantine/core";
+import { nprogress } from "@mantine/nprogress";
 import {
   IconInfoCircle,
   IconPlugConnected,
@@ -44,6 +44,8 @@ import {
 } from "../url/thumbnail.ts";
 import { useFileHandleRecovery } from "../hooks/useFileHandleRecovery.ts";
 import { saveHistoryEntry } from "../stores/historyStore.ts";
+import type { ScanProgress } from "../format.ts";
+import { formatScanStats } from "../format.ts";
 
 function ViewPage() {
   const navigate = useNavigate();
@@ -59,6 +61,7 @@ function ViewPage() {
   const [loading, setLoading] = useState(false);
   const [scanTarget, setScanTarget] = useState<ScanMode | null>(null);
   const [progress, setProgress] = useState(0);
+  const [scanStats, setScanStats] = useState<ScanProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
   const [detailSection, setDetailSection] = useState<DetailSection | null>(
@@ -71,6 +74,7 @@ function ViewPage() {
   );
 
   const generationRef = useRef(0);
+  const scanStartRef = useRef(0);
   const {
     tryGetCachedRaw,
     readAndCache,
@@ -209,8 +213,11 @@ function ViewPage() {
       }
 
       const gen = ++generationRef.current;
+      scanStartRef.current = Date.now();
       setLoading(true);
       setProgress(0);
+      setScanStats(null);
+      nprogress.start();
 
       try {
         const {
@@ -219,7 +226,14 @@ function ViewPage() {
           tfData: newTfData,
           timelapseVideos: newTimelapseVideos,
         } = await readAndCache(localFile, mode, (bytesRead, total) => {
-          setProgress(Math.round((bytesRead / total) * 100));
+          const pct = Math.round((bytesRead / total) * 100);
+          setProgress(pct);
+          setScanStats({
+            bytesRead,
+            totalBytes: total,
+            startTime: scanStartRef.current,
+          });
+          nprogress.set(pct);
         });
 
         if (generationRef.current !== gen) return;
@@ -251,6 +265,8 @@ function ViewPage() {
         if (generationRef.current === gen) {
           setLoading(false);
           setScanTarget(null);
+          setScanStats(null);
+          nprogress.complete();
         }
       }
     },
@@ -318,14 +334,15 @@ function ViewPage() {
         </Alert>
       )}
 
-      {loading && (
-        <Stack gap="xs">
-          <Text size="sm" c="dimmed">
-            Scanning file... {progress}%
-          </Text>
-          <Progress value={progress} />
-        </Stack>
-      )}
+      {loading &&
+        (() => {
+          const stats = scanStats ? formatScanStats(scanStats) : "";
+          return (
+            <Text size="sm" c="dimmed">
+              Scanning file... {progress}%{stats ? ` · ${stats}` : ""}
+            </Text>
+          );
+        })()}
 
       {error && (
         <Alert color="red" title="Error">

@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { nprogress } from "@mantine/nprogress";
 import type { McapInfoOutput, ScanMode } from "../mcap/types.ts";
+import type { ScanProgress } from "../format.ts";
 import { computeStats } from "../mcap/stats.ts";
 import { pickRepresentativeThumbnailUrl } from "../mcap/image.ts";
 import { useMcapCache } from "./useMcapCache.ts";
@@ -16,9 +18,11 @@ export function useFileProcessor() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [scanStats, setScanStats] = useState<ScanProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scanMode, setScanMode] = useState<ScanMode>("summary");
   const generationRef = useRef(0);
+  const scanStartRef = useRef(0);
   const { tryGetCachedRaw, readAndCache, getCachedMode, getThumbnails } =
     useMcapCache();
   const history = useHistory();
@@ -84,15 +88,25 @@ export function useFileProcessor() {
       }
 
       const gen = ++generationRef.current;
+      scanStartRef.current = Date.now();
       setLoading(true);
       setProgress(0);
+      setScanStats(null);
+      nprogress.start();
 
       try {
         const { rawData: raw, thumbnails: thumbs } = await readAndCache(
           selectedFile,
           mode,
           (bytesRead, total) => {
-            setProgress(Math.round((bytesRead / total) * 100));
+            const pct = Math.round((bytesRead / total) * 100);
+            setProgress(pct);
+            setScanStats({
+              bytesRead,
+              totalBytes: total,
+              startTime: scanStartRef.current,
+            });
+            nprogress.set(pct);
           },
         );
 
@@ -118,6 +132,8 @@ export function useFileProcessor() {
       } finally {
         if (generationRef.current === gen) {
           setLoading(false);
+          setScanStats(null);
+          nprogress.complete();
         }
       }
     },
@@ -171,15 +187,25 @@ export function useFileProcessor() {
           }
 
           const gen = ++generationRef.current;
+          scanStartRef.current = Date.now();
           setLoading(true);
           setProgress(0);
+          setScanStats(null);
+          nprogress.start();
 
           try {
             const { rawData: raw, thumbnails: thumbs } = await readAndCache(
               file,
               mode,
               (bytesRead, total) => {
-                setProgress(Math.round((bytesRead / total) * 100));
+                const pct = Math.round((bytesRead / total) * 100);
+                setProgress(pct);
+                setScanStats({
+                  bytesRead,
+                  totalBytes: total,
+                  startTime: scanStartRef.current,
+                });
+                nprogress.set(pct);
               },
             );
             if (generationRef.current !== gen) return;
@@ -207,6 +233,8 @@ export function useFileProcessor() {
           } finally {
             if (generationRef.current === gen) {
               setLoading(false);
+              setScanStats(null);
+              nprogress.complete();
             }
           }
         }
@@ -225,6 +253,7 @@ export function useFileProcessor() {
   return {
     loading,
     progress,
+    scanStats,
     error,
     scanMode,
     handleFileSelect,

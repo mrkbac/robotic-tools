@@ -11,6 +11,7 @@
     "generate-types": "json2ts -i ../pymcap-cli/schemas/mcap_info.json -o src/mcap/types.generated.ts --no-additionalProperties --unreachableDefinitions --style.singleQuote --style.semi"
   },
   "dependencies": {
+    "@bokuweb/zstd-wasm": "^0.0.27",
     "@foxglove/rosmsg": "^5.0.5",
     "@foxglove/rosmsg2-serialization": "^3.0.3",
     "@foxglove/wasm-bz2": "^0.3.0",
@@ -21,6 +22,7 @@
     "@mantine/dates": "^8.3.15",
     "@mantine/dropzone": "^8.3.15",
     "@mantine/hooks": "^8.3.15",
+    "@mantine/nprogress": "^8.3.15",
     "@mcap/core": "^2.2.0",
     "@tabler/icons-react": "^3.37.1",
     "@tanstack/react-router": "^1.163.3",

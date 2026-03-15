@@ -5,10 +5,10 @@ import {
   Group,
   Title,
   ActionIcon,
-  Progress,
   useMantineColorScheme,
   useComputedColorScheme,
 } from "@mantine/core";
+import { NavigationProgress } from "@mantine/nprogress";
 import { IconSun, IconMoon } from "@tabler/icons-react";
 import {
   FileProcessorProvider,
@@ -32,18 +32,12 @@ function ColorSchemeToggle() {
 }
 
 function RootLayoutInner() {
-  const { loading, progress, handleFilesSelect } = useFileProcessorContext();
+  const { handleFilesSelect } = useFileProcessorContext();
 
   return (
     <>
       <GlobalDropZone onFilesSelect={handleFilesSelect} />
-      {loading && (
-        <Progress
-          value={progress}
-          size="xs"
-          style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 999 }}
-        />
-      )}
+      <NavigationProgress />
       <Container size="xl" py="xl">
         <Stack gap="lg">
           <Group justify="space-between" align="flex-end">

@@ -19,4 +19,9 @@ function spa404(): Plugin {
 export default defineConfig({
   base: "/robotic-tools/",
   plugins: [tanstackRouter({ quoteStyle: "double" }), react(), spa404()],
+  optimizeDeps: {
+    // Prevent pre-bundling so the library's `new URL('./zstd.wasm', import.meta.url)`
+    // resolves correctly in dev mode.
+    exclude: ["@bokuweb/zstd-wasm"],
+  },
 });

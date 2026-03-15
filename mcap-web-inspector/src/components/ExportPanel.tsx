@@ -8,9 +8,17 @@ import {
   Text,
   Progress,
   RangeSlider,
+  SegmentedControl,
+  Select,
 } from "@mantine/core";
 import { IconDownload } from "@tabler/icons-react";
-import type { McapInfoOutput, FilterConfig } from "../mcap/types.ts";
+import type {
+  McapInfoOutput,
+  FilterConfig,
+  CompressionAlgorithm,
+  OutputConfig,
+} from "../mcap/types.ts";
+import { DEFAULT_OUTPUT_CONFIG } from "../mcap/types.ts";
 import { exportFilteredMcap, downloadMcap } from "../mcap/writer.ts";
 import { formatTimestamp, formatNumber, formatBytes } from "../format.ts";
 import { ChannelsTable } from "./channels-table/ChannelsTable.tsx";
@@ -55,6 +63,10 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
   // Toggles
   const [includeMetadata, setIncludeMetadata] = useState(true);
   const [includeAttachments, setIncludeAttachments] = useState(true);
+
+  // Output settings
+  const [compression, setCompression] = useState<CompressionAlgorithm>(DEFAULT_OUTPUT_CONFIG.compression);
+  const [chunkSize, setChunkSize] = useState<string>(String(DEFAULT_OUTPUT_CONFIG.chunk_size));
 
   // Export state
   const [exporting, setExporting] = useState(false);
@@ -200,13 +212,23 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
         include_attachments: includeAttachments,
       };
 
-      const result = await exportFilteredMcap(file, config, (info) => {
-        setProgressPct(Math.round((info.bytesRead / info.totalBytes) * 100));
-        setProgressInfo({
-          messagesWritten: info.messagesWritten,
-          messagesSkipped: info.messagesSkipped,
-        });
-      });
+      const outputConfig: OutputConfig = {
+        compression,
+        chunk_size: Number(chunkSize),
+      };
+
+      const result = await exportFilteredMcap(
+        file,
+        config,
+        outputConfig,
+        (info) => {
+          setProgressPct(Math.round((info.bytesRead / info.totalBytes) * 100));
+          setProgressInfo({
+            messagesWritten: info.messagesWritten,
+            messagesSkipped: info.messagesSkipped,
+          });
+        },
+      );
 
       // Generate output filename
       const baseName = file.name.replace(/\.mcap$/i, "");
@@ -224,6 +246,8 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
     endTime,
     includeMetadata,
     includeAttachments,
+    compression,
+    chunkSize,
   ]);
 
   // Convert number ns timestamps to display values
@@ -326,6 +350,50 @@ export function ExportPanel({ file, data }: ExportPanelProps) {
           />
         )}
       </Group>
+
+      {/* Output settings */}
+      <div>
+        <Text size="sm" fw={600} mb="xs">
+          Output Settings
+        </Text>
+        <Group gap="xl" align="flex-start">
+          <div>
+            <Text size="xs" c="dimmed" mb={4}>
+              Compression
+            </Text>
+            <SegmentedControl
+              size="xs"
+              value={compression}
+              onChange={(v) => setCompression(v as CompressionAlgorithm)}
+              data={[
+                { label: "Zstd", value: "zstd" },
+                { label: "LZ4", value: "lz4" },
+                { label: "None", value: "none" },
+              ]}
+            />
+          </div>
+          <div>
+            <Text size="xs" c="dimmed" mb={4}>
+              Chunk Size
+            </Text>
+            <Select
+              size="xs"
+              w={120}
+              value={chunkSize}
+              onChange={(v) => v && setChunkSize(v)}
+              data={[
+                { label: "64 KB", value: String(64 * 1024) },
+                { label: "256 KB", value: String(256 * 1024) },
+                { label: "1 MB", value: String(1024 * 1024) },
+                { label: "4 MB", value: String(4 * 1024 * 1024) },
+                { label: "8 MB", value: String(8 * 1024 * 1024) },
+                { label: "16 MB", value: String(16 * 1024 * 1024) },
+              ]}
+              allowDeselect={false}
+            />
+          </div>
+        </Group>
+      </div>
 
       {/* Summary */}
       <Text size="xs" c="dimmed">
