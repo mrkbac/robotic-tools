@@ -3,7 +3,7 @@ from typing import Any, ClassVar
 
 from rich.highlighter import ISO8601Highlighter, ReprHighlighter
 from rich.text import Text
-from ros_parser.message_path import MessagePath, MessagePathError, parse_message_path
+from ros_parser.message_path import LarkError, MessagePath, MessagePathError, parse_message_path
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.validation import ValidationResult, Validator
@@ -92,6 +92,13 @@ def add_node(
             add_node(slot, child, data, expand_depth - 1, auto_expand)
 
 
+def _to_full_path(field_path: str) -> str:
+    """Prepend dummy topic, auto-inserting '.' if the path doesn't start with one."""
+    if not field_path.startswith((".", "[", "{", "@")):
+        field_path = "." + field_path
+    return f"/dummy{field_path}"
+
+
 class QueryValidator(Validator):
     """Validator for query syntax using parse_message_path."""
 
@@ -115,11 +122,11 @@ class QueryValidator(Validator):
             return self.success()
 
         try:
-            parsed = parse_message_path(f"/dummy{value}")
+            parsed = parse_message_path(_to_full_path(value))
             self._cached_parsed = parsed
             self._cached_query = value
             return self.success()
-        except ValueError as e:
+        except (ValueError, LarkError) as e:
             self._cached_parsed = None
             self._cached_query = value
             return self.failure(f"Invalid query syntax: {e}")
@@ -451,16 +458,36 @@ class Raw(BasePanel[MessageEvent]):
         yield Input(placeholder="Filter", compact=True, validators=[self._validator])
         yield TreeView("root").data_bind(guide_depth=2, show_root=False)
 
+    _filter_error: reactive[str] = reactive("")
+
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle query changes from Input."""
         if event.validation_result and event.validation_result.is_valid:
             self.parsed_query = self._validator.get_cached_parsed(event.value)
-            self._update_date()
+            self._filter_error = ""
+        else:
+            self.parsed_query = None
+            self._filter_error = (
+                event.validation_result.failure_descriptions[0]
+                if event.validation_result and event.validation_result.failure_descriptions
+                else "Invalid query"
+            )
+        self._update_tree()
 
-    def _update_date(self) -> None:
+    def _update_tree(self) -> None:
         tree = self.query_one(TreeView)
 
-        if self.parsed_query and self.data and self.parsed_query:
+        if self._filter_error:
+            tree.data = None
+            tree.clear()
+            error_node = tree.root.add("")
+            error_node.set_label(
+                Text.from_markup(f"[bold red]Invalid filter:[/] [red]{self._filter_error}[/]")
+            )
+            error_node.allow_expand = False
+            return
+
+        if self.parsed_query and self.data:
             try:
                 filtered_message = self.parsed_query.apply(self.data.message)
                 tree.data = MessageEvent(
@@ -469,11 +496,14 @@ class Raw(BasePanel[MessageEvent]):
                     timestamp_ns=self.data.timestamp_ns,
                     schema_name=self.data.schema_name,
                 )
-            except MessagePathError:
-                # Ignore for now
-                pass
+            except MessagePathError as e:
+                tree.data = None
+                tree.clear()
+                error_node = tree.root.add("")
+                error_node.set_label(Text.from_markup(f"[bold red]Path error:[/] [red]{e}[/]"))
+                error_node.allow_expand = False
         else:
             tree.data = self.data
 
     def watch_data(self, _data: MessageEvent | None) -> None:
-        self._update_date()
+        self._update_tree()

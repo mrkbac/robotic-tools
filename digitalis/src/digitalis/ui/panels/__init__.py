@@ -4,6 +4,7 @@ from .image import ImageViewer
 from .interactive_base import InteractiveRenderPanel
 from .navsat_fix import NavSatFix
 from .occupancy_grid import OccupancyGrid
+from .plot import Plot
 from .pointcloud import PointCloud
 from .raw import Raw
 from .tf import Tf
@@ -15,6 +16,7 @@ __all__ = [
     "InteractiveRenderPanel",
     "NavSatFix",
     "OccupancyGrid",
+    "Plot",
     "PointCloud",
     "Raw",
     "Tf",
