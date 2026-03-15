@@ -51,21 +51,37 @@ array_slice: "[" slice_value ":" slice_value "]"  -> slice_both
 
 slice_value: SIGNED_INT | variable
 
-// Filter: {field > value}, {nested.field == "string"}
-filter: "{" field_path COMPARISON_OP value "}"
+// Filter: {field > value}, {a > 1 || b < 2}, {!(type == "error")}, {x in [1, 2, 3]}
+filter: "{" filter_expr "}"
+
+// Boolean expression hierarchy (precedence: || < && < !)
+?filter_expr: or_expr
+?or_expr: and_expr ("||" and_expr)*
+?and_expr: not_expr ("&&" not_expr)*
+?not_expr: "!" not_expr -> not_filter
+         | filter_atom
+?filter_atom: comparison
+            | in_expr
+            | "(" filter_expr ")"
+
+// Comparison: field op value, or field op field (cross-field)
+comparison: field_path COMPARISON_OP filter_value
+
+// In expression: field in [val1, val2, ...]
+in_expr: field_path "in" "[" filter_value ("," filter_value)* "]"
+
+// Filter values can be literals, variables, or field paths (for cross-field comparison)
+?filter_value: SIGNED_NUMBER  -> filter_literal
+             | STRING         -> filter_literal
+             | BOOLEAN        -> filter_literal
+             | variable       -> filter_literal
+             | field_path     -> filter_field_ref
 
 // Field path within filter (can be nested with dots)
 field_path: IDENTIFIER ("." IDENTIFIER)*
 
 // Comparison operators terminal (order matters: longer matches first)
 COMPARISON_OP: "==" | "!=" | "<=" | ">=" | "<" | ">"
-
-// Values in filters can be numbers, strings, booleans, variables, or identifiers
-?value: SIGNED_NUMBER
-      | STRING
-      | BOOLEAN
-      | variable
-      | IDENTIFIER
 
 // Boolean literals (higher priority than IDENTIFIER to match first)
 BOOLEAN.1: "true" | "false"

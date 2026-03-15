@@ -7,9 +7,15 @@ from ._standalone_parser import Lark_StandAlone
 from .models import (
     ArrayIndex,
     ArraySlice,
+    Comparison,
     ComparisonOperator,
+    CompoundFilter,
     FieldAccess,
     Filter,
+    FilterExpression,
+    FilterFieldRef,
+    FilterValue,
+    InExpression,
     MathModifier,
     MessagePath,
     Variable,
@@ -72,19 +78,44 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         return int(item)
 
     def filter(self, items: list[Any]) -> Filter:
-        """Build Filter from field path, operator, and value."""
-        field_path = items[0]
-        operator_str = str(items[1])  # COMPARISON_OP token
-        value = items[2]  # Already transformed by terminal methods or is Variable
+        """Build Filter from a filter expression."""
+        return Filter(expression=items[0])
 
-        # Convert operator string to enum
-        operator = ComparisonOperator(operator_str)
+    def or_expr(self, items: list[FilterExpression]) -> CompoundFilter:
+        """Build OR compound filter."""
+        return CompoundFilter(op="or", children=items)
 
-        return Filter(field_path=field_path, operator=operator, value=value)
+    def and_expr(self, items: list[FilterExpression]) -> CompoundFilter:
+        """Build AND compound filter."""
+        return CompoundFilter(op="and", children=items)
+
+    def not_filter(self, items: list[FilterExpression]) -> CompoundFilter:
+        """Build NOT compound filter."""
+        return CompoundFilter(op="not", children=[items[0]])
+
+    def comparison(self, items: list[Any]) -> Comparison:
+        """Build Comparison from field path, operator, and value."""
+        field_path: str = items[0]
+        operator = ComparisonOperator(str(items[1]))
+        value: FilterValue = items[2]
+        return Comparison(field_path=field_path, operator=operator, value=value)
+
+    def in_expr(self, items: list[Any]) -> InExpression:
+        """Build InExpression from field path and list of values."""
+        field_path: str = items[0]
+        values: list[FilterValue] = items[1:]
+        return InExpression(field_path=field_path, values=values)
+
+    def filter_literal(self, items: list[Any]) -> FilterValue:
+        """Pass through a literal filter value."""
+        return items[0]
+
+    def filter_field_ref(self, items: list[Any]) -> FilterFieldRef:
+        """Build a field reference for cross-field comparison."""
+        return FilterFieldRef(field_path=items[0])
 
     def field_path(self, items: list[Token]) -> str:
         """Build field path string from identifiers."""
-        # Join all identifiers with dots
         return ".".join(str(item) for item in items)
 
     def math_modifier_with_args(self, items: list[Any]) -> MathModifier:

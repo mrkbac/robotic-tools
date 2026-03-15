@@ -5,13 +5,17 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from operator import neg
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ros_parser.models import MessageDefinition, Type
 
 
 class MessagePathError(Exception):
     """Exception raised when message path operations fail."""
+
+
+class FieldResolutionError(MessagePathError):
+    """Exception raised when a field path cannot be resolved on an object."""
 
 
 class ValidationError(Exception):
@@ -239,93 +243,146 @@ class ArraySlice(Action):
 
 
 @dataclass
-class Filter(Action):
+class FilterFieldRef:
+    """A reference to a field path used as a value in filter comparisons (cross-field)."""
+
+    field_path: str
+
+    def resolve(self, obj: Any) -> Any:
+        """Resolve the field path against an object."""
+        return _resolve_field_path(obj, self.field_path)
+
+
+FilterValue = int | float | str | bool | Variable | FilterFieldRef
+
+
+def _resolve_field_path(obj: Any, field_path: str) -> Any:
+    """Extract field value from nested field path (e.g., 'pose.x')."""
+    value = obj
+    for part in field_path.split("."):
+        if isinstance(value, Mapping):
+            if part not in value:
+                raise FieldResolutionError(f"Field '{part}' not found in mapping")
+            value = value[part]
+        else:
+            try:
+                value = getattr(value, part)
+            except AttributeError:
+                obj_type = type(value).__name__
+                raise FieldResolutionError(
+                    f"Field '{part}' not found on object of type '{obj_type}'"
+                ) from None
+    return value
+
+
+def _resolve_filter_value(val: FilterValue, obj: Any, variables: _VariableStore) -> Any:
+    """Resolve a filter value to a concrete value for comparison."""
+    if isinstance(val, Variable):
+        return variables[val.name]
+    if isinstance(val, FilterFieldRef):
+        return val.resolve(obj)
+    return val
+
+
+def _compare(field_value: Any, operator: ComparisonOperator, compare_value: Any) -> bool:
+    """Compare two values according to the operator."""
+    try:
+        if operator == ComparisonOperator.EQUAL:
+            return bool(field_value == compare_value)
+        if operator == ComparisonOperator.NOT_EQUAL:
+            return bool(field_value != compare_value)
+        if operator == ComparisonOperator.LESS_THAN:
+            return bool(field_value < compare_value)
+        if operator == ComparisonOperator.LESS_THAN_OR_EQUAL:
+            return bool(field_value <= compare_value)
+        if operator == ComparisonOperator.GREATER_THAN:
+            return bool(field_value > compare_value)
+        if operator == ComparisonOperator.GREATER_THAN_OR_EQUAL:
+            return bool(field_value >= compare_value)
+        raise MessagePathError(f"Unsupported comparison operator: {operator}")
+    except TypeError as e:
+        raise MessagePathError(
+            f"Cannot compare {type(field_value).__name__} with {type(compare_value).__name__} "
+            f"using operator {operator.value}"
+        ) from e
+
+
+class FilterExpression(ABC):
+    """Base class for filter expressions (used inside {})."""
+
+    @abstractmethod
+    def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
+        """Evaluate this filter expression against an object."""
+
+
+@dataclass
+class Comparison(FilterExpression):
+    """A single comparison: field_path op value."""
+
     field_path: str
     operator: ComparisonOperator
-    value: int | float | str | bool | Variable
+    value: FilterValue
+
+    def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
+        field_value = _resolve_field_path(obj, self.field_path)
+        compare_value = _resolve_filter_value(self.value, obj, variables)
+        return _compare(field_value, self.operator, compare_value)
+
+
+@dataclass
+class InExpression(FilterExpression):
+    """Membership test: field_path in [val1, val2, ...]."""
+
+    field_path: str
+    values: list[FilterValue]
+
+    def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
+        field_value = _resolve_field_path(obj, self.field_path)
+        resolved = [_resolve_filter_value(v, obj, variables) for v in self.values]
+        return field_value in resolved
+
+
+@dataclass
+class CompoundFilter(FilterExpression):
+    """Boolean combination of filter expressions."""
+
+    op: Literal["and", "or", "not"]
+    children: list[FilterExpression]
+
+    def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
+        if self.op == "and":
+            return all(child.evaluate(obj, variables) for child in self.children)
+        if self.op == "or":
+            return any(child.evaluate(obj, variables) for child in self.children)
+        # not
+        return not self.children[0].evaluate(obj, variables)
+
+
+@dataclass
+class Filter(Action):
+    expression: FilterExpression
 
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """
-        Filter a sequence or single object based on a field comparison.
+        Filter a sequence or single object based on a filter expression.
 
         For sequences (list/tuple): Returns a new list with only matching items.
         For single objects: Returns the object if it matches, or None if it doesn't.
         """
-        # Handle single objects
         if not isinstance(obj, (list, tuple)):
             try:
-                field_value = self._get_field_value(obj)
-            except MessagePathError:
-                # Field doesn't exist on this object
+                return obj if self.expression.evaluate(obj, variables) else None
+            except FieldResolutionError:
                 return None
 
-            compare_value = (
-                variables[self.value.name] if isinstance(self.value, Variable) else self.value
-            )
-            # Return the object if it matches, None otherwise
-            return obj if self._compare(field_value, compare_value) else None
-
-        # Handle sequences (lists/tuples)
         filtered: list[Any] = []
         for item in obj:
             try:
-                field_value = self._get_field_value(item)
-            except MessagePathError:
-                # If field doesn't exist on this item, skip it
+                if self.expression.evaluate(item, variables):
+                    filtered.append(item)
+            except FieldResolutionError:
                 continue
-
-            compare_value = (
-                variables[self.value.name] if isinstance(self.value, Variable) else self.value
-            )
-            if self._compare(field_value, compare_value):
-                filtered.append(item)
         return filtered
-
-    def _get_field_value(self, obj: Any) -> Any:
-        """Extract field value from nested field path (e.g., 'pose.x')."""
-        field_value = obj
-        for part in self.field_path.split("."):
-            # Use FieldAccess logic for consistent field access
-            if isinstance(field_value, Mapping):
-                if part not in field_value:
-                    raise MessagePathError(f"Field '{part}' not found in mapping")
-                field_value = field_value[part]
-            else:
-                try:
-                    field_value = getattr(field_value, part)
-                except AttributeError:
-                    obj_type = type(field_value).__name__
-                    raise MessagePathError(
-                        f"Field '{part}' not found on object of type '{obj_type}'"
-                    ) from None
-        return field_value
-
-    def _compare(self, field_value: Any, compare_value: Any) -> bool:
-        """Compare two values according to the operator."""
-        try:
-            if self.operator == ComparisonOperator.EQUAL:
-                return bool(field_value == compare_value)
-            if self.operator == ComparisonOperator.NOT_EQUAL:
-                return bool(field_value != compare_value)
-
-            # For ordering comparisons, ensure types are comparable
-            # Allow int/float mixing but catch other type mismatches
-            if self.operator == ComparisonOperator.LESS_THAN:
-                return bool(field_value < compare_value)
-            if self.operator == ComparisonOperator.LESS_THAN_OR_EQUAL:
-                return bool(field_value <= compare_value)
-            if self.operator == ComparisonOperator.GREATER_THAN:
-                return bool(field_value > compare_value)
-            if self.operator == ComparisonOperator.GREATER_THAN_OR_EQUAL:
-                return bool(field_value >= compare_value)
-
-            raise MessagePathError(f"Unsupported comparison operator: {self.operator}")
-        except TypeError as e:
-            # Comparison between incompatible types
-            raise MessagePathError(
-                f"Cannot compare {type(field_value).__name__} with {type(compare_value).__name__} "
-                f"using operator {self.operator.value}"
-            ) from e
 
     def validate(
         self,
@@ -349,56 +406,41 @@ class Filter(Action):
                 is_upper_bound=False,
                 string_upper_bound=current_type.string_upper_bound,
             )
-            # Get element's message definition if complex.
-            # ValidationError is suppressed for partial validation - the element type
-            # may reference a message not included in all_definitions.
             validate_msgdef = None
             if not validate_type.is_primitive:
                 with contextlib.suppress(ValidationError):
                     validate_msgdef = _get_message_definition(validate_type, all_definitions)
 
-        # Validate the filter's field path
-        field_parts = self.field_path.split(".")
-        working_type = validate_type
-        working_msgdef = validate_msgdef
-
-        for part in field_parts:
-            if working_type.is_primitive:
-                raise ValidationError(
-                    f"Cannot access field '{part}' on primitive type '{working_type}' "
-                    f"in filter field path '{self.field_path}'"
-                )
-
-            if working_type.is_array:
-                raise ValidationError(
-                    f"Cannot access field '{part}' on array type '{working_type}' "
-                    f"in filter field path '{self.field_path}'. "
-                    "Nested array filtering is not supported"
-                )
-
-            if working_msgdef is None:
-                working_msgdef = _get_message_definition(working_type, all_definitions)
-
-            field = next((f for f in working_msgdef.fields if f.name == part), None)
-            if not field:
-                available = [f.name for f in working_msgdef.fields]
-                raise ValidationError(
-                    f"Field '{part}' not found in message '{working_type}' "
-                    f"in filter field path '{self.field_path}'. "
-                    f"Available fields: {', '.join(available) if available else 'none'}"
-                )
-
-            working_type = field.type
-            # Update working_msgdef if it's a complex type.
-            # ValidationError is suppressed to allow validation to continue even when
-            # nested types aren't available in all_definitions (partial schema loading).
-            working_msgdef = None
-            if not working_type.is_primitive and not working_type.is_array:
-                with contextlib.suppress(ValidationError):
-                    working_msgdef = _get_message_definition(working_type, all_definitions)
+        # Validate all field paths in the expression
+        self._validate_expression(self.expression, validate_type, validate_msgdef, all_definitions)
 
         # Filter returns the same type as input
         return current_type, current_msgdef
+
+    def _validate_expression(
+        self,
+        expr: FilterExpression,
+        validate_type: "Type",
+        validate_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> None:
+        """Recursively validate all field paths in a filter expression."""
+        if isinstance(expr, Comparison):
+            _validate_field_path(expr.field_path, validate_type, validate_msgdef, all_definitions)
+            if isinstance(expr.value, FilterFieldRef):
+                _validate_field_path(
+                    expr.value.field_path, validate_type, validate_msgdef, all_definitions
+                )
+        elif isinstance(expr, InExpression):
+            _validate_field_path(expr.field_path, validate_type, validate_msgdef, all_definitions)
+            for val in expr.values:
+                if isinstance(val, FilterFieldRef):
+                    _validate_field_path(
+                        val.field_path, validate_type, validate_msgdef, all_definitions
+                    )
+        elif isinstance(expr, CompoundFilter):
+            for child in expr.children:
+                self._validate_expression(child, validate_type, validate_msgdef, all_definitions)
 
 
 def _add(value: float, *args: float) -> float:
@@ -443,6 +485,11 @@ def _max(*args: float) -> float:
     return max(args)
 
 
+def _wrap_angle(value: float) -> float:
+    """Wrap angle to [-pi, pi] range."""
+    return (value + math.pi) % (2 * math.pi) - math.pi
+
+
 _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "abs": abs,
     "acos": math.acos,
@@ -468,6 +515,122 @@ _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "round": _round_with_arg,
     "min": _min,
     "max": _max,
+    "degrees": math.degrees,
+    "radians": math.radians,
+    "wrap_angle": _wrap_angle,
+}
+
+
+def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
+    """Sentinel for time-series functions. Raises when called without TransformContext."""
+    raise MessagePathError(
+        "Time-series function requires TransformContext. "
+        "Use digitalis transforms.apply_with_history() instead."
+    )
+
+
+TIMESERIES_OPS: set[str] = {"delta", "derivative", "timedelta"}
+
+# Add time-series sentinels to _FUNCTIONS_NO_ARGS
+_FUNCTIONS_NO_ARGS["delta"] = _timeseries_sentinel
+_FUNCTIONS_NO_ARGS["derivative"] = _timeseries_sentinel
+_FUNCTIONS_NO_ARGS["timedelta"] = _timeseries_sentinel
+
+
+def _norm(obj: Any) -> float:
+    """Euclidean norm of object with x/y/z fields."""
+    try:
+        x = obj.x if hasattr(obj, "x") else obj["x"]
+        y = obj.y if hasattr(obj, "y") else obj["y"]
+        z = obj.z if hasattr(obj, "z") else obj["z"]
+    except (AttributeError, KeyError, TypeError) as e:
+        raise MessagePathError("norm requires an object with x, y, z fields") from e
+    return math.sqrt(x * x + y * y + z * z)
+
+
+@dataclass
+class EulerAngles:
+    """Roll, pitch, yaw Euler angles (radians). Supports attribute access like Foxglove."""
+
+    roll: float
+    pitch: float
+    yaw: float
+
+
+@dataclass
+class Quaternion:
+    """Quaternion (x, y, z, w). Supports attribute access like Foxglove."""
+
+    x: float
+    y: float
+    z: float
+    w: float
+
+
+def _quaternion_to_euler(obj: Any) -> EulerAngles:
+    """Convert quaternion (x,y,z,w) to EulerAngles(roll, pitch, yaw)."""
+    try:
+        x = obj.x if hasattr(obj, "x") else obj["x"]
+        y = obj.y if hasattr(obj, "y") else obj["y"]
+        z = obj.z if hasattr(obj, "z") else obj["z"]
+        w = obj.w if hasattr(obj, "w") else obj["w"]
+    except (AttributeError, KeyError, TypeError) as e:
+        raise MessagePathError("rpy requires an object with x, y, z, w fields") from e
+
+    t0 = 2.0 * (w * x + y * z)
+    t1 = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(t0, t1)
+
+    t2 = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = math.asin(t2)
+
+    t3 = 2.0 * (w * z + x * y)
+    t4 = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(t3, t4)
+
+    return EulerAngles(roll=roll, pitch=pitch, yaw=yaw)
+
+
+def _euler_to_quaternion(obj: Any) -> Quaternion:
+    """Convert (roll, pitch, yaw) stored as (x, y, z) to Quaternion(x, y, z, w)."""
+    try:
+        roll = obj.x if hasattr(obj, "x") else obj["x"]
+        pitch = obj.y if hasattr(obj, "y") else obj["y"]
+        yaw = obj.z if hasattr(obj, "z") else obj["z"]
+    except (AttributeError, KeyError, TypeError) as e:
+        raise MessagePathError(
+            "quat requires an object with x, y, z fields (roll, pitch, yaw)"
+        ) from e
+
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    qw = cr * cp * cy + sr * sp * sy
+
+    return Quaternion(x=qx, y=qy, z=qz, w=qw)
+
+
+def _magnitude(obj: Any) -> float:
+    """L2 norm of a list/array/sequence of numbers."""
+    if isinstance(obj, (list, tuple)):
+        return math.sqrt(sum(v * v for v in obj))
+    # Try to iterate (numpy arrays, etc.)
+    try:
+        values = list(obj)
+        return math.sqrt(sum(v * v for v in values))
+    except TypeError as e:
+        raise MessagePathError("magnitude requires a list or array of numbers") from e
+
+
+_OBJECT_FUNCTIONS: dict[str, Callable[..., Any]] = {
+    "norm": _norm,
+    "rpy": _quaternion_to_euler,
+    "quat": _euler_to_quaternion,
+    "magnitude": _magnitude,
 }
 
 
@@ -485,6 +648,10 @@ class MathModifier(Action):
             variables[arg.name] if isinstance(arg, Variable) else arg for arg in self.arguments
         ]
 
+        # Object-level functions operate on the whole object (not element-wise)
+        if self.operation in _OBJECT_FUNCTIONS:
+            return self._apply_operation(obj, resolved_args)
+
         # Check if obj is a sequence for element-wise operation
         if isinstance(obj, (list, tuple)):
             # Apply element-wise
@@ -495,9 +662,20 @@ class MathModifier(Action):
         # Apply to single value
         return self._apply_operation(obj, resolved_args)
 
-    def _apply_operation(self, value: Any, args: list[int | float]) -> int | float:
-        """Apply the math operation to a single numeric value."""
-        # Validate that value is numeric
+    def _apply_operation(
+        self, value: Any, args: list[int | float]
+    ) -> int | float | tuple[float, ...]:
+        """Apply the math operation to a single value."""
+        # Check object-level functions first (these accept non-numeric inputs)
+        if func := _OBJECT_FUNCTIONS.get(self.operation):
+            try:
+                return func(value, *args) if args else func(value)
+            except MessagePathError:
+                raise
+            except Exception as e:
+                raise MessagePathError(f"Error in '{self.operation}': {e!s}") from e
+
+        # Validate that value is numeric for scalar functions
         if not isinstance(value, (int, float)):
             raise MessagePathError(
                 f"Math modifier '{self.operation}' can only be applied to numeric types, "
@@ -541,6 +719,23 @@ class MathModifier(Action):
                 is_upper_bound=False,
                 string_upper_bound=current_type.string_upper_bound,
             )
+
+        # Object-level functions work on complex types
+        if self.operation in _OBJECT_FUNCTIONS:
+            # These functions return numeric types
+            float_type = Type(
+                type_name="float64",
+                package_name=None,
+                is_array=False,
+                array_size=None,
+                is_upper_bound=False,
+                string_upper_bound=None,
+            )
+            return float_type, None
+
+        # Time-series functions work on numeric types, preserve type
+        if self.operation in TIMESERIES_OPS:
+            return current_type, current_msgdef
 
         # Check if the base type is numeric
         if not working_type.is_primitive:
@@ -631,6 +826,50 @@ class MessagePath:
             current_type, current_msgdef = segment.validate(
                 current_type, current_msgdef, all_definitions
             )
+
+
+def _validate_field_path(
+    field_path: str,
+    validate_type: "Type",
+    validate_msgdef: "MessageDefinition | None",
+    all_definitions: dict[str, "MessageDefinition"],
+) -> None:
+    """Validate a field path against a type schema."""
+    field_parts = field_path.split(".")
+    working_type = validate_type
+    working_msgdef = validate_msgdef
+
+    for part in field_parts:
+        if working_type.is_primitive:
+            raise ValidationError(
+                f"Cannot access field '{part}' on primitive type '{working_type}' "
+                f"in filter field path '{field_path}'"
+            )
+
+        if working_type.is_array:
+            raise ValidationError(
+                f"Cannot access field '{part}' on array type '{working_type}' "
+                f"in filter field path '{field_path}'. "
+                "Nested array filtering is not supported"
+            )
+
+        if working_msgdef is None:
+            working_msgdef = _get_message_definition(working_type, all_definitions)
+
+        field = next((f for f in working_msgdef.fields if f.name == part), None)
+        if not field:
+            available = [f.name for f in working_msgdef.fields]
+            raise ValidationError(
+                f"Field '{part}' not found in message '{working_type}' "
+                f"in filter field path '{field_path}'. "
+                f"Available fields: {', '.join(available) if available else 'none'}"
+            )
+
+        working_type = field.type
+        working_msgdef = None
+        if not working_type.is_primitive and not working_type.is_array:
+            with contextlib.suppress(ValidationError):
+                working_msgdef = _get_message_definition(working_type, all_definitions)
 
 
 def _get_message_definition(

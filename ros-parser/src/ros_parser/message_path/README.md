@@ -71,7 +71,42 @@ Filter messages using curly braces with comparison expressions:
 | `>`      | Greater than          | `{pressure > 101.3}`   |
 | `>=`     | Greater than or equal | `{score >= 0.95}`      |
 
-#### Multiple Filters (AND Logic)
+#### Boolean Logic
+
+Combine conditions with `&&` (AND), `||` (OR), and `!` (NOT):
+
+```
+/detections.objects[:]{confidence > 0.8 || class == "person"}
+/sensors[:]{active == true && value > 0}
+/data{!(type == "error")}
+```
+
+Use parentheses to control precedence (`&&` binds tighter than `||`):
+
+```
+/topic{(x > 1 || y > 1) && z == 0}
+/alerts{!(severity == "low") && active == true}
+```
+
+#### Cross-Field Comparison
+
+Compare one field against another field on the same object:
+
+```
+/odom{position.x > target.x}
+/readings[:]{measured > expected}
+```
+
+#### `in` Membership Operator
+
+Test if a field's value is one of a set of values:
+
+```
+/markers[:]{type in [1, 3, 5]}
+/sensors[:]{status in ["active", "calibrating"]}
+```
+
+#### Multiple Filters (AND Logic via Chaining)
 
 Chain multiple filters together - all conditions must be true:
 
@@ -81,7 +116,107 @@ Chain multiple filters together - all conditions must be true:
 
 This is equivalent to: `category == "robot" AND status == "active" AND battery > 20`
 
-### 6. Variables
+### 6. Math Modifiers (`.@`)
+
+Math modifiers transform numeric values using the `.@` syntax. They can be chained and support optional arguments.
+
+```
+/topic.value.@abs                  # No arguments
+/topic.value.@mul(2.5)             # Single argument
+/topic.value.@add($offset)         # Variable argument
+/topic.value.@mul(1.8).@add(32)    # Chaining (Celsius to Fahrenheit)
+/topic.value.@add(5, 10, 3)        # Multiple arguments
+```
+
+**Element-wise arrays**: When applied to an array, modifiers operate on each element automatically:
+
+```
+/topic.values[:].@mul(2)           # Doubles every element
+/topic.readings[:].@abs            # Absolute value of each reading
+```
+
+#### Scalar Math Functions
+
+These operate on numeric values (int/float). When applied to arrays, they work element-wise.
+
+| Modifier | Arguments | Description | Example |
+| --- | --- | --- | --- |
+| `.@abs` | none | Absolute value | `/topic.value.@abs` |
+| `.@negative` | none | Negate value | `/topic.value.@negative` |
+| `.@sign` | none | Sign: 1, -1, or 0 | `/topic.value.@sign` |
+| `.@ceil` | none | Round up to integer | `/topic.value.@ceil` |
+| `.@floor` | none | Round down to integer | `/topic.value.@floor` |
+| `.@trunc` | none | Truncate to integer | `/topic.value.@trunc` |
+| `.@round` | `(precision?)` | Round, optional decimal places | `.@round` or `.@round(2)` |
+| `.@sqrt` | none | Square root | `/topic.value.@sqrt` |
+| `.@log` | none | Natural logarithm | `/topic.value.@log` |
+| `.@log1p` | none | ln(1 + x), accurate for small x | `/topic.value.@log1p` |
+| `.@log2` | none | Base-2 logarithm | `/topic.value.@log2` |
+| `.@log10` | none | Base-10 logarithm | `/topic.value.@log10` |
+
+#### Arithmetic Functions
+
+| Modifier | Arguments | Description | Example |
+| --- | --- | --- | --- |
+| `.@add` | `(a, b?, ...)` | Add values | `.@add(10)` or `.@add(5, 10, 3)` |
+| `.@sub` | `(a, b?, ...)` | Subtract values | `.@sub(5)` |
+| `.@mul` | `(a, b?, ...)` | Multiply by values | `.@mul(2)` or `.@mul(2, 3)` |
+| `.@div` | `(divisor)` | Divide (errors on zero) | `.@div(100)` |
+| `.@min` | `(a, b?, ...)` | Minimum of value and args | `.@min(5, 2, 8)` |
+| `.@max` | `(a, b?, ...)` | Maximum of value and args | `.@max(5, 2, 8)` |
+
+#### Trigonometric Functions
+
+| Modifier | Arguments | Description |
+| --- | --- | --- |
+| `.@sin` | none | Sine (radians) |
+| `.@cos` | none | Cosine (radians) |
+| `.@tan` | none | Tangent (radians) |
+| `.@asin` | none | Arcsine (returns radians) |
+| `.@acos` | none | Arccosine (returns radians) |
+| `.@atan` | none | Arctangent (returns radians) |
+| `.@degrees` | none | Convert radians to degrees |
+| `.@radians` | none | Convert degrees to radians |
+| `.@wrap_angle` | none | Wrap angle to [-pi, pi] range |
+
+#### Robotics Functions
+
+These operate on objects with specific field structures (e.g., geometry messages), not on scalar values.
+
+| Modifier | Input fields | Description | Output |
+| --- | --- | --- | --- |
+| `.@norm` | `x, y, z` | Euclidean norm (L2) of a 3D vector | `float` |
+| `.@magnitude` | sequence | L2 norm of a list/array of numbers | `float` |
+| `.@rpy` | `x, y, z, w` | Quaternion to Euler angles | `EulerAngles(.roll, .pitch, .yaw)` |
+| `.@quat` | `x, y, z` | Euler angles (roll=x, pitch=y, yaw=z) to quaternion | `Quaternion(.x, .y, .z, .w)` |
+
+The results of `.@rpy` and `.@quat` are objects with named fields, so you can chain field access:
+
+```
+/odom.pose.orientation.@rpy.yaw    # Extract just the yaw angle
+/odom.pose.orientation.@rpy.roll   # Extract just the roll angle
+/topic.euler.@quat.w              # Extract the w component of the quaternion
+/odom.pose.position.@norm          # Distance from origin
+/imu.linear_acceleration.@magnitude
+```
+
+#### Time-Series Functions
+
+These require a `TransformContext` and cannot be used in standalone evaluation. They track state across messages.
+
+| Modifier | Description |
+| --- | --- |
+| `.@delta` | Difference from previous value |
+| `.@derivative` | Rate of change (delta / time_delta) |
+| `.@timedelta` | Time elapsed since previous message |
+
+```
+/odom.pose.position.x.@delta       # Change in x per message
+/odom.pose.position.x.@derivative  # Velocity (dx/dt)
+/topic.header.stamp.@timedelta     # Time between messages
+```
+
+### 7. Variables
 
 Variables are prefixed with `$` and can be used in slices and filters:
 
@@ -181,6 +316,28 @@ Filter by a specific robot ID and slice events within a time range.
 
 Find low-stock items in a specific category.
 
+### Boolean Logic in Filters
+
+```
+/detections.objects[:]{confidence > 0.8 || class == "person"}.label
+```
+
+Get labels for high-confidence detections or anything classified as a person.
+
+```
+/sensors[:]{!(status == "offline") && value > threshold}
+```
+
+Find online sensors where value exceeds their threshold (cross-field comparison).
+
+### Membership Testing
+
+```
+/markers[:]{type in [1, 3, 5]}.pose
+```
+
+Get poses of markers with specific type IDs.
+
 ## Grammar Overview
 
 ```
@@ -192,18 +349,30 @@ path_segment    : field_access
                 | array_index
                 | array_slice
                 | filter
+                | math_modifier
 
 field_access    : "." identifier
+
+math_modifier   : ".@" identifier "(" args ")"
+                | ".@" identifier
 
 array_index     : "[" (integer | negative_int | variable) "]"
 
 array_slice     : "[" slice_start? ":" slice_end? "]"
 
-filter          : "{" field_expr operator value "}"
+filter          : "{" filter_expr "}"
+
+filter_expr     : or_expr
+or_expr         : and_expr ("||" and_expr)*
+and_expr        : not_expr ("&&" not_expr)*
+not_expr        : "!" not_expr | filter_atom
+filter_atom     : comparison | in_expr | "(" filter_expr ")"
+comparison      : field_path operator filter_value
+in_expr         : field_path "in" "[" filter_value ("," filter_value)* "]"
+
+filter_value    : number | string | boolean | variable | field_path
 
 operator        : "==" | "!=" | "<" | "<=" | ">" | ">="
-
-value           : number | string | boolean | variable
 
 variable        : "$" identifier
 ```
