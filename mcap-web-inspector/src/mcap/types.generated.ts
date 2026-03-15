@@ -14,7 +14,7 @@
  * This interface was referenced by `McapInfoOutput1`'s JSON-Schema
  * via the `definition` "ScanMode".
  */
-export type ScanMode = "summary" | "rebuild" | "exact";
+export type ScanMode = 'summary' | 'rebuild' | 'exact';
 
 /**
  * Complete MCAP info output structure.
