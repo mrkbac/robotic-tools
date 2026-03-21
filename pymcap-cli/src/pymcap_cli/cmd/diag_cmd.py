@@ -139,7 +139,7 @@ def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str]:
     """Compile a regex pattern with a user-friendly error on invalid syntax."""
     try:
         return re.compile(pattern, re.IGNORECASE)
-    except re.PatternError as e:
+    except re.error as e:
         console_err.print(f"[red]Invalid regex for {flag_name}: {e}[/red]")
         raise SystemExit(1) from e
 
