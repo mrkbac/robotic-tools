@@ -135,21 +135,30 @@ def _format_timestamp(timestamp_ns: int) -> str:
     return datetime.fromtimestamp(timestamp_ns / 1_000_000_000).strftime("%H:%M:%S.%f")[:-3]
 
 
+def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str]:
+    """Compile a regex pattern with a user-friendly error on invalid syntax."""
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.PatternError as e:
+        console_err.print(f"[red]Invalid regex for {flag_name}: {e}[/red]")
+        raise SystemExit(1) from e
+
+
 def _filter_entries(
     entries: dict[str, DiagEntry],
     *,
     min_level: int,
-    name_pattern: str | None,
-    hw_pattern: str | None,
+    name_pattern: re.Pattern[str] | None,
+    hw_pattern: re.Pattern[str] | None,
 ) -> list[DiagEntry]:
     """Filter and sort entries."""
     result = []
     for entry in entries.values():
         if entry.worst_level < min_level:
             continue
-        if name_pattern and not re.search(name_pattern, entry.name, re.IGNORECASE):
+        if name_pattern and not name_pattern.search(entry.name):
             continue
-        if hw_pattern and not re.search(hw_pattern, entry.hardware_id, re.IGNORECASE):
+        if hw_pattern and not hw_pattern.search(entry.hardware_id):
             continue
         result.append(entry)
 
@@ -375,6 +384,13 @@ def diag(
             group=DISPLAY_GROUP,
         ),
     ] = None,
+    inspect_all: Annotated[
+        bool,
+        Parameter(
+            name=["-I", "--inspect-all"],
+            group=DISPLAY_GROUP,
+        ),
+    ] = False,
     tree: Annotated[
         bool,
         Parameter(
@@ -419,6 +435,9 @@ def diag(
       # Inspect a specific component in detail
       pymcap-cli diag recording.mcap --inspect "encoder"
 
+      # Inspect all components
+      pymcap-cli diag recording.mcap --inspect-all
+
       # Hierarchical tree view
       pymcap-cli diag recording.mcap --tree
 
@@ -440,6 +459,8 @@ def diag(
         Regex filter on hardware ID (case-insensitive).
     inspect
         Show detailed view for components matching this regex.
+    inspect_all
+        Show detailed view for all components.
     tree
         Display as hierarchical tree instead of flat table.
     topic
@@ -447,6 +468,13 @@ def diag(
     json_output
         Output as JSON for scripting.
     """
+    # Compile regex patterns upfront so invalid patterns fail fast
+    name_re = _compile_pattern(name, "--name") if name else None
+    hw_re = _compile_pattern(hardware_id, "--hardware-id") if hardware_id else None
+    if inspect_all:
+        inspect = "."
+    inspect_re = _compile_pattern(inspect, "--inspect") if inspect else None
+
     try:
         entries = _collect_diagnostics(file, topic)
     except (OSError, ValueError, RuntimeError) as e:
@@ -464,29 +492,22 @@ def diag(
     for entry in entries.values():
         level_totals[entry.worst_level] += 1
 
-    if show_all:
+    if show_all or inspect_re:
         min_level = 0
     elif level is not None:
         min_level = level
     else:
         min_level = 1
 
-    filtered = _filter_entries(
-        entries, min_level=min_level, name_pattern=name, hw_pattern=hardware_id
-    )
+    filtered = _filter_entries(entries, min_level=min_level, name_pattern=name_re, hw_pattern=hw_re)
 
     if json_output:
         output = _build_json_output(filtered, len(entries), level_totals)
         print(json.dumps(output, indent=2), file=sys.stdout)  # noqa: T201
         return 0
 
-    if inspect:
-        # Try with current filters first, fall back to ignoring level filter
-        matched = [e for e in filtered if re.search(inspect, e.name, re.IGNORECASE)]
-        if not matched:
-            matched = _filter_entries(
-                entries, min_level=0, name_pattern=inspect, hw_pattern=hardware_id
-            )
+    if inspect_re:
+        matched = [e for e in filtered if inspect_re.search(e.name)]
         if not matched:
             console_err.print(f"[yellow]No components matching '{inspect}'[/yellow]")
             return 0
