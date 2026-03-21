@@ -44,6 +44,9 @@ Issues = "https://github.com/mrkbac/robotic-tools/issues"
 [project.optional-dependencies]
 video = ["av>=12.0.0", "numpy>=1.24.0"]
 pointcloud = ["pureini"]
+plot = [
+    "plotly>=6.0.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

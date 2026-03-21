@@ -106,8 +106,6 @@ class Field:
         if self.default_value is not None:
             if isinstance(self.default_value, str):
                 result += f" '{self.default_value}'"
-            elif isinstance(self.default_value, list):
-                result += f" {self.default_value}"
             else:
                 result += f" {self.default_value}"
         return result
@@ -182,11 +180,7 @@ class ServiceDefinition:
 
     def __str__(self) -> str:
         """Return the string representation of the service."""
-        lines = [f"# {self.name}"]
-        lines.append(str(self.request))
-        lines.append("---")
-        lines.append(str(self.response))
-        return "\n".join(lines)
+        return "\n".join([f"# {self.name}", str(self.request), "---", str(self.response)])
 
 
 @dataclass
@@ -200,10 +194,13 @@ class ActionDefinition:
 
     def __str__(self) -> str:
         """Return the string representation of the action."""
-        lines = [f"# {self.name}"]
-        lines.append(str(self.goal))
-        lines.append("---")
-        lines.append(str(self.result))
-        lines.append("---")
-        lines.append(str(self.feedback))
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                f"# {self.name}",
+                str(self.goal),
+                "---",
+                str(self.result),
+                "---",
+                str(self.feedback),
+            ]
+        )

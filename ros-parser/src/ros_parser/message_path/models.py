@@ -5,9 +5,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from operator import neg
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-from ros_parser.models import MessageDefinition, Type
+from ros_parser.models import Field, MessageDefinition, Type
 
 
 class MessagePathError(Exception):
@@ -490,6 +490,15 @@ def _wrap_angle(value: float) -> float:
     return (value + math.pi) % (2 * math.pi) - math.pi
 
 
+def _sign(value: float) -> int:
+    """Return the sign of a numeric value: 1, -1, or 0."""
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
 _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "abs": abs,
     "acos": math.acos,
@@ -503,7 +512,7 @@ _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "log2": math.log2,
     "log10": math.log10,
     "negative": neg,
-    "sign": lambda value: 1 if value > 0 else (-1 if value < 0 else 0),
+    "sign": _sign,
     "sin": math.sin,
     "sqrt": math.sqrt,
     "tan": math.tan,
@@ -520,6 +529,8 @@ _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "wrap_angle": _wrap_angle,
 }
 
+TIMESERIES_OPS: set[str] = {"delta", "derivative", "timedelta"}
+
 
 def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
     """Sentinel for time-series functions. Raises when called without TransformContext."""
@@ -529,22 +540,33 @@ def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
     )
 
 
-TIMESERIES_OPS: set[str] = {"delta", "derivative", "timedelta"}
+for _op in TIMESERIES_OPS:
+    _FUNCTIONS_NO_ARGS[_op] = _timeseries_sentinel
 
-# Add time-series sentinels to _FUNCTIONS_NO_ARGS
-_FUNCTIONS_NO_ARGS["delta"] = _timeseries_sentinel
-_FUNCTIONS_NO_ARGS["derivative"] = _timeseries_sentinel
-_FUNCTIONS_NO_ARGS["timedelta"] = _timeseries_sentinel
+
+def _get_field(obj: Any, name: str) -> Any:
+    """Get a field from an object, trying mapping access first, then attribute access."""
+    if isinstance(obj, Mapping):
+        try:
+            return obj[name]
+        except KeyError:
+            raise MessagePathError(f"Field '{name}' not found in mapping") from None
+    try:
+        return getattr(obj, name)
+    except AttributeError:
+        raise MessagePathError(
+            f"Field '{name}' not found on object of type '{type(obj).__name__}'"
+        ) from None
 
 
 def _norm(obj: Any) -> float:
     """Euclidean norm of object with x/y/z fields."""
     try:
-        x = obj.x if hasattr(obj, "x") else obj["x"]
-        y = obj.y if hasattr(obj, "y") else obj["y"]
-        z = obj.z if hasattr(obj, "z") else obj["z"]
-    except (AttributeError, KeyError, TypeError) as e:
-        raise MessagePathError("norm requires an object with x, y, z fields") from e
+        x = _get_field(obj, "x")
+        y = _get_field(obj, "y")
+        z = _get_field(obj, "z")
+    except MessagePathError:
+        raise MessagePathError("norm requires an object with x, y, z fields") from None
     return math.sqrt(x * x + y * y + z * z)
 
 
@@ -570,12 +592,12 @@ class Quaternion:
 def _quaternion_to_euler(obj: Any) -> EulerAngles:
     """Convert quaternion (x,y,z,w) to EulerAngles(roll, pitch, yaw)."""
     try:
-        x = obj.x if hasattr(obj, "x") else obj["x"]
-        y = obj.y if hasattr(obj, "y") else obj["y"]
-        z = obj.z if hasattr(obj, "z") else obj["z"]
-        w = obj.w if hasattr(obj, "w") else obj["w"]
-    except (AttributeError, KeyError, TypeError) as e:
-        raise MessagePathError("rpy requires an object with x, y, z, w fields") from e
+        x = _get_field(obj, "x")
+        y = _get_field(obj, "y")
+        z = _get_field(obj, "z")
+        w = _get_field(obj, "w")
+    except MessagePathError:
+        raise MessagePathError("rpy requires an object with x, y, z, w fields") from None
 
     t0 = 2.0 * (w * x + y * z)
     t1 = 1.0 - 2.0 * (x * x + y * y)
@@ -594,13 +616,13 @@ def _quaternion_to_euler(obj: Any) -> EulerAngles:
 def _euler_to_quaternion(obj: Any) -> Quaternion:
     """Convert (roll, pitch, yaw) stored as (x, y, z) to Quaternion(x, y, z, w)."""
     try:
-        roll = obj.x if hasattr(obj, "x") else obj["x"]
-        pitch = obj.y if hasattr(obj, "y") else obj["y"]
-        yaw = obj.z if hasattr(obj, "z") else obj["z"]
-    except (AttributeError, KeyError, TypeError) as e:
+        roll = _get_field(obj, "x")
+        pitch = _get_field(obj, "y")
+        yaw = _get_field(obj, "z")
+    except MessagePathError:
         raise MessagePathError(
             "quat requires an object with x, y, z fields (roll, pitch, yaw)"
-        ) from e
+        ) from None
 
     cr, sr = math.cos(roll / 2), math.sin(roll / 2)
     cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
@@ -631,6 +653,28 @@ _OBJECT_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "rpy": _quaternion_to_euler,
     "quat": _euler_to_quaternion,
     "magnitude": _magnitude,
+}
+
+_FLOAT64_TYPE = Type(type_name="float64", package_name=None)
+
+_OBJECT_FUNCTION_RETURN_TYPES: dict[str, MessageDefinition] = {
+    "rpy": MessageDefinition(
+        name="EulerAngles",
+        fields_all=[
+            Field(type=_FLOAT64_TYPE, name="roll"),
+            Field(type=_FLOAT64_TYPE, name="pitch"),
+            Field(type=_FLOAT64_TYPE, name="yaw"),
+        ],
+    ),
+    "quat": MessageDefinition(
+        name="Quaternion",
+        fields_all=[
+            Field(type=_FLOAT64_TYPE, name="x"),
+            Field(type=_FLOAT64_TYPE, name="y"),
+            Field(type=_FLOAT64_TYPE, name="z"),
+            Field(type=_FLOAT64_TYPE, name="w"),
+        ],
+    ),
 }
 
 
@@ -688,7 +732,8 @@ class MathModifier(Action):
 
         try:
             if func := _FUNCTIONS_NO_ARGS.get(self.operation):
-                return cast("int | float", func(value, *args))
+                result: int | float = func(value, *args)
+                return result
 
             # Unknown operation
             raise MessagePathError(f"Unknown math modifier '{self.operation}'")
@@ -722,16 +767,13 @@ class MathModifier(Action):
 
         # Object-level functions work on complex types
         if self.operation in _OBJECT_FUNCTIONS:
-            # These functions return numeric types
-            float_type = Type(
-                type_name="float64",
-                package_name=None,
-                is_array=False,
-                array_size=None,
-                is_upper_bound=False,
-                string_upper_bound=None,
-            )
-            return float_type, None
+            result_def = _OBJECT_FUNCTION_RETURN_TYPES.get(self.operation)
+            if result_def is not None:
+                result_type = Type(type_name=result_def.name or "unknown", package_name=None)
+                return result_type, result_def
+
+            # norm, magnitude → scalar float
+            return _FLOAT64_TYPE, None
 
         # Time-series functions work on numeric types, preserve type
         if self.operation in TIMESERIES_OPS:

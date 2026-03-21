@@ -45,6 +45,27 @@ except ImportError:
 
 
 try:
+    from pymcap_cli.cmd.plot_cmd import plot
+except ImportError:
+
+    def plot() -> int:
+        """Plot command is unavailable because 'plotly' is not installed.
+
+        To enable plot functionality, please install pymcap-cli with the 'plot' extra:
+
+            uv add --group plot pymcap-cli
+        """
+        print(  # noqa: T201
+            "Error:\n"
+            "Plot command is unavailable because 'plotly' is not installed.\n"
+            "To enable plot functionality, please install pymcap-cli with the 'plot' extra:\n\n"
+            "    uv add --group plot pymcap-cli\n",
+            file=sys.stderr,
+        )
+        return 1
+
+
+try:
     from pymcap_cli.cmd.roscompress_cmd import roscompress
 except ImportError:
 
@@ -94,6 +115,7 @@ app.command(name="process", group=transform_group)(process_cmd.process)
 app.command(name="rechunk", group=transform_group)(rechunk_cmd.rechunk)
 app.command(name="recover", group=transform_group)(recover_cmd.recover)
 app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
+app.command(name="plot", group=inspect_group)(plot)
 app.command(name="roscompress", group=transform_group)(roscompress)
 app.command(name="video", group=transform_group)(video)
 
