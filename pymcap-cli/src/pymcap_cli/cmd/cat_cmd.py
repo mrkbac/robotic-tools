@@ -1,9 +1,13 @@
 """Cat command for pymcap-cli - stream MCAP messages to stdout."""
 
+import base64
 import json
 import re
 import sys
-from typing import Annotated, Any
+from contextlib import ExitStack
+from enum import Enum
+from pathlib import Path
+from typing import IO, Annotated, Any
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -19,45 +23,58 @@ from small_mcap.reader import read_message_decoded
 from small_mcap.records import Channel
 
 from pymcap_cli.input_handler import open_input
-from pymcap_cli.utils import MAX_INT64, parse_timestamp_args
+from pymcap_cli.utils import MAX_INT64, ProgressTrackingIO, file_progress, parse_timestamp_args
 
-console_err = Console(stderr=True)  # Use stderr for errors
-console_out = Console()  # Use stdout for data output
+console_err = Console(stderr=True)
+console_out = Console()
 
-# Parameter groups
 FILTERING_GROUP = Group("Filtering")
 OUTPUT_GROUP = Group("Output")
 
+_TTY_BYTES_TRUNCATE = 32
 
-def message_to_dict(obj: Any) -> Any:
+
+class BytesMode(str, Enum):
+    """How to serialize bytes fields in JSON output."""
+
+    INTS = "ints"
+    BASE64 = "base64"
+    SKIP = "skip"
+
+
+def message_to_dict(
+    obj: Any,
+    *,
+    bytes_mode: BytesMode = BytesMode.INTS,
+    truncate_bytes: int = 0,
+) -> Any:
     """Recursively convert a message object to a JSON-serializable dict.
 
-    Handles:
-    - Dataclass objects with __slots__ → dict
-    - Lists/tuples → lists
-    - bytes/bytearray/memoryview → list of ints
-    - Other types → as-is
+    Handles __slots__-based objects, sequences, and bytes-like objects.
+    The ``truncate_bytes`` parameter is used for TTY display to keep output manageable.
     """
-    # Handle dataclass-like objects with __slots__
+    recurse = lambda v: message_to_dict(v, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)  # noqa: E731
+
     if hasattr(obj, "__slots__"):
-        result = {}
-        for slot in obj.__slots__:
-            # Skip private/internal fields
-            if slot.startswith("_"):
-                continue
-            value = getattr(obj, slot, None)
-            result[slot] = message_to_dict(value)
-        return result
+        return {
+            slot: recurse(getattr(obj, slot, None))
+            for slot in obj.__slots__
+            if not slot.startswith("_")
+        }
 
-    # Handle sequences
     if isinstance(obj, (list, tuple)):
-        return [message_to_dict(item) for item in obj]
+        return [recurse(item) for item in obj]
 
-    # Handle bytes-like objects as list of integers
     if isinstance(obj, (bytes, bytearray, memoryview)):
+        total = len(obj)
+        if bytes_mode == BytesMode.SKIP:
+            return f"<{total} bytes>"
+        if bytes_mode == BytesMode.BASE64:
+            return base64.b64encode(bytes(obj)).decode("ascii")
+        if truncate_bytes and total > truncate_bytes:
+            return [*list(obj[:truncate_bytes]), f"... ({total} bytes total)"]
         return list(obj)
 
-    # Handle other standard types (int, float, str, bool, None)
     return obj
 
 
@@ -120,6 +137,20 @@ def cat(
             group=OUTPUT_GROUP,
         ),
     ] = None,
+    output: Annotated[
+        Path | None,
+        Parameter(
+            name=["-o", "--output"],
+            group=OUTPUT_GROUP,
+        ),
+    ] = None,
+    bytes_mode: Annotated[
+        BytesMode,
+        Parameter(
+            name=["--bytes"],
+            group=OUTPUT_GROUP,
+        ),
+    ] = BytesMode.INTS,
 ) -> int:
     """Stream MCAP messages to stdout.
 
@@ -132,6 +163,9 @@ def cat(
 
       # Pipe to file as JSONL
       pymcap-cli cat recording.mcap > messages.jsonl
+
+      # Write to file with progress bar
+      pymcap-cli cat recording.mcap -o messages.jsonl
 
       # Filter specific topics
       pymcap-cli cat recording.mcap --topics /camera/image
@@ -147,6 +181,12 @@ def cat(
 
       # Filter array elements
       pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
+
+      # Skip binary data (images, pointclouds)
+      pymcap-cli cat recording.mcap --bytes skip
+
+      # Base64-encode binary data
+      pymcap-cli cat recording.mcap --bytes base64
     """
 
     start_time_ns = parse_timestamp_args(start, 0, start_secs) or 0
@@ -164,11 +204,12 @@ def cat(
             console_err.print(f"[red]Invalid query syntax: {e}[/red]")
             return 1
 
-    # Detect if output is to a TTY (terminal) or piped
-    is_tty = sys.stdout.isatty()
+    # Determine output mode
+    writing_to_file = output is not None
+    is_tty = not writing_to_file and sys.stdout.isatty()
 
     message_count = 0
-    validated_topics: set[str] = set()  # Track which topics have been validated
+    validated_topics: set[str] = set()
 
     def should_include_message(
         channel: Channel,
@@ -177,26 +218,71 @@ def cat(
         """Check if a message should be included based on filters."""
         topic = channel.topic
 
-        # If query is specified, filter by query topic (smart filtering)
         if parsed_query:
             if topic != parsed_query.topic:
                 return False
         elif topics and not any(re.search(pattern, topic) for pattern in topics):
-            # Otherwise use explicit topic filters
             return False
 
         return not (exclude_topics and any(re.search(pattern, topic) for pattern in exclude_topics))
 
+    def _validate_query(msg_schema_name: str, msg_schema_data: bytes, topic: str) -> int | None:
+        """Validate query against schema. Returns 1 on error, None on success."""
+        try:
+            all_definitions = parse_schema_to_definitions(msg_schema_name, msg_schema_data)
+            root_msgdef = all_definitions.get(msg_schema_name)
+            if root_msgdef is None:
+                parts = msg_schema_name.split("/")
+                root_msgdef = all_definitions.get(f"{parts[0]}/{parts[-1]}")
+
+            if root_msgdef is None:
+                console_err.print(
+                    f"[yellow]Warning: Could not find message definition "
+                    f"for schema '{msg_schema_name}'[/yellow]"
+                )
+            else:
+                parsed_query.validate(root_msgdef, all_definitions)  # type: ignore[union-attr]
+        except ValidationError as e:
+            console_err.print(f"[red]Query validation error for topic '{topic}':[/red]")
+            console_err.print(f"[red]{e}[/red]")
+            console_err.print(
+                f"\n[yellow]Query:[/yellow] {query}\n[yellow]Schema:[/yellow] {msg_schema_name}"
+            )
+            return 1
+        return None
+
+    def _to_jsonl(msg: Any, data: Any) -> str:
+        """Serialize a decoded message to a compact JSON line."""
+        entry: dict[str, Any] = {
+            "topic": msg.channel.topic,
+            "sequence": msg.message.sequence,
+            "log_time": msg.message.log_time,
+            "publish_time": msg.message.publish_time,
+        }
+        if msg.schema:
+            entry["schema"] = msg.schema.name
+        entry["message"] = message_to_dict(data, bytes_mode=bytes_mode)
+        return json.dumps(entry, separators=(",", ":"))
+
     try:
-        with open_input(file) as (input_stream, _):
+        with open_input(file) as (input_stream, file_size), ExitStack() as stack:
+            stream: IO[bytes] = input_stream
+            if writing_to_file and file_size:
+                progress = file_progress("[bold blue]Reading MCAP...", console_err)
+                progress.start()
+                stack.callback(progress.stop)
+                task = progress.add_task("Processing", total=file_size)
+                stream = ProgressTrackingIO(input_stream, task, progress, input_stream.tell())
+
+            out_file = stack.enter_context(output.open("w")) if output else None
+
             for msg in read_message_decoded(
-                input_stream,
+                stream,
                 decoder_factories=[JSONDecoderFactory(), DecoderFactory()],
                 start_time_ns=start_time_ns,
                 end_time_ns=end_time_ns,
                 should_include=should_include_message,
             ):
-                # Check limit
                 if limit is not None and message_count >= limit:
                     break
                 message_count += 1
@@ -211,46 +297,14 @@ def cat(
                             f"'{msg.channel.topic}' (no schema available)[/yellow]"
                         )
                     else:
-                        try:
-                            # Parse schema into message definitions
-                            all_definitions = parse_schema_to_definitions(
-                                msg.schema.name, msg.schema.data
-                            )
+                        err = _validate_query(msg.schema.name, msg.schema.data, msg.channel.topic)
+                        if err:
+                            return err
 
-                            # Get the root message definition
-                            root_msgdef = all_definitions.get(msg.schema.name)
-                            if root_msgdef is None:
-                                # Try short name (e.g., "pkg/msg/Type" -> "pkg/Type")
-                                parts = msg.schema.name.split("/")
-                                short_name = f"{parts[0]}/{parts[-1]}"
-                                root_msgdef = all_definitions.get(short_name)
-
-                            if root_msgdef is None:
-                                console_err.print(
-                                    f"[yellow]Warning: Could not find message definition "
-                                    f"for schema '{msg.schema.name}'[/yellow]"
-                                )
-                            else:
-                                # Validate the query against the schema
-                                parsed_query.validate(root_msgdef, all_definitions)
-
-                        except ValidationError as e:
-                            console_err.print(
-                                f"[red]Query validation error for topic "
-                                f"'{msg.channel.topic}':[/red]"
-                            )
-                            console_err.print(f"[red]{e}[/red]")
-                            console_err.print(
-                                f"\n[yellow]Query:[/yellow] {query}\n"
-                                f"[yellow]Schema:[/yellow] {msg.schema.name}"
-                            )
-                            return 1
-
-                # Filter data if query is specified
+                # Apply query filter
                 if parsed_query:
                     try:
                         data = parsed_query.apply(msg.decoded_message)
-                        # If filter returned None, skip this message
                         if data is None:
                             continue
                     except MessagePathError as e:
@@ -261,42 +315,44 @@ def cat(
                 else:
                     data = msg.decoded_message
 
-                # Output data (pretty or raw)
                 if is_tty:
-                    # Pretty output with Rich
-                    json_str = json.dumps(message_to_dict(data), indent=2)
+                    json_str = json.dumps(
+                        message_to_dict(
+                            data,
+                            bytes_mode=bytes_mode,
+                            truncate_bytes=_TTY_BYTES_TRUNCATE,
+                        ),
+                        indent=2,
+                    )
 
                     header = Text()
                     header.append(msg.channel.topic, style="bold cyan")
                     header.append(" @ ", style="dim")
                     header.append(str(msg.message.log_time), style="green")
                     header.append(" [", style="dim")
-                    schema_name = msg.schema.name if msg.schema else "unknown"
-                    header.append(schema_name, style="yellow")
+                    header.append(msg.schema.name if msg.schema else "unknown", style="yellow")
                     header.append("]", style="dim")
 
-                    panel = Panel(
-                        JSON(json_str),
-                        title=header,
-                        border_style="blue",
-                        expand=False,
+                    console_out.print(
+                        Panel(
+                            JSON(json_str),
+                            title=header,
+                            border_style="blue",
+                            expand=False,
+                        )
                     )
-                    console_out.print(panel)
                 else:
-                    # Raw JSONL output
-                    output = {
-                        "topic": msg.channel.topic,
-                        "sequence": msg.message.sequence,
-                        "log_time": msg.message.log_time,
-                        "publish_time": msg.message.publish_time,
-                    }
-                    if msg.schema:
-                        output["schema"] = msg.schema.name
-                    output["message"] = message_to_dict(data)
+                    line = _to_jsonl(msg, data)
+                    if out_file is not None:
+                        out_file.write(line + "\n")
+                    else:
+                        print(line, file=sys.stdout)  # noqa: T201
 
-                    print(json.dumps(output, separators=(",", ":")), file=sys.stdout)  # noqa: T201
+        if writing_to_file:
+            console_err.print(
+                f"Wrote [bold]{message_count:,}[/bold] messages to [cyan]{output}[/cyan]"
+            )
 
-        # Check if query was specified but topic was not found
         if parsed_query and not validated_topics:
             console_err.print(
                 f"[red]Error: Topic '{parsed_query.topic}' not found in MCAP file[/red]"
@@ -304,7 +360,6 @@ def cat(
             return 1
 
     except KeyboardInterrupt:
-        # Allow graceful exit with Ctrl+C
         console_err.print("\n[yellow]Interrupted by user[/yellow]")
         return 0
 
