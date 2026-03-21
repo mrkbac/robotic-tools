@@ -1899,6 +1899,13 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "av" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "plotly" },
+    { name = "pureini" },
+]
 plot = [
     { name = "plotly" },
 ]
@@ -1920,12 +1927,13 @@ requires-dist = [
     { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "plotly", marker = "extra == 'plot'", specifier = ">=6.0.0" },
     { name = "pureini", marker = "extra == 'pointcloud'", editable = "pureini" },
+    { name = "pymcap-cli", extras = ["video", "pointcloud", "plot"], marker = "extra == 'all'" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
 ]
-provides-extras = ["video", "pointcloud", "plot"]
+provides-extras = ["video", "pointcloud", "plot", "all"]
 
 [[package]]
 name = "pytest"
