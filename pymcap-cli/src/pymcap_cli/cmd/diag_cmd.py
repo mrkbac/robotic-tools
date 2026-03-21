@@ -10,6 +10,7 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
@@ -47,13 +48,34 @@ class DiagEntry:
 def _collect_diagnostics(file: str, topic: str) -> dict[str, DiagEntry]:
     """Stream all diagnostics messages and accumulate per-component state."""
     entries: dict[str, DiagEntry] = {}
+    msg_count = 0
 
-    with open_input(file) as (f, _file_size):
+    with (
+        open_input(file) as (f, file_size),
+        Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TextColumn("[cyan]{task.fields[msgs]} msgs"),
+            TextColumn("[dim]{task.fields[components]} components"),
+            TimeElapsedColumn(),
+            console=console_err,
+            transient=True,
+        ) as progress,
+    ):
+        task = progress.add_task(
+            "Scanning diagnostics...",
+            total=file_size or None,
+            msgs=0,
+            components=0,
+        )
+
         for msg in read_message_decoded(
             f,
             should_include=include_topics([topic]),
             decoder_factories=[DecoderFactory()],
         ):
+            msg_count += 1
             timestamp_ns = msg.message.log_time
 
             for status in msg.decoded_message.status:
@@ -88,6 +110,16 @@ def _collect_diagnostics(file: str, topic: str) -> dict[str, DiagEntry]:
 
                     entry.last_level = level
                     entry.last_message = status.message
+
+            if msg_count % 100 == 0:
+                progress.update(
+                    task,
+                    completed=f.tell(),
+                    msgs=msg_count,
+                    components=len(entries),
+                )
+
+        progress.update(task, completed=file_size, msgs=msg_count, components=len(entries))
 
     return entries
 
