@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any, ClassVar, Protocol
+from typing import ClassVar, Protocol
 
 from rich.highlighter import ISO8601Highlighter, ReprHighlighter
 from rich.text import Text
@@ -12,6 +12,7 @@ from textual.widgets import Input, Select, Tree
 from textual.widgets.tree import TreeNode
 
 from digitalis.reader.types import MessageEvent
+from digitalis.ui.panels._protocols import Header
 from digitalis.ui.panels.base import BasePanel
 from digitalis.utilities import NANOSECONDS_PER_SECOND, nanoseconds_to_iso
 
@@ -32,8 +33,8 @@ class DiagnosticStatus(Protocol):
 class DiagnosticArray(Protocol):
     """Protocol for diagnostic array messages."""
 
-    header: Any
-    status: list[dict[str, Any]]
+    header: Header
+    status: list[DiagnosticStatus]
 
 
 class DiagnosticLevel(IntEnum):

@@ -22,6 +22,7 @@ from .transformers import Transformer, TransformerRegistry, TransformError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import SimpleNamespace
 
     from robo_ws_bridge.ws_types import ChannelInfo
 
@@ -712,7 +713,7 @@ class ProxyBridge:
             logger.exception("Message transformation failed")
             return None
 
-    def _decode_message(self, channel: ChannelInfo, payload: bytes) -> Any:
+    def _decode_message(self, channel: ChannelInfo, payload: bytes) -> SimpleNamespace:
         """Decode a CDR-encoded message.
 
         Args:

@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Any, ClassVar, Protocol
+from typing import ClassVar, Protocol
 
 from rich.highlighter import ISO8601Highlighter, ReprHighlighter
 from rich.text import Text
@@ -10,6 +10,7 @@ from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 
 from digitalis.reader.types import MessageEvent
+from digitalis.ui.panels._protocols import Header
 from digitalis.ui.panels.base import BasePanel
 from digitalis.utilities import nanoseconds_to_iso, quaternion_to_euler
 
@@ -41,7 +42,7 @@ class Transform(Protocol):
 class TfTransformStamped(Protocol):
     """https://docs.ros2.org/foxy/api/geometry_msgs/msg/TransformStamped.html"""
 
-    header: Any
+    header: Header
     child_frame_id: str
     transform: Transform
 

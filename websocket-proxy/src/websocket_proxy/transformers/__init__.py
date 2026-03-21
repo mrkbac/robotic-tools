@@ -1,7 +1,12 @@
 """Message transformers for converting between ROS2 message types."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from types import SimpleNamespace
 
 
 class Transformer(ABC):
@@ -23,11 +28,11 @@ class Transformer(ABC):
         ...
 
     @abstractmethod
-    def transform(self, message: dict[str, Any]) -> dict[str, Any]:
-        """Transform a decoded message dict to another message dict.
+    def transform(self, message: SimpleNamespace) -> dict[str, Any]:
+        """Transform a decoded message object to a message dict.
 
         Args:
-            message: Decoded input message as a dictionary
+            message: Decoded input message (SimpleNamespace from CDR decoder)
 
         Returns:
             Transformed output message as a dictionary

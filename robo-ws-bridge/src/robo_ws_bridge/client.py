@@ -211,7 +211,9 @@ class WebSocketBridgeClient:
         """Register a callback for server time updates."""
         self._on_time_update.append(handler)
 
-    async def _invoke_handlers(self, handlers: list[Any], *args: Any) -> None:
+    async def _invoke_handlers(
+        self, handlers: list[Callable[..., Awaitable[None] | None]], *args: Any
+    ) -> None:
         """Invoke a list of handlers with the given arguments.
 
         Handles both sync and async handlers.

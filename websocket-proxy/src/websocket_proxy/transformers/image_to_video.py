@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pymcap_cli.image_utils import (
     FOXGLOVE_COMPRESSED_VIDEO,
@@ -17,6 +17,9 @@ from pymcap_cli.image_utils import (
 )
 
 from . import Transformer, TransformError
+
+if TYPE_CHECKING:
+    from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +63,7 @@ class ImageToVideoTransformer(Transformer):
     def get_output_schema_definition(self) -> str:
         return FOXGLOVE_COMPRESSED_VIDEO
 
-    def transform(self, message: Any) -> dict[str, Any]:
+    def transform(self, message: SimpleNamespace) -> dict[str, Any]:
         if not message.data:
             raise TransformError(f"Empty image data, {message}")
 

@@ -1,7 +1,7 @@
 import logging
 import math
 from collections import deque
-from typing import Any, ClassVar, Protocol
+from typing import ClassVar, Protocol
 
 import numpy as np
 from textual import work
@@ -9,6 +9,7 @@ from textual.binding import Binding, BindingType
 from textual.widgets import Static
 
 from digitalis.reader.types import MessageEvent
+from digitalis.ui.panels._protocols import Header
 from digitalis.ui.panels.interactive_base import InteractiveRenderPanel
 from digitalis.ui.panels.pointcloud_renderer import render_pointcloud
 from digitalis.utilities import RichRender
@@ -20,7 +21,7 @@ class NavSatStatus(Protocol):
 
 
 class NavSatFixMessage(Protocol):
-    header: Any
+    header: Header
     status: NavSatStatus
     latitude: float
     longitude: float

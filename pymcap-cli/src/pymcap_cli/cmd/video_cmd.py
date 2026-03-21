@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 
 import av
 import av.error
@@ -31,7 +31,9 @@ from pymcap_cli.image_utils import (
     COMPRESSED_SCHEMAS,
     IMAGE_SCHEMAS,
     RAW_SCHEMAS,
+    CompressedImageMsg,
     EncoderBackend,
+    ImageMsg,
     VideoCodec,
     VideoEncoderError,
     decode_compressed_frame,
@@ -45,6 +47,8 @@ from pymcap_cli.utils import confirm_output_overwrite
 
 if TYPE_CHECKING:
     from av.container import OutputContainer
+    from av.video.stream import VideoStream
+    from small_mcap.reader import DecodedMessage
 
 
 console = Console()
@@ -92,7 +96,10 @@ QUALITY_PRESETS = {
 
 
 def _decode_and_resize_image(
-    message: Any, message_type: ImageType, target_width: int, target_height: int
+    message: ImageMsg | CompressedImageMsg,
+    message_type: ImageType,
+    target_width: int,
+    target_height: int,
 ) -> NDArray[np.uint8]:
     """Decode a ROS image message and resize to target dimensions."""
     if message_type is ImageType.COMPRESSED:
@@ -101,19 +108,19 @@ def _decode_and_resize_image(
         frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
         return frame.to_ndarray(format="rgb24")  # type: ignore[return-value]
 
-    rgb_array = raw_image_to_array(message)
+    rgb_array = raw_image_to_array(message)  # type: ignore[arg-type]
     frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
     frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
     return frame.to_ndarray(format="rgb24")  # type: ignore[return-value]
 
 
-def _process_compressed_image(message: Any) -> bytes:
+def _process_compressed_image(message: CompressedImageMsg) -> bytes:
     if not hasattr(message, "data") or not message.data:
         raise VideoEncoderError("CompressedImage has no data")
     return bytes(message.data)
 
 
-def _discover_topic_info(message: Any, topic: str) -> TopicInfo:
+def _discover_topic_info(message: "DecodedMessage", topic: str) -> TopicInfo:
     """Discover topic metadata from first message."""
     schema_name = message.schema.name if message.schema else ""
 
@@ -231,7 +238,7 @@ def encode_video(
     topic_infos: dict[str, TopicInfo] = {}  # Discovered metadata per topic
     last_frames: dict[str, NDArray[np.uint8]] = {}  # Cache of last decoded frame per topic
     container: OutputContainer | None = None
-    stream: Any = None
+    stream: VideoStream | None = None
     frame_idx = 0
     first_timestamp_ns: int | None = None  # First message timestamp for PTS calculation
     last_pts: int = -1  # Track last PTS to ensure monotonic increase
@@ -307,7 +314,7 @@ def encode_video(
                     )
 
                     try:
-                        stream = container.add_stream(codec_name=encoder_name)
+                        stream = container.add_stream(codec_name=encoder_name)  # type: ignore[assignment]
                     except (av.error.FFmpegError, ValueError) as exc:
                         container.close()
                         raise VideoEncoderError(

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pymcap_cli.image_utils import COMPRESSED_POINTCLOUD2, PointCloudCompressor
 
 from . import Transformer, TransformError
+
+if TYPE_CHECKING:
+    from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,7 @@ class PointCloudPureiniTransformer(Transformer):
     def get_output_schema_definition(self) -> str:
         return COMPRESSED_POINTCLOUD2
 
-    def transform(self, message: Any) -> dict[str, Any]:
+    def transform(self, message: SimpleNamespace) -> dict[str, Any]:
         try:
             compressed = self._compressor.compress(message)
 

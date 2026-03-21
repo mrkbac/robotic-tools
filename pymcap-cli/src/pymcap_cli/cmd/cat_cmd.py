@@ -7,7 +7,10 @@ import sys
 from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
-from typing import IO, Annotated, Any
+from typing import IO, TYPE_CHECKING, Annotated, Any
+
+if TYPE_CHECKING:
+    from small_mcap.reader import DecodedMessage
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -251,7 +254,7 @@ def cat(
             return 1
         return None
 
-    def _to_jsonl(msg: Any, data: Any) -> str:
+    def _to_jsonl(msg: "DecodedMessage", data: Any) -> str:
         """Serialize a decoded message to a compact JSON line."""
         entry: dict[str, Any] = {
             "topic": msg.channel.topic,

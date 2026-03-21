@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from pureini import (
@@ -18,6 +19,9 @@ from pureini import (
 from rich.console import Console
 from rich.table import Table
 from small_mcap import read_message
+
+if TYPE_CHECKING:
+    from pointcloud2.messages import Pointcloud2Msg
 
 console = Console()
 
@@ -135,7 +139,7 @@ def handle_command(args: argparse.Namespace) -> None:
 
 
 def _build_encoding_info(
-    msg: object,
+    msg: Pointcloud2Msg,
     encoding_opt: EncodingOptions,
     compression_opt: CompressionOption,
     resolution: float,
@@ -153,14 +157,14 @@ def _build_encoding_info(
         EncodingInfo for pureini encoder
     """
     info = EncodingInfo()
-    info.width = msg.width  # type: ignore[attr-defined]
-    info.height = msg.height  # type: ignore[attr-defined]
-    info.point_step = msg.point_step  # type: ignore[attr-defined]
+    info.width = msg.width
+    info.height = msg.height
+    info.point_step = msg.point_step
     info.encoding_opt = encoding_opt
     info.compression_opt = compression_opt
 
     info.fields = []
-    for ros_field in msg.fields:  # type: ignore[attr-defined]
+    for ros_field in msg.fields:
         # Map ROS2 PointField datatype to pureini FieldType (1:1 mapping!)
         field = PointField(
             name=ros_field.name,

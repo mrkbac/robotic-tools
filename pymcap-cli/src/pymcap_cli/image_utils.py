@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from fractions import Fraction
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import av
 import av.error
@@ -17,7 +17,32 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
+    from pointcloud2.messages import Pointcloud2Msg
     from pureini import CompressionOption, EncodingInfo, EncodingOptions
+
+
+class CompressedImageMsg(Protocol):
+    """Protocol for ROS CompressedImage messages."""
+
+    @property
+    def data(self) -> bytes | bytearray | memoryview: ...
+
+
+class ImageMsg(Protocol):
+    """Protocol for ROS Image messages."""
+
+    @property
+    def width(self) -> int: ...
+
+    @property
+    def height(self) -> int: ...
+
+    @property
+    def encoding(self) -> str: ...
+
+    @property
+    def data(self) -> bytes | bytearray | memoryview: ...
+
 
 COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
 RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
@@ -162,7 +187,7 @@ def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
     raise VideoEncoderError("Decoder produced no frames")
 
 
-def raw_image_to_array(message: Any) -> NDArray[np.uint8]:
+def raw_image_to_array(message: ImageMsg) -> NDArray[np.uint8]:
     """Convert a ROS Image message to an RGB numpy array."""
     if not hasattr(message, "data") or not message.data:
         raise VideoEncoderError("Image has no data")
@@ -505,7 +530,7 @@ class VideoEncoder:
 
 
 def _build_encoding_info(
-    msg: object,
+    msg: "Pointcloud2Msg",
     encoding_opt: "EncodingOptions",
     compression_opt: "CompressionOption",
     resolution: float,
@@ -514,14 +539,14 @@ def _build_encoding_info(
     from pureini import EncodingInfo, FieldType, PointField  # noqa: PLC0415
 
     info = EncodingInfo()
-    info.width = msg.width  # type: ignore[attr-defined]
-    info.height = msg.height  # type: ignore[attr-defined]
-    info.point_step = msg.point_step  # type: ignore[attr-defined]
+    info.width = msg.width
+    info.height = msg.height
+    info.point_step = msg.point_step
     info.encoding_opt = encoding_opt
     info.compression_opt = compression_opt
 
     info.fields = []
-    for ros_field in msg.fields:  # type: ignore[attr-defined]
+    for ros_field in msg.fields:
         field = PointField(
             name=ros_field.name,
             offset=ros_field.offset,
@@ -576,7 +601,7 @@ class PointCloudCompressor:
         self._cached_info: EncodingInfo | None = None
         self._cached_encoder: PointcloudEncoder | None = None
 
-    def compress(self, msg: object) -> bytes:
+    def compress(self, msg: "Pointcloud2Msg") -> bytes:
         """Compress a decoded ROS2 PointCloud2 message and return raw bytes."""
         info = _build_encoding_info(
             msg, self._encoding_opt, self._compression_opt, self._resolution
@@ -584,4 +609,4 @@ class PointCloudCompressor:
         if self._cached_info != info:
             self._cached_info = info
             self._cached_encoder = self._PointcloudEncoder(info)
-        return self._cached_encoder.encode(bytes(msg.data))  # type: ignore[attr-defined, union-attr]
+        return self._cached_encoder.encode(bytes(msg.data))  # type: ignore[union-attr]

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pointcloud2.messages import Pointcloud2Msg
 
 import zstandard as zstd
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -29,19 +33,19 @@ def bytes_h(n: float) -> str:
 
 
 def build_encoding_info(
-    msg: object,
+    msg: Pointcloud2Msg,
     encoding_opt: EncodingOptions,
     compression_opt: CompressionOption,
     resolution: float,
 ) -> EncodingInfo:
     info = EncodingInfo()
-    info.width = msg.width  # type: ignore[attr-defined]
-    info.height = msg.height  # type: ignore[attr-defined]
-    info.point_step = msg.point_step  # type: ignore[attr-defined]
+    info.width = msg.width
+    info.height = msg.height
+    info.point_step = msg.point_step
     info.encoding_opt = encoding_opt
     info.compression_opt = compression_opt
     info.fields = []
-    for rf in msg.fields:  # type: ignore[attr-defined]
+    for rf in msg.fields:
         info.fields.append(
             PointField(
                 name=rf.name,

@@ -112,7 +112,7 @@ def _generate_plan(
     fields_and_types_dict = {field.name: _format_field_type(field.type) for field in msgdef.fields}
 
     # Define the get_fields_and_field_types classmethod
-    def get_fields_and_field_types(cls: Any) -> dict[str, str]:
+    def get_fields_and_field_types(cls: type) -> dict[str, str]:
         return copy(cls._fields_and_field_types)
 
     msg_class = make_dataclass(
