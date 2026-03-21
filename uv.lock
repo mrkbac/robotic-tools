@@ -493,7 +493,7 @@ wheels = [
 
 [[package]]
 name = "digitalis"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "digitalis" }
 dependencies = [
     { name = "lark" },
@@ -1072,7 +1072,7 @@ wheels = [
 
 [[package]]
 name = "mcap-ros2-support-fast"
-version = "0.1.2"
+version = "0.2.0"
 source = { editable = "mcap-ros2-support-fast" }
 dependencies = [
     { name = "ros-parser" },
@@ -1777,7 +1777,7 @@ wheels = [
 
 [[package]]
 name = "pureini"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "pureini" }
 dependencies = [
     { name = "lz4" },
@@ -1886,7 +1886,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2113,7 +2113,7 @@ wheels = [
 
 [[package]]
 name = "robo-ws-bridge"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "robo-ws-bridge" }
 dependencies = [
     { name = "typing-extensions" },
@@ -2155,7 +2155,7 @@ dev = [
 
 [[package]]
 name = "ros-parser"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "ros-parser" }
 
 [package.dev-dependencies]
@@ -2627,7 +2627,7 @@ wheels = [
 
 [[package]]
 name = "websocket-proxy"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "websocket-proxy" }
 dependencies = [
     { name = "mcap-ros2-support-fast" },
