@@ -174,68 +174,57 @@ def _make_compressed_pointcloud(n_points: int = 10) -> tuple[bytes, bytes]:
 
 
 class TestVideoDecompressor:
-    def test_decode_h264_to_compressed_image(self):
-        from pymcap_cli.encoding.decompress import _VideoDecompressor as VideoDecompressor
-        from pymcap_cli.encoding.encoder_common import EncoderMode
+    def test_decompress_h264_to_jpeg(self):
+        from pymcap_cli.encoding.video_pyav import PyAVVideoDecompressor
 
-        dec = VideoDecompressor("compressed", 80, EncoderMode.PYAV)
+        dec = PyAVVideoDecompressor("compressed", 80)
         h264_data = _make_h264_keyframe()
 
-        msg = {
-            "timestamp": {"sec": 123, "nanosec": 456},
-            "frame_id": "cam",
-            "data": h264_data,
-            "format": "h264",
-        }
-
-        result = dec.decode(msg)
+        result = dec.decompress(h264_data, "h264")
         assert result is not None
-        assert result["header"]["stamp"] == {"sec": 123, "nanosec": 456}
-        assert result["header"]["frame_id"] == "cam"
-        assert result["format"] == "jpeg"
-        assert result["data"][:2] == b"\xff\xd8"
+        assert result.is_jpeg is True
+        assert result.data[:2] == b"\xff\xd8"
 
-    def test_decode_h264_to_raw_image(self):
-        from pymcap_cli.encoding.decompress import _VideoDecompressor as VideoDecompressor
-        from pymcap_cli.encoding.encoder_common import EncoderMode
+    def test_decompress_h264_to_raw(self):
+        from pymcap_cli.encoding.video_pyav import PyAVVideoDecompressor
 
-        dec = VideoDecompressor("raw", 90, EncoderMode.PYAV)
+        dec = PyAVVideoDecompressor("raw", 90)
         h264_data = _make_h264_keyframe(width=64, height=32)
 
-        msg = {
-            "timestamp": {"sec": 1, "nanosec": 0},
-            "frame_id": "cam",
-            "data": h264_data,
-            "format": "h264",
-        }
-
-        result = dec.decode(msg)
+        result = dec.decompress(h264_data, "h264")
         assert result is not None
-        assert result["height"] == 32
-        assert result["width"] == 64
-        assert result["encoding"] == "rgb8"
-        assert result["step"] == 64 * 3
-        assert len(result["data"]) == 64 * 32 * 3
+        assert result.is_jpeg is False
+        assert result.height == 32
+        assert result.width == 64
+        assert len(result.data) == 64 * 32 * 3
 
-    def test_decode_preserves_timestamp(self):
-        from pymcap_cli.encoding.decompress import _VideoDecompressor as VideoDecompressor
+
+class TestVideoDecompressFactoryTimestamp:
+    """Test that VideoDecompressFactory preserves timestamps in the output message."""
+
+    def test_timestamp_preserved_in_compressed_output(self):
+        from pymcap_cli.encoding.decompress import VideoDecompressFactory
         from pymcap_cli.encoding.encoder_common import EncoderMode
 
-        dec = VideoDecompressor("compressed", 90, EncoderMode.PYAV)
         h264_data = _make_h264_keyframe()
+        log_time = 999 * 1_000_000_000 + 12345
 
-        msg = {
-            "timestamp": {"sec": 999, "nanosec": 12345},
-            "frame_id": "left_camera",
-            "data": h264_data,
-            "format": "h264",
-        }
+        buf = _create_compressed_video_mcap([(log_time, h264_data, "h264")])
+        factory = VideoDecompressFactory(
+            video_format="compressed", jpeg_quality=90, backend=EncoderMode.PYAV
+        )
 
-        result = dec.decode(msg)
-        assert result is not None
-        assert result["header"]["stamp"]["sec"] == 999
-        assert result["header"]["stamp"]["nanosec"] == 12345
-        assert result["header"]["frame_id"] == "left_camera"
+        for msg in read_message_decoded(buf, decoder_factories=[factory]):
+            assert msg.decoded_message is not None
+            header = msg.decoded_message["header"]
+            assert header["stamp"]["sec"] == 999
+            assert header["stamp"]["nanosec"] == 12345
+            assert header["frame_id"] == "camera_link"
+            assert msg.decoded_message["format"] == "jpeg"
+            assert msg.decoded_message["data"][:2] == b"\xff\xd8"
+            break
+        else:
+            raise AssertionError("No messages decoded")
 
 
 # ---------------------------------------------------------------------------

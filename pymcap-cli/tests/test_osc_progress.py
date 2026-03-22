@@ -2,33 +2,39 @@
 
 import gc
 
+import pytest
 from pymcap_cli.display.osc_utils import Osc94States, OSCProgressColumn
 from rich.progress import Progress
 from rich.text import Text
 
+_OSC_MODULE = "pymcap_cli.display.osc_utils"
 
-def mock_set_progress(monkeypatch):
-    """Mock set_progress and return list of (state, progress) calls."""
-    # Force garbage collection to clear any pending __del__ calls from previous tests
+
+def _mock_osc(monkeypatch, *, supported: bool = True):
+    """Mock OSC support and set_progress, return list of (state, progress) calls."""
     gc.collect()
+    progress_calls: list[tuple[Osc94States, int]] = []
 
-    progress_calls = []
-
-    def mock_progress(state, progress):
-        progress_calls.append((state, progress))
-
-    monkeypatch.setattr("pymcap_cli.display.osc_utils.set_progress", mock_progress)
-
+    monkeypatch.setattr(f"{_OSC_MODULE}.supports_osc_9_4", lambda: supported)
+    monkeypatch.setattr(
+        f"{_OSC_MODULE}.set_progress",
+        lambda state, progress: progress_calls.append((state, progress)),
+    )
     return progress_calls
+
+
+@pytest.fixture
+def osc_mocks(monkeypatch):
+    """Fixture providing mocked OSC support (enabled) and progress call recorder."""
+    return _mock_osc(monkeypatch)
 
 
 class TestOSCProgressColumn:
     """Test OSC 9;4 progress column."""
 
-    def test_osc_emission_with_support(self, monkeypatch):
+    def test_osc_emission_with_support(self, osc_mocks):
         """Test OSC sequences are emitted when supported."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = osc_mocks
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -47,8 +53,7 @@ class TestOSCProgressColumn:
 
     def test_no_osc_without_support(self, monkeypatch):
         """Test OSC sequences are NOT emitted when unsupported."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: False)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = _mock_osc(monkeypatch, supported=False)
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -61,10 +66,9 @@ class TestOSCProgressColumn:
         # Should NOT contain progress calls
         assert len(progress_calls) == 0
 
-    def test_indeterminate_progress(self, monkeypatch):
+    def test_indeterminate_progress(self, osc_mocks):
         """Test state 3 (indeterminate) when total is None."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = osc_mocks
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -76,10 +80,9 @@ class TestOSCProgressColumn:
         # Should contain state INDETERMINATE
         assert (Osc94States.INDETERMINATE, 0) in progress_calls
 
-    def test_completion_resets_progress(self, monkeypatch):
+    def test_completion_resets_progress(self, osc_mocks):
         """Test state 0 (reset) when task is finished."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = osc_mocks
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -92,10 +95,9 @@ class TestOSCProgressColumn:
         # Should contain state RESET when finished
         assert (Osc94States.RESET, 0) in progress_calls
 
-    def test_percentage_calculation(self, monkeypatch):
+    def test_percentage_calculation(self, osc_mocks):
         """Test percentage calculation is correct."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = osc_mocks
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -108,10 +110,9 @@ class TestOSCProgressColumn:
         # Should contain 75% progress
         assert (Osc94States.PROGRESS, 75) in progress_calls
 
-    def test_percentage_clamping(self, monkeypatch):
+    def test_percentage_clamping(self, osc_mocks):
         """Test percentage is clamped to 0-100 range."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = osc_mocks
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -126,10 +127,9 @@ class TestOSCProgressColumn:
         # This is expected behavior - the task is complete
         assert (Osc94States.RESET, 0) in progress_calls
 
-    def test_zero_total_indeterminate(self, monkeypatch):
+    def test_zero_total_indeterminate(self, osc_mocks):
         """Test that zero total triggers indeterminate state."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
-        progress_calls = mock_set_progress(monkeypatch)
+        progress_calls = osc_mocks
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -141,10 +141,8 @@ class TestOSCProgressColumn:
         # Should use state INDETERMINATE for zero total
         assert (Osc94States.INDETERMINATE, 0) in progress_calls
 
-    def test_render_returns_empty_text(self, monkeypatch):
+    def test_render_returns_empty_text(self, osc_mocks):  # noqa: ARG002
         """Test that render() returns empty Text."""
-        # Mock to ensure column has OSC support (just for testing render method)
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
 
         column = OSCProgressColumn()
 
@@ -160,15 +158,15 @@ class TestOSCProgressColumn:
 
     def test_write_error_handling(self, monkeypatch):
         """Test that write errors are handled gracefully."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
+        monkeypatch.setattr(f"{_OSC_MODULE}.supports_osc_9_4", lambda: True)
 
-        progress_attempts = []
+        progress_attempts: list[tuple[Osc94States, int]] = []
 
         def mock_progress_with_error(state, progress):
             progress_attempts.append((state, progress))
             raise OSError("Broken pipe")
 
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_progress", mock_progress_with_error)
+        monkeypatch.setattr(f"{_OSC_MODULE}.set_progress", mock_progress_with_error)
 
         column = OSCProgressColumn()
         progress = Progress(column)
@@ -184,19 +182,16 @@ class TestOSCProgressColumn:
 
     def test_terminal_title_updates(self, monkeypatch):
         """Test terminal title is updated with progress percentage."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
+        monkeypatch.setattr(f"{_OSC_MODULE}.supports_osc_9_4", lambda: True)
 
-        title_calls = []
-        progress_calls = []
+        title_calls: list[str] = []
+        progress_calls: list[tuple[Osc94States, int]] = []
 
-        def mock_set_title(title):
-            title_calls.append(title)
-
-        def mock_set_progress(state, progress):
-            progress_calls.append((state, progress))
-
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_window_title", mock_set_title)
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_progress", mock_set_progress)
+        monkeypatch.setattr(f"{_OSC_MODULE}.set_window_title", title_calls.append)
+        monkeypatch.setattr(
+            f"{_OSC_MODULE}.set_progress",
+            lambda state, progress: progress_calls.append((state, progress)),
+        )
 
         column = OSCProgressColumn(title="Processing file.mcap")
         progress = Progress(column)
@@ -213,15 +208,12 @@ class TestOSCProgressColumn:
 
     def test_terminal_title_reset_on_completion(self, monkeypatch):
         """Test terminal title is reset to empty when task completes."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
+        monkeypatch.setattr(f"{_OSC_MODULE}.supports_osc_9_4", lambda: True)
 
-        title_calls = []
+        title_calls: list[str] = []
 
-        def mock_set_title(title):
-            title_calls.append(title)
-
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_window_title", mock_set_title)
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_progress", lambda _s, _p: None)
+        monkeypatch.setattr(f"{_OSC_MODULE}.set_window_title", title_calls.append)
+        monkeypatch.setattr(f"{_OSC_MODULE}.set_progress", lambda _s, _p: None)
 
         column = OSCProgressColumn(title="Processing file.mcap")
         progress = Progress(column)
@@ -236,15 +228,12 @@ class TestOSCProgressColumn:
 
     def test_no_title_updates_without_title(self, monkeypatch):
         """Test no title updates when title is not provided."""
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.supports_osc_9_4", lambda: True)
+        monkeypatch.setattr(f"{_OSC_MODULE}.supports_osc_9_4", lambda: True)
 
-        title_calls = []
+        title_calls: list[str] = []
 
-        def mock_set_title(title):
-            title_calls.append(title)
-
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_window_title", mock_set_title)
-        monkeypatch.setattr("pymcap_cli.display.osc_utils.set_progress", lambda _s, _p: None)
+        monkeypatch.setattr(f"{_OSC_MODULE}.set_window_title", title_calls.append)
+        monkeypatch.setattr(f"{_OSC_MODULE}.set_progress", lambda _s, _p: None)
 
         column = OSCProgressColumn()  # No title provided
         progress = Progress(column)

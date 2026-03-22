@@ -38,7 +38,7 @@ from pymcap_cli.encoding.encoder_common import (
     VideoEncoderError,
     get_encoder_options,
 )
-from pymcap_cli.encoding.image_utils import (
+from pymcap_cli.encoding.video_pyav import (
     CompressedImageMsg,
     ImageMsg,
     decode_compressed_frame,

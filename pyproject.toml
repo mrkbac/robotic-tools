@@ -60,7 +60,9 @@ unresolved-attribute = "ignore"
 [[tool.ty.overrides]]
 include = [
     "pymcap-cli/src/pymcap_cli/encoding/decompress.py",
-    "pymcap-cli/src/pymcap_cli/encoding/video_decoder.py",
+    "pymcap-cli/src/pymcap_cli/encoding/video_pyav.py",
+    "pymcap-cli/src/pymcap_cli/encoding/video_ffmpeg.py",
+    "pymcap-cli/src/pymcap_cli/encoding/video_factory.py",
     "pymcap-cli/src/pymcap_cli/cmd/rosdecompress_cmd.py",
     "pymcap-cli/src/pymcap_cli/cmd/roscompress_cmd.py",
 ]

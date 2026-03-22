@@ -1,5 +1,7 @@
 """Sparkline renderable for categorical time-series data."""
 
+from bisect import bisect_right
+
 from rich.text import Text
 
 # Unicode block characters ordered by height
@@ -48,24 +50,23 @@ def sparkline(
 
     span = end_ns - t_start
     reduce_fn = max if reducer == "max" else min
+    timestamps = [ts for ts, _ in changes]
 
     result = Text()
     for i in range(width):
         bucket_start = t_start + (span * i) // width
         bucket_end = t_start + (span * (i + 1)) // width
 
-        # Find the value active at bucket_start (last change before bucket_start)
-        active = changes[0][1]
+        # Active value: last change at or before bucket_start.
+        idx = bisect_right(timestamps, bucket_start) - 1
+        active = changes[max(idx, 0)][1]
         worst = active
-        for ts, val in changes:
-            if ts <= bucket_start:
-                active = val
-                worst = val
-            elif ts <= bucket_end:
-                worst = reduce_fn(worst, val)
-            else:
-                break
-        worst = reduce_fn(worst, active)
+
+        # Reduce over changes within (bucket_start, bucket_end].
+        start_idx = bisect_right(timestamps, bucket_start)
+        end_idx = bisect_right(timestamps, bucket_end)
+        for j in range(start_idx, end_idx):
+            worst = reduce_fn(worst, changes[j][1])
 
         char = char_map.get(worst, "▁")
         style = style_map.get(worst, "dim")

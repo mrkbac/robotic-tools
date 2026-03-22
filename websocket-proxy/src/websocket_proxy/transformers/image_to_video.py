@@ -12,7 +12,7 @@ from pymcap_cli.encoding.encoder_common import (
     calculate_downscale_dimensions,
     get_software_encoder,
 )
-from pymcap_cli.encoding.image_utils import (
+from pymcap_cli.encoding.video_pyav import (
     VideoEncoder,
     decode_compressed_frame,
     resolve_encoder,

@@ -1,24 +1,11 @@
-"""Decoder factories for decompressing compressed ROS topics.
+"""Decoder factory for decompressing CompressedVideo topics.
 
-Provides two independent factories for use with ``read_message_decoded``:
-
-- ``VideoDecompressFactory`` — CompressedVideo → CompressedImage or Image (channel-aware)
-- ``PointCloudDecompressFactory`` — CompressedPointCloud2 → PointCloud2 (schema-only)
-
-Usage::
-
-    from small_mcap import read_message_decoded
-    from pymcap_cli.encoding.decompress import VideoDecompressFactory, PointCloudDecompressFactory
-
-    with open("compressed.mcap", "rb") as f:
-        factories = [VideoDecompressFactory(), PointCloudDecompressFactory()]
-        for msg in read_message_decoded(f, decoder_factories=factories):
-            print(msg.channel.topic, type(msg.decoded_message))
+Provides ``VideoDecompressFactory`` for use with ``read_message_decoded``.
+Uses ``VideoDecompressorProtocol`` — no direct ``av`` or ``subprocess`` imports.
 """
 
 from __future__ import annotations
 
-from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Literal
 
 from pymcap_cli.encoding.encoder_common import EncoderMode
@@ -26,8 +13,9 @@ from pymcap_cli.encoding.encoder_common import EncoderMode
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from av.video.frame import VideoFrame
     from small_mcap.records import Channel
+
+    from pymcap_cli.encoding.video_protocols import DecompressedFrame
 
 # ---------------------------------------------------------------------------
 # Schema constants
@@ -127,97 +115,15 @@ class _SchemaProtocol:
 
 
 # ---------------------------------------------------------------------------
-# Video decompression
+# VideoDecompressFactory
 # ---------------------------------------------------------------------------
-
-
-class _VideoDecompressor:
-    """Per-channel H.264/H.265 → CompressedImage or raw Image decoder.
-
-    Maintains a persistent video decoder context for proper P-frame decoding.
-    """
-
-    def __init__(
-        self,
-        video_format: Literal["compressed", "raw"],
-        jpeg_quality: int,
-        backend: EncoderMode,
-    ) -> None:
-        self._video_format = video_format
-        self._jpeg_quality = jpeg_quality
-        self._backend = backend
-        self._decoder: Any = None
-        self._jpeg_encoder: Any = None
-
-    def _ensure_decoder(self, codec_format: str) -> Any:
-        if self._decoder is not None:
-            return self._decoder
-        from pymcap_cli.encoding.video_decoder import create_video_decoder  # noqa: PLC0415
-
-        self._decoder = create_video_decoder(codec_format, mode=self._backend)
-        return self._decoder
-
-    def _ensure_jpeg_encoder(self, width: int, height: int) -> Any:
-        if self._jpeg_encoder is not None:
-            return self._jpeg_encoder
-        import av  # noqa: PLC0415
-
-        self._jpeg_encoder = av.CodecContext.create("mjpeg", "w")
-        self._jpeg_encoder.width = width
-        self._jpeg_encoder.height = height
-        self._jpeg_encoder.pix_fmt = "yuvj420p"
-        self._jpeg_encoder.time_base = Fraction(1, 1000)
-        self._jpeg_encoder.options = {"q:v": str(max(1, 31 - self._jpeg_quality * 31 // 100))}
-        self._jpeg_encoder.open()
-        return self._jpeg_encoder
-
-    def _frame_to_jpeg(self, frame: VideoFrame) -> bytes:
-        encoder = self._ensure_jpeg_encoder(frame.width, frame.height)
-        reformatted = frame.reformat(format="yuvj420p")
-        reformatted.pts = 0
-        packets = encoder.encode(reformatted)
-        return b"".join(bytes(p) for p in packets)
-
-    def _frame_to_raw(self, frame: VideoFrame) -> tuple[bytes, int, int, str, int]:
-        rgb_frame = frame.reformat(format="rgb24")
-        data = rgb_frame.to_ndarray().tobytes()
-        return data, rgb_frame.height, rgb_frame.width, "rgb8", rgb_frame.width * 3
-
-    def decode(self, msg: Any) -> dict[str, Any] | None:
-        codec_format = _get(msg, "format")
-        video_data = _get(msg, "data")
-        if isinstance(video_data, memoryview):
-            video_data = bytes(video_data)
-
-        frame = self._ensure_decoder(codec_format).decode(video_data)
-        if frame is None:
-            return None
-
-        timestamp = _get(msg, "timestamp")
-        header = {
-            "stamp": {"sec": _get(timestamp, "sec"), "nanosec": _get(timestamp, "nanosec")},
-            "frame_id": _get(msg, "frame_id"),
-        }
-
-        if self._video_format == "compressed":
-            return {"header": header, "format": "jpeg", "data": self._frame_to_jpeg(frame)}
-
-        data, height, width, encoding, step = self._frame_to_raw(frame)
-        return {
-            "header": header,
-            "height": height,
-            "width": width,
-            "encoding": encoding,
-            "is_bigendian": 0,
-            "step": step,
-            "data": data,
-        }
 
 
 class VideoDecompressFactory:
     """Channel-aware decoder factory: CompressedVideo → CompressedImage or Image.
 
-    Creates a separate video decoder per channel for proper P-frame handling.
+    Creates a separate ``VideoDecompressorProtocol`` per channel for proper
+    P-frame handling. No direct ``av`` or ``subprocess`` imports.
     """
 
     channel_aware = True
@@ -236,7 +142,18 @@ class VideoDecompressFactory:
         from mcap_ros2_support_fast.decoder import DecoderFactory  # noqa: PLC0415
 
         self._cdr_factory = DecoderFactory()
-        self._decompressors: dict[int, _VideoDecompressor] = {}
+        self._decompressors: dict[int, Any] = {}
+
+    def _get_decompressor(self, channel_id: int) -> Any:
+        if channel_id not in self._decompressors:
+            from pymcap_cli.encoding.video_factory import create_video_decompressor  # noqa: PLC0415
+
+            self._decompressors[channel_id] = create_video_decompressor(
+                video_format=self._video_format,
+                jpeg_quality=self._jpeg_quality,
+                mode=self._backend,
+            )
+        return self._decompressors[channel_id]
 
     def decoder_for(
         self,
@@ -251,13 +168,39 @@ class VideoDecompressFactory:
         if cdr_decoder is None:
             return None
 
-        if channel.id not in self._decompressors:
-            self._decompressors[channel.id] = _VideoDecompressor(
-                self._video_format, self._jpeg_quality, self._backend
-            )
-        video_dec = self._decompressors[channel.id]
+        decompressor = self._get_decompressor(channel.id)
 
-        def _decode(data: bytes | memoryview) -> Any:
-            return video_dec.decode(cdr_decoder(data))
+        def _decode(data: bytes | memoryview) -> dict[str, Any] | None:
+            decoded = cdr_decoder(data)
+            codec = _get(decoded, "format")
+            video_data = _get(decoded, "data")
+            if isinstance(video_data, memoryview):
+                video_data = bytes(video_data)
+
+            frame: DecompressedFrame | None = decompressor.decompress(video_data, codec)
+            if frame is None:
+                return None
+
+            timestamp = _get(decoded, "timestamp")
+            header = {
+                "stamp": {
+                    "sec": _get(timestamp, "sec"),
+                    "nanosec": _get(timestamp, "nanosec"),
+                },
+                "frame_id": _get(decoded, "frame_id"),
+            }
+
+            if frame.is_jpeg:
+                return {"header": header, "format": "jpeg", "data": frame.data}
+
+            return {
+                "header": header,
+                "height": frame.height,
+                "width": frame.width,
+                "encoding": "rgb8",
+                "is_bigendian": 0,
+                "step": frame.width * 3,
+                "data": frame.data,
+            }
 
         return _decode

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from pymcap_cli.encoding.subprocess_encoder import (
+from pymcap_cli.encoding.video_ffmpeg import (
     AnnexBParser,
-    SubprocessVideoEncoder,
+    FFmpegVideoEncoder,
     check_encoder_cli,
     find_ffmpeg,
 )
@@ -90,23 +90,24 @@ class TestFfmpegDiscovery:
 
 
 # ---------------------------------------------------------------------------
-# SubprocessVideoEncoder integration
+# FFmpegVideoEncoder integration
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
-class TestSubprocessVideoEncoder:
+class TestFFmpegVideoEncoder:
     def test_encode_raw_bytes(self) -> None:
         """Encode raw YUV420p bytes — no PyAV needed."""
         width, height = 64, 64
         frame_size = width * height * 3 // 2
-        encoder = SubprocessVideoEncoder(
+        encoder = FFmpegVideoEncoder(
             width=width,
             height=height,
             codec_name="libx264",
             quality=28,
             target_fps=30.0,
             gop_size=10,
+            input_pix_fmt="yuv420p",
         )
 
         outputs: list[bytes] = []
@@ -128,13 +129,14 @@ class TestSubprocessVideoEncoder:
         """Each encode() output should start with a start code."""
         width, height = 64, 64
         frame_size = width * height * 3 // 2
-        encoder = SubprocessVideoEncoder(
+        encoder = FFmpegVideoEncoder(
             width=width,
             height=height,
             codec_name="libx264",
             quality=28,
             target_fps=30.0,
             gop_size=10,
+            input_pix_fmt="yuv420p",
         )
 
         for i in range(20):
@@ -150,7 +152,9 @@ class TestSubprocessVideoEncoder:
             assert flushed[:4] == b"\x00\x00\x00\x01"
 
     def test_cleanup_on_del(self) -> None:
-        encoder = SubprocessVideoEncoder(width=64, height=64, codec_name="libx264")
+        encoder = FFmpegVideoEncoder(
+            width=64, height=64, codec_name="libx264", input_pix_fmt="yuv420p"
+        )
         pid = encoder._process.pid
         del encoder
         assert pid > 0

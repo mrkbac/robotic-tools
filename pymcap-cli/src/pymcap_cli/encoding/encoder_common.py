@@ -70,7 +70,7 @@ class EncoderConfig:
 
 
 class VideoEncoderProtocol(Protocol):
-    """Structural interface shared by VideoEncoder and SubprocessVideoEncoder."""
+    """Structural interface shared by VideoEncoder and FFmpegVideoEncoder."""
 
     config: EncoderConfig
 
@@ -78,6 +78,9 @@ class VideoEncoderProtocol(Protocol):
 
     def flush(self) -> bytes | None: ...
 
+
+DEFAULT_FPS: float = 30.0
+DEFAULT_GOP_SIZE: int = 30
 
 # Mapping from short codec name to software (CPU) encoder name.
 SOFTWARE_CODEC_MAP: dict[str, str] = {
