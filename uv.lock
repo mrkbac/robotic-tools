@@ -1786,7 +1786,7 @@ wheels = [
 
 [[package]]
 name = "pureini"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "pureini" }
 dependencies = [
     { name = "lz4" },
@@ -1895,7 +1895,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2168,7 +2168,7 @@ dev = [
 
 [[package]]
 name = "ros-parser"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "ros-parser" }
 
 [package.dev-dependencies]
@@ -2415,7 +2415,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]
@@ -2640,7 +2640,7 @@ wheels = [
 
 [[package]]
 name = "websocket-proxy"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "websocket-proxy" }
 dependencies = [
     { name = "mcap-ros2-support-fast" },
