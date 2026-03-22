@@ -17,14 +17,25 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        package:
+          - { dir: small-mcap, cov: true, submodules: true }
+          - { dir: pymcap-cli, cov: true, submodules: true }
+          - { dir: mcap-ros2-support-fast, cov: true, submodules: true }
+          - { dir: ros-parser, cov: true, submodules: false }
+          - { dir: pointcloud2, cov: true, submodules: false }
+          - { dir: pureini, cov: true, submodules: false }
+          - { dir: digitalis, cov: false, submodules: false }
+
+    name: test (${{ matrix.package.dir }}, ${{ matrix.python-version }})
 
     steps:
       - uses: actions/checkout@v6
         with:
-          lfs: true
-          submodules: true
+          lfs: ${{ matrix.package.submodules }}
+          submodules: ${{ matrix.package.submodules }}
 
       - name: Fetch LFS files from submodules
+        if: matrix.package.submodules
         run: git submodule foreach --recursive 'git lfs pull'
 
       - name: Install uv
@@ -34,31 +45,29 @@ jobs:
           activate-environment: true
           enable-cache: true
 
-      - name: Install Python
-        run: |
-          uv pip install pip
-
       - name: Install dependencies
         run: uv sync --frozen --all-groups --all-extras --all-packages
 
       - name: Install mcap CLI
+        if: matrix.package.dir == 'pymcap-cli'
         run: |
           curl -L https://github.com/foxglove/mcap/releases/download/releases%2Fmcap-cli%2Fv0.0.57/mcap-linux-amd64 -o /tmp/mcap
           chmod +x /tmp/mcap
           sudo mv /tmp/mcap /usr/local/bin/mcap
           mcap version
 
-      - name: Run tests with coverage
+      - name: Run tests
         run: |
-          uv run pytest small-mcap/tests -v --cov=small_mcap -m "not benchmark"
-          uv run pytest pymcap-cli/tests -v --cov=pymcap_cli --cov-append -m "not benchmark"
-          uv run pytest mcap-ros2-support-fast/tests -v --cov=mcap_ros2_support_fast --cov-append -m "not benchmark"
-          uv run pytest ros-parser/tests -v --cov=ros_parser --cov-append -m "not benchmark"
-          uv run pytest pointcloud2/tests -v --cov=pointcloud2 --cov-append -m "not benchmark"
-          uv run pytest pureini/tests -v --cov=pureini --cov-append -m "not benchmark"
-          uv run pytest digitalis/tests -v --no-cov -m "not benchmark"
+          cov_module=$(echo "${{ matrix.package.dir }}" | tr '-' '_')
+          if [ "${{ matrix.package.cov }}" = "true" ]; then
+            uv run pytest ${{ matrix.package.dir }}/tests -v --cov=$cov_module -m "not benchmark"
+          else
+            uv run pytest ${{ matrix.package.dir }}/tests -v --no-cov -m "not benchmark"
+          fi
 
       - name: Upload coverage reports to Codecov
+        if: matrix.package.cov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          flags: ${{ matrix.package.dir }}
