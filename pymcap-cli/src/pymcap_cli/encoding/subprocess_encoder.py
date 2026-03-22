@@ -17,7 +17,11 @@ import threading
 import time
 from queue import Empty, Queue
 
-from pymcap_cli.encoder_common import EncoderConfig, VideoEncoderError, build_encoder_options
+from pymcap_cli.encoding.encoder_common import (
+    EncoderConfig,
+    VideoEncoderError,
+    build_encoder_options,
+)
 
 # ---------------------------------------------------------------------------
 # Annex B access-unit splitter

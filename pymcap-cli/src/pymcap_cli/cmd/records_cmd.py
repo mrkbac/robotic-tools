@@ -5,7 +5,7 @@ import sys
 from rich.console import Console
 from small_mcap.reader import stream_reader
 
-from pymcap_cli.input_handler import open_input
+from pymcap_cli.core.input_handler import open_input
 
 console_err = Console(stderr=True)
 

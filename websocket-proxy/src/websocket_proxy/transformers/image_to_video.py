@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pymcap_cli.encoder_common import (
+from pymcap_cli.encoding.encoder_common import (
     FOXGLOVE_COMPRESSED_VIDEO,
     EncoderConfig,
     VideoEncoderError,
     calculate_downscale_dimensions,
     get_software_encoder,
 )
-from pymcap_cli.image_utils import (
+from pymcap_cli.encoding.image_utils import (
     VideoEncoder,
     decode_compressed_frame,
     resolve_encoder,

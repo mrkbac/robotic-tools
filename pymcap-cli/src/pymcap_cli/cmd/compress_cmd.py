@@ -3,8 +3,8 @@
 from rich.console import Console
 
 from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.mcap_processor import InputOptions, OutputOptions
-from pymcap_cli.types_manual import (
+from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
+from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,

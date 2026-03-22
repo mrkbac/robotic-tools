@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from pymcap_cli.osc_utils import Osc94States, set_progress, set_window_title, write_osc
+from pymcap_cli.display.osc_utils import Osc94States, set_progress, set_window_title, write_osc
 
 
 class TestWriteOsc:
@@ -249,7 +249,7 @@ class TestSetWindowTitle:
         def mock_write(sequence: str) -> None:
             written_sequences.append(sequence)
 
-        monkeypatch.setattr("pymcap_cli.osc_utils.write_osc", mock_write)
+        monkeypatch.setattr("pymcap_cli.display.osc_utils.write_osc", mock_write)
 
         set_window_title("Processing data.mcap")
 
@@ -264,7 +264,7 @@ class TestSetWindowTitle:
         def mock_write_error(_sequence: str) -> None:
             raise OSError("Write failed")
 
-        monkeypatch.setattr("pymcap_cli.osc_utils.write_osc", mock_write_error)
+        monkeypatch.setattr("pymcap_cli.display.osc_utils.write_osc", mock_write_error)
 
         # Should not raise an exception
         set_window_title("Test")
@@ -280,7 +280,7 @@ class TestSetProgress:
         def mock_write(sequence: str) -> None:
             written_sequences.append(sequence)
 
-        monkeypatch.setattr("pymcap_cli.osc_utils.write_osc", mock_write)
+        monkeypatch.setattr("pymcap_cli.display.osc_utils.write_osc", mock_write)
 
         # Test progress state (1)
         set_progress(Osc94States.PROGRESS, 50)
@@ -304,7 +304,7 @@ class TestSetProgress:
         def mock_write_error(_sequence: str) -> None:
             raise OSError("Write failed")
 
-        monkeypatch.setattr("pymcap_cli.osc_utils.write_osc", mock_write_error)
+        monkeypatch.setattr("pymcap_cli.display.osc_utils.write_osc", mock_write_error)
 
         # Should not raise an exception
         set_progress(Osc94States.PROGRESS, 50)

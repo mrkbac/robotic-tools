@@ -1,6 +1,6 @@
 """Tests for terminal capability detection."""
 
-from pymcap_cli.osc_utils import supports_osc_9_4
+from pymcap_cli.display.osc_utils import supports_osc_9_4
 
 
 class TestTerminalDetection:

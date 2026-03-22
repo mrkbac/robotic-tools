@@ -14,7 +14,7 @@ from rich.table import Table
 from small_mcap import read_message_decoded
 from small_mcap.reader import include_topics
 
-from pymcap_cli.input_handler import open_input
+from pymcap_cli.core.input_handler import open_input
 
 console = Console()
 

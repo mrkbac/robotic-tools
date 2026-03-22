@@ -35,7 +35,7 @@ from small_mcap import (
 from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
-from pymcap_cli.processors import (
+from pymcap_cli.core.processors import (
     Action,
     AlwaysDecodeProcessor,
     AttachmentFilterProcessor,
@@ -45,7 +45,7 @@ from pymcap_cli.processors import (
     TimeFilterProcessor,
     TopicFilterProcessor,
 )
-from pymcap_cli.types_manual import (
+from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     str_to_compression_type,

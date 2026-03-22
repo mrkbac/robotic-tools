@@ -12,7 +12,7 @@ import numpy as np
 from av import Packet, VideoFrame
 from numpy.typing import NDArray
 
-from pymcap_cli.encoder_common import (
+from pymcap_cli.encoding.encoder_common import (
     HARDWARE_CODEC_MAP,
     EncoderConfig,
     VideoEncoderError,
@@ -23,8 +23,6 @@ from pymcap_cli.encoder_common import (
 if TYPE_CHECKING:
     from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
-    from pointcloud2.messages import Pointcloud2Msg
-    from pureini import CompressionOption, EncodingInfo, EncodingOptions
 
 
 class CompressedImageMsg(Protocol):
@@ -327,91 +325,3 @@ class VideoEncoder:
         if not packets:
             return None
         return b"".join(bytes(packet) for packet in packets)
-
-
-# ---------------------------------------------------------------------------
-# Point cloud compression
-# ---------------------------------------------------------------------------
-
-
-def _build_encoding_info(
-    msg: "Pointcloud2Msg",
-    encoding_opt: "EncodingOptions",
-    compression_opt: "CompressionOption",
-    resolution: float,
-) -> "EncodingInfo":
-    """Build pureini EncodingInfo from a decoded ROS2 PointCloud2 message."""
-    from pureini import EncodingInfo, FieldType, PointField  # noqa: PLC0415
-
-    info = EncodingInfo()
-    info.width = msg.width
-    info.height = msg.height
-    info.point_step = msg.point_step
-    info.encoding_opt = encoding_opt
-    info.compression_opt = compression_opt
-
-    info.fields = []
-    for ros_field in msg.fields:
-        field = PointField(
-            name=ros_field.name,
-            offset=ros_field.offset,
-            type=FieldType(ros_field.datatype),
-            resolution=resolution if ros_field.datatype == 7 else None,
-        )
-        info.fields.append(field)
-
-    return info
-
-
-class PointCloudCompressor:
-    """Pureini-based point cloud compressor with encoder caching.
-
-    Lazily imports pureini, maps string encoding/compression options to
-    pureini enums, and caches the ``PointcloudEncoder`` per ``EncodingInfo``.
-    """
-
-    def __init__(
-        self,
-        encoding: str = "lossy",
-        compression: str = "zstd",
-        resolution: float = 0.01,
-    ) -> None:
-        from pureini import CompressionOption, EncodingOptions, PointcloudEncoder  # noqa: PLC0415
-
-        encoding_map = {
-            "lossy": EncodingOptions.LOSSY,
-            "lossless": EncodingOptions.LOSSLESS,
-            "none": EncodingOptions.NONE,
-        }
-        compression_map = {
-            "zstd": CompressionOption.ZSTD,
-            "lz4": CompressionOption.LZ4,
-            "none": CompressionOption.NONE,
-        }
-
-        if encoding not in encoding_map:
-            raise ValueError(
-                f"Unknown encoding '{encoding}'. Choose from: {', '.join(encoding_map)}"
-            )
-        if compression not in compression_map:
-            raise ValueError(
-                f"Unknown compression '{compression}'. Choose from: {', '.join(compression_map)}"
-            )
-
-        self._encoding_opt = encoding_map[encoding]
-        self._compression_opt = compression_map[compression]
-        self._resolution = resolution
-        self._PointcloudEncoder = PointcloudEncoder
-
-        self._cached_info: EncodingInfo | None = None
-        self._cached_encoder: PointcloudEncoder | None = None
-
-    def compress(self, msg: "Pointcloud2Msg") -> bytes:
-        """Compress a decoded ROS2 PointCloud2 message and return raw bytes."""
-        info = _build_encoding_info(
-            msg, self._encoding_opt, self._compression_opt, self._resolution
-        )
-        if self._cached_info != info:
-            self._cached_info = info
-            self._cached_encoder = self._PointcloudEncoder(info)
-        return self._cached_encoder.encode(bytes(msg.data))  # type: ignore[union-attr]

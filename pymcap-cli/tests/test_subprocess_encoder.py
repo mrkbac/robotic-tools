@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pymcap_cli.subprocess_encoder import (
+from pymcap_cli.encoding.subprocess_encoder import (
     AnnexBParser,
     SubprocessVideoEncoder,
     check_encoder_cli,

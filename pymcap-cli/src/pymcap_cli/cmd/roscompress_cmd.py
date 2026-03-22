@@ -23,20 +23,19 @@ from rich.progress import (
 from small_mcap import McapWriter, get_summary
 from small_mcap.reader import read_message_decoded
 
-from pymcap_cli.encoder_common import (
-    COMPRESSED_POINTCLOUD2,
+from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.display.osc_utils import OSCProgressColumn
+from pymcap_cli.encoding.encoder_common import (
     COMPRESSED_SCHEMAS,
     FOXGLOVE_COMPRESSED_VIDEO,
     IMAGE_SCHEMAS,
-    POINTCLOUD2_SCHEMAS,
     EncoderConfig,
     EncoderMode,
     VideoEncoderError,
     get_software_encoder,
 )
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.osc_utils import OSCProgressColumn
-from pymcap_cli.types_manual import (  # noqa: TC001 — runtime for cyclopts
+from pymcap_cli.encoding.pointcloud import COMPRESSED_POINTCLOUD2, POINTCLOUD2_SCHEMAS
+from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
     ForceOverwriteOption,
     OutputPathOption,
 )
@@ -72,13 +71,13 @@ def _pyav_test_encoder(encoder_name: str) -> bool:
 
 
 def _pyav_resolve_encoder(codec: str) -> str:
-    from pymcap_cli.image_utils import resolve_encoder  # noqa: PLC0415
+    from pymcap_cli.encoding.image_utils import resolve_encoder  # noqa: PLC0415
 
     return resolve_encoder(codec)
 
 
 def _pyav_decode_compressed(data: bytes) -> Any:
-    from pymcap_cli.image_utils import decode_compressed_frame  # noqa: PLC0415
+    from pymcap_cli.encoding.image_utils import decode_compressed_frame  # noqa: PLC0415
 
     return decode_compressed_frame(data)
 
@@ -86,7 +85,7 @@ def _pyav_decode_compressed(data: bytes) -> Any:
 def _pyav_raw_to_frame(decoded_message: Any) -> Any:
     import av  # noqa: PLC0415
 
-    from pymcap_cli.image_utils import raw_image_to_array  # noqa: PLC0415
+    from pymcap_cli.encoding.image_utils import raw_image_to_array  # noqa: PLC0415
 
     rgb_array = raw_image_to_array(decoded_message)
     return av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
@@ -97,13 +96,13 @@ def _pyav_get_frame_dims(frame: Any) -> tuple[int, int]:
 
 
 def _pyav_calculate_downscale(width: int, height: int, max_dim: int) -> tuple[int, int]:
-    from pymcap_cli.image_utils import calculate_downscale_dimensions  # noqa: PLC0415
+    from pymcap_cli.encoding.encoder_common import calculate_downscale_dimensions  # noqa: PLC0415
 
     return calculate_downscale_dimensions(width, height, max_dim)
 
 
 def _pyav_create_encoder(width: int, height: int, codec_name: str, quality: int) -> Any:
-    from pymcap_cli.image_utils import VideoEncoder  # noqa: PLC0415
+    from pymcap_cli.encoding.image_utils import VideoEncoder  # noqa: PLC0415
 
     return VideoEncoder(
         width=width,
@@ -121,14 +120,20 @@ def _pyav_create_encoder(width: int, height: int, codec_name: str, quality: int)
 
 
 def _cli_test_encoder(encoder_name: str) -> bool:
-    from pymcap_cli.subprocess_encoder import check_encoder_cli  # noqa: PLC0415
+    from pymcap_cli.encoding.subprocess_encoder import check_encoder_cli  # noqa: PLC0415
 
     return check_encoder_cli(encoder_name)
 
 
 def _cli_resolve_encoder(codec: str) -> str:
-    from pymcap_cli.encoder_common import HARDWARE_CODEC_MAP, SOFTWARE_CODEC_MAP  # noqa: PLC0415
-    from pymcap_cli.subprocess_encoder import check_encoder_cli, find_ffmpeg  # noqa: PLC0415
+    from pymcap_cli.encoding.encoder_common import (  # noqa: PLC0415
+        HARDWARE_CODEC_MAP,
+        SOFTWARE_CODEC_MAP,
+    )
+    from pymcap_cli.encoding.subprocess_encoder import (  # noqa: PLC0415
+        check_encoder_cli,
+        find_ffmpeg,
+    )
 
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
@@ -154,13 +159,13 @@ def _cli_resolve_encoder(codec: str) -> str:
 
 
 def _cli_decode_compressed(data: bytes, scale: int | None = None) -> tuple[bytes, int, int]:
-    from pymcap_cli.subprocess_encoder import decode_image_to_yuv420p  # noqa: PLC0415
+    from pymcap_cli.encoding.subprocess_encoder import decode_image_to_yuv420p  # noqa: PLC0415
 
     return decode_image_to_yuv420p(data, scale=scale)
 
 
 def _cli_raw_to_yuv420p(decoded_message: Any) -> tuple[bytes, int, int]:
-    from pymcap_cli.subprocess_encoder import (  # noqa: PLC0415
+    from pymcap_cli.encoding.subprocess_encoder import (  # noqa: PLC0415
         ROS_ENCODING_TO_PIX_FMT,
         raw_rgb_to_yuv420p,
     )
@@ -174,7 +179,7 @@ def _cli_raw_to_yuv420p(decoded_message: Any) -> tuple[bytes, int, int]:
 
 
 def _cli_create_encoder(width: int, height: int, codec_name: str, quality: int) -> Any:
-    from pymcap_cli.subprocess_encoder import SubprocessVideoEncoder  # noqa: PLC0415
+    from pymcap_cli.encoding.subprocess_encoder import SubprocessVideoEncoder  # noqa: PLC0415
 
     return SubprocessVideoEncoder(
         width=width,
@@ -224,7 +229,7 @@ def _create_pointcloud_compressor(
     pc_encoding: str, pc_compression: str, resolution: float
 ) -> Any | None:
     try:
-        from pymcap_cli.image_utils import PointCloudCompressor  # noqa: PLC0415
+        from pymcap_cli.encoding.pointcloud import PointCloudCompressor  # noqa: PLC0415
 
         return PointCloudCompressor(
             encoding=pc_encoding, compression=pc_compression, resolution=resolution

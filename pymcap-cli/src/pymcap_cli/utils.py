@@ -29,7 +29,7 @@ from small_mcap import (
     rebuild_summary,
 )
 
-from pymcap_cli.osc_utils import OSCProgressColumn
+from pymcap_cli.display.osc_utils import OSCProgressColumn
 
 
 def bytes_to_human(size_bytes: float | None) -> str:

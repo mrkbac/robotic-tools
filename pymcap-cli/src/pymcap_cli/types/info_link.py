@@ -7,7 +7,7 @@ import zlib
 from pathlib import Path
 from typing import Literal, TypedDict
 
-from pymcap_cli.info_types import ChannelInfo, ChunksInfo, McapInfoOutput, SchemaInfo
+from pymcap_cli.types.info_types import ChannelInfo, ChunksInfo, McapInfoOutput, SchemaInfo
 
 ScanMode = Literal["summary", "rebuild", "exact"]
 

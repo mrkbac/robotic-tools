@@ -7,7 +7,7 @@ import zlib
 from pathlib import Path
 
 import pytest
-from pymcap_cli.cmd.info_link import generate_link
+from pymcap_cli.types.info_link import generate_link
 
 
 def _decompress_from_base64url(b64: str) -> str:

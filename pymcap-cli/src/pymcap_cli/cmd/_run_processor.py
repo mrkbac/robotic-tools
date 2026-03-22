@@ -4,8 +4,8 @@ import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from pymcap_cli.input_handler import open_input
-from pymcap_cli.mcap_processor import (
+from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
     McapProcessor,

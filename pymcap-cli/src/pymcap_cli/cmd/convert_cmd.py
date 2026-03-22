@@ -21,9 +21,9 @@ from rich.progress import (
 from small_mcap.writer import CompressionType, McapWriter
 from small_mcap.writer import CompressionType as WriterCompressionType
 
-from pymcap_cli.msg_resolver import ROS2Distro, get_message_definition
-from pymcap_cli.osc_utils import OSCProgressColumn
-from pymcap_cli.types_manual import (
+from pymcap_cli.core.msg_resolver import ROS2Distro, get_message_definition
+from pymcap_cli.display.osc_utils import OSCProgressColumn
+from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,

@@ -5,7 +5,7 @@ from collections import defaultdict
 from rich.console import Console
 from rich.table import Table
 
-from pymcap_cli.input_handler import open_input
+from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.utils import read_or_rebuild_info
 
 console = Console()

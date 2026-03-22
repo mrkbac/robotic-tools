@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from pymcap_cli.mcap_processor import (
+from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
     McapProcessor,

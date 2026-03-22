@@ -5,9 +5,9 @@ from typing import Annotated
 from cyclopts import Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd.info_data import info_to_dict
-from pymcap_cli.display_utils import ChannelTableColumn, display_channels_table
-from pymcap_cli.input_handler import open_input
+from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.display.display_utils import ChannelTableColumn, display_channels_table
+from pymcap_cli.types.info_data import info_to_dict
 from pymcap_cli.utils import read_or_rebuild_info
 
 console = Console()

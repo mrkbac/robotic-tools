@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from pymcap_cli.cmd.recover_inplace_cmd import recover_inplace
-from pymcap_cli.mcap_processor import (
+from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
     McapProcessor,

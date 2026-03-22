@@ -5,8 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pymcap_cli.encoder_common import COMPRESSED_POINTCLOUD2
-from pymcap_cli.image_utils import PointCloudCompressor
+from pymcap_cli.encoding.pointcloud import COMPRESSED_POINTCLOUD2, PointCloudCompressor
 
 from . import Transformer, TransformError
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from small_mcap import Channel, ChunkIndex, RebuildInfo, Schema
 
-from pymcap_cli.info_types import (
+from pymcap_cli.types.info_types import (
     AttachmentInfo,
     ChannelInfo,
     CompressionStats,

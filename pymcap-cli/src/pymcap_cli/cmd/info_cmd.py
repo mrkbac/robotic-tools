@@ -18,15 +18,15 @@ from rich.table import Table
 from rich.text import Text
 from small_mcap import McapError, rebuild_summary
 
-from pymcap_cli.cmd.info_data import info_to_dict
-from pymcap_cli.cmd.info_link import ScanMode, generate_link
-from pymcap_cli.display_utils import (
+from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.display.display_utils import (
     ChannelTableColumn,
     DistributionBar,
     display_channels_table,
 )
-from pymcap_cli.info_types import McapInfoOutput
-from pymcap_cli.input_handler import open_input
+from pymcap_cli.types.info_data import info_to_dict
+from pymcap_cli.types.info_link import ScanMode, generate_link
+from pymcap_cli.types.info_types import McapInfoOutput
 from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
 console = Console()
