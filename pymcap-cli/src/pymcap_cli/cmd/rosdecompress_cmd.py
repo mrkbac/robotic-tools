@@ -235,7 +235,11 @@ def rosdecompress(
             elif schema_name == _COMPRESSED_POINTCLOUD2_SCHEMA and pointcloud:
                 decoded = msg.decoded_message
                 schema_id = ensure_schema(
-                    writer, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2.encode(), schema_ids
+                    writer,
+                    "sensor_msgs/msg/PointCloud2",
+                    "ros2msg",
+                    POINTCLOUD2.encode(),
+                    schema_ids,
                 )
                 channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
                 writer.add_message_encode(

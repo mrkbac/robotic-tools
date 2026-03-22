@@ -11,17 +11,19 @@ Verifies that compress → decompress preserves:
 from __future__ import annotations
 
 import io
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import pytest
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
-from small_mcap import McapWriter, get_summary
-from small_mcap.reader import read_message
-
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
 from pymcap_cli.encoding.encoder_common import EncoderMode
+from small_mcap import McapWriter, get_summary
+from small_mcap.reader import read_message
+
 from tests.fixtures.image_mcap_generator import (
     SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA,
     SENSOR_MSGS_IMAGE_SCHEMA,
@@ -121,7 +123,12 @@ def _create_mixed_mcap(num_frames: int = 20) -> bytes:
     writer.start()
 
     # Register schemas and channels.
-    writer.add_schema(1, "sensor_msgs/msg/CompressedImage", "ros2msg", SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode())
+    writer.add_schema(
+        1,
+        "sensor_msgs/msg/CompressedImage",
+        "ros2msg",
+        SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode(),
+    )
     writer.add_schema(2, "sensor_msgs/msg/Image", "ros2msg", SENSOR_MSGS_IMAGE_SCHEMA.encode())
     writer.add_schema(3, "std_msgs/msg/String", "ros2msg", _STRING_SCHEMA.encode())
 
@@ -202,9 +209,7 @@ class TestRoscompressRoundtrip:
         assert _get_message_count(decompressed) == input_count
 
     @pytest.mark.parametrize("backend", [EncoderMode.PYAV, EncoderMode.FFMPEG_CLI])
-    def test_raw_image_roundtrip(
-        self, image_rgb_mcap: Path, tmp_path: Path, backend: EncoderMode
-    ):
+    def test_raw_image_roundtrip(self, image_rgb_mcap: Path, tmp_path: Path, backend: EncoderMode):
         input_count = _get_message_count(image_rgb_mcap)
         compressed, decompressed = _roundtrip(image_rgb_mcap, tmp_path, backend)
 
@@ -297,9 +302,7 @@ class TestRoscompressMixedInput:
         _assert_timestamps_monotonic(_read_messages(decompressed))
 
     @pytest.mark.parametrize("backend", [EncoderMode.PYAV, EncoderMode.FFMPEG_CLI])
-    def test_mixed_all_topics_present(
-        self, mixed_mcap: Path, tmp_path: Path, backend: EncoderMode
-    ):
+    def test_mixed_all_topics_present(self, mixed_mcap: Path, tmp_path: Path, backend: EncoderMode):
         """All topics from input must appear in output."""
         input_topics = {m["topic"] for m in _read_messages(mixed_mcap)}
         compressed, decompressed = _roundtrip(mixed_mcap, tmp_path, backend)

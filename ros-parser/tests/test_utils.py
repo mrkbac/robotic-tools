@@ -70,7 +70,7 @@ class TestUnescapeString:
 
     def test_unicode_8_emoji(self):
         # \U0001F600 = 😀
-        assert unescape_string("\\U0001F600") == "\U0001F600"
+        assert unescape_string("\\U0001F600") == "\U0001f600"
 
     def test_combined(self):
         assert unescape_string("\\t\\x41\\n") == "\tA\n"

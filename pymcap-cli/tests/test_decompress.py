@@ -375,7 +375,8 @@ class TestVideoDecompressFactoryFlush:
 
         factory = VideoDecompressFactory()
         decoded = [
-            msg for msg in read_message_decoded(buf, decoder_factories=[factory])
+            msg
+            for msg in read_message_decoded(buf, decoder_factories=[factory])
             if msg.decoded_message is not None
         ]
         flushed = factory.flush_all()

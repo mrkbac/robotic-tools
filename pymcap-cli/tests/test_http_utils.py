@@ -252,9 +252,7 @@ class TestHTTPRangeStreamClosed:
 class TestVerifyRangeSupport:
     @patch("pymcap_cli.http_utils.urlopen")
     def test_accept_ranges_none_raises(self, mock_urlopen: MagicMock) -> None:
-        mock_urlopen.return_value = _make_response(
-            status=200, headers={"Accept-Ranges": "none"}
-        )
+        mock_urlopen.return_value = _make_response(status=200, headers={"Accept-Ranges": "none"})
         with pytest.raises(ValueError, match="does not support Range"):
             HTTPRangeStream(URL, 100)
 
@@ -266,18 +264,14 @@ class TestVerifyRangeSupport:
 
     @patch("pymcap_cli.http_utils.urlopen")
     def test_416_is_accepted(self, mock_urlopen: MagicMock) -> None:
-        mock_urlopen.side_effect = HTTPError(
-            URL, 416, "Range Not Satisfiable", HTTPMessage(), None
-        )
+        mock_urlopen.side_effect = HTTPError(URL, 416, "Range Not Satisfiable", HTTPMessage(), None)
         # Should not raise
         stream = HTTPRangeStream(URL, 100)
         assert stream.size == 100
 
     @patch("pymcap_cli.http_utils.urlopen")
     def test_other_http_error_raises(self, mock_urlopen: MagicMock) -> None:
-        mock_urlopen.side_effect = HTTPError(
-            URL, 403, "Forbidden", HTTPMessage(), None
-        )
+        mock_urlopen.side_effect = HTTPError(URL, 403, "Forbidden", HTTPMessage(), None)
         with pytest.raises(ValueError, match="Failed to verify"):
             HTTPRangeStream(URL, 100)
 
