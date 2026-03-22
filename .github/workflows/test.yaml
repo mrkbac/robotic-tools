@@ -76,9 +76,9 @@ jobs:
         run: |
           cov_module=$(echo "${{ matrix.package.dir }}" | tr '-' '_')
           if [ "${{ matrix.package.cov }}" = "true" ]; then
-            uv run pytest ${{ matrix.package.dir }}/tests -v --cov=$cov_module -m "not benchmark"
+            uv run pytest ${{ matrix.package.dir }}/tests -v --cov=$cov_module -m "not benchmark" -n auto
           else
-            uv run pytest ${{ matrix.package.dir }}/tests -v --no-cov -m "not benchmark"
+            uv run pytest ${{ matrix.package.dir }}/tests -v --no-cov -m "not benchmark" -n auto
           fi
 
       - name: Upload coverage reports to Codecov
