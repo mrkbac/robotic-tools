@@ -32,11 +32,27 @@ jobs:
       - uses: actions/checkout@v6
         with:
           lfs: ${{ matrix.package.submodules }}
-          submodules: ${{ matrix.package.submodules }}
 
-      - name: Fetch LFS files from submodules
+      - name: Compute submodule cache key
         if: matrix.package.submodules
-        run: git submodule foreach --recursive 'git lfs pull'
+        id: submodule-key
+        run: echo "hash=$(git ls-tree HEAD data/ | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache submodules
+        if: matrix.package.submodules
+        id: submodule-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/data
+            data/mcap
+          key: submodules-${{ runner.os }}-${{ steps.submodule-key.outputs.hash }}
+
+      - name: Checkout submodules
+        if: matrix.package.submodules && steps.submodule-cache.outputs.cache-hit != 'true'
+        run: |
+          git submodule update --init --depth=1
+          git submodule foreach --recursive 'git lfs pull'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
