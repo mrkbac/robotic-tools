@@ -5,6 +5,7 @@ import sys
 from cyclopts import App, Group
 
 from pymcap_cli.cmd import (
+    bag2mcap_cmd,
     cat_cmd,
     compress_cmd,
     convert_cmd,
@@ -130,6 +131,7 @@ app.command(name="tftree", group=inspect_group)(tftree_cmd.tftree)
 app.command(name="topic-chunks", group=inspect_group)(topic_chunks_cmd.topic_chunks)
 
 # Transform commands — convert, filter, or produce new files
+app.command(name="bag2mcap", group=transform_group)(bag2mcap_cmd.bag2mcap)
 app.command(name="compress", group=transform_group)(compress_cmd.compress)
 app.command(name="convert", group=transform_group)(convert_cmd.convert)
 app.command(name="filter", group=transform_group)(filter_cmd.filter_cmd)
