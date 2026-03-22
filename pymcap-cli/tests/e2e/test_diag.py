@@ -30,10 +30,8 @@ class TestDiag:
 
         assert result == 0
         captured = capsys.readouterr()
-        # encoder_top had ERROR, camera_front had ERROR — both should appear
         assert "encoder_top" in captured.out
         assert "camera_front" in captured.out
-        # radar_front was always OK — should NOT appear in default view
         assert "radar_front" not in captured.out
 
     def test_all_shows_ok(self, diag_mcap: Path, capsys):
@@ -74,7 +72,7 @@ class TestDiag:
         assert "encoder_top" not in captured.out
 
     def test_inspect(self, diag_mcap: Path, capsys):
-        """--inspect shows detailed view with level changes and values."""
+        """--inspect shows detailed view with level changes, frequency, duration, and values."""
         result = diag(file=str(diag_mcap), inspect="encoder")
 
         assert result == 0
@@ -83,6 +81,10 @@ class TestDiag:
         assert "Level Changes" in captured.out
         assert "Latest Values" in captured.out
         assert "encoder_reset_count" in captured.out
+        assert "Frequency:" in captured.out
+        assert "Hz" in captured.out
+        assert "Time in state:" in captured.out
+        assert "Timeline:" in captured.out
 
     def test_inspect_no_match(self, diag_mcap: Path, capsys):
         """--inspect with no match prints warning."""
@@ -113,7 +115,6 @@ class TestDiag:
         assert "components" in data
         assert data["summary"]["total_components"] == 3
 
-        # Check component structure
         comp = data["components"][0]
         assert "name" in comp
         assert "worst_level" in comp
@@ -121,6 +122,8 @@ class TestDiag:
         assert "level_counts" in comp
         assert "values" in comp
         assert "level_changes" in comp
+        assert "frequency_hz" in comp
+        assert "level_durations_s" in comp
 
     def test_json_all(self, diag_mcap: Path, capsys):
         """--json --all includes all components."""
@@ -145,13 +148,56 @@ class TestDiag:
         assert result == 0
         data = json.loads(capsys.readouterr().out)
 
-        # Find encoder component
         encoder = next(c for c in data["components"] if "Encoder" in c["name"])
-        # Should have transitions: OK -> WARN -> ERROR -> OK -> OK (last OK not recorded since same)
         assert len(encoder["level_changes"]) >= 3
-        # First was OK
         assert encoder["level_changes"][0]["level"] == 0
-        # Should have gone through WARN and ERROR
         levels = [c["level"] for c in encoder["level_changes"]]
-        assert 1 in levels  # WARN
-        assert 2 in levels  # ERROR
+        assert 1 in levels
+        assert 2 in levels
+
+    def test_frequency_hz(self, diag_mcap: Path, capsys):
+        """Frequency Hz is computed and shown in JSON."""
+        result = diag(file=str(diag_mcap), json_output=True, show_all=True)
+
+        assert result == 0
+        data = json.loads(capsys.readouterr().out)
+        # All 3 components have 5 messages over 20s = 0.2 Hz
+        for comp in data["components"]:
+            assert comp["frequency_hz"] is not None
+            assert comp["frequency_hz"] > 0
+
+    def test_level_durations(self, diag_mcap: Path, capsys):
+        """Level durations are tracked in JSON output."""
+        result = diag(file=str(diag_mcap), json_output=True, show_all=True)
+
+        assert result == 0
+        data = json.loads(capsys.readouterr().out)
+
+        encoder = next(c for c in data["components"] if "Encoder" in c["name"])
+        durations = encoder["level_durations_s"]
+        # Encoder spent time in OK, WARN, and ERROR
+        assert "OK" in durations
+        assert durations["OK"] > 0
+
+    def test_sparkline_in_summary(self, diag_mcap: Path, capsys):
+        """Summary table includes sparkline timeline column."""
+        result = diag(file=str(diag_mcap))
+
+        assert result == 0
+        captured = capsys.readouterr()
+        # Sparkline uses Unicode block chars
+        assert any(c in captured.out for c in "▁▃▅▇")
+
+    def test_single_topic(self, diag_mcap: Path, capsys):
+        """Passing a single topic via -t works."""
+        result = diag(file=str(diag_mcap), topics=["/diagnostics"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "encoder_top" in captured.out
+
+    def test_default_scans_both_topics(self, diag_mcap: Path):
+        """Default scans /diagnostics and /diagnostics_agg."""
+        # The fixture only has /diagnostics, but the command should not error
+        result = diag(file=str(diag_mcap))
+        assert result == 0

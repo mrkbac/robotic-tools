@@ -17,12 +17,16 @@ from rich.tree import Tree
 from small_mcap.reader import include_topics, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.display.sparkline import sparkline
 
 console = Console()
 console_err = Console(stderr=True)
 
 LEVEL_NAMES = {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
 LEVEL_STYLES = {0: "green", 1: "yellow", 2: "red", 3: "dim"}
+LEVEL_CHARS = {0: "▁", 1: "▃", 2: "▇", 3: "▅"}
+
+DEFAULT_TOPICS = ["/diagnostics", "/diagnostics_agg"]
 
 FILTERING_GROUP = Group("Filtering")
 DISPLAY_GROUP = Group("Display")
@@ -43,9 +47,10 @@ class DiagEntry:
     last_timestamp_ns: int = 0
     latest_values: list[tuple[str, str]] = field(default_factory=list)
     level_changes: list[tuple[int, int, str]] = field(default_factory=list)
+    level_durations_ns: dict[int, int] = field(default_factory=lambda: {0: 0, 1: 0, 2: 0, 3: 0})
 
 
-def _collect_diagnostics(file: str, topic: str) -> dict[str, DiagEntry]:
+def _collect_diagnostics(file: str, topics: list[str]) -> dict[str, DiagEntry]:
     """Stream all diagnostics messages and accumulate per-component state."""
     entries: dict[str, DiagEntry] = {}
     msg_count = 0
@@ -72,7 +77,7 @@ def _collect_diagnostics(file: str, topic: str) -> dict[str, DiagEntry]:
 
         for msg in read_message_decoded(
             f,
-            should_include=include_topics([topic]),
+            should_include=include_topics(topics),
             decoder_factories=[DecoderFactory()],
         ):
             msg_count += 1
@@ -99,6 +104,10 @@ def _collect_diagnostics(file: str, topic: str) -> dict[str, DiagEntry]:
                     entries[name].level_counts[level] += 1
                 else:
                     entry = entries[name]
+                    # Accumulate time spent at previous level
+                    dt = timestamp_ns - entry.last_timestamp_ns
+                    entry.level_durations_ns[entry.last_level] += dt
+
                     entry.count += 1
                     entry.level_counts[level] += 1
                     entry.worst_level = max(entry.worst_level, level)
@@ -133,6 +142,43 @@ def _level_text(level: int) -> Text:
 
 def _format_timestamp(timestamp_ns: int) -> str:
     return datetime.fromtimestamp(timestamp_ns / 1_000_000_000).strftime("%H:%M:%S.%f")[:-3]
+
+
+def _format_duration_ns(ns: int) -> str:
+    """Format nanoseconds as human-readable duration."""
+    total_s = ns / 1_000_000_000
+    if total_s < 1:
+        return f"{total_s:.1f}s"
+    total_s = int(total_s)
+    if total_s < 60:
+        return f"{total_s}s"
+    minutes, seconds = divmod(total_s, 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes}m"
+
+
+def _compute_hz(entry: DiagEntry) -> float | None:
+    """Compute average publish rate in Hz from first to last timestamp."""
+    if entry.count < 2:
+        return None
+    duration_s = (entry.last_timestamp_ns - entry.first_timestamp_ns) / 1e9
+    if duration_s <= 0:
+        return None
+    return (entry.count - 1) / duration_s
+
+
+def _sparkline(entry: DiagEntry, width: int = 20) -> Text:
+    """Build a colored sparkline of level changes over time."""
+    changes = [(ts, lvl) for ts, lvl, _msg in entry.level_changes]
+    return sparkline(
+        changes,
+        entry.last_timestamp_ns,
+        char_map=LEVEL_CHARS,
+        style_map=LEVEL_STYLES,
+        width=width,
+    )
 
 
 def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str]:
@@ -197,14 +243,19 @@ def _build_summary_table(
     )
     table.add_column("Lvl", no_wrap=True, width=5)
     table.add_column("Cnt", justify="right", style="cyan", width=5)
+    table.add_column("Hz", justify="right", width=6, style="dim")
+    table.add_column("Timeline", no_wrap=True, width=20)
     table.add_column("Name", no_wrap=True, ratio=1, overflow="ellipsis")
     table.add_column("Message", no_wrap=True, ratio=1, overflow="ellipsis")
 
     for entry in filtered:
-        level_txt = _level_text(entry.worst_level)
+        hz = _compute_hz(entry)
+        hz_str = f"{hz:.1f}" if hz is not None else ""
         table.add_row(
-            level_txt,
+            _level_text(entry.worst_level),
             str(entry.count),
+            hz_str,
+            _sparkline(entry),
             entry.name,
             entry.last_message,
         )
@@ -244,7 +295,6 @@ def _build_inspect_view(entries: list[DiagEntry]) -> list[Table | Text]:
     renderables: list[Table | Text] = []
 
     for entry in entries:
-        # Header
         header = Text()
         header.append(f"\n{entry.name}", style="bold")
         if entry.hardware_id:
@@ -262,6 +312,28 @@ def _build_inspect_view(entries: list[DiagEntry]) -> list[Table | Text]:
         dist.append(f"(total={entry.count})", style="dim")
         renderables.append(dist)
 
+        # Frequency
+        hz = _compute_hz(entry)
+        if hz is not None:
+            renderables.append(Text(f"  Frequency: {hz:.1f} Hz", style="cyan"))
+
+        # Time in state
+        has_durations = any(v > 0 for v in entry.level_durations_ns.values())
+        if has_durations:
+            dur = Text("  Time in state: ")
+            for lvl in (0, 1, 2, 3):
+                ns = entry.level_durations_ns.get(lvl, 0)
+                if ns > 0:
+                    style = LEVEL_STYLES[lvl]
+                    name = LEVEL_NAMES[lvl]
+                    dur.append(f"{name}={_format_duration_ns(ns)}  ", style=style)
+            renderables.append(dur)
+
+        # Sparkline
+        spark = _sparkline(entry, width=40)
+        if spark.plain:
+            renderables.append(Text.assemble("  Timeline: ", spark))
+
         # Timeline of level changes
         if len(entry.level_changes) > 1:
             timeline = Table(
@@ -275,7 +347,6 @@ def _build_inspect_view(entries: list[DiagEntry]) -> list[Table | Text]:
             timeline.add_column("Level", no_wrap=True, width=6)
             timeline.add_column("Message")
 
-            # Show up to 50 transitions
             changes = entry.level_changes
             truncated = len(changes) > 50
             if truncated:
@@ -330,6 +401,12 @@ def _build_json_output(
                 "count": e.count,
                 "level_counts": {LEVEL_NAMES[k]: v for k, v in sorted(e.level_counts.items())},
                 "last_message": e.last_message,
+                "frequency_hz": _compute_hz(e),
+                "level_durations_s": {
+                    LEVEL_NAMES[k]: round(v / 1e9, 2)
+                    for k, v in sorted(e.level_durations_ns.items())
+                    if v > 0
+                },
                 "values": dict(e.latest_values),
                 "level_changes": [
                     {
@@ -398,13 +475,13 @@ def diag(
             group=DISPLAY_GROUP,
         ),
     ] = False,
-    topic: Annotated[
-        str,
+    topics: Annotated[
+        list[str] | None,
         Parameter(
-            name=["-t", "--topic"],
+            name=["-t", "--topics"],
             group=FILTERING_GROUP,
         ),
-    ] = "/diagnostics",
+    ] = None,
     json_output: Annotated[
         bool,
         Parameter(
@@ -417,7 +494,7 @@ def diag(
 
     Reads diagnostic_msgs/msg/DiagnosticArray messages and provides a scannable
     overview of system health. By default shows only components with issues
-    (WARN, ERROR, STALE).
+    (WARN, ERROR, STALE) and scans both /diagnostics and /diagnostics_agg.
 
     Examples:
       # Show components with issues
@@ -437,6 +514,9 @@ def diag(
 
       # Inspect all components
       pymcap-cli diag recording.mcap --inspect-all
+
+      # Scan only /diagnostics (skip /diagnostics_agg)
+      pymcap-cli diag recording.mcap -t /diagnostics
 
       # Hierarchical tree view
       pymcap-cli diag recording.mcap --tree
@@ -463,11 +543,13 @@ def diag(
         Show detailed view for all components.
     tree
         Display as hierarchical tree instead of flat table.
-    topic
-        Diagnostics topic name. Common alternatives: /diagnostics_agg.
+    topics
+        Diagnostics topic names. Defaults to /diagnostics and /diagnostics_agg.
     json_output
         Output as JSON for scripting.
     """
+    resolved_topics = topics if topics is not None else DEFAULT_TOPICS
+
     # Compile regex patterns upfront so invalid patterns fail fast
     name_re = _compile_pattern(name, "--name") if name else None
     hw_re = _compile_pattern(hardware_id, "--hardware-id") if hardware_id else None
@@ -476,7 +558,7 @@ def diag(
     inspect_re = _compile_pattern(inspect, "--inspect") if inspect else None
 
     try:
-        entries = _collect_diagnostics(file, topic)
+        entries = _collect_diagnostics(file, resolved_topics)
     except (OSError, ValueError, RuntimeError) as e:
         console_err.print(f"[red]Error reading MCAP file: {e}[/red]")
         return 1
@@ -485,7 +567,8 @@ def diag(
         return 0
 
     if not entries:
-        console_err.print(f"[yellow]No diagnostics found on topic '{topic}'[/yellow]")
+        topic_str = ", ".join(resolved_topics)
+        console_err.print(f"[yellow]No diagnostics found on topic(s) '{topic_str}'[/yellow]")
         return 0
 
     level_totals: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
