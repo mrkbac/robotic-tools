@@ -80,7 +80,7 @@ def _roundtrip(
     compressed = tmp_path / "compressed.mcap"
     decompressed = tmp_path / "decompressed.mcap"
 
-    roscompress(
+    rc = roscompress(
         file=str(input_path),
         output=compressed,
         force=True,
@@ -88,7 +88,8 @@ def _roundtrip(
         backend=backend,
         pointcloud=False,
     )
-    rosdecompress(
+    assert rc == 0, f"roscompress failed with exit code {rc}"
+    rc = rosdecompress(
         file=str(compressed),
         output=decompressed,
         force=True,
@@ -96,6 +97,7 @@ def _roundtrip(
         backend=backend,
         pointcloud=False,
     )
+    assert rc == 0, f"rosdecompress failed with exit code {rc}"
     return compressed, decompressed
 
 
@@ -195,6 +197,7 @@ def mixed_mcap(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.e2e
 class TestRoscompressRoundtrip:
     """Test that roscompress → rosdecompress preserves message count and timing."""
 
@@ -253,6 +256,7 @@ class TestRoscompressRoundtrip:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.e2e
 class TestRoscompressMixedInput:
     """Test with multiple image topics + non-image pass-through."""
 

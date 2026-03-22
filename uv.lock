@@ -1662,6 +1662,15 @@ dependencies = [
 requires-dist = [{ name = "numpy", specifier = ">1" }]
 
 [[package]]
+name = "portable-ffmpeg"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/f4/21a509690b57bafc00012392c085c428140d59bf790809c74c580b711756/portable_ffmpeg-0.1.0.tar.gz", hash = "sha256:85094cc7acbcf9dd07b9dd4408847220e0d6fe0ea20a8623b6e02dd63f316b60", size = 32932, upload-time = "2025-06-15T11:28:18.261Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/e7/cd530c42d8bd2c11adfd22f6a61ce74e73bde74f2ae20fd6c97b07393616/portable_ffmpeg-0.1.0-py3-none-any.whl", hash = "sha256:06aef1a28c3c0a3e737104659478005e7959013b0987eda8b9ca2b1784e2d8c6", size = 8392, upload-time = "2025-06-15T11:28:16.934Z" },
+]
+
+[[package]]
 name = "propcache"
 version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2136,6 +2145,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "jsonschema-gentypes" },
+    { name = "portable-ffmpeg" },
     { name = "pyinstrument" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
@@ -2148,6 +2158,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "jsonschema-gentypes", specifier = ">=2.12.0" },
+    { name = "portable-ffmpeg", specifier = ">=0.1.0" },
     { name = "pyinstrument", specifier = ">=5.1.1" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-benchmark", specifier = ">=5.1.0" },
