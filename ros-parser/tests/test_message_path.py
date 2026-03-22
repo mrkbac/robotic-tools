@@ -20,6 +20,8 @@ from ros_parser.message_path import (
     Variable,
     parse_message_path,
 )
+from ros_parser.message_path.models import ValidationError
+from ros_parser.models import Field, MessageDefinition, Type
 
 
 class TestBasicPaths:
@@ -1814,3 +1816,207 @@ class TestTimeSeriesSentinels:
         modifier = MathModifier(operation="timedelta", arguments=[])
         with pytest.raises(MessagePathError, match="TransformContext"):
             modifier.apply(5.0, {})
+
+
+# ---------------------------------------------------------------------------
+# Validation tests (validate() methods on actions and MessagePath)
+# ---------------------------------------------------------------------------
+
+
+_INT32_TYPE = Type(type_name="int32", package_name=None)
+_INT32_ARRAY_TYPE = Type(type_name="int32", package_name=None, is_array=True, array_size=10)
+_FLOAT64_TYPE = Type(type_name="float64", package_name=None)
+_STRING_TYPE = Type(type_name="string", package_name=None)
+_COMPLEX_TYPE = Type(type_name="Point", package_name="geometry_msgs")
+_COMPLEX_ARRAY_TYPE = Type(
+    type_name="Point",
+    package_name="geometry_msgs",
+    is_array=True,
+    array_size=None,
+)
+
+_POINT_MSGDEF = MessageDefinition(
+    name="geometry_msgs/Point",
+    fields_all=[
+        Field(type=_FLOAT64_TYPE, name="x"),
+        Field(type=_FLOAT64_TYPE, name="y"),
+        Field(type=_FLOAT64_TYPE, name="z"),
+    ],
+)
+
+_ALL_DEFS: dict[str, MessageDefinition] = {
+    "geometry_msgs/Point": _POINT_MSGDEF,
+    "geometry_msgs/msg/Point": _POINT_MSGDEF,
+    "Point": _POINT_MSGDEF,
+}
+
+
+class TestFieldAccessValidation:
+    def test_validate_primitive_field(self):
+        fa = FieldAccess(field_name="x")
+        result_type, _ = fa.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+        assert result_type.type_name == "float64"
+
+    def test_validate_missing_field_raises(self):
+        fa = FieldAccess(field_name="w")
+        with pytest.raises(ValidationError, match="not found"):
+            fa.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_on_primitive_raises(self):
+        fa = FieldAccess(field_name="x")
+        with pytest.raises(ValidationError, match="primitive"):
+            fa.validate(_FLOAT64_TYPE, None, _ALL_DEFS)
+
+
+class TestArrayIndexValidation:
+    def test_validate_array_type(self):
+        idx = ArrayIndex(index=0)
+        result_type, _ = idx.validate(_INT32_ARRAY_TYPE, None, _ALL_DEFS)
+        assert result_type.type_name == "int32"
+        assert not result_type.is_array
+
+    def test_validate_non_array_raises(self):
+        idx = ArrayIndex(index=0)
+        with pytest.raises(ValidationError, match="non-array"):
+            idx.validate(_INT32_TYPE, None, _ALL_DEFS)
+
+    def test_validate_complex_array(self):
+        idx = ArrayIndex(index=0)
+        result_type, result_def = idx.validate(_COMPLEX_ARRAY_TYPE, None, _ALL_DEFS)
+        assert result_type.type_name == "Point"
+        assert not result_type.is_array
+        assert result_def is _POINT_MSGDEF
+
+
+class TestArraySliceValidation:
+    def test_validate_array_type(self):
+        slc = ArraySlice(start=0, end=5)
+        result_type, _ = slc.validate(_INT32_ARRAY_TYPE, None, _ALL_DEFS)
+        assert result_type.is_array
+
+    def test_validate_non_array_raises(self):
+        slc = ArraySlice(start=0, end=5)
+        with pytest.raises(ValidationError, match="non-array"):
+            slc.validate(_INT32_TYPE, None, _ALL_DEFS)
+
+
+class TestMathModifierValidation:
+    def test_validate_on_numeric_type(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        result_type, _ = mod.validate(_INT32_TYPE, None, _ALL_DEFS)
+        assert result_type == _INT32_TYPE
+
+    def test_validate_on_float_array(self):
+        arr_type = Type(type_name="float64", package_name=None, is_array=True)
+        mod = MathModifier(operation="abs", arguments=[])
+        result_type, _ = mod.validate(arr_type, None, _ALL_DEFS)
+        assert result_type == arr_type  # preserves array type
+
+    def test_validate_on_string_raises(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        with pytest.raises(ValidationError, match="numeric"):
+            mod.validate(_STRING_TYPE, None, _ALL_DEFS)
+
+    def test_validate_on_complex_type_raises(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        with pytest.raises(ValidationError, match="numeric"):
+            mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_norm_on_complex_type(self):
+        mod = MathModifier(operation="norm", arguments=[])
+        result_type, _ = mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+        assert result_type.type_name == "float64"
+
+    def test_validate_rpy_returns_euler_type(self):
+        mod = MathModifier(operation="rpy", arguments=[])
+        result_type, result_def = mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+        assert result_type.type_name == "EulerAngles"
+        assert result_def is not None
+        field_names = [f.name for f in result_def.fields]
+        assert "roll" in field_names
+
+    def test_validate_timeseries_preserves_type(self):
+        mod = MathModifier(operation="delta", arguments=[])
+        result_type, _ = mod.validate(_FLOAT64_TYPE, None, _ALL_DEFS)
+        assert result_type == _FLOAT64_TYPE
+
+
+class TestMathModifierApplyErrors:
+    def test_nan_raises(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        with pytest.raises(MessagePathError, match="NaN"):
+            mod.apply(float("nan"), {})
+
+    def test_non_numeric_raises(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        with pytest.raises(MessagePathError, match="numeric"):
+            mod.apply("hello", {})
+
+    def test_unknown_operation_raises(self):
+        mod = MathModifier(operation="nonexistent", arguments=[])
+        with pytest.raises(MessagePathError, match="Unknown"):
+            mod.apply(5.0, {})
+
+    def test_log_negative_raises(self):
+        mod = MathModifier(operation="log", arguments=[])
+        with pytest.raises(MessagePathError, match="Math error"):
+            mod.apply(-1.0, {})
+
+    def test_div_by_zero_raises(self):
+        mod = MathModifier(operation="div", arguments=[0])
+        with pytest.raises(MessagePathError, match="Division by zero"):
+            mod.apply(5.0, {})
+
+    def test_element_wise_on_list(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        result = mod.apply([-1, -2, 3], {})
+        assert result == [1, 2, 3]
+
+    def test_element_wise_on_tuple(self):
+        mod = MathModifier(operation="abs", arguments=[])
+        result = mod.apply((-1, -2, 3), {})
+        assert result == (1, 2, 3)
+
+
+class TestMessagePathValidation:
+    def test_validate_valid_field_path_does_not_raise(self):
+        # x is a valid field on Point — should not raise
+        path = parse_message_path("/topic.x")
+        path.validate(_POINT_MSGDEF, _ALL_DEFS)
+        # Contrast: w is NOT valid → should raise
+        bad_path = parse_message_path("/topic.w")
+        with pytest.raises(ValidationError, match="not found"):
+            bad_path.validate(_POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_nested_field_resolves_type(self):
+        nested_def = MessageDefinition(
+            name="geometry_msgs/Pose",
+            fields_all=[Field(type=_COMPLEX_TYPE, name="position")],
+        )
+        defs = {**_ALL_DEFS, "geometry_msgs/Pose": nested_def, "Pose": nested_def}
+        # Valid deep path
+        path = parse_message_path("/topic.position.x")
+        path.validate(nested_def, defs)
+        # Invalid deep path — z2 doesn't exist on Point
+        bad_path = parse_message_path("/topic.position.z2")
+        with pytest.raises(ValidationError, match="not found"):
+            bad_path.validate(nested_def, defs)
+
+    def test_validate_math_modifier_on_numeric_ok(self):
+        path = parse_message_path("/topic.x.@abs")
+        path.validate(_POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_math_on_string_raises(self):
+        str_def = MessageDefinition(
+            name="String",
+            fields_all=[Field(type=_STRING_TYPE, name="data")],
+        )
+        path = parse_message_path("/topic.data.@abs")
+        with pytest.raises(ValidationError, match="numeric"):
+            path.validate(str_def, {"String": str_def})
+
+    def test_validate_field_access_on_primitive_raises(self):
+        # x is float64 (primitive), can't access .foo on it
+        path = parse_message_path("/topic.x.foo")
+        with pytest.raises(ValidationError, match="primitive"):
+            path.validate(_POINT_MSGDEF, _ALL_DEFS)

@@ -358,6 +358,36 @@ class TestVideoDecompressFactory:
         assert len(factory._decompressors) == 2
 
 
+class TestVideoDecompressFactoryFlush:
+    def test_flush_all_empty(self):
+        from pymcap_cli.encoding.decompress import VideoDecompressFactory
+
+        factory = VideoDecompressFactory()
+        frames = factory.flush_all()
+        assert frames == []
+
+    def test_flush_all_after_decoding(self):
+        from pymcap_cli.encoding.decompress import VideoDecompressFactory
+
+        # Feed 1 keyframe through the factory and verify flush works
+        h264_data = _make_h264_keyframe()
+        buf = _create_compressed_video_mcap([(1_000_000_000, h264_data, "h264")])
+
+        factory = VideoDecompressFactory()
+        decoded = [
+            msg for msg in read_message_decoded(buf, decoder_factories=[factory])
+            if msg.decoded_message is not None
+        ]
+        flushed = factory.flush_all()
+
+        # The single keyframe should decode immediately (no buffering)
+        assert len(decoded) == 1
+        assert decoded[0].decoded_message["format"] == "jpeg"
+        assert flushed == []
+        # Verify decompressor was created for the channel
+        assert len(factory._decompressors) == 1
+
+
 class TestPointCloudDecompressFactory:
     def test_decode_compressed_pointcloud_from_mcap(self):
         from pymcap_cli.encoding.pointcloud import PointCloudDecompressFactory
