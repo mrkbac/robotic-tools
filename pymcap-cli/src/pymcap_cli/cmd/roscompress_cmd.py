@@ -4,27 +4,24 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
-from small_mcap import McapWriter, get_summary
+from small_mcap import McapWriter
 from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.display.osc_utils import OSCProgressColumn
+from pymcap_cli.core.mcap_transform import (
+    copy_message,
+    create_progress,
+    ensure_channel,
+    ensure_schema,
+    get_total_message_count,
+    print_size_comparison,
+)
 from pymcap_cli.encoding.encoder_common import (
     COMPRESSED_SCHEMAS,
     FOXGLOVE_COMPRESSED_VIDEO,
@@ -32,7 +29,11 @@ from pymcap_cli.encoding.encoder_common import (
     EncoderConfig,
     EncoderMode,
     VideoEncoderError,
+    calculate_downscale_dimensions,
     get_software_encoder,
+)
+from pymcap_cli.encoding.encoder_common import (
+    resolve_encoder as _resolve_encoder,
 )
 from pymcap_cli.encoding.pointcloud import COMPRESSED_POINTCLOUD2, POINTCLOUD2_SCHEMAS
 from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
@@ -44,6 +45,7 @@ from pymcap_cli.utils import confirm_output_overwrite
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
+    from rich.progress import Progress
     from small_mcap.reader import DecodedMessage
 
 
@@ -55,140 +57,142 @@ POINTCLOUD_GROUP = Group("Point Cloud")
 
 
 # ---------------------------------------------------------------------------
-# PyAV backend helpers (lazy-imported)
+# Backend abstraction
 # ---------------------------------------------------------------------------
 
 
-def _pyav_test_encoder(encoder_name: str) -> bool:
-    import av  # noqa: PLC0415
-    import av.error  # noqa: PLC0415
+class CompressBackend(Protocol):
+    """Protocol for video encoding backends (PyAV or ffmpeg-cli)."""
 
-    try:
-        av.CodecContext.create(encoder_name, "w")
-    except (av.error.FFmpegError, ValueError):
-        return False
-    return True
+    def test_encoder(self, encoder_name: str) -> bool: ...
 
+    def resolve_encoder(self, codec: str) -> str: ...
 
-def _pyav_resolve_encoder(codec: str) -> str:
-    from pymcap_cli.encoding.image_utils import resolve_encoder  # noqa: PLC0415
+    def decode_image(
+        self, msg: DecodedMessage, schema_name: str, *, scale: int | None = None
+    ) -> tuple[Any, int, int]:
+        """Decode an image message to an intermediate format.
 
-    return resolve_encoder(codec)
+        Returns (intermediate_frame, width, height).
+        """
+        ...
 
-
-def _pyav_decode_compressed(data: bytes) -> Any:
-    from pymcap_cli.encoding.image_utils import decode_compressed_frame  # noqa: PLC0415
-
-    return decode_compressed_frame(data)
+    def create_encoder(self, width: int, height: int, codec_name: str, quality: int) -> Any: ...
 
 
-def _pyav_raw_to_frame(decoded_message: Any) -> Any:
-    import av  # noqa: PLC0415
+class PyAVBackend:
+    """Video encoding backend using PyAV (in-process)."""
 
-    from pymcap_cli.encoding.image_utils import raw_image_to_array  # noqa: PLC0415
+    def test_encoder(self, encoder_name: str) -> bool:
+        import av  # noqa: PLC0415
+        import av.error  # noqa: PLC0415
 
-    rgb_array = raw_image_to_array(decoded_message)
-    return av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+        try:
+            av.CodecContext.create(encoder_name, "w")
+        except (av.error.FFmpegError, ValueError):
+            return False
+        return True
 
+    def resolve_encoder(self, codec: str) -> str:
+        from pymcap_cli.encoding.image_utils import resolve_encoder  # noqa: PLC0415
 
-def _pyav_get_frame_dims(frame: Any) -> tuple[int, int]:
-    return frame.width, frame.height
+        return resolve_encoder(codec)
 
+    def decode_image(
+        self,
+        msg: DecodedMessage,
+        schema_name: str,
+        *,
+        scale: int | None = None,  # noqa: ARG002
+    ) -> tuple[Any, int, int]:
+        # PyAV decodes at native resolution; scaling is done via calculate_downscale.
+        if schema_name in COMPRESSED_SCHEMAS:
+            return self.decode_compressed(bytes(msg.decoded_message.data))
+        return self._decode_raw(msg.decoded_message)
 
-def _pyav_calculate_downscale(width: int, height: int, max_dim: int) -> tuple[int, int]:
-    from pymcap_cli.encoding.encoder_common import calculate_downscale_dimensions  # noqa: PLC0415
+    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]:
+        from pymcap_cli.encoding.image_utils import decode_compressed_frame  # noqa: PLC0415
 
-    return calculate_downscale_dimensions(width, height, max_dim)
+        frame = decode_compressed_frame(data)
+        return frame, frame.width, frame.height
 
+    def _decode_raw(self, decoded_message: Any) -> tuple[Any, int, int]:
+        import av  # noqa: PLC0415
 
-def _pyav_create_encoder(width: int, height: int, codec_name: str, quality: int) -> Any:
-    from pymcap_cli.encoding.image_utils import VideoEncoder  # noqa: PLC0415
+        from pymcap_cli.encoding.image_utils import raw_image_to_array  # noqa: PLC0415
 
-    return VideoEncoder(
-        width=width,
-        height=height,
-        codec_name=codec_name,
-        quality=quality,
-        target_fps=30.0,
-        gop_size=30,
-    )
+        rgb_array = raw_image_to_array(decoded_message)
+        frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+        return frame, frame.width, frame.height
 
+    def create_encoder(self, width: int, height: int, codec_name: str, quality: int) -> Any:
+        from pymcap_cli.encoding.image_utils import VideoEncoder  # noqa: PLC0415
 
-# ---------------------------------------------------------------------------
-# ffmpeg-cli backend helpers (lazy-imported)
-# ---------------------------------------------------------------------------
-
-
-def _cli_test_encoder(encoder_name: str) -> bool:
-    from pymcap_cli.encoding.subprocess_encoder import check_encoder_cli  # noqa: PLC0415
-
-    return check_encoder_cli(encoder_name)
-
-
-def _cli_resolve_encoder(codec: str) -> str:
-    from pymcap_cli.encoding.encoder_common import (  # noqa: PLC0415
-        HARDWARE_CODEC_MAP,
-        SOFTWARE_CODEC_MAP,
-    )
-    from pymcap_cli.encoding.subprocess_encoder import (  # noqa: PLC0415
-        check_encoder_cli,
-        find_ffmpeg,
-    )
-
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        raise VideoEncoderError("ffmpeg not found on PATH")
-
-    import platform  # noqa: PLC0415
-
-    hw_probe_order: dict[str, list[str]] = {
-        "Darwin": ["videotoolbox"],
-        "Linux": ["nvenc", "vaapi"],
-    }
-    hw = HARDWARE_CODEC_MAP.get(codec, {})
-    for backend_name in hw_probe_order.get(platform.system(), []):
-        encoder = hw.get(backend_name)
-        if encoder and check_encoder_cli(encoder):
-            return encoder
-
-    sw = SOFTWARE_CODEC_MAP.get(codec)
-    if sw and check_encoder_cli(sw):
-        return sw
-
-    raise VideoEncoderError(f"No encoder found for codec '{codec}' via ffmpeg")
+        return VideoEncoder(
+            width=width,
+            height=height,
+            codec_name=codec_name,
+            quality=quality,
+            target_fps=30.0,
+            gop_size=30,
+        )
 
 
-def _cli_decode_compressed(data: bytes, scale: int | None = None) -> tuple[bytes, int, int]:
-    from pymcap_cli.encoding.subprocess_encoder import decode_image_to_yuv420p  # noqa: PLC0415
+class FfmpegCliBackend:
+    """Video encoding backend using ffmpeg subprocess."""
 
-    return decode_image_to_yuv420p(data, scale=scale)
+    def test_encoder(self, encoder_name: str) -> bool:
+        from pymcap_cli.encoding.subprocess_encoder import check_encoder_cli  # noqa: PLC0415
 
+        return check_encoder_cli(encoder_name)
 
-def _cli_raw_to_yuv420p(decoded_message: Any) -> tuple[bytes, int, int]:
-    from pymcap_cli.encoding.subprocess_encoder import (  # noqa: PLC0415
-        ROS_ENCODING_TO_PIX_FMT,
-        raw_rgb_to_yuv420p,
-    )
+    def resolve_encoder(self, codec: str) -> str:
+        from pymcap_cli.encoding.subprocess_encoder import (  # noqa: PLC0415
+            check_encoder_cli,
+            find_ffmpeg,
+        )
 
-    encoding = str(decoded_message.encoding).lower()
-    pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)
-    if not pix_fmt:
-        raise VideoEncoderError(f"Unsupported image encoding: {decoded_message.encoding}")
-    data = bytes(decoded_message.data)
-    return raw_rgb_to_yuv420p(data, decoded_message.width, decoded_message.height, pix_fmt)
+        if not find_ffmpeg():
+            raise VideoEncoderError("ffmpeg not found on PATH")
 
+        try:
+            return _resolve_encoder(codec, test_fn=check_encoder_cli)
+        except ValueError as exc:
+            raise VideoEncoderError(str(exc)) from exc
 
-def _cli_create_encoder(width: int, height: int, codec_name: str, quality: int) -> Any:
-    from pymcap_cli.encoding.subprocess_encoder import SubprocessVideoEncoder  # noqa: PLC0415
+    def decode_image(
+        self, msg: DecodedMessage, schema_name: str, *, scale: int | None = None
+    ) -> tuple[Any, int, int]:
+        if schema_name in COMPRESSED_SCHEMAS:
+            from pymcap_cli.encoding import subprocess_encoder as sub_enc  # noqa: PLC0415
 
-    return SubprocessVideoEncoder(
-        width=width,
-        height=height,
-        codec_name=codec_name,
-        quality=quality,
-        target_fps=30.0,
-        gop_size=30,
-    )
+            return sub_enc.decode_image_to_yuv420p(bytes(msg.decoded_message.data), scale=scale)
+
+        from pymcap_cli.encoding.subprocess_encoder import (  # noqa: PLC0415
+            ROS_ENCODING_TO_PIX_FMT,
+            raw_rgb_to_yuv420p,
+        )
+
+        encoding = str(msg.decoded_message.encoding).lower()
+        pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)
+        if not pix_fmt:
+            raise VideoEncoderError(f"Unsupported image encoding: {msg.decoded_message.encoding}")
+        data = bytes(msg.decoded_message.data)
+        return raw_rgb_to_yuv420p(
+            data, msg.decoded_message.width, msg.decoded_message.height, pix_fmt
+        )
+
+    def create_encoder(self, width: int, height: int, codec_name: str, quality: int) -> Any:
+        from pymcap_cli.encoding.subprocess_encoder import SubprocessVideoEncoder  # noqa: PLC0415
+
+        return SubprocessVideoEncoder(
+            width=width,
+            height=height,
+            codec_name=codec_name,
+            quality=quality,
+            target_fps=30.0,
+            gop_size=30,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +202,7 @@ def _cli_create_encoder(width: int, height: int, codec_name: str, quality: int) 
 
 def _prefetch_image_decodes(
     messages: Iterable[DecodedMessage],
+    backend: PyAVBackend,
     pool: ThreadPoolExecutor,
     prefetch: int = 8,
 ) -> Iterator[tuple[DecodedMessage, Future[Any] | None]]:
@@ -208,7 +213,7 @@ def _prefetch_image_decodes(
         schema_name = msg.schema.name if msg.schema else ""
         if schema_name in COMPRESSED_SCHEMAS:
             data = bytes(msg.decoded_message.data)
-            future: Future[Any] | None = pool.submit(_pyav_decode_compressed, data)
+            future: Future[Any] | None = pool.submit(backend.decode_compressed, data)
         else:
             future = None
         buffer.append((msg, future))
@@ -356,25 +361,32 @@ def roscompress(
 
     # Resolve backend.
     use_cli = backend == EncoderMode.FFMPEG_CLI
-    if backend == EncoderMode.AUTO:
-        try:
-            _pyav_resolve_encoder(codec)
-        except Exception:  # noqa: BLE001
-            use_cli = True
-
-    test_enc = _cli_test_encoder if use_cli else _pyav_test_encoder
-    resolve_enc = _cli_resolve_encoder if use_cli else _pyav_resolve_encoder
+    compress_backend: CompressBackend
+    if use_cli:
+        compress_backend = FfmpegCliBackend()
+    else:
+        pyav_backend = PyAVBackend()
+        if backend == EncoderMode.AUTO:
+            try:
+                pyav_backend.resolve_encoder(codec)
+            except Exception:  # noqa: BLE001
+                use_cli = True
+                compress_backend = FfmpegCliBackend()
+            else:
+                compress_backend = pyav_backend
+        else:
+            compress_backend = pyav_backend
 
     # Detect encoder.
     encoder_name = ""
     if video:
         if encoder:
-            if not test_enc(encoder):
+            if not compress_backend.test_encoder(encoder):
                 console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
                 return 1
             encoder_name = encoder
         else:
-            encoder_name = resolve_enc(codec)
+            encoder_name = compress_backend.resolve_encoder(codec)
 
     # Create point cloud compressor.
     pc_compressor: Any | None = None
@@ -407,14 +419,7 @@ def roscompress(
         console.print("[cyan]Point cloud compression:[/cyan] disabled")
 
     # Get message count from summary for progress bar.
-    total_message_count: int | None = None
-    with open_input(file) as (f, _file_size):
-        if (
-            (summary := get_summary(f))
-            and summary.statistics
-            and summary.statistics.channel_message_counts
-        ):
-            total_message_count = sum(summary.statistics.channel_message_counts.values())
+    total_message_count = get_total_message_count(file)
 
     # Track encoders per topic (lazy initialization).
     encoders: dict[str, Any] = {}
@@ -422,27 +427,15 @@ def roscompress(
     encoder_factory = ROS2EncoderFactory()
 
     # Statistics.
-    messages_converted = 0
-    messages_copied = 0
+    counters = {"converted": 0, "copied": 0, "pc_converted": 0}
     topics_converted: set[str] = set()
-    pointcloud_messages_converted = 0
     pointcloud_topics_converted: set[str] = set()
     last_video_times: dict[str, tuple[int, int]] = {}
 
     with (
         open_input(file) as (input_stream, input_size),
         output.open("wb") as output_stream,
-        Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            OSCProgressColumn(title="Compressing images"),
-            console=console,
-        ) as progress,
+        create_progress(console, title="Compressing images") as progress,
     ):
         task_id = progress.add_task("Processing messages", total=total_message_count)
 
@@ -461,35 +454,15 @@ def roscompress(
             input_stream, decoder_factories=[decoder_factory], num_workers=4
         )
 
-        if use_cli:
-            _run_ffmpeg_cli_loop(
-                messages,
-                video,
-                pointcloud,
-                encoders,
-                encoder_name,
-                codec,
-                quality,
-                scale,
-                pc_compressor,
-                writer,
-                schema_ids,
-                channel_ids,
-                topics_converted,
-                pointcloud_topics_converted,
-                last_video_times,
-                progress,
-                task_id,
-                _counters := {"converted": 0, "copied": 0, "pc_converted": 0},
-            )
-            messages_converted = _counters["converted"]
-            messages_copied = _counters["copied"]
-            pointcloud_messages_converted = _counters["pc_converted"]
-        else:
+        # Wrap with prefetching for PyAV backend.
+        if not use_cli and isinstance(compress_backend, PyAVBackend):
             decode_pool = ThreadPoolExecutor(max_workers=4)
-            prefetched = _prefetch_image_decodes(messages, decode_pool, prefetch=16)
-            _run_pyav_loop(
+            prefetched = _prefetch_image_decodes(
+                messages, compress_backend, decode_pool, prefetch=16
+            )
+            _run_compress_loop(
                 prefetched,
+                compress_backend,
                 video,
                 pointcloud,
                 encoders,
@@ -506,12 +479,31 @@ def roscompress(
                 last_video_times,
                 progress,
                 task_id,
-                _counters := {"converted": 0, "copied": 0, "pc_converted": 0},
+                counters,
             )
-            messages_converted = _counters["converted"]
-            messages_copied = _counters["copied"]
-            pointcloud_messages_converted = _counters["pc_converted"]
             decode_pool.shutdown(wait=True)
+        else:
+            _run_compress_loop(
+                _iter_no_futures(messages),
+                compress_backend,
+                video,
+                pointcloud,
+                encoders,
+                encoder_name,
+                codec,
+                quality,
+                scale,
+                pc_compressor,
+                writer,
+                schema_ids,
+                channel_ids,
+                topics_converted,
+                pointcloud_topics_converted,
+                last_video_times,
+                progress,
+                task_id,
+                counters,
+            )
 
         # Flush remaining frames from video encoders.
         for topic_name, video_enc in encoders.items():
@@ -533,6 +525,9 @@ def roscompress(
         writer.finish()
 
     # Report statistics.
+    messages_converted = counters["converted"]
+    messages_copied = counters["copied"]
+    pointcloud_messages_converted = counters["pc_converted"]
     total_converted = messages_converted + pointcloud_messages_converted
     console.print("\n[green bold]✓ Compression complete![/green bold]")
     if topics_converted:
@@ -553,61 +548,22 @@ def roscompress(
     console.print(f"[cyan]Total messages:[/cyan] {total_converted + messages_copied:,}")
 
     # Show file size comparison.
-    output_size = output.stat().st_size
-    if input_size > 0:
-        reduction_pct = ((input_size - output_size) / input_size) * 100
-        console.print(f"\n[cyan]Input size:[/cyan] {input_size / 1024 / 1024:.2f} MB")
-        console.print(f"[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.2f} MB")
-        if reduction_pct > 0:
-            console.print(f"[green]Reduction:[/green] {reduction_pct:.1f}%")
-        else:
-            console.print(f"[yellow]Size change:[/yellow] {-reduction_pct:.1f}% increase")
-    else:
-        console.print(f"\n[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.2f} MB")
+    print_size_comparison(console, input_size, output.stat().st_size)
 
     return 0
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-_next_schema_id_counter = 0
 
-
-def _ensure_schema(
-    writer: McapWriter,
-    schema_name: str,
-    encoding: str,
-    data: bytes,
-    schema_ids: dict[str, int],
-) -> int:
-    if schema_name not in schema_ids:
-        sid = max(schema_ids.values(), default=0) + 1
-        writer.add_schema(sid, schema_name, encoding, data)
-        schema_ids[schema_name] = sid
-    return schema_ids[schema_name]
-
-
-def _ensure_channel(
-    writer: McapWriter,
-    topic: str,
-    message_encoding: str,
-    schema_id: int,
-    channel_ids: dict[str, int],
-    metadata: dict[str, str] | None = None,
-) -> int:
-    if topic not in channel_ids:
-        cid = max(channel_ids.values(), default=0) + 1
-        writer.add_channel(
-            channel_id=cid,
-            topic=topic,
-            message_encoding=message_encoding,
-            schema_id=schema_id,
-            metadata=metadata,
-        )
-        channel_ids[topic] = cid
-    return channel_ids[topic]
+def _iter_no_futures(
+    messages: Iterable[DecodedMessage],
+) -> Iterator[tuple[DecodedMessage, None]]:
+    """Wrap plain message iterator to match the prefetched signature."""
+    for msg in messages:
+        yield msg, None
 
 
 def _write_compressed_video(
@@ -680,14 +636,14 @@ def _handle_pointcloud(
         "format": "cloudini",
     }
 
-    schema_id = _ensure_schema(
+    schema_id = ensure_schema(
         writer,
         "point_cloud_interfaces/msg/CompressedPointCloud2",
         "ros2msg",
         COMPRESSED_POINTCLOUD2.encode(),
         schema_ids,
     )
-    channel_id = _ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
+    channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
     writer.add_message_encode(
         channel_id=channel_id,
         log_time=msg.message.log_time,
@@ -696,45 +652,14 @@ def _handle_pointcloud(
     )
 
 
-def _copy_message(
-    msg: DecodedMessage,
-    writer: McapWriter,
-    schema_ids: dict[str, int],
-    channel_ids: dict[str, int],
-) -> None:
-    topic = msg.channel.topic
-    if topic not in channel_ids:
-        if msg.schema:
-            schema_id = _ensure_schema(
-                writer, msg.schema.name, msg.schema.encoding, msg.schema.data, schema_ids
-            )
-        else:
-            schema_id = 0
-        _ensure_channel(
-            writer,
-            topic,
-            msg.channel.message_encoding,
-            schema_id,
-            channel_ids,
-            msg.channel.metadata,
-        )
-
-    channel_id = channel_ids[topic]
-    writer.add_message(
-        channel_id=channel_id,
-        log_time=msg.message.log_time,
-        data=msg.message.data,
-        publish_time=msg.message.publish_time,
-    )
-
-
 # ---------------------------------------------------------------------------
-# PyAV processing loop
+# Unified processing loop
 # ---------------------------------------------------------------------------
 
 
-def _run_pyav_loop(
-    prefetched: Iterator[tuple[DecodedMessage, Future[Any] | None]],
+def _run_compress_loop(
+    messages: Iterator[tuple[DecodedMessage, Future[Any] | None]],
+    backend: CompressBackend,
     video: bool,
     pointcloud: bool,
     encoders: dict[str, Any],
@@ -753,7 +678,7 @@ def _run_pyav_loop(
     task_id: int,
     counters: dict[str, int],
 ) -> None:
-    for msg, decode_future in prefetched:
+    for msg, decode_future in messages:
         schema_name = msg.schema.name if msg.schema else ""
 
         if video and schema_name in IMAGE_SCHEMAS:
@@ -761,22 +686,20 @@ def _run_pyav_loop(
 
             frame: Any = None
             if topic not in encoders:
-                if schema_name in COMPRESSED_SCHEMAS:
-                    first_frame = decode_future.result()
-                    width, height = first_frame.width, first_frame.height
-                    frame = first_frame
+                # First message for this topic — discover dimensions and create encoder.
+                if decode_future is not None:
+                    frame, width, height = decode_future.result()
                 else:
-                    frame = _pyav_raw_to_frame(msg.decoded_message)
-                    width, height = _pyav_get_frame_dims(frame)
+                    frame, width, height = backend.decode_image(msg, schema_name, scale=scale)
 
                 if scale is not None:
-                    width, height = _pyav_calculate_downscale(width, height, scale)
+                    width, height = calculate_downscale_dimensions(width, height, scale)
                 else:
                     width -= width % 2
                     height -= height % 2
 
                 try:
-                    encoders[topic] = _pyav_create_encoder(width, height, encoder_name, quality)
+                    encoders[topic] = backend.create_encoder(width, height, encoder_name, quality)
                     topics_converted.add(topic)
                     console.print(
                         f"[green]✓[/green] Converting {topic}: {width}x{height} "
@@ -788,11 +711,9 @@ def _run_pyav_loop(
 
             if frame is None:
                 if decode_future is not None:
-                    frame = decode_future.result()
-                elif schema_name in COMPRESSED_SCHEMAS:
-                    frame = _pyav_decode_compressed(bytes(msg.decoded_message.data))
+                    frame, _, _ = decode_future.result()
                 else:
-                    frame = _pyav_raw_to_frame(msg.decoded_message)
+                    frame, _, _ = backend.decode_image(msg, schema_name, scale=scale)
 
             try:
                 video_data = encoders[topic].encode(frame)
@@ -804,7 +725,7 @@ def _run_pyav_loop(
                         f"falling back to {sw}"
                     )
                     cfg: EncoderConfig = encoders[topic].config
-                    encoders[topic] = _pyav_create_encoder(cfg.width, cfg.height, sw, quality)
+                    encoders[topic] = backend.create_encoder(cfg.width, cfg.height, sw, quality)
                     video_data = encoders[topic].encode(frame)
                 else:
                     raise
@@ -813,14 +734,14 @@ def _run_pyav_loop(
                 progress.update(task_id, advance=1)
                 continue
 
-            schema_id = _ensure_schema(
+            schema_id = ensure_schema(
                 writer,
                 "foxglove_msgs/msg/CompressedVideo",
                 "ros2msg",
                 FOXGLOVE_COMPRESSED_VIDEO.encode(),
                 schema_ids,
             )
-            channel_id = _ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
+            channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
             _write_compressed_video(writer, channel_id, msg, video_data, codec)
             counters["converted"] += 1
             last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
@@ -832,122 +753,7 @@ def _run_pyav_loop(
             counters["pc_converted"] += 1
 
         else:
-            _copy_message(msg, writer, schema_ids, channel_ids)
-            counters["copied"] += 1
-
-        progress.update(task_id, advance=1)
-
-
-# ---------------------------------------------------------------------------
-# ffmpeg-cli processing loop
-# ---------------------------------------------------------------------------
-
-
-def _run_ffmpeg_cli_loop(
-    messages: Iterable[DecodedMessage],
-    video: bool,
-    pointcloud: bool,
-    encoders: dict[str, Any],
-    encoder_name: str,
-    codec: str,
-    quality: int,
-    scale: int | None,
-    pc_compressor: Any | None,
-    writer: McapWriter,
-    schema_ids: dict[str, int],
-    channel_ids: dict[str, int],
-    topics_converted: set[str],
-    pointcloud_topics_converted: set[str],
-    last_video_times: dict[str, tuple[int, int]],
-    progress: Progress,
-    task_id: int,
-    counters: dict[str, int],
-) -> None:
-    # Cache per-topic dimensions for raw image conversion.
-    topic_dims: dict[str, tuple[int, int]] = {}
-
-    for msg in messages:
-        schema_name = msg.schema.name if msg.schema else ""
-
-        if video and schema_name in IMAGE_SCHEMAS:
-            topic = msg.channel.topic
-
-            # Decode image to raw YUV420p bytes.
-            if schema_name in COMPRESSED_SCHEMAS:
-                yuv_bytes, dec_w, dec_h = _cli_decode_compressed(
-                    bytes(msg.decoded_message.data), scale=scale
-                )
-            else:
-                yuv_bytes, dec_w, dec_h = _cli_raw_to_yuv420p(msg.decoded_message)
-
-            if topic not in encoders:
-                width, height = dec_w, dec_h
-                if scale is not None and schema_name not in COMPRESSED_SCHEMAS:
-                    # decode_image_to_yuv420p handles scale internally,
-                    # but raw images need separate scaling.
-
-                    if width > scale or height > scale:
-                        if width > height:
-                            height = max(int(height * scale / width), 2)
-                            width = scale
-                        else:
-                            width = max(int(width * scale / height), 2)
-                            height = scale
-                    width -= width % 2
-                    height -= height % 2
-
-                topic_dims[topic] = (dec_w, dec_h)
-
-                try:
-                    encoders[topic] = _cli_create_encoder(dec_w, dec_h, encoder_name, quality)
-                    topics_converted.add(topic)
-                    console.print(
-                        f"[green]✓[/green] Converting {topic}: {dec_w}x{dec_h} "
-                        f"({schema_name} → CompressedVideo)"
-                    )
-                except VideoEncoderError as exc:
-                    console.print(f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}")
-                    return
-
-            try:
-                video_data = encoders[topic].encode(yuv_bytes)
-            except VideoEncoderError:
-                sw = get_software_encoder(codec)
-                if encoders[topic].config.codec_name != sw:
-                    console.print(
-                        f"[yellow]Warning:[/yellow] Encoder failed for {topic}, "
-                        f"falling back to {sw}"
-                    )
-                    cfg: EncoderConfig = encoders[topic].config
-                    encoders[topic] = _cli_create_encoder(cfg.width, cfg.height, sw, quality)
-                    video_data = encoders[topic].encode(yuv_bytes)
-                else:
-                    raise
-
-            if video_data is None:
-                progress.update(task_id, advance=1)
-                continue
-
-            schema_id = _ensure_schema(
-                writer,
-                "foxglove_msgs/msg/CompressedVideo",
-                "ros2msg",
-                FOXGLOVE_COMPRESSED_VIDEO.encode(),
-                schema_ids,
-            )
-            channel_id = _ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
-            _write_compressed_video(writer, channel_id, msg, video_data, codec)
-            counters["converted"] += 1
-            last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
-
-        elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
-            _handle_pointcloud(
-                msg, pc_compressor, writer, schema_ids, channel_ids, pointcloud_topics_converted
-            )
-            counters["pc_converted"] += 1
-
-        else:
-            _copy_message(msg, writer, schema_ids, channel_ids)
+            copy_message(msg, writer, schema_ids, channel_ids)
             counters["copied"] += 1
 
         progress.update(task_id, advance=1)

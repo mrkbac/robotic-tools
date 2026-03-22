@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # ROS schema sets
@@ -62,6 +67,16 @@ class EncoderConfig:
     width: int
     height: int
     codec_name: str
+
+
+class VideoEncoderProtocol(Protocol):
+    """Structural interface shared by VideoEncoder and SubprocessVideoEncoder."""
+
+    config: EncoderConfig
+
+    def encode(self, frame: Any) -> bytes | None: ...
+
+    def flush(self) -> bytes | None: ...
 
 
 # Mapping from short codec name to software (CPU) encoder name.
@@ -181,3 +196,77 @@ def calculate_downscale_dimensions(width: int, height: int, max_dimension: int) 
         new_width = int(new_height * aspect_ratio)
 
     return ensure_even(new_width), ensure_even(new_height)
+
+
+# ---------------------------------------------------------------------------
+# Encoder resolution
+# ---------------------------------------------------------------------------
+
+# Platform → hardware backend probe order.
+_HW_PROBE_ORDER: dict[str, list[str]] = {
+    "Darwin": ["videotoolbox"],
+    "Linux": ["nvenc", "vaapi"],
+}
+
+
+def resolve_encoder(
+    codec: str,
+    *,
+    test_fn: Callable[[str], bool],
+    use_hardware: bool = True,
+) -> str:
+    """Pick the best available encoder for *codec*.
+
+    Probes hardware encoders first (when *use_hardware* is True), then
+    falls back to the software encoder. Uses *test_fn* to check whether
+    a given encoder name is available on the system.
+
+    Raises:
+        ValueError: If no encoder is found for *codec*.
+    """
+    if use_hardware:
+        hw = HARDWARE_CODEC_MAP.get(codec)
+        if hw:
+            for backend_name in _HW_PROBE_ORDER.get(platform.system(), []):
+                encoder = hw.get(backend_name)
+                if encoder and test_fn(encoder):
+                    return encoder
+    return get_software_encoder(codec)
+
+
+def resolve_encoder_for_backend(
+    codec: str,
+    backend: str,
+    *,
+    test_fn: Callable[[str], bool],
+) -> str:
+    """Pick the encoder for *codec* using the specified *backend*.
+
+    *backend* must be one of the ``EncoderBackend`` values: ``"auto"``,
+    ``"software"``, ``"videotoolbox"``, ``"nvenc"``, or ``"vaapi"``.
+
+    Raises:
+        VideoEncoderError: If the encoder is unavailable or the backend is unknown.
+    """
+    if backend == "auto":
+        try:
+            return resolve_encoder(codec, test_fn=test_fn)
+        except ValueError as exc:
+            raise VideoEncoderError(str(exc)) from exc
+
+    if backend == "software":
+        try:
+            return get_software_encoder(codec)
+        except ValueError as exc:
+            raise VideoEncoderError(str(exc)) from exc
+
+    # Explicit hardware backend.
+    hw = HARDWARE_CODEC_MAP.get(codec, {})
+    encoder = hw.get(backend)
+    if not encoder:
+        raise VideoEncoderError(f"Hardware encoder '{backend}' not available for codec: {codec}")
+    if not test_fn(encoder):
+        raise VideoEncoderError(
+            f"Hardware encoder '{encoder}' not available on this system. Try --encoder software."
+        )
+    return encoder

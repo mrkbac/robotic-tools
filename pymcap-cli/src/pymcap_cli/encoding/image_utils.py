@@ -1,6 +1,5 @@
 """Shared image decoding and encoder utilities for video/roscompress commands."""
 
-import platform
 import threading
 from fractions import Fraction
 from io import BytesIO
@@ -13,11 +12,15 @@ from av import Packet, VideoFrame
 from numpy.typing import NDArray
 
 from pymcap_cli.encoding.encoder_common import (
-    HARDWARE_CODEC_MAP,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
-    get_software_encoder,
+)
+from pymcap_cli.encoding.encoder_common import (
+    resolve_encoder as _resolve_encoder,
+)
+from pymcap_cli.encoding.encoder_common import (
+    resolve_encoder_for_backend as _resolve_encoder_for_backend,
 )
 
 if TYPE_CHECKING:
@@ -162,81 +165,18 @@ def raw_image_to_array(message: ImageMsg) -> NDArray[np.uint8]:
 
 
 # ---------------------------------------------------------------------------
-# Downscale / encoder detection
+# Encoder resolution (delegates to encoder_common with PyAV test function)
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Codec / encoder enums and mappings (defined in encoder_common, re-exported)
-# ---------------------------------------------------------------------------
-
-# Platform → hardware backend probe order.
-_HW_PROBE_ORDER: dict[str, list[str]] = {
-    "Darwin": ["videotoolbox"],
-    "Linux": ["nvenc", "vaapi"],
-}
-
-
-def _detect_best_hardware_encoder(codec: str) -> str | None:
-    """Probe for the best available hardware encoder, or return None."""
-    hw = HARDWARE_CODEC_MAP.get(codec)
-    if not hw:
-        return None
-    for backend in _HW_PROBE_ORDER.get(platform.system(), []):
-        encoder = hw.get(backend)
-        if encoder and test_encoder(encoder):
-            return encoder
-    return None
 
 
 def resolve_encoder(codec: str, *, use_hardware: bool = True) -> str:
-    """Pick the best available encoder for *codec*.
-
-    Attempts hardware detection first (when *use_hardware* is True and the
-    codec has known hardware encoders), then falls back to the software
-    encoder from SOFTWARE_CODEC_MAP.
-
-    Raises:
-        ValueError: If *codec* is not in SOFTWARE_CODEC_MAP.
-    """
-    if use_hardware:
-        hw = _detect_best_hardware_encoder(codec)
-        if hw:
-            return hw
-    return get_software_encoder(codec)
+    """Pick the best available encoder for *codec* using PyAV to probe."""
+    return _resolve_encoder(codec, test_fn=test_encoder, use_hardware=use_hardware)
 
 
 def resolve_encoder_for_backend(codec: str, backend: str) -> str:
-    """Pick the encoder for *codec* using the specified *backend*.
-
-    *backend* must be one of the ``EncoderBackend`` values: ``"auto"``,
-    ``"software"``, ``"videotoolbox"``, ``"nvenc"``, or ``"vaapi"``.
-
-    Raises:
-        VideoEncoderError: If the encoder is unavailable or the backend is unknown.
-    """
-    if backend == "auto":
-        try:
-            return resolve_encoder(codec)
-        except ValueError as exc:
-            raise VideoEncoderError(str(exc)) from exc
-
-    if backend == "software":
-        try:
-            return get_software_encoder(codec)
-        except ValueError as exc:
-            raise VideoEncoderError(str(exc)) from exc
-
-    # Explicit hardware backend
-    hw = HARDWARE_CODEC_MAP.get(codec, {})
-    encoder = hw.get(backend)
-    if not encoder:
-        raise VideoEncoderError(f"Hardware encoder '{backend}' not available for codec: {codec}")
-    if not test_encoder(encoder):
-        raise VideoEncoderError(
-            f"Hardware encoder '{encoder}' not available on this system. Try --encoder software."
-        )
-    return encoder
+    """Pick the encoder for *codec* using the specified *backend* (PyAV probe)."""
+    return _resolve_encoder_for_backend(codec, backend, test_fn=test_encoder)
 
 
 class VideoEncoder:

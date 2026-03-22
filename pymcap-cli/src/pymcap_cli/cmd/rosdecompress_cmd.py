@@ -7,21 +7,18 @@ from typing import Annotated, Literal
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
-from small_mcap import McapWriter, get_summary
+from small_mcap import McapWriter
 from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.display.osc_utils import OSCProgressColumn
+from pymcap_cli.core.mcap_transform import (
+    copy_message,
+    create_progress,
+    ensure_channel,
+    ensure_schema,
+    get_total_message_count,
+    print_size_comparison,
+)
 from pymcap_cli.encoding.decompress import (
     _COMPRESSED_VIDEO_SCHEMA,
     COMPRESSED_IMAGE,
@@ -129,15 +126,7 @@ def rosdecompress(
     else:
         console.print("[cyan]Point cloud decompression:[/cyan] disabled")
 
-    # Get message count for progress bar.
-    total_message_count: int | None = None
-    with open_input(file) as (f, _file_size):
-        if (
-            (summary := get_summary(f))
-            and summary.statistics
-            and summary.statistics.channel_message_counts
-        ):
-            total_message_count = sum(summary.statistics.channel_message_counts.values())
+    total_message_count = get_total_message_count(file)
 
     # Create decoder factories.
     factories: list[VideoDecompressFactory | PointCloudDecompressFactory] = []
@@ -160,26 +149,13 @@ def rosdecompress(
     video_topics: set[str] = set()
     pointcloud_topics: set[str] = set()
 
-    # Schema/channel ID tracking for output.
     schema_ids: dict[str, int] = {}
     channel_ids: dict[str, int] = {}
-    next_schema_id = 1
-    next_channel_id = 1
 
     with (
         open_input(file) as (input_stream, input_size),
         output.open("wb") as output_stream,
-        Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            OSCProgressColumn(title="Decompressing topics"),
-            console=console,
-        ) as progress,
+        create_progress(console, title="Decompressing topics") as progress,
     ):
         task_id = progress.add_task("Processing messages", total=total_message_count)
 
@@ -215,48 +191,23 @@ def rosdecompress(
                 pointcloud_topics.add(topic)
 
             else:
-                # Pass-through: copy schema/channel/message unchanged.
-                out_schema_name = schema_name
-                out_schema_data = None
-
-            # Register schema if needed.
-            if out_schema_name not in schema_ids:
-                sid = next_schema_id
-                next_schema_id += 1
-                if out_schema_data is not None:
-                    writer.add_schema(sid, out_schema_name, "ros2msg", out_schema_data.encode())
-                elif msg.schema:
-                    writer.add_schema(sid, out_schema_name, msg.schema.encoding, msg.schema.data)
-                schema_ids[out_schema_name] = sid
-
-            # Register channel if needed.
-            channel_key = f"{topic}:{out_schema_name}"
-            if channel_key not in channel_ids:
-                cid = next_channel_id
-                next_channel_id += 1
-                writer.add_channel(cid, topic, "cdr", schema_ids[out_schema_name])
-                channel_ids[channel_key] = cid
-
-            out_channel_id = channel_ids[channel_key]
-
-            # Write message.
-            if out_schema_data is not None:
-                # Transformed message — encode the dict.
-                writer.add_message_encode(
-                    channel_id=out_channel_id,
-                    log_time=msg.message.log_time,
-                    publish_time=msg.message.publish_time,
-                    data=decoded,
-                )
-            else:
-                # Pass-through — write raw bytes.
+                # Pass-through: copy message unchanged.
+                copy_message(msg, writer, schema_ids, channel_ids)
                 messages_copied += 1
-                writer.add_message(
-                    channel_id=out_channel_id,
-                    log_time=msg.message.log_time,
-                    publish_time=msg.message.publish_time,
-                    data=msg.message.data,
-                )
+                progress.advance(task_id)
+                continue
+
+            # Transformed message — register schema/channel and write.
+            schema_id = ensure_schema(
+                writer, out_schema_name, "ros2msg", out_schema_data.encode(), schema_ids
+            )
+            channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
+            writer.add_message_encode(
+                channel_id=channel_id,
+                log_time=msg.message.log_time,
+                publish_time=msg.message.publish_time,
+                data=decoded,
+            )
 
             progress.advance(task_id)
 
@@ -267,22 +218,17 @@ def rosdecompress(
     if video_messages:
         target = "CompressedImage (JPEG)" if video_format == "compressed" else "Image (raw)"
         console.print(
-            f"[green]Video:[/green] {video_messages:,} messages → {target} "
+            f"[green]Video:[/green] {video_messages:,} messages -> {target} "
             f"({len(video_topics)} topic{'s' if len(video_topics) != 1 else ''})"
         )
     if pointcloud_messages:
         console.print(
-            f"[green]Point cloud:[/green] {pointcloud_messages:,} messages → PointCloud2 "
+            f"[green]Point cloud:[/green] {pointcloud_messages:,} messages -> PointCloud2 "
             f"({len(pointcloud_topics)} topic{'s' if len(pointcloud_topics) != 1 else ''})"
         )
     if messages_copied:
         console.print(f"[dim]Copied:[/dim] {messages_copied:,} messages unchanged")
 
-    if input_size and output_stream.tell():
-        ratio = output_stream.tell() / input_size
-        console.print(
-            f"[cyan]Size:[/cyan] {input_size / 1024 / 1024:.1f} MB → "
-            f"{output_stream.tell() / 1024 / 1024:.1f} MB ({ratio:.1%})"
-        )
+    print_size_comparison(console, input_size, output_stream.tell())
 
     return 0
