@@ -22,6 +22,7 @@ from small_mcap.exceptions import (
 # Reader classes and functions
 from small_mcap.json_decoder import JSONDecoderFactory, JSONEncoderFactory
 from small_mcap.reader import (
+    ChannelDecoderFactoryProtocol,
     DecodedMessage,
     DecoderFactoryProtocol,
     breakup_chunk,
@@ -82,6 +83,7 @@ __all__ = [
     "AttachmentIndex",
     "CRCValidationError",
     "Channel",
+    "ChannelDecoderFactoryProtocol",
     "ChannelNotFoundError",
     "Chunk",
     "ChunkIndex",

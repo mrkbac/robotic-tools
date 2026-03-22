@@ -762,7 +762,7 @@ def _run_pyav_loop(
             frame: Any = None
             if topic not in encoders:
                 if schema_name in COMPRESSED_SCHEMAS:
-                    first_frame = decode_future.result()  # type: ignore[union-attr]
+                    first_frame = decode_future.result()
                     width, height = first_frame.width, first_frame.height
                     frame = first_frame
                 else:

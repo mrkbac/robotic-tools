@@ -87,6 +87,27 @@ except ImportError:
         return 1
 
 
+try:
+    from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
+except ImportError:
+
+    def rosdecompress() -> int:
+        """ROS decompress command is unavailable because the 'av' package is not installed.
+
+        To enable rosdecompress functionality, please install pymcap-cli with the 'video' extra:
+
+            uv add --group video pymcap-cli
+        """
+        print(  # noqa: T201
+            "Error:\n"
+            "ROS decompress command is unavailable because the 'av' package is not installed.\n"
+            "To enable this functionality, please install pymcap-cli with the 'video' extra:\n\n"
+            "    uv add --group video pymcap-cli\n",
+            file=sys.stderr,
+        )
+        return 1
+
+
 app = App(
     name="pymcap-cli",
     help="CLI tool for slicing and dicing MCAP files.",
@@ -119,6 +140,7 @@ app.command(name="recover", group=transform_group)(recover_cmd.recover)
 app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
 app.command(name="plot", group=inspect_group)(plot)
 app.command(name="roscompress", group=transform_group)(roscompress)
+app.command(name="rosdecompress", group=transform_group)(rosdecompress)
 app.command(name="video", group=transform_group)(video)
 
 

@@ -1071,10 +1071,31 @@ class _SchemaProtocol(Protocol):
     data: bytes
 
 
+_DecoderFn = Callable[[bytes | memoryview], Any]
+
+
 class DecoderFactoryProtocol(Protocol):
     def decoder_for(
         self, message_encoding: str, schema: _SchemaProtocol | None
-    ) -> Callable[[bytes | memoryview], Any] | None: ...
+    ) -> _DecoderFn | None: ...
+
+
+class ChannelDecoderFactoryProtocol(Protocol):
+    """Decoder factory that receives channel info, enabling per-channel decoder instances.
+
+    Useful for stateful decoders (e.g. H.264 video) that need independent state per topic.
+    Implementations must set ``channel_aware = True`` as a class attribute so that
+    ``read_message_decoded`` passes the channel and caches per (schema, channel).
+    """
+
+    channel_aware: bool
+
+    def decoder_for(
+        self,
+        message_encoding: str,
+        schema: _SchemaProtocol | None,
+        channel: Channel,
+    ) -> _DecoderFn | None: ...
 
 
 @dataclass(frozen=True)
@@ -1094,26 +1115,45 @@ def read_message_decoded(
     should_include: _ShouldIncludeType = _should_include_all,
     start_time_ns: int = 0,
     end_time_ns: int = sys.maxsize,
-    decoder_factories: Iterable[DecoderFactoryProtocol] = (),
+    decoder_factories: Iterable[DecoderFactoryProtocol | ChannelDecoderFactoryProtocol] = (),
     reverse: bool = False,
     validate_crc: bool = False,
     num_workers: int = 0,
 ) -> Iterable[DecodedMessage]:
-    decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
+    decoders: dict[tuple[int, int], _DecoderFn] = {}
+
+    # Split factories once so we can dispatch without per-message getattr.
+    channel_factories: list[ChannelDecoderFactoryProtocol] = []
+    schema_factories: list[DecoderFactoryProtocol] = []
+    for f in decoder_factories:
+        if getattr(f, "channel_aware", False):
+            channel_factories.append(f)  # type: ignore[arg-type]
+        else:
+            schema_factories.append(f)  # type: ignore[arg-type]
+
+    def _resolve(
+        message_encoding: str, schema: Schema | None, channel: Channel
+    ) -> _DecoderFn | None:
+        for factory in channel_factories:
+            if decoder := factory.decoder_for(message_encoding, schema, channel):
+                return decoder
+        for factory in schema_factories:
+            if decoder := factory.decoder_for(message_encoding, schema):
+                return decoder
+        return None
 
     def decoded_message(schema: Schema | None, channel: Channel, message: Message) -> Any:
-        # Use schema.id as cache key, or 0 for schemaless
-        cache_key = schema.id if schema else 0
+        cache_key = (schema.id if schema else 0, channel.id)
 
         if decoder := decoders.get(cache_key):
             data = message.data if isinstance(message.data, bytes) else bytes(message.data)
             return decoder(data)
 
-        for factory in decoder_factories:
-            if decoder := factory.decoder_for(channel.message_encoding, schema):
-                decoders[cache_key] = decoder
-                data = message.data if isinstance(message.data, bytes) else bytes(message.data)
-                return decoder(data)
+        decoder = _resolve(channel.message_encoding, schema, channel)
+        if decoder:
+            decoders[cache_key] = decoder
+            data = message.data if isinstance(message.data, bytes) else bytes(message.data)
+            return decoder(data)
 
         # No decoder found - return raw data for schemaless, raise for schema-based
         if schema is None:

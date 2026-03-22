@@ -56,6 +56,20 @@ include = [
 [tool.ty.overrides.rules]
 unresolved-attribute = "ignore"
 
+# av (PyAV) has incomplete type stubs
+[[tool.ty.overrides]]
+include = [
+    "pymcap-cli/src/pymcap_cli/encoding/decompress.py",
+    "pymcap-cli/src/pymcap_cli/encoding/video_decoder.py",
+    "pymcap-cli/src/pymcap_cli/cmd/rosdecompress_cmd.py",
+    "pymcap-cli/src/pymcap_cli/cmd/roscompress_cmd.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
+call-non-callable = "ignore"
+invalid-argument-type = "ignore"
+
 
 [tool.ruff]
 required-version = ">=0.8.0"
