@@ -139,12 +139,58 @@ class AnnexBParser:
         return result
 
     def flush(self) -> bytes | None:
+        """Return any remaining data as a single final access unit."""
+        items = self.flush_list()
+        if not items:
+            return None
+        return b"".join(items)
+
+    def flush_list(self) -> list[bytes]:
+        """Return remaining data split into individual access units."""
+        # Combine all buffered data.
         self._current_au.extend(self._buf)
         self._buf.clear()
-        data = bytes(self._current_au)
+        remaining = bytes(self._current_au)
         self._current_au.clear()
         self._current_has_vcl = False
-        return data or None
+
+        if not remaining:
+            return []
+
+        # Split by VCL NAL boundaries — each VCL NAL starts a new AU.
+        # Find all start code positions.
+        positions: list[int] = []
+        pos = 0
+        while True:
+            idx = remaining.find(_START_CODE_4, pos)
+            if idx == -1:
+                break
+            positions.append(idx)
+            pos = idx + 4
+
+        if not positions:
+            return [remaining]
+
+        # Find AU boundaries: a new AU starts at each VCL NAL that follows
+        # a previous VCL NAL (i.e., the second and subsequent VCL NALs).
+        au_starts = [positions[0]]
+        seen_vcl = False
+        for p in positions:
+            if p + 4 >= len(remaining):
+                continue
+            nal_header = remaining[p + 4]
+            is_vcl = self._is_vcl(nal_header)
+            if is_vcl and seen_vcl:
+                au_starts.append(p)
+            if is_vcl:
+                seen_vcl = True
+
+        # Split into AUs.
+        aus: list[bytes] = []
+        for i, start in enumerate(au_starts):
+            end = au_starts[i + 1] if i + 1 < len(au_starts) else len(remaining)
+            aus.append(remaining[start:end])
+        return aus
 
 
 # ---------------------------------------------------------------------------
@@ -167,133 +213,13 @@ def _codec_family(codec_name: str) -> str:
     return "h264"
 
 
-# ---------------------------------------------------------------------------
-# Base ffmpeg encoder (shared stdout/stderr/flush/encode machinery)
-# ---------------------------------------------------------------------------
-
-
-class _BaseFFmpegEncoder:
-    """Shared base for ffmpeg subprocess encoders.
-
-    Subclasses build the ffmpeg command; this class handles process I/O,
-    Annex B parsing, encode/flush, and cleanup.
-    """
-
-    def __init__(self, cmd: list[str], codec_fam: str, config: EncoderConfig) -> None:
-        self.config = config
-
-        try:
-            self._process = subprocess.Popen(  # noqa: S603
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except OSError as exc:
-            raise VideoEncoderError(f"Failed to start ffmpeg: {exc}") from exc
-
-        self._parser = AnnexBParser(codec_fam)
-        self._output_queue: Queue[bytes | None] = Queue()
-        self._stderr_lines: list[str] = []
-
-        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
-        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
-        self._stdout_thread.start()
-        self._stderr_thread.start()
-
-    def _read_stdout(self) -> None:
-        if self._process.stdout is None:
-            return
-        fd = self._process.stdout.fileno()
-        os.set_blocking(fd, False)
-        try:
-            while True:
-                try:
-                    chunk = os.read(fd, 65536)
-                    if not chunk:
-                        break
-                    for au in self._parser.feed(chunk):
-                        self._output_queue.put(au)
-                except BlockingIOError:
-                    time.sleep(0.005)
-                except OSError:
-                    break
-            remaining = self._parser.flush()
-            if remaining:
-                self._output_queue.put(remaining)
-        finally:
-            self._output_queue.put(None)
-
-    def _read_stderr(self) -> None:
-        if self._process.stderr is None:
-            return
-        for raw_line in self._process.stderr:
-            text = raw_line.decode(errors="replace").rstrip()
-            if text:
-                self._stderr_lines.append(text)
-
-    def encode(self, frame: bytes) -> bytes | None:
-        """Write *frame* bytes to ffmpeg stdin and return one access unit (or None)."""
-        if self._process.stdin is None:
-            raise VideoEncoderError("ffmpeg stdin is not available")
-        try:
-            self._process.stdin.write(frame)
-            self._process.stdin.flush()
-        except BrokenPipeError as exc:
-            stderr_tail = "\n".join(self._stderr_lines[-5:])
-            raise VideoEncoderError(f"ffmpeg process died unexpectedly:\n{stderr_tail}") from exc
-
-        time.sleep(0.01)
-        try:
-            au = self._output_queue.get(timeout=0.1)
-        except Empty:
-            return None
-
-        if au is None:
-            stderr_tail = "\n".join(self._stderr_lines[-5:])
-            raise VideoEncoderError(f"ffmpeg exited prematurely:\n{stderr_tail}")
-        return au
-
-    def flush(self) -> bytes | None:
-        if self._process.stdin and not self._process.stdin.closed:
-            self._process.stdin.close()
-
-        self._stdout_thread.join(timeout=10)
-        self._stderr_thread.join(timeout=5)
-        self._process.wait(timeout=10)
-
-        chunks: list[bytes] = []
-        while True:
-            try:
-                item = self._output_queue.get_nowait()
-            except Empty:
-                break
-            if item is None:
-                break
-            chunks.append(item)
-
-        if self._process.returncode and self._process.returncode != 0:
-            stderr_tail = "\n".join(self._stderr_lines[-5:])
-            raise VideoEncoderError(
-                f"ffmpeg exited with code {self._process.returncode}:\n{stderr_tail}"
-            )
-
-        return b"".join(chunks) if chunks else None
-
-    def __del__(self) -> None:
-        try:
-            if self._process.poll() is None:
-                self._process.kill()
-                self._process.wait(timeout=2)
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-
 def _build_output_args(
     codec_fam: str, codec_name: str, gop_size: int, options: dict[str, str], bit_rate: int | None
 ) -> list[str]:
     """Build the shared encoder output arguments."""
     cmd: list[str] = [
+        "-vsync",
+        "0",
         "-c:v",
         codec_name,
         "-g",
@@ -401,7 +327,7 @@ def _ffprobe_image_dimensions(data: bytes) -> tuple[int, int]:
     raise VideoEncoderError("Cannot determine image dimensions")
 
 
-class FFmpegVideoEncoder(_BaseFFmpegEncoder):
+class FFmpegVideoEncoder:
     """Encode frames to H.264/H.265 via a single ffmpeg process.
 
     When *input_pix_fmt* is ``None`` (the default), the encoder accepts
@@ -446,12 +372,14 @@ class FFmpegVideoEncoder(_BaseFFmpegEncoder):
                 "pipe:0",
             ]
         else:
-            # Compressed images (JPEG/PNG) — ffmpeg auto-detects format.
+            # Compressed images (JPEG) — explicit mjpeg codec for reliable detection.
             cmd = [
                 ffmpeg,
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                "-c:v",
+                "mjpeg",
                 "-f",
                 "image2pipe",
                 "-r",
@@ -466,9 +394,151 @@ class FFmpegVideoEncoder(_BaseFFmpegEncoder):
 
         cmd.extend(_build_output_args(codec_fam, codec_name, gop_size, options, bit_rate))
 
-        super().__init__(
-            cmd, codec_fam, EncoderConfig(width=width, height=height, codec_name=codec_name)
-        )
+        self.config = EncoderConfig(width=width, height=height, codec_name=codec_name)
+
+        try:
+            self._process = subprocess.Popen(  # noqa: S603
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise VideoEncoderError(f"Failed to start ffmpeg: {exc}") from exc
+
+        self._parser = AnnexBParser(codec_fam)
+        self._output_queue: Queue[bytes | None] = Queue()
+        self._stderr_lines: list[str] = []
+
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+        self._is_image_pipe = input_pix_fmt is None
+        self._last_frame: bytes | None = None
+        self._frames_fed = 0
+        self._frames_returned = 0
+
+    def _read_stdout(self) -> None:
+        if self._process.stdout is None:
+            return
+        fd = self._process.stdout.fileno()
+        os.set_blocking(fd, False)
+        try:
+            while True:
+                try:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        break
+                    for au in self._parser.feed(chunk):
+                        self._output_queue.put(au)
+                except BlockingIOError:
+                    time.sleep(0.005)
+                except OSError:
+                    break
+            for au in self._parser.flush_list():
+                self._output_queue.put(au)
+        finally:
+            self._output_queue.put(None)
+
+    def _read_stderr(self) -> None:
+        if self._process.stderr is None:
+            return
+        for raw_line in self._process.stderr:
+            text = raw_line.decode(errors="replace").rstrip()
+            if text:
+                self._stderr_lines.append(text)
+
+    def _encode_raw(self, frame: bytes) -> bytes | None:
+        """Write *frame* bytes to ffmpeg stdin and return one access unit (or None)."""
+        if self._process.stdin is None:
+            raise VideoEncoderError("ffmpeg stdin is not available")
+        try:
+            self._process.stdin.write(frame)
+            self._process.stdin.flush()
+        except BrokenPipeError as exc:
+            stderr_tail = "\n".join(self._stderr_lines[-5:])
+            raise VideoEncoderError(f"ffmpeg process died unexpectedly:\n{stderr_tail}") from exc
+
+        try:
+            au = self._output_queue.get(timeout=0.2)
+        except Empty:
+            return None
+
+        if au is None:
+            stderr_tail = "\n".join(self._stderr_lines[-5:])
+            raise VideoEncoderError(f"ffmpeg exited prematurely:\n{stderr_tail}")
+        return au
+
+    def encode(self, frame: bytes) -> bytes | None:
+        """Write *frame* bytes to ffmpeg stdin and return one access unit (or None)."""
+        self._last_frame = frame
+        self._frames_fed += 1
+        result = self._encode_raw(frame)
+        if result is not None:
+            self._frames_returned += 1
+        return result
+
+    def _flush_packets_raw(self) -> list[bytes]:
+        """Close the encoder and return remaining buffered access units as a list."""
+        if self._process.stdin and not self._process.stdin.closed:
+            self._process.stdin.close()
+
+        self._stdout_thread.join(timeout=10)
+        self._stderr_thread.join(timeout=5)
+        self._process.wait(timeout=10)
+
+        packets: list[bytes] = []
+        while True:
+            try:
+                item = self._output_queue.get_nowait()
+            except Empty:
+                break
+            if item is None:
+                break
+            packets.append(item)
+
+        if self._process.returncode and self._process.returncode != 0:
+            stderr_tail = "\n".join(self._stderr_lines[-5:])
+            raise VideoEncoderError(
+                f"ffmpeg exited with code {self._process.returncode}:\n{stderr_tail}"
+            )
+
+        return packets
+
+    def flush_packets(self) -> list[bytes]:
+        """Flush encoder, sending padding frames to prevent frame loss.
+
+        ffmpeg drops the last N frames when stdin closes (both image2pipe
+        and rawvideo). We compensate by sending extra copies of the last
+        frame, then trimming the excess AUs from the output.
+        """
+        if self._last_frame is not None:
+            try:
+                assert self._process.stdin is not None
+                for _ in range(2):
+                    self._process.stdin.write(self._last_frame)
+                    self._process.stdin.flush()
+            except (BrokenPipeError, AssertionError):
+                pass
+        packets = self._flush_packets_raw()
+        # Keep only enough packets to reach the real frame count.
+        needed = self._frames_fed - self._frames_returned
+        return packets[:needed]
+
+    def flush(self) -> bytes | None:
+        """Close the encoder and return remaining data as a single blob."""
+        packets = self.flush_packets()
+        return b"".join(packets) if packets else None
+
+    def __del__(self) -> None:
+        try:
+            if self._process.poll() is None:
+                self._process.kill()
+                self._process.wait(timeout=2)
+        except Exception:  # noqa: BLE001, S110
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -585,9 +655,9 @@ class FFmpegVideoDecompressor:
         ]
         try:
             result = subprocess.run(  # noqa: S603
-                cmd, input=data, capture_output=True, text=True, timeout=10, check=False
+                cmd, input=data, capture_output=True, timeout=10, check=False
             )
-            parts = result.stdout.strip().split(",")
+            parts = result.stdout.decode().strip().split(",")
             if len(parts) == 2:
                 return int(parts[0]), int(parts[1])
         except (subprocess.TimeoutExpired, OSError, ValueError):

@@ -461,6 +461,7 @@ def roscompress(
     topics_converted: set[str] = set()
     pointcloud_topics_converted: set[str] = set()
     last_video_times: dict[str, tuple[int, int]] = {}
+    pending_messages: dict[str, deque[Any]] = {}
 
     with (
         open_input(file) as (input_stream, input_size),
@@ -510,6 +511,7 @@ def roscompress(
             topics_converted,
             pointcloud_topics_converted,
             last_video_times,
+            pending_messages,
             progress,
             task_id,
             counters,
@@ -519,20 +521,21 @@ def roscompress(
 
         # Flush remaining frames from video encoders.
         for topic_name, video_enc in encoders.items():
-            flushed = video_enc.flush()
-            if flushed and topic_name in channel_ids and topic_name in last_video_times:
-                log_time, publish_time = last_video_times[topic_name]
-                writer.add_message_encode(
-                    channel_id=channel_ids[topic_name],
-                    log_time=log_time,
-                    data={
-                        "timestamp": {"sec": 0, "nanosec": 0},
-                        "frame_id": "",
-                        "data": flushed,
-                        "format": codec,
-                    },
-                    publish_time=publish_time,
-                )
+            if topic_name not in channel_ids:
+                continue
+            pending = pending_messages.get(topic_name, deque())
+            if hasattr(video_enc, "flush_packets"):
+                packets = video_enc.flush_packets()
+            else:
+                flushed = video_enc.flush()
+                packets = [flushed] if flushed else []
+            for packet in packets:
+                if pending:
+                    pending_msg = pending.popleft()
+                    _write_compressed_video(
+                        writer, channel_ids[topic_name], pending_msg, packet, codec
+                    )
+                    counters["converted"] += 1
 
         writer.finish()
 
@@ -693,6 +696,7 @@ def _run_compress_loop(
     topics_converted: set[str],
     pointcloud_topics_converted: set[str],
     last_video_times: dict[str, tuple[int, int]],
+    pending_messages: dict[str, deque[Any]],
     progress: Progress,
     task_id: int,
     counters: dict[str, int],
@@ -704,7 +708,6 @@ def _run_compress_loop(
             topic = msg.channel.topic
 
             frame: Any = None
-            pix_fmt = _get_topic_pix_fmt(backend, topic)
             if topic not in encoders:
                 # First message for this topic — discover dimensions and create encoder.
                 if decode_future is not None:
@@ -715,9 +718,10 @@ def _run_compress_loop(
 
                 if scale is not None:
                     width, height = calculate_downscale_dimensions(width, height, scale)
-                else:
-                    width -= width % 2
-                    height -= height % 2
+                # Always ensure even dimensions (required for yuv420p).
+                width -= width % 2
+                height -= height % 2
+
                 try:
                     encoders[topic] = backend.create_encoder(
                         width,
@@ -728,6 +732,15 @@ def _run_compress_loop(
                         scale=(width, height) if pix_fmt is None and scale is not None else None,
                     )
                     topics_converted.add(topic)
+                    # Register schema/channel immediately so flush can write messages.
+                    vid_schema_id = ensure_schema(
+                        writer,
+                        "foxglove_msgs/msg/CompressedVideo",
+                        "ros2msg",
+                        FOXGLOVE_COMPRESSED_VIDEO.encode(),
+                        schema_ids,
+                    )
+                    ensure_channel(writer, topic, "cdr", vid_schema_id, channel_ids)
                     console.print(
                         f"[green]✓[/green] Converting {topic}: {width}x{height} "
                         f"({schema_name} → CompressedVideo)"
@@ -752,6 +765,7 @@ def _run_compress_loop(
                         f"falling back to {sw}"
                     )
                     cfg: EncoderConfig = encoders[topic].config
+                    pix_fmt = _get_topic_pix_fmt(backend, topic)
                     encoders[topic] = backend.create_encoder(
                         cfg.width,
                         cfg.height,
@@ -764,19 +778,18 @@ def _run_compress_loop(
                 else:
                     raise
 
+            # Buffer this message's metadata for when encoder output arrives.
+            if topic not in pending_messages:
+                pending_messages[topic] = deque()
+            pending_messages[topic].append(msg)
+
             if video_data is None:
                 progress.update(task_id, advance=1)
                 continue
 
-            schema_id = ensure_schema(
-                writer,
-                "foxglove_msgs/msg/CompressedVideo",
-                "ros2msg",
-                FOXGLOVE_COMPRESSED_VIDEO.encode(),
-                schema_ids,
-            )
-            channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
-            _write_compressed_video(writer, channel_id, msg, video_data, codec)
+            # Write output using the oldest pending message's metadata.
+            pending_msg = pending_messages[topic].popleft()
+            _write_compressed_video(writer, channel_ids[topic], pending_msg, video_data, codec)
             counters["converted"] += 1
             last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
 

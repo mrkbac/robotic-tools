@@ -144,6 +144,13 @@ class VideoDecompressFactory:
         self._cdr_factory = DecoderFactory()
         self._decompressors: dict[int, Any] = {}
 
+    def flush_all(self) -> list[Any]:
+        """Flush all decompressors and return remaining frames."""
+        frames: list[Any] = []
+        for decompressor in self._decompressors.values():
+            frames.extend(decompressor.flush())
+        return frames
+
     def _get_decompressor(self, channel_id: int) -> Any:
         if channel_id not in self._decompressors:
             from pymcap_cli.encoding.video_factory import create_video_decompressor  # noqa: PLC0415

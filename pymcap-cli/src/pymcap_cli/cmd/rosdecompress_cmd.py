@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from collections import deque
+from typing import TYPE_CHECKING, Annotated, Any, Literal
+
+if TYPE_CHECKING:
+    from small_mcap.reader import DecodedMessage
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
 from small_mcap import McapWriter
+from small_mcap.nop_decoder import NOPDecoderFactory
 from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
@@ -41,6 +46,17 @@ console = Console()
 
 VIDEO_GROUP = Group("Video")
 POINTCLOUD_GROUP = Group("Point Cloud")
+
+
+def _build_header(msg: DecodedMessage) -> dict[str, Any]:
+    """Build a ROS header dict from a DecodedMessage's original CompressedVideo fields."""
+    decoded = msg.decoded_message
+    if decoded is not None and isinstance(decoded, dict):
+        return decoded.get("header", {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": ""})
+    # Fallback: use message timestamps.
+    sec = msg.message.log_time // 1_000_000_000
+    nanosec = msg.message.log_time % 1_000_000_000
+    return {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": ""}
 
 
 def rosdecompress(
@@ -129,7 +145,9 @@ def rosdecompress(
     total_message_count = get_total_message_count(file)
 
     # Create decoder factories.
-    factories: list[VideoDecompressFactory | PointCloudDecompressFactory] = []
+    # Video/pointcloud factories are channel-aware and handle compressed topics.
+    # CDR factory handles all other ROS2 schemas (pass-through messages).
+    factories: list[VideoDecompressFactory | PointCloudDecompressFactory | NOPDecoderFactory] = []
     if video:
         factories.append(
             VideoDecompressFactory(
@@ -140,6 +158,7 @@ def rosdecompress(
         )
     if pointcloud:
         factories.append(PointCloudDecompressFactory())
+    factories.append(NOPDecoderFactory())
     encoder_factory = ROS2EncoderFactory()
 
     # Statistics.
@@ -151,6 +170,16 @@ def rosdecompress(
 
     schema_ids: dict[str, int] = {}
     channel_ids: dict[str, int] = {}
+
+    # Pending video messages whose decoded data hasn't arrived yet (decoder buffering).
+    pending_video: dict[str, deque[DecodedMessage]] = {}
+
+    # Track which video factory is used for flushing.
+    video_factory: VideoDecompressFactory | None = None
+    for f in factories:
+        if isinstance(f, VideoDecompressFactory):
+            video_factory = f
+            break
 
     with (
         open_input(file) as (input_stream, input_size),
@@ -167,51 +196,105 @@ def rosdecompress(
         for msg in messages:
             schema_name = msg.schema.name if msg.schema else ""
             topic = msg.channel.topic
-            decoded = msg.decoded_message
 
-            # Determine if this was a compressed topic and what output schema to use.
             if schema_name == _COMPRESSED_VIDEO_SCHEMA and video:
-                if decoded is None:
-                    # Decoder needs more data (waiting for keyframe)
-                    progress.advance(task_id)
-                    continue
+                decoded = msg.decoded_message  # triggers CDR decode via VideoDecompressFactory
                 if video_format == "compressed":
                     out_schema_name = "sensor_msgs/msg/CompressedImage"
                     out_schema_data = COMPRESSED_IMAGE
                 else:
                     out_schema_name = "sensor_msgs/msg/Image"
                     out_schema_data = IMAGE
+
+                # Register schema/channel on first encounter.
+                schema_id = ensure_schema(
+                    writer, out_schema_name, "ros2msg", out_schema_data.encode(), schema_ids
+                )
+                ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
+
+                # Buffer message metadata.
+                if topic not in pending_video:
+                    pending_video[topic] = deque()
+                pending_video[topic].append(msg)
+
+                if decoded is None:
+                    progress.advance(task_id)
+                    continue
+
+                # Write using oldest pending message's metadata.
+                pending_msg = pending_video[topic].popleft()
+                writer.add_message_encode(
+                    channel_id=channel_ids[topic],
+                    log_time=pending_msg.message.log_time,
+                    publish_time=pending_msg.message.publish_time,
+                    data=decoded,
+                )
                 video_messages += 1
                 video_topics.add(topic)
 
             elif schema_name == _COMPRESSED_POINTCLOUD2_SCHEMA and pointcloud:
-                out_schema_name = "sensor_msgs/msg/PointCloud2"
-                out_schema_data = POINTCLOUD2
+                decoded = msg.decoded_message
+                schema_id = ensure_schema(
+                    writer, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2.encode(), schema_ids
+                )
+                channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
+                writer.add_message_encode(
+                    channel_id=channel_id,
+                    log_time=msg.message.log_time,
+                    publish_time=msg.message.publish_time,
+                    data=decoded,
+                )
                 pointcloud_messages += 1
                 pointcloud_topics.add(topic)
 
             else:
-                # Pass-through: copy message unchanged.
+                # Pass-through: copy raw bytes — never touches decoded_message.
                 copy_message(msg, writer, schema_ids, channel_ids)
                 messages_copied += 1
                 progress.advance(task_id)
                 continue
 
-            # Transformed message — register schema/channel and write.
-            schema_id = ensure_schema(
-                writer, out_schema_name, "ros2msg", out_schema_data.encode(), schema_ids
-            )
-            channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
-            writer.add_message_encode(
-                channel_id=channel_id,
-                log_time=msg.message.log_time,
-                publish_time=msg.message.publish_time,
-                data=decoded,
-            )
-
             progress.advance(task_id)
 
+        # Flush buffered frames from video decompressors.
+        if video_factory is not None:
+            flushed_frames = video_factory.flush_all()
+            for frame in flushed_frames:
+                # Find a topic with pending messages.
+                topic_name = next(
+                    (t for t, p in pending_video.items() if p and t in channel_ids),
+                    None,
+                )
+                if topic_name is None:
+                    break
+                pending_msg = pending_video[topic_name].popleft()
+                header = _build_header(pending_msg)
+                if frame.is_jpeg:
+                    msg_data: dict[str, Any] = {
+                        "header": header,
+                        "format": "jpeg",
+                        "data": frame.data,
+                    }
+                else:
+                    msg_data = {
+                        "header": header,
+                        "height": frame.height,
+                        "width": frame.width,
+                        "encoding": "rgb8",
+                        "is_bigendian": 0,
+                        "step": frame.width * 3,
+                        "data": frame.data,
+                    }
+                writer.add_message_encode(
+                    channel_id=channel_ids[topic_name],
+                    log_time=pending_msg.message.log_time,
+                    publish_time=pending_msg.message.publish_time,
+                    data=msg_data,
+                )
+                video_messages += 1
+
         writer.finish()
+        output_size = output_stream.tell()
 
     # Print statistics.
     console.print()
@@ -229,6 +312,6 @@ def rosdecompress(
     if messages_copied:
         console.print(f"[dim]Copied:[/dim] {messages_copied:,} messages unchanged")
 
-    print_size_comparison(console, input_size, output_stream.tell())
+    print_size_comparison(console, input_size, output_size)
 
     return 0
