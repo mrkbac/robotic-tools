@@ -27,17 +27,19 @@ from rich.progress import (
 )
 from small_mcap import get_summary, include_topics, read_message_decoded
 
-from pymcap_cli.image_utils import (
+from pymcap_cli.encoder_common import (
     COMPRESSED_SCHEMAS,
     IMAGE_SCHEMAS,
     RAW_SCHEMAS,
-    CompressedImageMsg,
     EncoderBackend,
-    ImageMsg,
     VideoCodec,
     VideoEncoderError,
-    decode_compressed_frame,
     get_encoder_options,
+)
+from pymcap_cli.image_utils import (
+    CompressedImageMsg,
+    ImageMsg,
+    decode_compressed_frame,
     raw_image_to_array,
     resolve_encoder_for_backend,
 )

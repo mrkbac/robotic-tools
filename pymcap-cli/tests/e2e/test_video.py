@@ -4,7 +4,8 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pymcap_cli.cmd.video_cmd import EncoderBackend, VideoCodec, VideoEncoderError, encode_video
+from pymcap_cli.cmd.video_cmd import encode_video
+from pymcap_cli.encoder_common import EncoderBackend, VideoCodec, VideoEncoderError
 
 
 @pytest.mark.e2e
