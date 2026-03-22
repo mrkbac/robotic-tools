@@ -89,6 +89,13 @@ pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
 
 # Pipe to file as JSONL
 pymcap-cli cat recording.mcap > messages.jsonl
+
+# Write to file with progress bar
+pymcap-cli cat recording.mcap -o messages.jsonl
+
+# Control binary field serialization
+pymcap-cli cat recording.mcap --bytes base64   # base64-encoded
+pymcap-cli cat recording.mcap --bytes skip     # omit binary fields
 ```
 
 ### `tftree` — TF Transform Tree
@@ -107,6 +114,45 @@ pymcap-cli tftree data.mcap
 
 # Show only static transforms
 pymcap-cli tftree data.mcap --static-only
+```
+
+### `diag` — ROS2 Diagnostics
+
+Inspect ROS2 diagnostics with per-component health overview, sparkline timelines, frequency stats, and time-in-state tracking.
+
+```bash
+# Show components with issues (WARN/ERROR/STALE)
+pymcap-cli diag recording.mcap
+
+# Show all components including OK
+pymcap-cli diag recording.mcap --all
+
+# Detailed inspection of specific components
+pymcap-cli diag recording.mcap --inspect "encoder"
+
+# Hierarchical tree view
+pymcap-cli diag recording.mcap --tree
+
+# JSON output for scripting
+pymcap-cli diag recording.mcap --json
+```
+
+### `plot` — Time-Series Visualization
+
+Plot message fields over time using Plotly. Supports named labels, LTTB downsampling, XY trajectory mode, and saves to interactive HTML. Requires the `plot` extra (`uv add pymcap-cli[plot]`).
+
+```bash
+# Plot a single field
+pymcap-cli plot recording.mcap /odom.pose.position.x
+
+# Named series
+pymcap-cli plot recording.mcap "Vel X=/odom.twist.twist.linear.x"
+
+# XY trajectory plot
+pymcap-cli plot recording.mcap --xy /odom.pose.position.x /odom.pose.position.y
+
+# Downsample to 1000 points and save to file
+pymcap-cli plot recording.mcap /odom.pose.position.x -d 1000 -o plot.html
 ```
 
 ### `process` — Unified Processing
@@ -269,6 +315,21 @@ pymcap-cli roscompress data.mcap -o compressed.mcap
 
 # Specify quality and codec
 pymcap-cli roscompress data.mcap -o compressed.mcap --quality 28 --codec h265
+```
+
+### `rosdecompress` — ROS Decompression
+
+Decompress CompressedVideo and CompressedPointCloud2 topics back to standard ROS formats. Requires the `video` extra.
+
+```bash
+# Decompress to CompressedImage (JPEG)
+pymcap-cli rosdecompress input.mcap output.mcap
+
+# Decompress to raw Image
+pymcap-cli rosdecompress input.mcap output.mcap --video-format raw
+
+# Skip point cloud decompression
+pymcap-cli rosdecompress input.mcap output.mcap --no-pointcloud
 ```
 
 ### Shell Autocompletion
