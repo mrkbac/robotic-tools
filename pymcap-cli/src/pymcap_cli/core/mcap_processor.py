@@ -29,6 +29,7 @@ from small_mcap import (
     Schema,
     Statistics,
     breakup_chunk,
+    get_header,
     get_summary,
     stream_reader,
 )
@@ -57,6 +58,7 @@ from pymcap_cli.utils import (
 )
 
 console = Console()
+OUTPUT_LIBRARY = "pymcap-cli"
 
 
 @dataclass(slots=True)
@@ -692,8 +694,8 @@ class McapProcessor:
         writer.schemas = self.schemas
         writer.channels = self.channels
 
-        # Start writer (use default profile/library for merged files)
-        writer.start()
+        header = self._resolve_output_header()
+        writer.start(profile=header.profile, library=header.library)
 
         try:
             # Pre-load schemas and channels from all files' summaries
@@ -878,3 +880,25 @@ class McapProcessor:
                 f"[yellow]Warning (stream {stream_id}): Failed to decode chunk: {e}[/yellow]"
             )
             self.stats.errors_encountered += 1
+
+    def _resolve_output_header(self) -> Header:
+        """Choose output header metadata from readable inputs.
+
+        The output library should identify this tool. The profile is preserved only when
+        all readable input headers agree, which covers the common merge/recover case.
+        """
+        profiles: set[str] = set()
+
+        for input_file in self.options.inputs:
+            input_stream = input_file.stream
+            original_position = input_stream.tell()
+            try:
+                header = get_header(input_stream)
+            except McapError:
+                continue
+            finally:
+                input_stream.seek(original_position)
+            profiles.add(header.profile)
+
+        profile = profiles.pop() if len(profiles) == 1 else ""
+        return Header(profile=profile, library=OUTPUT_LIBRARY)
