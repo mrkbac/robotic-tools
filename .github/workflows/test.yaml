@@ -41,7 +41,7 @@ jobs:
       - name: Cache submodules
         if: matrix.package.submodules
         id: submodule-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             data/data
@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload coverage reports to Codecov
         if: matrix.package.cov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: ${{ matrix.package.dir }}
