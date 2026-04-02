@@ -81,6 +81,13 @@ class SeekRequiredError(McapError):
         super().__init__(f"{operation} is not supported for non-seekable streams.")
 
 
+class WriterNotStartedError(RuntimeError):
+    """Raised when a writer method is called before start()."""
+
+    def __init__(self) -> None:
+        super().__init__("Writer not started. Call start() first.")
+
+
 class IllegalOpcodeInChunkError(McapError):
     def __init__(self, opcode: int) -> None:
         opcode_name = f"unknown (opcode 0x{opcode:02X})"

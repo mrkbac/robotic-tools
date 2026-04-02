@@ -118,6 +118,8 @@ class TimeFilterProcessor(Processor):
     """
 
     def __init__(self, start_ns: int | None = None, end_ns: int | None = None) -> None:
+        if start_ns is not None and end_ns is not None and start_ns >= end_ns:
+            raise ValueError(f"start_ns ({start_ns}) must be less than end_ns ({end_ns})")
         # Pre-compute bounds with defaults for fast path
         self.start = start_ns if start_ns is not None else 0
         self.end = end_ns if end_ns is not None else MAX_INT64

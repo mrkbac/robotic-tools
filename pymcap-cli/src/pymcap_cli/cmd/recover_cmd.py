@@ -2,6 +2,7 @@ from typing import Annotated
 
 from cyclopts import Group, Parameter
 from rich.console import Console
+from small_mcap.exceptions import WriterNotStartedError
 
 from pymcap_cli.cmd._run_processor import run_processor
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
@@ -75,15 +76,12 @@ def recover(
         )
         console.print("[green]✓ Recovery completed successfully![/green]")
         console.print(result.stats)
+    except WriterNotStartedError:
+        console.print("[yellow]Warning: File appears to be empty or severely corrupted[/yellow]")
+        console.print("No valid MCAP data found to recover")
     except RuntimeError as e:
-        if "Writer not started" in str(e):
-            console.print(
-                "[yellow]Warning: File appears to be empty or severely corrupted[/yellow]"
-            )
-            console.print("No valid MCAP data found to recover")
-        else:
-            console.print(f"[red]Error during recovery: {e}[/red]")
-            return 1
+        console.print(f"[red]Error during recovery: {e}[/red]")
+        return 1
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error during recovery: {e}[/red]")
         return 1

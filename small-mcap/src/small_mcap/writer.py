@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, Flag, auto
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 
+from small_mcap.exceptions import WriterNotStartedError
 from small_mcap.records import (
     MAGIC,
     Attachment,
@@ -251,7 +252,7 @@ class McapWriterRaw:
     def add_schema(self, schema_id: int, name: str, encoding: str, data: bytes) -> None:
         """Add a schema to the file."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             raise RuntimeError("Writer already finished")
         if schema_id == 0:
@@ -272,7 +273,7 @@ class McapWriterRaw:
     ) -> None:
         """Add a channel to the file."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             raise RuntimeError("Writer already finished")
 
@@ -304,7 +305,7 @@ class McapWriterRaw:
     ) -> None:
         """Add a message to the file."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             raise RuntimeError("Writer already finished")
 
@@ -344,7 +345,7 @@ class McapWriterRaw:
     ) -> None:
         """Add an attachment to the file."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             raise RuntimeError("Writer already finished")
 
@@ -375,7 +376,7 @@ class McapWriterRaw:
     def add_metadata(self, name: str, metadata: dict[str, str]) -> None:
         """Add a metadata record to the file."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             raise RuntimeError("Writer already finished")
 
@@ -391,7 +392,7 @@ class McapWriterRaw:
     def add_chunk(self, chunk: Chunk, message_indices: dict[int, MessageIndex]) -> None:
         """Write a chunk and its indexes to output."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             raise RuntimeError("Writer already finished")
 
@@ -445,7 +446,7 @@ class McapWriterRaw:
     def finish(self) -> None:
         """Finish writing the MCAP file."""
         if not self._started:
-            raise RuntimeError("Writer not started. Call start() first.")
+            raise WriterNotStartedError
         if self._finished:
             return
 

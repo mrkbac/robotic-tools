@@ -17,6 +17,7 @@ from small_mcap.exceptions import (
     SchemaNotFoundError,
     SeekRequiredError,
     UnsupportedCompressionError,
+    WriterNotStartedError,
 )
 
 # Reader classes and functions
@@ -125,6 +126,7 @@ __all__ = [
     "SummaryOffset",
     "UnsupportedCompressionError",
     "WritableBuffer",
+    "WriterNotStartedError",
     "breakup_chunk",
     "get_header",
     "get_summary",

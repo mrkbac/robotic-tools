@@ -15,6 +15,7 @@ import av
 import av.error
 import numpy as np
 from av import Packet, VideoFrame
+from typing_extensions import Self
 
 from pymcap_cli.encoding.encoder_common import (
     EncoderConfig,
@@ -233,7 +234,19 @@ class VideoEncoder:
         try:
             self._context.open()
         except av.error.FFmpegError as exc:
+            del self._context
             raise VideoEncoderError(f"Failed to open encoder {codec_name}: {exc}") from exc
+
+    def close(self) -> None:
+        """Release the native codec context."""
+        if hasattr(self, "_context"):
+            del self._context
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def encode(self, frame: VideoFrame) -> bytes | None:
         """Encode a single frame and return compressed video bytes, or None if buffered."""
@@ -337,6 +350,17 @@ class PyAVVideoDecompressor:
             height=rgb_frame.height,
             is_jpeg=False,
         )
+
+    def close(self) -> None:
+        """Release native codec contexts."""
+        self._decoder = None
+        self._jpeg_encoder = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def flush(self) -> list[DecompressedFrame]:
         if self._decoder is None:
