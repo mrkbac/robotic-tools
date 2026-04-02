@@ -9,6 +9,7 @@ from small_mcap import (
     McapWriter,
     MessageEncoding,
     SchemaEncoding,
+    WriterNotStartedError,
     get_summary,
     read_message,
 )
@@ -86,10 +87,10 @@ class TestMcapWriterBasics:
             assert len(messages) == 10
 
     def test_write_without_start_raises_error(self, temp_mcap_file: Path):
-        """Test that writing without calling start() raises an error."""
+        """Test that writing without calling start() raises WriterNotStartedError."""
         with open(temp_mcap_file, "wb") as f:
             writer = McapWriter(f)
-            with pytest.raises(RuntimeError, match="Writer not started"):
+            with pytest.raises(WriterNotStartedError, match="Writer not started"):
                 writer.add_schema(schema_id=1, name="Test", encoding="json", data=b"{}")
 
     def test_write_after_finish_raises_error(self, temp_mcap_file: Path):
