@@ -7,7 +7,7 @@ import pytest
 from mcap_ros2_support_fast._dynamic_decoder import (
     create_decoder as create_codegen_decoder,
 )
-from mcap_ros2_support_fast._planner import generate_dynamic
+from mcap_ros2_support_fast._planner import create_decoder_function
 
 
 def serialize_string(s: str) -> bytes:
@@ -316,7 +316,7 @@ def test_deserialize_basic_types(msg_def: str, data: Iterable[int], expected: di
     buffer = bytes([0, 1, 0, 0, *list(data)])
 
     # Choose decoder based on parameter
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
 
     # Convert SimpleNamespace to dict for comparison
@@ -374,7 +374,7 @@ def test_deserialize_time_types(msg_def: str, data: Iterable[int], expected: dic
     buffer = bytes([0, 1, 0, 0, *list(data)])
 
     # Test ROS2 format (nanosec)
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
     assert result_dict == expected
@@ -402,7 +402,7 @@ string file # file the message came from
 string function # function the message came from
 uint32 line # line the message came from
 """
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -450,7 +450,7 @@ float64 y
 float64 z
 float64 w
 """
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -476,7 +476,7 @@ def test_deserialize_empty_ros2_message() -> None:
     """Test deserialization of an empty ROS 2 message (e.g. std_msgs/msg/Empty)."""
     buffer = bytes.fromhex("0001000000")
     msg_def = ""
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -494,7 +494,7 @@ uint8 uint_8_field
 MSG: std_msgs/Empty
 # This message has no fields
 """
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -511,7 +511,7 @@ int32 int_32_field
 MSG: std_msgs/Empty
 # This message has no fields
 """
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -528,7 +528,7 @@ int32 int_32_field
 MSG: custom_msgs/Nothing
 int32 EXAMPLE=123
 """
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
     result = decoder(buffer)
     result_dict = _convert_to_dict(result)
 
@@ -545,7 +545,7 @@ int32 EXAMPLE=123
 def test_wstring_throws_exception(msg_def: str) -> None:
     """Test that wstring fields throw an exception."""
     buffer = bytes.fromhex("00010000000000007b000000")
-    decoder = generate_dynamic("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
+    decoder = create_decoder_function("custom_type/TestMsg", msg_def, parser=create_codegen_decoder)
 
     with pytest.raises(NotImplementedError, match=r"wstring.*not.*implemented"):
         decoder(buffer)
@@ -596,7 +596,7 @@ def test_deserialize_header_plus_fixed_fields(frame_id: str) -> None:
     payload += struct.pack("<4d2?", velocity, steering, arm, shovel, handbreak, safety)
 
     buffer = bytes([0, 1, 0, 0]) + bytes(payload)
-    decoder = generate_dynamic(
+    decoder = create_decoder_function(
         "custom_type/CommandMsg", COMMAND_MSG_SCHEMA, parser=create_codegen_decoder
     )
     result = decoder(buffer)

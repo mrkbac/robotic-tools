@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mcap_ros2_support_fast._dynamic_decoder import create_decoder
 from mcap_ros2_support_fast._plans import McapROS2DecodeError as _McapROS2DecodeError
 
-from ._planner import generate_dynamic
+from ._planner import create_decoder_function
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,6 +50,8 @@ class DecoderFactory:
 
         decoder = self._decoders.get(schema.id)
         if decoder is None:
-            decoder = generate_dynamic(schema.name, schema.data.decode(), parser=create_decoder)
+            decoder = create_decoder_function(
+                schema.name, schema.data.decode(), parser=create_decoder
+            )
             self._decoders[schema.id] = decoder
         return decoder

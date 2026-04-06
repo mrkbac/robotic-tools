@@ -4,7 +4,7 @@ from tempfile import TemporaryFile
 from typing import Any
 
 import pytest
-from mcap_ros2._dynamic import EncoderFunction, serialize_dynamic
+from mcap_ros2._dynamic import EncoderFunction, create_encoder_function
 from mcap_ros2.decoder import DecoderFactory
 from mcap_ros2_support_fast.decoder import DecoderFactory as DecoderFactoryFast
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory as ROS2EncoderFactoryFast
@@ -36,7 +36,7 @@ class ROS2EncoderFactory:
         if encoder is None:
             if schema.encoding != "ros2msg":
                 raise RuntimeError(f'can\'t parse schema with encoding "{schema.encoding}"')
-            type_dict = serialize_dynamic(schema.name, schema.data.decode())
+            type_dict = create_encoder_function(schema.name, schema.data.decode())
             # Check if schema.name is in type_dict
             if schema.name not in type_dict:
                 raise RuntimeError(f'schema parsing failed for "{schema.name}"')

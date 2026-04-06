@@ -8,7 +8,7 @@ import socket
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
+from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 from robo_ws_bridge import (
     ConnectionState,
     ServerConnection,
@@ -726,7 +726,7 @@ class ProxyBridge:
         schema_name = channel["schemaName"]
         schema_def = channel["schema"]
         if schema_name not in self._decoders:
-            self._decoders[schema_name] = generate_dynamic(schema_name, schema_def)
+            self._decoders[schema_name] = create_decoder_function(schema_name, schema_def)
         return self._decoders[schema_name](payload)
 
     def _encode_message(self, schema_name: str, schema_def: str, message: dict[str, Any]) -> bytes:
@@ -741,7 +741,7 @@ class ProxyBridge:
             CDR-encoded bytes
         """
         if schema_name not in self._encoders:
-            self._encoders[schema_name] = serialize_dynamic(schema_name, schema_def)
+            self._encoders[schema_name] = create_encoder_function(schema_name, schema_def)
         result = self._encoders[schema_name](message)
         # Convert memoryview to bytes if needed
         return bytes(result) if isinstance(result, memoryview) else result

@@ -212,27 +212,6 @@ def generate_plans(schema_name: str, schema_text: str) -> PlanList:
     return _generate_plan(primary_msgdef, msgdefs)
 
 
-def generate_dynamic(
-    schema_name: str,
-    schema_text: str,
-    parser: Callable[[PlanList], DecoderFunction] = create_decoder,
-) -> DecoderFunction:
-    """Convert a ROS2 concatenated message definition into a message parser.
-
-    Modeled after the `generate_dynamic` function in ROS1 `genpy.dynamic`.
-
-    :param schema_name: The name of the schema defined in `schema_text`.
-    :param schema_text: The schema text to use for deserializing the message payload.
-    :param parser: Parser implementation function.
-    :return: A decoder function for the primary schema type.
-    """
-    plan = generate_plans(schema_name, schema_text)
-    optimized_plan = optimize_plan(plan)
-
-    # Create decoder using the specified parser implementation
-    return parser(optimized_plan)
-
-
 def _find_groupable_primitives(steps: PlanActions) -> list[tuple[int, int]]:
     """Find ranges of consecutive primitive fields that can be grouped by alignment rules.
 
@@ -393,7 +372,28 @@ def optimize_plan(plan: PlanList) -> PlanList:
     return target_type, final_steps
 
 
-def serialize_dynamic(schema_name: str, schema_text: str) -> EncoderFunction:
+def create_decoder_function(
+    schema_name: str,
+    schema_text: str,
+    parser: Callable[[PlanList], DecoderFunction] = create_decoder,
+) -> DecoderFunction:
+    """Convert a ROS2 concatenated message definition into a message parser.
+
+    Modeled after the `create_decoder_function` function in ROS1 `genpy.dynamic`.
+
+    :param schema_name: The name of the schema defined in `schema_text`.
+    :param schema_text: The schema text to use for deserializing the message payload.
+    :param parser: Parser implementation function.
+    :return: A decoder function for the primary schema type.
+    """
+    plan = generate_plans(schema_name, schema_text)
+    optimized_plan = optimize_plan(plan)
+
+    # Create decoder using the specified parser implementation
+    return parser(optimized_plan)
+
+
+def create_encoder_function(schema_name: str, schema_text: str) -> EncoderFunction:
     """Convert a ROS2 concatenated message definition into message encoders.
 
     This function generates encoder functions that can serialize message objects

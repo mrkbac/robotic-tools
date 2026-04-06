@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ._planner import serialize_dynamic
+from ._planner import create_encoder_function
 
 if TYPE_CHECKING:
     from ._plans import EncoderFunction
@@ -55,6 +55,6 @@ class ROS2EncoderFactory:
             raise McapROS2WriteError(f'can\'t parse schema with encoding "{schema.encoding}"')
 
         # Create and cache encoder
-        encoder = serialize_dynamic(schema.name, schema.data.decode())
+        encoder = create_encoder_function(schema.name, schema.data.decode())
         self._encoders[cache_key] = encoder
         return encoder

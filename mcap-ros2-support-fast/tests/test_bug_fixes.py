@@ -1,6 +1,6 @@
 """Tests for bug fixes comparing against reference implementation."""
 
-from mcap_ros2_support_fast._planner import generate_dynamic, serialize_dynamic
+from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 
 
 class TestCharTypeBugFix:
@@ -12,8 +12,8 @@ class TestCharTypeBugFix:
 int8 field1
 char field2
 """
-        decoder = generate_dynamic("my_msgs/TestChar", schema)
-        encoder = serialize_dynamic("my_msgs/TestChar", schema)
+        decoder = create_decoder_function("my_msgs/TestChar", schema)
+        encoder = create_encoder_function("my_msgs/TestChar", schema)
 
         # Create a message with a negative char value
         msg = type("TestChar", (), {})()
@@ -35,8 +35,8 @@ char field2
         schema = """
 char[3] field
 """
-        decoder = generate_dynamic("my_msgs/TestCharArray", schema)
-        encoder = serialize_dynamic("my_msgs/TestCharArray", schema)
+        decoder = create_decoder_function("my_msgs/TestCharArray", schema)
+        encoder = create_encoder_function("my_msgs/TestCharArray", schema)
 
         msg = type("TestCharArray", (), {})()
         # Encode negative values as unsigned bytes (twos complement)
@@ -58,8 +58,8 @@ class TestBoundedArrays:
         schema = """
 int32[<=5] numbers
 """
-        decoder = generate_dynamic("my_msgs/TestBounded", schema)
-        encoder = serialize_dynamic("my_msgs/TestBounded", schema)
+        decoder = create_decoder_function("my_msgs/TestBounded", schema)
+        encoder = create_encoder_function("my_msgs/TestBounded", schema)
 
         msg = type("TestBounded", (), {})()
         msg.numbers = [1, 2, 3]  # Within bounds
@@ -74,8 +74,8 @@ int32[<=5] numbers
         schema = """
 int32[<=5] numbers
 """
-        encoder = serialize_dynamic("my_msgs/TestBounded", schema)
-        decoder = generate_dynamic("my_msgs/TestBounded", schema)
+        encoder = create_encoder_function("my_msgs/TestBounded", schema)
+        decoder = create_decoder_function("my_msgs/TestBounded", schema)
 
         msg = type("TestBounded", (), {})()
         msg.numbers = [1, 2, 3, 4, 5, 6, 7, 8]  # Exceeds bounds
@@ -94,8 +94,8 @@ NestedMsg[<=3] items
 MSG: my_msgs/NestedMsg
 int32 value
 """
-        encoder = serialize_dynamic("my_msgs/TestBoundedComplex", schema)
-        decoder = generate_dynamic("my_msgs/TestBoundedComplex", schema)
+        encoder = create_encoder_function("my_msgs/TestBoundedComplex", schema)
+        decoder = create_decoder_function("my_msgs/TestBoundedComplex", schema)
 
         nested_msg = type("NestedMsg", (), {})
         msg = type("TestBoundedComplex", (), {})()
@@ -123,8 +123,8 @@ int32[5] fixed
 int32[] dynamic
 int32[<=5] bounded
 """
-        encoder = serialize_dynamic("my_msgs/TestArrayTypes", schema)
-        decoder = generate_dynamic("my_msgs/TestArrayTypes", schema)
+        encoder = create_encoder_function("my_msgs/TestArrayTypes", schema)
+        decoder = create_decoder_function("my_msgs/TestArrayTypes", schema)
 
         msg = type("TestArrayTypes", (), {})()
         msg.fixed = [1, 2, 3, 4, 5]  # Must be exactly 5
@@ -150,8 +150,8 @@ string name "default_name"
 float32 value 3.14
 bool flag true
 """
-        encoder = serialize_dynamic("my_msgs/TestDefaults", schema)
-        decoder = generate_dynamic("my_msgs/TestDefaults", schema)
+        encoder = create_encoder_function("my_msgs/TestDefaults", schema)
+        decoder = create_decoder_function("my_msgs/TestDefaults", schema)
 
         # Create message with None values
         msg = type("TestDefaults", (), {})()
@@ -177,8 +177,8 @@ string name
 float32 value
 bool flag
 """
-        encoder = serialize_dynamic("my_msgs/TestFallbacks", schema)
-        decoder = generate_dynamic("my_msgs/TestFallbacks", schema)
+        encoder = create_encoder_function("my_msgs/TestFallbacks", schema)
+        decoder = create_decoder_function("my_msgs/TestFallbacks", schema)
 
         msg = type("TestFallbacks", (), {})()
         msg.count = None
@@ -201,8 +201,8 @@ bool flag
 int32 count 42
 string name "default_name"
 """
-        encoder = serialize_dynamic("my_msgs/TestOverride", schema)
-        decoder = generate_dynamic("my_msgs/TestOverride", schema)
+        encoder = create_encoder_function("my_msgs/TestOverride", schema)
+        decoder = create_decoder_function("my_msgs/TestOverride", schema)
 
         msg = type("TestOverride", (), {})()
         msg.count = 100
@@ -220,8 +220,8 @@ string name "default_name"
         schema = """
 int32[] numbers [1, 2, 3]
 """
-        encoder = serialize_dynamic("my_msgs/TestArrayDefaults", schema)
-        decoder = generate_dynamic("my_msgs/TestArrayDefaults", schema)
+        encoder = create_encoder_function("my_msgs/TestArrayDefaults", schema)
+        decoder = create_decoder_function("my_msgs/TestArrayDefaults", schema)
 
         msg = type("TestArrayDefaults", (), {})()
         msg.numbers = None

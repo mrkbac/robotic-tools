@@ -17,7 +17,7 @@ def test_encoder_factory_caches_by_schema_identity(monkeypatch) -> None:
     compile_encoder = Mock(
         side_effect=[Mock(return_value=b"encoded"), Mock(return_value=b"encoded")]
     )
-    monkeypatch.setattr(writer_module, "serialize_dynamic", compile_encoder)
+    monkeypatch.setattr(writer_module, "create_encoder_function", compile_encoder)
 
     class SchemaA:
         id = 7
