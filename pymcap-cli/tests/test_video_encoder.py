@@ -1,14 +1,12 @@
 """Tests for VideoEncoder resource management."""
 
-from __future__ import annotations
-
 import pytest
+from pymcap_cli.encoding.video_pyav import VideoEncoder
 
 av = pytest.importorskip("av")
 
 
 def _make_encoder():
-    from pymcap_cli.encoding.video_pyav import VideoEncoder
 
     return VideoEncoder(width=16, height=16, codec_name="libx264")
 
@@ -43,7 +41,6 @@ class TestVideoEncoderClose:
 
     def test_context_manager_closes_on_exception(self):
         enc = _make_encoder()
-        with pytest.raises(RuntimeError):
-            with enc:
-                raise RuntimeError("simulated error")
+        with pytest.raises(RuntimeError), enc:
+            raise RuntimeError("simulated error")
         assert not hasattr(enc, "_context")

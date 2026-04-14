@@ -36,6 +36,7 @@ repos:
     rev: v1.43.5
     hooks:
       - id: typos
+        exclude: pymcap-cli\/tests\/test_rihs01.py
 
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.10.6

@@ -10,6 +10,7 @@ from pymcap_cli.cmd import (
     compress_cmd,
     convert_cmd,
     diag_cmd,
+    diff_cmd,
     du_cmd,
     filter_cmd,
     info_cmd,
@@ -21,7 +22,6 @@ from pymcap_cli.cmd import (
     records_cmd,
     recover_cmd,
     recover_inplace_cmd,
-    diff_cmd,
     tftree_cmd,
     topic_chunks_cmd,
 )
