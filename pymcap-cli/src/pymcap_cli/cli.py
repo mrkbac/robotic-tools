@@ -21,6 +21,7 @@ from pymcap_cli.cmd import (
     records_cmd,
     recover_cmd,
     recover_inplace_cmd,
+    diff_cmd,
     tftree_cmd,
     topic_chunks_cmd,
 )
@@ -122,6 +123,7 @@ transform_group = Group("Transform", sort_key=1)
 app.command(name="cat", group=inspect_group)(cat_cmd.cat)
 app.command(name="diag", group=inspect_group)(diag_cmd.diag)
 app.command(name="du", group=inspect_group)(du_cmd.du)
+app.command(name="diff", group=inspect_group)(diff_cmd.diff_cmd)
 app.command(name="info", group=inspect_group)(info_cmd.info)
 app.command(name="info-json", group=inspect_group)(info_json_cmd.info_json)
 list_cmd.list_app.group = (inspect_group,)
