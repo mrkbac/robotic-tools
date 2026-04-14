@@ -1081,7 +1081,7 @@ wheels = [
 
 [[package]]
 name = "mcap-ros2-support-fast"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "mcap-ros2-support-fast" }
 dependencies = [
     { name = "ros-parser" },
@@ -1904,7 +1904,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2439,7 +2439,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]
@@ -2664,7 +2664,7 @@ wheels = [
 
 [[package]]
 name = "websocket-proxy"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "websocket-proxy" }
 dependencies = [
     { name = "mcap-ros2-support-fast" },
