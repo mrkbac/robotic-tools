@@ -115,8 +115,14 @@ def _build_file_info_and_summary(data: McapInfoOutput) -> Table:
         "Duration:",
         f"[yellow]{duration_ns / 1_000_000:.2f} ms[/] [cyan]({duration_human})[/]",
     )
-    info_table.add_row("Start:", f"[cyan]{date_start}[/]")
-    info_table.add_row("End:", f"[cyan]{date_end}[/]")
+    info_table.add_row(
+        "Start:",
+        f"[cyan]{date_start}[/] [dim]({stats['message_start_time'] / _NS_TO_SEC:.9f})[/]",
+    )
+    info_table.add_row(
+        "End:",
+        f"[cyan]{date_end}[/] [dim]({stats['message_end_time'] / _NS_TO_SEC:.9f})[/]",
+    )
     info_table.add_row("Channels:", f"[green]{stats['channel_count']:,}[/]")
     info_table.add_row("Attachments:", f"[yellow]{stats['attachment_count']:,}[/]")
     info_table.add_row("Metadata:", f"[cyan]{stats['metadata_count']:,}[/]")
