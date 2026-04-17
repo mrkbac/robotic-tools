@@ -5,20 +5,23 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
+from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.core.mcap_processor import (
+    InputOptions,
+    OutputOptions,
+)
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
+    NoClobberOption,
     OutputPathOption,
 )
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
-    confirm_output_overwrite,
 )
 
 console = Console()
@@ -106,6 +109,7 @@ def filter_cmd(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
+    no_clobber: NoClobberOption = False,
 ) -> int:
     """Copy filtered MCAP data to a new file.
 
@@ -145,6 +149,8 @@ def filter_cmd(
         Compression algorithm for output file.
     force
         Force overwrite of output file without confirmation.
+    no_clobber
+        Fail instead of prompting if the output file already exists.
 
     Examples
     --------
@@ -152,7 +158,10 @@ def filter_cmd(
     mcap filter in.mcap -o out.mcap -y /diagnostics -y /tf -y /camera_.*
     ```
     """
-    confirm_output_overwrite(output, force)
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
+    if overwrite_policy is None:
+        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        return 1
 
     try:
         input_options = InputOptions.from_args(
@@ -179,6 +188,7 @@ def filter_cmd(
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
+                overwrite_policy=overwrite_policy,
             ),
         )
         console.print("[green]✓ Filter completed successfully![/green]")

@@ -5,20 +5,23 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
+from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.core.mcap_processor import (
+    InputOptions,
+    OutputOptions,
+)
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
+    NoClobberOption,
     OutputPathOption,
 )
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
-    confirm_output_overwrite,
 )
 
 console = Console()
@@ -48,6 +51,7 @@ def merge(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
+    no_clobber: NoClobberOption = False,
 ) -> int:
     """Merge multiple MCAP files into one.
 
@@ -70,6 +74,8 @@ def merge(
         Compression algorithm for output file.
     force
         Force overwrite of output file without confirmation.
+    no_clobber
+        Fail instead of prompting if the output file already exists.
 
     Examples
     --------
@@ -82,7 +88,10 @@ def merge(
         console.print("[red]Error: At least 2 input files are required for merging[/red]")
         return 1
 
-    confirm_output_overwrite(output, force)
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
+    if overwrite_policy is None:
+        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        return 1
 
     try:
         result = run_processor(
@@ -95,6 +104,7 @@ def merge(
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
+                overwrite_policy=overwrite_policy,
             ),
         )
         console.print(f"[green]✓ Successfully merged {len(files)} files![/green]")

@@ -6,17 +6,22 @@ from typing import TYPE_CHECKING, Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions, RechunkStrategy
+from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.core.mcap_processor import (
+    InputOptions,
+    OutputOptions,
+    RechunkStrategy,
+)
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
+    NoClobberOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import compile_topic_patterns, confirm_output_overwrite
+from pymcap_cli.utils import compile_topic_patterns
 
 if TYPE_CHECKING:
     from re import Pattern
@@ -48,6 +53,7 @@ def rechunk(
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
+    no_clobber: NoClobberOption = False,
 ) -> int:
     """Reorganize MCAP messages into chunks based on topic patterns.
 
@@ -75,6 +81,8 @@ def rechunk(
         Compression algorithm for output file.
     force
         Force overwrite of output file without confirmation.
+    no_clobber
+        Fail instead of prompting if the output file already exists.
 
     Examples
     --------
@@ -100,9 +108,12 @@ def rechunk(
         )
         return 1
 
-    output_file = Path(output)
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
+    if overwrite_policy is None:
+        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        return 1
 
-    confirm_output_overwrite(output_file, force)
+    output_file = Path(output)
 
     # Compile patterns if using PATTERN strategy
     patterns: list[Pattern[str]] = []
@@ -134,6 +145,7 @@ def rechunk(
             rechunk_patterns=patterns,
             compression=compression.value,
             chunk_size=chunk_size,
+            overwrite_policy=overwrite_policy,
         ),
     )
 
@@ -145,7 +157,10 @@ def rechunk(
     )
 
     # Strategy-specific stats
-    num_unique_groups = len(result.processor.rechunk_groups)
+    assert result.processor.output_manager is not None
+    num_unique_groups = sum(
+        len(segment.rechunk_groups) for segment in result.processor.output_manager.segments.values()
+    )
     if strategy == RechunkStrategy.ALL:
         console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")
     elif strategy == RechunkStrategy.AUTO:

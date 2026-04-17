@@ -1,10 +1,12 @@
 """Unified MCAP processor combining recovery and filtering capabilities."""
 
 import heapq
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from functools import cached_property
+from pathlib import Path
 from re import Pattern
 from typing import IO, BinaryIO
 
@@ -28,6 +30,7 @@ from small_mcap import (
     Remapper,
     Schema,
     Statistics,
+    Summary,
     breakup_chunk,
     get_header,
     get_summary,
@@ -37,6 +40,7 @@ from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
 from pymcap_cli.core.processors import (
+    SPLIT_REQUIRED,
     Action,
     AlwaysDecodeProcessor,
     AttachmentFilterProcessor,
@@ -53,12 +57,15 @@ from pymcap_cli.types.types_manual import (
 )
 from pymcap_cli.utils import (
     ProgressTrackingIO,
+    confirm_output_overwrite,
     file_progress,
     parse_timestamp_args,
 )
 
 console = Console()
 OUTPUT_LIBRARY = "pymcap-cli"
+OutputKey = int | str | tuple[int | str, ...]
+OutputStreamOpener = Callable[[OutputKey, int, int, int], tuple[str, BinaryIO]]
 
 
 @dataclass(slots=True)
@@ -87,6 +94,14 @@ class RechunkStrategy(str, Enum):
     PATTERN = "pattern"  # Group by regex patterns
     ALL = "all"  # Each topic in its own chunk group
     AUTO = "auto"  # Auto-group based on size (>15% threshold)
+
+
+class OverwriteCollisionPolicy(str, Enum):
+    """How split outputs handle collisions with existing files."""
+
+    ASK = "ask"
+    OVERWRITE = "overwrite"
+    ERROR = "error"
 
 
 @dataclass
@@ -189,6 +204,12 @@ class OutputOptions:
     rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
     rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
 
+    # Output processors (split routing, etc.)
+    processors: list[Processor] = field(default_factory=list)
+    # Template for multi-output file naming (e.g., "output_{index:03d}.mcap")
+    output_template: str = ""
+    overwrite_policy: OverwriteCollisionPolicy = OverwriteCollisionPolicy.ASK
+
     @property
     def compression_type(self) -> CompressionType:
         return str_to_compression_type(self.compression)
@@ -196,6 +217,10 @@ class OutputOptions:
     @property
     def is_rechunking(self) -> bool:
         return self.rechunk_strategy != RechunkStrategy.NONE
+
+    @property
+    def is_splitting(self) -> bool:
+        return bool(self.processors)
 
 
 class ProcessingOptions:
@@ -345,6 +370,205 @@ class MessageGroup:
             self.writer.add_chunk(chunk, message_indexes)
 
 
+def _ns_to_iso(ns: int) -> str:
+    """Convert nanosecond timestamp to ISO 8601 string."""
+    return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).isoformat()
+
+
+@dataclass(slots=True)
+class OutputSegment:
+    """One output file in a multi-output split."""
+
+    key: OutputKey
+    index: int
+    stream: BinaryIO
+    writer: McapWriter
+    path: str
+    written_schemas: set[int] = field(default_factory=set)
+    written_channels: set[int] = field(default_factory=set)
+    rechunk_groups: list[MessageGroup] = field(default_factory=list)
+    channel_to_group: dict[int, MessageGroup] = field(default_factory=dict)
+    start_time: int = 0
+    end_time: int = 0
+    pattern_groups: dict[int, MessageGroup] = field(default_factory=dict)
+
+
+class OutputManager:
+    """Manages writer pool for multi-output splitting.
+
+    Writers are lazily created on first write to a segment key. Each segment
+    gets its own McapWriter, schema/channel tracking, and optional rechunk groups.
+
+    Pending attachments and metadata are buffered until segments are created,
+    then flushed to each new segment to ensure records are not lost during
+    lazy segment creation.
+    """
+
+    def __init__(
+        self,
+        output_options: "OutputOptions",
+        schemas: dict[int, Schema],
+        channels: dict[int, Channel],
+        header: Header,
+        open_output: OutputStreamOpener | None = None,
+    ) -> None:
+        self.output_options = output_options
+        self.schemas = schemas
+        self.channels = channels
+        self.header = header
+        self._open_output = open_output or self._open_template_output
+        self.segments: dict[OutputKey, OutputSegment] = {}
+        self._next_index: int = 0
+        # Buffer records that arrive before any segments exist
+        self._pending_attachments: list[Attachment] = []
+        self._pending_metadata: list[tuple[str, dict[str, str]]] = []
+
+    def handle_existing_output(self, path: Path) -> None:
+        """Apply the configured collision policy for an existing output path."""
+        if not path.exists():
+            return
+
+        policy = self.output_options.overwrite_policy
+        if policy == OverwriteCollisionPolicy.OVERWRITE:
+            return
+        if policy == OverwriteCollisionPolicy.ERROR:
+            console.print(f"[red]Error: Output file '{path}' already exists.[/red]")
+            raise SystemExit(1)
+
+        confirm_output_overwrite(path, force=False)
+
+    def _open_template_output(
+        self, key: OutputKey, index: int, start_time: int, end_time: int
+    ) -> tuple[str, BinaryIO]:
+        """Open a template-derived output path for a segment."""
+        path = self.output_options.output_template.format(
+            index=index,
+            index1=index + 1,
+            key=key,
+            start_time=start_time,
+            start_time_iso=_ns_to_iso(start_time) if start_time else "",
+            end_time=end_time,
+        )
+
+        path_obj = Path(path)
+        self.handle_existing_output(path_obj)
+        return path, path_obj.open("wb")
+
+    def _flush_pending_to_segment(self, segment: OutputSegment) -> None:
+        """Write buffered attachments/metadata to a newly created segment."""
+        for attachment in self._pending_attachments:
+            segment.writer.add_attachment(
+                log_time=attachment.log_time,
+                create_time=attachment.create_time,
+                name=attachment.name,
+                media_type=attachment.media_type,
+                data=attachment.data,
+            )
+        for name, metadata in self._pending_metadata:
+            segment.writer.add_metadata(name=name, metadata=metadata)
+
+    def get_or_create_segment(
+        self, key: OutputKey, start_time: int = 0, end_time: int = 0
+    ) -> OutputSegment:
+        """Get or lazily create an output segment for the given key."""
+        if key in self.segments:
+            return self.segments[key]
+
+        index = self._next_index
+        self._next_index += 1
+
+        path, stream = self._open_output(key, index, start_time, end_time)
+        writer = McapWriter(
+            stream,
+            chunk_size=self.output_options.chunk_size,
+            compression=self.output_options.compression_type,
+        )
+        writer.schemas = dict(self.schemas)
+        writer.channels = dict(self.channels)
+        writer.start(profile=self.header.profile, library=self.header.library)
+
+        segment = OutputSegment(
+            key=key,
+            index=index,
+            stream=stream,
+            writer=writer,
+            path=path,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        self.segments[key] = segment
+
+        # Flush any buffered records to this new segment
+        self._flush_pending_to_segment(segment)
+
+        return segment
+
+    def get_writer(self, key: OutputKey) -> McapWriter:
+        """Get writer for output key, creating segment if needed."""
+        return self.get_or_create_segment(key).writer
+
+    def ensure_channel_written(self, channel_id: int, key: OutputKey) -> None:
+        """Write schema and channel to a segment if not already written."""
+        segment = self.get_or_create_segment(key)
+        if channel_id in segment.written_channels:
+            return
+
+        channel = self.channels.get(channel_id)
+        if not channel:
+            return
+
+        # Write schema first if needed
+        if channel.schema_id != 0 and channel.schema_id not in segment.written_schemas:
+            schema = self.schemas.get(channel.schema_id)
+            if schema:
+                segment.writer.add_schema(schema.id, schema.name, schema.encoding, schema.data)
+                segment.written_schemas.add(schema.id)
+
+        segment.writer.add_channel(
+            channel.id,
+            schema_id=channel.schema_id,
+            topic=channel.topic,
+            message_encoding=channel.message_encoding,
+            metadata=channel.metadata,
+        )
+        segment.written_channels.add(channel_id)
+
+    def finish_all(self) -> dict[OutputKey, Statistics]:
+        """Finish and close all segment writers. Returns per-segment statistics."""
+        stats: dict[OutputKey, Statistics] = {}
+        for key, segment in self.segments.items():
+            # Flush rechunk groups
+            for group in segment.rechunk_groups:
+                group.flush()
+            segment.writer.finish()
+            stats[key] = segment.writer.statistics
+            segment.stream.close()
+        # Clear buffers (records were flushed to all segments during creation)
+        self._pending_attachments.clear()
+        self._pending_metadata.clear()
+        return stats
+
+    def add_attachment(self, attachment: Attachment) -> None:
+        """Buffer attachment for later flushing to all segments, or write to existing ones."""
+        self._pending_attachments.append(attachment)
+        if self.segments:
+            for segment in self.segments.values():
+                segment.writer.add_attachment(
+                    log_time=attachment.log_time,
+                    create_time=attachment.create_time,
+                    name=attachment.name,
+                    media_type=attachment.media_type,
+                    data=attachment.data,
+                )
+
+    def add_metadata(self, name: str, metadata: dict[str, str]) -> None:
+        """Buffer metadata for later flushing to all segments, or write to existing ones."""
+        self._pending_metadata.append((name, metadata))
+        if self.segments:
+            for segment in self.segments.values():
+                segment.writer.add_metadata(name=name, metadata=metadata)
+
+
 class McapProcessor:
     """Unified MCAP processor combining recovery and filtering capabilities.
 
@@ -370,15 +594,11 @@ class McapProcessor:
         # Track which channels we've already seen to optimize metadata extraction
         self.known_channels: set[int] = set()
 
-        # Rechunking state (only used when options.output.is_rechunking)
-        self.channel_to_group: dict[int, MessageGroup] = {}
+        # Rechunking state
         self.large_channels: set[int] = set()  # For AUTO mode
-        self.rechunk_groups: list[MessageGroup] = []  # Track unique groups
-        self.pattern_index_to_group: dict[int, MessageGroup] = {}  # For PATTERN mode cache
 
-        # Track which schemas/channels we've written to the main file (not in chunks)
-        self.written_schemas: set[int] = set()
-        self.written_channels: set[int] = set()
+        # Unified output management for both single-output and split-output modes.
+        self.output_manager: OutputManager | None = None
 
     def _get_input(self, stream_id: int) -> InputOptions:
         return self.options.inputs[stream_id].options
@@ -399,24 +619,6 @@ class McapProcessor:
                 return False
         self.channel_filter_cache[cache_key] = True
         return True
-
-    def _ensure_channel_written(self, channel_id: int, writer: McapWriter) -> None:
-        """Ensure channel and its schema are written to the main file (not in chunks)."""
-        if channel_id in self.written_channels:
-            return
-        if not (channel := self.channels.get(channel_id)):
-            return
-        if (
-            channel.schema_id != 0
-            and channel.schema_id not in self.written_schemas
-            and (schema := self.schemas.get(channel.schema_id))
-        ):
-            writer.add_schema(schema.id, schema.name, schema.encoding, schema.data)
-            self.written_schemas.add(schema.id)
-        writer.add_channel(
-            channel.id, channel.topic, channel.message_encoding, channel.schema_id, channel.metadata
-        )
-        self.written_channels.add(channel_id)
 
     def _analyze_for_auto_grouping(self, input_streams: Sequence[IO[bytes]]) -> None:
         """Pre-analyze files to identify large channels (>15% of total uncompressed size)."""
@@ -480,55 +682,72 @@ class McapProcessor:
                 return i
         return None
 
-    def _create_message_group(self, writer: McapWriter) -> MessageGroup:
-        opts = self.options.output_options
-        group = MessageGroup(writer, opts.chunk_size, opts.compression_type)
-        self.rechunk_groups.append(group)
-        return group
-
     def _get_or_create_group_for_channel(
         self, channel_id: int, channel: Channel, writer: McapWriter
     ) -> MessageGroup:
         """Get or create appropriate MessageGroup for a channel based on rechunk strategy."""
-        if channel_id in self.channel_to_group:
-            return self.channel_to_group[channel_id]
+        return self._get_or_create_group_for_channel_split(channel_id, channel, writer)
+
+    def _get_or_create_group_for_channel_split(
+        self, channel_id: int, channel: Channel, writer: McapWriter
+    ) -> MessageGroup:
+        """Get or create MessageGroup when splitting is active.
+
+        Uses per-segment group tracking since each segment needs independent rechunk groups.
+        """
+        assert self.output_manager is not None
+        # Find which segment this writer belongs to
+        segment: OutputSegment | None = None
+        for seg in self.output_manager.segments.values():
+            if seg.writer is writer:
+                segment = seg
+                break
+        if segment is None:
+            # Writer not yet in any segment, create one
+            segment = self.output_manager.get_or_create_segment(0)
+
+        if channel_id in segment.channel_to_group:
+            return segment.channel_to_group[channel_id]
 
         strategy = self.options.output_options.rechunk_strategy
         group: MessageGroup | None = None
 
         if strategy == RechunkStrategy.ALL:
-            # Each channel gets its own unique group
-            group = self._create_message_group(writer)
+            group = self._create_segment_message_group(segment)
 
         elif strategy == RechunkStrategy.AUTO:
-            # Large channels get their own group, small channels share one
             if channel_id in self.large_channels:
-                group = self._create_message_group(writer)
+                group = self._create_segment_message_group(segment)
             else:
-                # Try to find existing shared group for small channels
-                for ch_id, existing in self.channel_to_group.items():
+                for ch_id, existing in segment.channel_to_group.items():
                     if ch_id not in self.large_channels:
                         group = existing
                         break
 
         elif strategy == RechunkStrategy.PATTERN:
-            # Find which pattern matches this channel's topic
             pattern_idx = self._find_matching_pattern_index(channel.topic)
             group_key = pattern_idx if pattern_idx is not None else -1
-            group = self.pattern_index_to_group.get(group_key)
+            group = segment.pattern_groups.get(group_key)
             if group is None:
-                group = self._create_message_group(writer)
-                self.pattern_index_to_group[group_key] = group
+                group = self._create_segment_message_group(segment)
+                segment.pattern_groups[group_key] = group
 
-        # Fallback: create new group if none assigned
         if group is None:
-            group = self._create_message_group(writer)
+            group = self._create_segment_message_group(segment)
 
-        self.channel_to_group[channel_id] = group
+        segment.channel_to_group[channel_id] = group
         return group
 
-    def process_message(self, message: Message, writer: McapWriter, stream_id: int) -> None:
+    def _create_segment_message_group(self, segment: "OutputSegment") -> MessageGroup:
+        """Create a MessageGroup attached to a specific segment."""
+        opts = self.options.output_options
+        group = MessageGroup(segment.writer, opts.chunk_size, opts.compression_type)
+        segment.rechunk_groups.append(group)
+        return group
+
+    def process_message(self, message: Message, stream_id: int) -> None:
         self.stats.messages_processed += 1
+        assert self.output_manager is not None
 
         # Topic filtering using cached decision (avoid repeated regex matching)
         if not self._is_channel_included(stream_id, message.channel_id):
@@ -541,6 +760,12 @@ class McapProcessor:
             self.stats.filter_rejections += 1
             return
 
+        route_key = self._get_message_route(message)
+        if route_key is None:
+            route_key = 0
+        target_writer = self.output_manager.get_writer(route_key)
+        self.output_manager.ensure_channel_written(message.channel_id, route_key)
+
         # Route to appropriate destination based on rechunking mode
         if self.options.output_options.is_rechunking:
             # Get channel for this message
@@ -550,17 +775,14 @@ class McapProcessor:
                 return
 
             # Get or create the MessageGroup for this channel
-            group = self._get_or_create_group_for_channel(message.channel_id, channel, writer)
-
-            # Ensure channel is written to main file (not in chunks)
-            self._ensure_channel_written(message.channel_id, writer)
+            group = self._get_or_create_group_for_channel(
+                message.channel_id, channel, target_writer
+            )
 
             # Add message to its group (chunk builder auto-ensures within chunks)
             group.add_message(message)
         else:
-            # Normal mode: ensure channel is written before writing message
-            self._ensure_channel_written(message.channel_id, writer)
-            writer.add_message(
+            target_writer.add_message(
                 channel_id=message.channel_id,
                 log_time=message.log_time,
                 data=message.data,
@@ -593,30 +815,23 @@ class McapProcessor:
             if not should_include:
                 del self.channels[remapped_channel.id]
 
-    def _handle_message_record(self, message: Message, writer: McapWriter, stream_id: int) -> None:
+    def _handle_message_record(self, message: Message, stream_id: int) -> None:
         message_to_process = self.remapper.remap_message(stream_id, message)
-        self.process_message(message_to_process, writer, stream_id)
+        self.process_message(message_to_process, stream_id)
 
-    def _handle_attachment_record(
-        self, attachment: Attachment, writer: McapWriter, stream_id: int
-    ) -> None:
+    def _handle_attachment_record(self, attachment: Attachment, stream_id: int) -> None:
         self.stats.attachments_processed += 1
+        assert self.output_manager is not None
 
         # Check all processors (includes AttachmentFilterProcessor and TimeFilterProcessor)
         input_opts = self._get_input(stream_id)
         if any(p.on_attachment(attachment) == Action.SKIP for p in input_opts.processors):
             return
 
-        writer.add_attachment(
-            log_time=attachment.log_time,
-            create_time=attachment.create_time,
-            name=attachment.name,
-            media_type=attachment.media_type,
-            data=attachment.data,
-        )
+        self.output_manager.add_attachment(attachment)
 
     def _generate_chunks_from_stream(
-        self, input_stream: IO[bytes], stream_id: int, writer: McapWriter
+        self, input_stream: IO[bytes], stream_id: int
     ) -> Iterator[PendingChunk]:
         """Generate chunks from a single stream in file order.
 
@@ -650,16 +865,17 @@ class McapProcessor:
                 elif isinstance(record, Channel):
                     self._handle_channel_record(record, stream_id)
                 elif isinstance(record, Message):
-                    self._handle_message_record(record, writer, stream_id)
+                    self._handle_message_record(record, stream_id)
                 elif isinstance(record, Attachment):
-                    self._handle_attachment_record(record, writer, stream_id)
+                    self._handle_attachment_record(record, stream_id)
                 elif isinstance(record, Metadata):
                     self.stats.metadata_processed += 1
                     input_opts = self._get_input(stream_id)
                     if not input_opts.processors or all(
                         p.on_metadata(record) != Action.SKIP for p in input_opts.processors
                     ):
-                        writer.add_metadata(name=record.name, metadata=record.metadata)
+                        assert self.output_manager is not None
+                        self.output_manager.add_metadata(name=record.name, metadata=record.metadata)
                 elif isinstance(record, (DataEnd, Footer)):
                     break
 
@@ -673,54 +889,65 @@ class McapProcessor:
 
     def process(
         self,
-        output_stream: BinaryIO,
+        output_stream: BinaryIO | None = None,
     ) -> ProcessingStats:
-        """Main processing function supporting single or multiple input files.
-
-        Args:
-            output_stream: Output MCAP file stream
-
-        Returns:
-            Processing statistics
-        """
+        """Main processing function."""
         output_opts = self.options.output_options
-
-        # Initialize writer and share schema/channel dicts for auto-ensure
-        writer = McapWriter(
-            output_stream,
-            chunk_size=output_opts.chunk_size,
-            compression=output_opts.compression_type,
-        )
-        writer.schemas = self.schemas
-        writer.channels = self.channels
-
         header = self._resolve_output_header()
-        writer.start(profile=header.profile, library=header.library)
+
+        # Pre-load schemas and channels from all files' summaries
+        # This ensures we have all metadata before processing any chunks
+        summaries: list[Summary | None] = []
+        for stream_id, input_opt in enumerate(self.options.inputs):
+            input_stream = input_opt.stream
+            try:
+                summary = get_summary(input_stream)
+            except McapError:
+                # In recovery mode, if we can't get summary (e.g., truncated file),
+                # continue without it - we'll discover schemas/channels during chunk processing
+                summary = None
+
+            summaries.append(summary)
+
+            if summary:
+                # Remap and store all schemas
+                for schema in summary.schemas.values():
+                    self._handle_schema_record(schema, stream_id)
+
+                # Remap and store all channels
+                for channel in summary.channels.values():
+                    self._handle_channel_record(channel, stream_id)
+
+            # Seek back to start for processing
+            input_stream.seek(0)
+
+        # Initialize output processors with summaries (for split boundary computation, etc.)
+        for proc in output_opts.processors:
+            proc.initialize(summaries)
+
+        if not output_opts.is_splitting and output_stream is None:
+            raise ValueError("output_stream is required when not splitting")
+
+        if output_opts.is_splitting:
+            open_output = None
+        else:
+            assert output_stream is not None
+            open_output = self._build_single_output_opener(output_stream)
+        self.output_manager = OutputManager(
+            output_opts,
+            self.schemas,
+            self.channels,
+            header,
+            open_output=open_output,
+        )
+        # Pre-create statically-known segments. In single-output mode this creates segment 0.
+        known_segments = list(self._iter_known_output_segments())
+        if not known_segments:
+            known_segments = [(0, 0, 0)]
+        for key, start_time, end_time in known_segments:
+            self.output_manager.get_or_create_segment(key, start_time=start_time, end_time=end_time)
 
         try:
-            # Pre-load schemas and channels from all files' summaries
-            # This ensures we have all metadata before processing any chunks
-            for stream_id, input_opt in enumerate(self.options.inputs):
-                input_stream = input_opt.stream
-                try:
-                    summary = get_summary(input_stream)
-                except McapError:
-                    # In recovery mode, if we can't get summary (e.g., truncated file),
-                    # continue without it - we'll discover schemas/channels during chunk processing
-                    summary = None
-
-                if summary:
-                    # Remap and store all schemas
-                    for schema in summary.schemas.values():
-                        self._handle_schema_record(schema, stream_id)
-
-                    # Remap and store all channels
-                    for channel in summary.channels.values():
-                        self._handle_channel_record(channel, stream_id)
-
-                # Seek back to start for processing
-                input_stream.seek(0)
-
             # For AUTO rechunking mode, pre-analyze files to identify large channels
             if output_opts.rechunk_strategy == RechunkStrategy.AUTO:
                 input_streams = [inp.stream for inp in self.options.inputs]
@@ -738,28 +965,45 @@ class McapProcessor:
 
                 # Create chunk generators for each wrapped stream
                 chunk_generators = [
-                    self._generate_chunks_from_stream(wrapped_stream, stream_id, writer)
+                    self._generate_chunks_from_stream(wrapped_stream, stream_id)
                     for stream_id, wrapped_stream in enumerate(wrapped_streams)
                 ]
 
                 # Process chunks in timestamp order using heapq.merge
                 # PendingChunk is ordered by timestamp, so no key function needed
                 for pending_chunk in heapq.merge(*chunk_generators):
-                    self._process_chunk_smart(pending_chunk, writer)
+                    self._process_chunk_smart(pending_chunk)
 
                 # Complete progress
                 progress.update(task, completed=total_size)
 
         finally:
-            # Flush all rechunk groups before finishing
-            if output_opts.is_rechunking:
-                for group in self.rechunk_groups:
-                    group.flush()
-
-            writer.finish()
-
-        # Save writer statistics (single source of truth for output counts)
-        self.stats.writer_statistics = writer.statistics
+            assert self.output_manager is not None
+            segment_stats = self.output_manager.finish_all()
+            # Aggregate writer statistics from all segments
+            if segment_stats:
+                first = next(iter(segment_stats.values()))
+                times_with_messages = [s for s in segment_stats.values() if s.message_count > 0]
+                total = Statistics(
+                    message_count=sum(s.message_count for s in segment_stats.values()),
+                    schema_count=first.schema_count,
+                    channel_count=first.channel_count,
+                    attachment_count=sum(s.attachment_count for s in segment_stats.values()),
+                    metadata_count=sum(s.metadata_count for s in segment_stats.values()),
+                    chunk_count=sum(s.chunk_count for s in segment_stats.values()),
+                    message_start_time=(
+                        min(s.message_start_time for s in times_with_messages)
+                        if times_with_messages
+                        else 0
+                    ),
+                    message_end_time=(
+                        max(s.message_end_time for s in times_with_messages)
+                        if times_with_messages
+                        else 0
+                    ),
+                    channel_message_counts={},
+                )
+                self.stats.writer_statistics = total
 
         return self.stats
 
@@ -777,13 +1021,19 @@ class McapProcessor:
         input_opts = self._get_input(stream_id)
         output_opts = self.options.output_options
 
-        # Ask processors for chunk-level decision (time filtering, always_decode, etc.)
+        # Ask input processors for chunk-level decision (time filtering, always_decode, etc.)
         for proc in input_opts.processors:
             decision = proc.on_chunk(chunk, indexes)
             if decision == ChunkDecision.SKIP:
                 return ChunkDecision.SKIP
             if decision == ChunkDecision.DECODE:
                 # Track that we need to decode, but keep checking for SKIP
+                return ChunkDecision.DECODE
+
+        # Ask output processors (split routing forces DECODE on boundary chunks)
+        for proc in output_opts.processors:
+            decision = proc.on_chunk(chunk, indexes)
+            if decision == ChunkDecision.DECODE:
                 return ChunkDecision.DECODE
 
         # Force decode if rechunking is active (must reorganize messages)
@@ -824,8 +1074,98 @@ class McapProcessor:
         # No reason to decode - can fast-copy
         return ChunkDecision.CONTINUE
 
-    def _process_chunk_smart(self, pending: PendingChunk, writer: McapWriter) -> None:
+    def _get_chunk_route(self, chunk: Chunk | LazyChunk) -> OutputKey | None:
+        """Get output key for a chunk from output processors."""
+        routes: list[int | str] = []
+        for proc in self.options.output_options.processors:
+            route = proc.route_chunk(chunk)
+            if route is SPLIT_REQUIRED:
+                return None
+            if route is not None:
+                assert isinstance(route, (int, str))
+                routes.append(route)
+        if not routes:
+            return None
+        if len(routes) == 1:
+            return routes[0]
+        return tuple(routes)
+
+    def _iter_known_output_segments(self) -> Iterator[tuple[OutputKey, int, int]]:
+        """Yield statically known output routes for pre-creating segments."""
+        known: list[list[tuple[int | str, int, int]]] = []
+        for proc in self.options.output_options.processors:
+            keys = proc.output_keys()
+            if keys is None:
+                return
+            boundaries = getattr(proc, "boundaries", None)
+            proc_known: list[tuple[int | str, int, int]] = []
+            for key in keys:
+                start_time = 0
+                end_time = 0
+                if boundaries and isinstance(key, int):
+                    start_time = boundaries[key]
+                    end_time = boundaries[key + 1]
+                proc_known.append((key, start_time, end_time))
+            known.append(proc_known)
+
+        if not known:
+            return
+
+        routes: list[tuple[tuple[int | str, ...], int, int]] = [((), 0, 0)]
+        for proc_known in known:
+            next_routes: list[tuple[tuple[int | str, ...], int, int]] = []
+            for base_key, base_start, base_end in routes:
+                for key, start_time, end_time in proc_known:
+                    flattened_key = (*base_key, key)
+                    combined_start = start_time if base_start == 0 else max(base_start, start_time)
+                    if end_time == 0:
+                        combined_end = base_end
+                    elif base_end == 0:
+                        combined_end = end_time
+                    else:
+                        combined_end = min(base_end, end_time)
+                    if combined_start >= combined_end and combined_end != 0:
+                        continue
+                    next_routes.append((flattened_key, combined_start, combined_end))
+            routes = next_routes
+
+        for route_key, start_time, end_time in routes:
+            key: OutputKey = route_key[0] if len(route_key) == 1 else route_key
+            yield key, start_time, end_time
+
+    def _build_single_output_opener(self, output_stream: BinaryIO) -> OutputStreamOpener:
+        """Create an opener for single-output processing."""
+        opened = False
+
+        def open_output(
+            key: OutputKey, index: int, start_time: int, end_time: int
+        ) -> tuple[str, BinaryIO]:
+            nonlocal opened
+            _ = key, index, start_time, end_time
+            if opened:
+                raise ValueError("single-output mode only supports one output segment")
+            opened = True
+            path = self.options.output_options.output_template or "output.mcap"
+            return path, output_stream
+
+        return open_output
+
+    def _get_message_route(self, message: Message) -> OutputKey | None:
+        """Get output key for a message from output processors."""
+        routes: list[int | str] = []
+        for proc in self.options.output_options.processors:
+            route = proc.route_message(message)
+            if route is not None:
+                routes.append(route)
+        if not routes:
+            return None
+        if len(routes) == 1:
+            return routes[0]
+        return tuple(routes)
+
+    def _process_chunk_smart(self, pending: PendingChunk) -> None:
         """Smart chunk processing with fast copying when possible."""
+        assert self.output_manager is not None
         decision = self._should_decode_chunk(pending.chunk, pending.indexes, pending.stream_id)
 
         if decision == ChunkDecision.SKIP:
@@ -842,27 +1182,26 @@ class McapProcessor:
             return
 
         if decision == ChunkDecision.DECODE:
-            self._process_chunk_fallback(chunk, writer, pending.stream_id)
+            self._process_chunk_fallback(chunk, pending.stream_id)
         else:
             # Fast-copy path (CONTINUE) -> nothing about the chunk must be changed
-            # ensure all channels are written before copying chunk
+            route_key = self._get_chunk_route(chunk)
+            if route_key is None:
+                route_key = 0
+            target_writer = self.output_manager.get_writer(route_key)
             for idx in pending.indexes:
-                # Check if channel should be included (per-input)
                 if self._is_channel_included(pending.stream_id, idx.channel_id):
-                    self._ensure_channel_written(idx.channel_id, writer)
+                    self.output_manager.ensure_channel_written(idx.channel_id, route_key)
+
             # Fast-copy the chunk with its indexes
-            writer.add_chunk(chunk, {idx.channel_id: idx for idx in pending.indexes})
+            target_writer.add_chunk(chunk, {idx.channel_id: idx for idx in pending.indexes})
             self.stats.chunks_copied += 1
 
-    def _process_chunk_fallback(
-        self, chunk: Chunk, writer: McapWriter | None, stream_id: int
-    ) -> None:
+    def _process_chunk_fallback(self, chunk: Chunk, stream_id: int) -> None:
         """Fallback to decode chunk into individual records."""
         try:
             chunk_records = breakup_chunk(chunk, validate_crc=True)
-            # Only count as decoded if we're actually writing messages
-            if writer is not None:
-                self.stats.chunks_decoded += 1
+            self.stats.chunks_decoded += 1
 
             for chunk_record in chunk_records:
                 if isinstance(chunk_record, Schema):
@@ -870,10 +1209,8 @@ class McapProcessor:
                 elif isinstance(chunk_record, Channel):
                     self._handle_channel_record(chunk_record, stream_id)
                 elif isinstance(chunk_record, Message):
-                    if not writer:
-                        continue
                     message_to_write = self.remapper.remap_message(stream_id, chunk_record)
-                    self.process_message(message_to_write, writer, stream_id)
+                    self.process_message(message_to_write, stream_id)
 
         except McapError as e:
             console.print(

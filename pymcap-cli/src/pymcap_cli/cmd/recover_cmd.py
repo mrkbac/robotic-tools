@@ -4,17 +4,20 @@ from cyclopts import Group, Parameter
 from rich.console import Console
 from small_mcap.exceptions import WriterNotStartedError
 
-from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
+from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.core.mcap_processor import (
+    InputOptions,
+    OutputOptions,
+)
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
+    NoClobberOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import confirm_output_overwrite
 
 console = Console()
 
@@ -36,6 +39,7 @@ def recover(
         ),
     ] = False,
     force: ForceOverwriteOption = False,
+    no_clobber: NoClobberOption = False,
 ) -> int:
     """Recover data from a potentially corrupt MCAP file.
 
@@ -55,6 +59,8 @@ def recover(
         Always decode chunks, even if the file is not chunked.
     force
         Force overwrite of output file without confirmation.
+    no_clobber
+        Fail instead of prompting if the output file already exists.
 
     Examples
     --------
@@ -62,7 +68,10 @@ def recover(
     pymcap-cli recover in.mcap -o out.mcap
     ```
     """
-    confirm_output_overwrite(output, force)
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
+    if overwrite_policy is None:
+        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        return 1
 
     try:
         result = run_processor(
@@ -72,6 +81,7 @@ def recover(
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
+                overwrite_policy=overwrite_policy,
             ),
         )
         console.print("[green]✓ Recovery completed successfully![/green]")

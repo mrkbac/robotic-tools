@@ -69,3 +69,11 @@ ForceOverwriteOption = Annotated[
         group=OUTPUT_OPTIONS_GROUP,
     ),
 ]
+
+NoClobberOption = Annotated[
+    bool,
+    Parameter(
+        name=["--no-clobber"],
+        group=OUTPUT_OPTIONS_GROUP,
+    ),
+]

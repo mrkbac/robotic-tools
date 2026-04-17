@@ -22,6 +22,7 @@ from pymcap_cli.cmd import (
     records_cmd,
     recover_cmd,
     recover_inplace_cmd,
+    split_cmd,
     tftree_cmd,
     topic_chunks_cmd,
 )
@@ -140,6 +141,7 @@ app.command(name="filter", group=transform_group)(filter_cmd.filter_cmd)
 app.command(name="merge", group=transform_group)(merge_cmd.merge)
 app.command(name="process", group=transform_group)(process_cmd.process)
 app.command(name="rechunk", group=transform_group)(rechunk_cmd.rechunk)
+app.command(name="split", group=transform_group)(split_cmd.split)
 app.command(name="recover", group=transform_group)(recover_cmd.recover)
 app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
 app.command(name="plot", group=inspect_group)(plot)
