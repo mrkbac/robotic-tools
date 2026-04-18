@@ -5,10 +5,13 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
+from ros_parser.message_path import MessagePathError
+
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.core.mcap_processor import OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
+from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
@@ -65,6 +68,22 @@ def split(
             help="Split at specific timestamps (ns or RFC3339, repeatable)",
         ),
     ] = None,
+    expression: Annotated[
+        str | None,
+        Parameter(
+            name=["-E", "--expression"],
+            group=SPLIT_GROUP,
+            help=(
+                "Split whenever a ros-parser message path changes value, e.g. "
+                "'/gps/fix.status.status' (value-change trigger) or "
+                "'/detections.objects[:]{confidence>0.8}' (predicate trigger: "
+                "match/no-match transitions). Segments are numbered — use "
+                "'{index:03d}' in --output-template. Messages on other topics "
+                "follow the current segment (sticky). Chunks with no "
+                "target-topic messages fast-copy without decoding."
+            ),
+        ),
+    ] = None,
     output_template: Annotated[
         str,
         Parameter(
@@ -91,6 +110,8 @@ def split(
         Split interval, e.g. "60s", "5m", "1h", or raw nanoseconds.
     split_at
         Timestamps at which to split (ns integer or RFC3339 format).
+    expression
+        ros-parser message path; each distinct value becomes a segment.
     output_template
         Python format string for output filenames. Available variables:
         {index}, {index1}, {key}, {start_time}, {start_time_iso}, {end_time}.
@@ -117,11 +138,21 @@ def split(
 
     # Split at RFC3339 timestamps
     pymcap-cli split input.mcap --split-at "2024-01-15T10:00:00Z"
+
+    # Split by a message-path expression (new segment on each value change)
+    pymcap-cli split input.mcap --expression '/gps/fix.status.status' \\
+        -t 'gps_{index:03d}.mcap'
+
+    # Filter-triggered split: new segment when confidence>0.8 turns on/off
+    pymcap-cli split input.mcap \\
+        --expression '/detections.objects[:]{confidence>0.8}' \\
+        -t 'hits_{index:03d}.mcap'
     ```
     """
-    if not duration and not split_at:
+    if not duration and not split_at and not expression:
         console.print(
-            "[red]Error: Specify --duration and/or --split-at to define split points.[/red]"
+            "[red]Error: Specify --duration, --split-at and/or --expression "
+            "to define split points.[/red]"
         )
         return 1
 
@@ -158,13 +189,23 @@ def split(
         processors.append(TimestampSplitProcessor(split_points))
         console.print(f"[dim]Timestamp split: {len(split_points)} point(s)[/dim]")
 
+    if expression:
+        try:
+            processors.append(ExpressionSplitProcessor(expression))
+        except MessagePathError as e:
+            console.print(f"[red]Error parsing expression '{expression}': {e}[/red]")
+            return 1
+        console.print(f"[dim]Expression split: {expression}[/dim]")
+
     # Display split mode
-    if len(processors) > 1:
-        console.print("[dim]Mode: Duration + Timestamp split[/dim]")
-    elif duration:
-        console.print("[dim]Mode: Duration split[/dim]")
-    else:
-        console.print("[dim]Mode: Timestamp split[/dim]")
+    modes = []
+    if duration:
+        modes.append("Duration")
+    if split_points:
+        modes.append("Timestamp")
+    if expression:
+        modes.append("Expression")
+    console.print(f"[dim]Mode: {' + '.join(modes)} split[/dim]")
 
     result = run_processor_multi(
         files=[file],

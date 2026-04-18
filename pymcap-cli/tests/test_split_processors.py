@@ -10,7 +10,7 @@ from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.core.processors.utils import global_time_range
-from small_mcap import Channel, LazyChunk, Message, Summary
+from small_mcap import Channel, LazyChunk, Message, MessageIndex, Summary
 from small_mcap import Statistics as SummaryStatistics
 
 
@@ -26,8 +26,14 @@ def _lazy_chunk(start: int, end: int) -> LazyChunk:
     )
 
 
-def _message(log_time: int) -> Message:
-    return Message(channel_id=1, sequence=0, log_time=log_time, publish_time=log_time, data=b"")
+def _message(log_time: int, channel_id: int = 1, data: bytes = b"") -> Message:
+    return Message(
+        channel_id=channel_id,
+        sequence=0,
+        log_time=log_time,
+        publish_time=log_time,
+        data=data,
+    )
 
 
 def _make_summary(start_ns: int, end_ns: int, msg_count: int = 100) -> Summary:
@@ -300,32 +306,102 @@ class TestTimestampSplitProcessorOutputKeys:
 # ---------------------------------------------------------------------------
 
 
+def _make_expression_proc(path: str = "/t.field") -> ExpressionSplitProcessor:
+    """Construct an ExpressionSplitProcessor with a pre-wired fake decoder.
+
+    Bypasses CDR/JSON decoding so tests can drive the processor with synthetic
+    ``Message.data`` payloads — the fake decoder treats the bytes as a UTF-8
+    string and returns an object exposing that string as ``.field``.
+    """
+    proc = ExpressionSplitProcessor(path)
+    proc.channels[1] = Channel(
+        id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
+    )
+    proc._decoders[1] = lambda data: type("M", (), {"field": bytes(data).decode()})()
+    return proc
+
+
 class TestExpressionSplitProcessor:
-    def test_always_decodes(self):
-        proc = ExpressionSplitProcessor(lambda msg, ch: 0)
-        assert proc.on_chunk(_lazy_chunk(0, 100), []) == ChunkDecision.DECODE
+    def test_invalid_path_raises(self):
+        # ros-parser raises a lark UnexpectedToken (subclass of LarkError);
+        # users see whatever the underlying parser surfaces — just assert the
+        # processor does not silently swallow bogus input.
+        with pytest.raises(Exception, match="Unexpected"):
+            ExpressionSplitProcessor("not a valid path !!!")
 
-    def test_route_chunk_always_split_required(self):
-        proc = ExpressionSplitProcessor(lambda msg, ch: 0)
-        assert proc.route_chunk(_lazy_chunk(0, 100)) is SPLIT_REQUIRED
+    def test_decodes_chunks_with_target_topic(self):
+        proc = _make_expression_proc()
+        assert (
+            proc.on_chunk(
+                _lazy_chunk(0, 100),
+                [MessageIndex(channel_id=1, timestamps=[], offsets=[])],
+            )
+            == ChunkDecision.DECODE
+        )
 
-    def test_route_message_calls_fn(self):
-        channels: dict[int, Channel] = {}
-        call_log = []
+    def test_fast_copies_chunks_without_target_topic(self):
+        proc = _make_expression_proc()
+        proc.channels[2] = Channel(
+            id=2, schema_id=1, topic="/other", message_encoding="json", metadata={}
+        )
+        assert (
+            proc.on_chunk(
+                _lazy_chunk(0, 100),
+                [MessageIndex(channel_id=2, timestamps=[], offsets=[])],
+            )
+            == ChunkDecision.CONTINUE
+        )
 
-        def fn(msg: Message, ch: dict[int, Channel]) -> int:
-            call_log.append(msg.log_time)
-            return 0 if msg.log_time < 100 else 1
+    def test_route_chunk_returns_current_segment_index(self):
+        proc = _make_expression_proc()
+        assert proc.route_chunk(_lazy_chunk(0, 100)) == 0
+        # Advance past the first target message (no transition yet)…
+        proc.route_message(_message(0, channel_id=1, data=b"alpha"))
+        assert proc.route_chunk(_lazy_chunk(0, 100)) == 0
+        # …then on value change the sticky segment advances.
+        proc.route_message(_message(1, channel_id=1, data=b"beta"))
+        assert proc.route_chunk(_lazy_chunk(0, 100)) == 1
 
-        proc = ExpressionSplitProcessor(fn, channels)
-        assert proc.route_message(_message(50)) == 0
-        assert proc.route_message(_message(150)) == 1
-        assert call_log == [50, 150]
+    def test_value_runs_share_one_segment(self):
+        proc = _make_expression_proc()
+        assert proc.route_message(_message(0, channel_id=1, data=b"alpha")) == 0
+        assert proc.route_message(_message(1, channel_id=1, data=b"alpha")) == 0
+        assert proc.route_message(_message(2, channel_id=1, data=b"alpha")) == 0
+
+    def test_value_change_triggers_new_segment(self):
+        proc = _make_expression_proc()
+        assert proc.route_message(_message(0, channel_id=1, data=b"alpha")) == 0
+        assert proc.route_message(_message(1, channel_id=1, data=b"beta")) == 1
+        assert proc.route_message(_message(2, channel_id=1, data=b"beta")) == 1
+        assert proc.route_message(_message(3, channel_id=1, data=b"alpha")) == 2
+
+    def test_sticky_between_target_messages(self):
+        proc = _make_expression_proc()
+        proc.route_message(_message(0, channel_id=1, data=b"alpha"))
+        proc.route_message(_message(1, channel_id=1, data=b"beta"))  # now in seg 1
+        proc.channels[2] = Channel(
+            id=2, schema_id=1, topic="/other", message_encoding="json", metadata={}
+        )
+        assert proc.route_message(_message(10, channel_id=2)) == 1
+
+    def test_starts_at_zero_before_any_target_message(self):
+        proc = _make_expression_proc()
+        proc.channels[2] = Channel(
+            id=2, schema_id=1, topic="/other", message_encoding="json", metadata={}
+        )
+        assert proc.route_message(_message(0, channel_id=2)) == 0
 
     def test_output_keys_returns_none(self):
-        proc = ExpressionSplitProcessor(lambda msg, ch: 0)
+        proc = _make_expression_proc()
         assert proc.output_keys() is None
 
-    def test_string_keys(self):
-        proc = ExpressionSplitProcessor(lambda msg, ch: "segment_a")
-        assert proc.route_message(_message(0)) == "segment_a"
+    def test_falls_back_to_decode_when_channels_unknown(self):
+        """Before any channel is seen, chunks must DECODE to stay correct."""
+        proc = ExpressionSplitProcessor("/t.field")
+        assert (
+            proc.on_chunk(
+                _lazy_chunk(0, 100),
+                [MessageIndex(channel_id=1, timestamps=[], offsets=[])],
+            )
+            == ChunkDecision.DECODE
+        )

@@ -218,14 +218,11 @@ class TestTimestampSplit:
 
 @pytest.mark.e2e
 class TestExpressionSplit:
-    """Test expression-based splitting."""
+    """Test expression-based splitting via ros-parser message paths."""
 
-    def test_split_by_channel(self, multi_topic_mcap: Path, tmp_path: Path):
-        """Test splitting messages by channel ID."""
+    def test_split_by_field_value(self, multi_topic_mcap: Path, tmp_path: Path):
+        """Splitting by a JSON field value produces one segment per distinct value."""
         file_size = multi_topic_mcap.stat().st_size
-
-        def split_by_channel(message, channels):
-            return message.channel_id
 
         with multi_topic_mcap.open("rb") as input_stream:
             input_files = [
@@ -240,8 +237,8 @@ class TestExpressionSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor(split_by_channel)],
-                    output_template=str(tmp_path / "channel_{key}.mcap"),
+                    processors=[ExpressionSplitProcessor("/camera/front.msg")],
+                    output_template=str(tmp_path / "msg_{key}.mcap"),
                     compression="zstd",
                     chunk_size=4 * 1024 * 1024,
                 ),
@@ -250,16 +247,13 @@ class TestExpressionSplit:
             processor = McapProcessor(options)
             stats = processor.process(output_stream=None)
 
-        # Should create one segment per channel
+        # /camera/front carries 50 distinct "msg" values (0..49).
         assert len(processor.output_manager.segments) > 1
         assert stats.writer_statistics.message_count > 0
 
-    def test_split_by_channel_preserves_messages(self, multi_topic_mcap: Path, tmp_path: Path):
-        """Test that expression split preserves all messages."""
+    def test_split_preserves_all_messages(self, multi_topic_mcap: Path, tmp_path: Path):
+        """Sticky routing keeps every message: sum across segments == total."""
         file_size = multi_topic_mcap.stat().st_size
-
-        def split_by_channel(message, channels):
-            return message.channel_id
 
         with multi_topic_mcap.open("rb") as input_stream:
             input_files = [
@@ -274,7 +268,7 @@ class TestExpressionSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor(split_by_channel)],
+                    processors=[ExpressionSplitProcessor("/camera/front.msg")],
                     output_template=str(tmp_path / "ch_{key}.mcap"),
                     compression="zstd",
                     chunk_size=4 * 1024 * 1024,
@@ -284,7 +278,6 @@ class TestExpressionSplit:
             processor = McapProcessor(options)
             stats = processor.process(output_stream=None)
 
-        # Count messages across all segments
         total = sum(
             s.writer.statistics.message_count for s in processor.output_manager.segments.values()
         )
