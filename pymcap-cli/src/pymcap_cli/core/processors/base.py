@@ -34,6 +34,10 @@ class ChunkDecision(Enum):
     CONTINUE = auto()
     SKIP = auto()
     DECODE = auto()
+    # Chunk data must be re-compressed (different target compression) but no
+    # per-message work is needed — just decompress + re-compress the chunk's
+    # data bytes. Avoids parsing/re-emitting every record.
+    RECOMPRESS = auto()
 
 
 class Processor:

@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, Flag, auto
-from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
+from typing import IO, TYPE_CHECKING, Any, BinaryIO, Protocol
 
 from small_mcap.exceptions import WriterNotStartedError
 from small_mcap.records import (
@@ -20,6 +20,7 @@ from small_mcap.records import (
     DataEnd,
     Footer,
     Header,
+    LazyChunk,
     McapRecord,
     Message,
     MessageIndex,
@@ -104,6 +105,30 @@ class _CRCWriter:
         if self.enable_crc:
             self._crc = zlib.crc32(data, self._crc)
         return self._f.write(data)
+
+    def copy_from(self, source: Any, total_bytes: int, buffer: bytearray) -> None:
+        """Stream-copy ``total_bytes`` from ``source`` into the underlying file.
+
+        Uses ``source.readinto(buffer)`` so no temporary bytes object is allocated
+        per chunk. CRC is updated in sync with writes. Raises EOFError if the
+        source runs short.
+        """
+        out_write = self._f.write
+        mv = memoryview(buffer)
+        crc = self._crc
+        enable_crc = self.enable_crc
+        remaining = total_bytes
+        while remaining > 0:
+            n = source.readinto(mv[: min(remaining, len(buffer))])
+            if not n:
+                raise EOFError("Unexpected EOF while copying chunk")
+            slab = mv[:n]
+            if enable_crc:
+                crc = zlib.crc32(slab, crc)
+            out_write(slab)
+            remaining -= n
+        if enable_crc:
+            self._crc = crc
 
     @property
     def crc(self) -> int:
@@ -237,6 +262,9 @@ class McapWriterRaw:
 
         # I/O components
         self.crc_writer = _CRCWriter(output, enable_crcs)
+
+        # Reusable 1MB buffer for add_chunk_raw streaming copy (lazily allocated)
+        self._raw_copy_buffer: bytearray | None = None
 
     def start(self, profile: str = "", library: str = "small-mcap") -> None:
         """Start writing the MCAP file."""
@@ -440,6 +468,82 @@ class McapWriterRaw:
                 compression=chunk.compression,
                 compressed_size=len(chunk.data),
                 uncompressed_size=chunk.uncompressed_size,
+            )
+        )
+
+    def add_chunk_raw(
+        self,
+        input_stream: IO[bytes],
+        lazy_chunk: LazyChunk,
+        message_indices: dict[int, MessageIndex],
+    ) -> None:
+        """Fast-copy a chunk record from an input stream, streaming bytes through.
+
+        Avoids materializing the compressed chunk payload as a Python bytes object.
+        The chunk is piped through the CRC writer in fixed-size slices using a
+        reusable buffer, so a 1.5MB chunk costs one bytearray allocation (amortized)
+        instead of one per chunk.
+
+        ``input_stream`` will be left positioned just past the chunk record.
+        ``message_indices`` are written normally after the chunk.
+        """
+        if not self._started:
+            raise WriterNotStartedError
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+
+        # Update statistics
+        if self.statistics.message_count == 0:
+            self.statistics.message_start_time = lazy_chunk.message_start_time
+        else:
+            self.statistics.message_start_time = min(
+                lazy_chunk.message_start_time, self.statistics.message_start_time
+            )
+        self.statistics.message_end_time = max(
+            lazy_chunk.message_end_time, self.statistics.message_end_time
+        )
+        for idx in message_indices.values():
+            self.statistics.channel_message_counts[idx.channel_id] += len(idx.timestamps)
+            self.statistics.message_count += len(idx.timestamps)
+        self.statistics.chunk_count += 1
+
+        # Stream-copy the entire chunk record (opcode + len + content) from input
+        saved_pos = input_stream.tell()
+        input_stream.seek(lazy_chunk.record_start)
+        chunk_start_offset = self.crc_writer.tell()
+        total_bytes = 9 + 8 + 8 + 8 + 4 + 4 + len(lazy_chunk.compression) + 8 + lazy_chunk.data_len
+
+        # Reusable buffer — one allocation amortised across every fast-copy chunk
+        if self._raw_copy_buffer is None:
+            self._raw_copy_buffer = bytearray(1 << 20)
+
+        self.crc_writer.copy_from(input_stream, total_bytes, self._raw_copy_buffer)
+
+        # Restore input stream position so the caller's iterator is not disturbed
+        input_stream.seek(saved_pos)
+
+        chunk_len = total_bytes
+
+        # Write message indexes
+        message_index_offsets: dict[int, int] = {}
+        message_index_start_offset = self.crc_writer.tell()
+        if self.index_types & IndexType.MESSAGE:
+            for idx in message_indices.values():
+                message_index_offsets[idx.channel_id] = self.crc_writer.tell()
+                idx.write_record_to(self.crc_writer)
+        message_index_length = self.crc_writer.tell() - message_index_start_offset
+
+        self.chunk_indices.append(
+            ChunkIndex(
+                message_start_time=lazy_chunk.message_start_time,
+                message_end_time=lazy_chunk.message_end_time,
+                chunk_start_offset=chunk_start_offset,
+                chunk_length=chunk_len,
+                message_index_offsets=message_index_offsets,
+                message_index_length=message_index_length,
+                compression=lazy_chunk.compression,
+                compressed_size=lazy_chunk.data_len,
+                uncompressed_size=lazy_chunk.uncompressed_size,
             )
         )
 
@@ -903,6 +1007,15 @@ class McapWriter(McapWriterRaw):
     def add_chunk(self, chunk: Chunk, message_indices: dict[int, MessageIndex]) -> None:
         self._finalize_current_chunk()
         return super().add_chunk(chunk, message_indices)
+
+    def add_chunk_raw(
+        self,
+        input_stream: IO[bytes],
+        lazy_chunk: LazyChunk,
+        message_indices: dict[int, MessageIndex],
+    ) -> None:
+        self._finalize_current_chunk()
+        return super().add_chunk_raw(input_stream, lazy_chunk, message_indices)
 
     def add_attachment(
         self,

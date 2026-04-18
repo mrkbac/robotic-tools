@@ -1,14 +1,17 @@
 """Unified MCAP processor combining recovery and filtering capabilities."""
 
 import heapq
+import os
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
 from re import Pattern
-from typing import IO, BinaryIO
+from typing import IO, BinaryIO, cast
 
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.panel import Panel
@@ -36,8 +39,10 @@ from small_mcap import (
     get_summary,
     stream_reader,
 )
+from small_mcap.reader import _predecompress_chunk
 from small_mcap.rebuild import rebuild_summary
-from small_mcap.writer import _ChunkBuilder
+from small_mcap.records import McapRecord
+from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 
 from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor
 from pymcap_cli.core.processors.attachment_filter import AttachmentFilterProcessor
@@ -61,6 +66,34 @@ console = Console()
 OUTPUT_LIBRARY = "pymcap-cli"
 OutputKey = int | str | tuple[int | str, ...]
 OutputStreamOpener = Callable[[OutputKey, int, int, int], tuple[str, BinaryIO]]
+
+
+def _decode_chunk_records(chunk: Chunk) -> list[McapRecord]:
+    """Worker-side: decompress a chunk and return its records as a list.
+
+    Runs on a ThreadPoolExecutor worker. zstd/lz4 decompression releases the
+    GIL so multiple chunks genuinely decompress in parallel.
+    """
+    return list(breakup_chunk(chunk, validate_crc=True))
+
+
+def _recompress_chunk(chunk: Chunk, target: CompressionType) -> Chunk:
+    """Worker-side: decompress + re-compress a chunk's data with a new codec.
+
+    Avoids parsing/re-emitting every record when only the chunk compression
+    changes. Message indexes remain valid because they reference offsets into
+    the uncompressed chunk payload, which is unchanged.
+    """
+    decompressed = _predecompress_chunk(chunk, validate_crc=True)
+    new_data, new_compression = _compress_chunk_data(decompressed.data, target)
+    return Chunk(
+        message_start_time=chunk.message_start_time,
+        message_end_time=chunk.message_end_time,
+        uncompressed_size=decompressed.uncompressed_size,
+        uncompressed_crc=decompressed.uncompressed_crc,
+        compression=new_compression,
+        data=new_data,
+    )
 
 
 @dataclass(slots=True)
@@ -473,10 +506,16 @@ class OutputManager:
         self._next_index += 1
 
         path, stream = self._open_output(key, index, start_time, end_time)
+        # Parallel compression: only useful when actually compressing — zstd/lz4
+        # release the GIL, so a small worker pool meaningfully speeds up writes.
+        # For uncompressed output the pool is pure overhead.
+        compression_type = self.output_options.compression_type
+        num_workers = 0 if compression_type == CompressionType.NONE else min(4, os.cpu_count() or 1)
         writer = McapWriter(
             stream,
             chunk_size=self.output_options.chunk_size,
-            compression=self.output_options.compression_type,
+            compression=compression_type,
+            num_workers=num_workers,
         )
         writer.schemas = dict(self.schemas)
         writer.channels = dict(self.channels)
@@ -837,7 +876,7 @@ class McapProcessor:
         pending: PendingChunk | None = None
 
         try:
-            records = stream_reader(input_stream, emit_chunks=True)  # lazy_chunks=True
+            records = stream_reader(input_stream, emit_chunks=True, lazy_chunks=True)
             indexes: list[MessageIndex] = []
 
             for record in records:
@@ -964,10 +1003,13 @@ class McapProcessor:
                     for stream_id, wrapped_stream in enumerate(wrapped_streams)
                 ]
 
-                # Process chunks in timestamp order using heapq.merge
-                # PendingChunk is ordered by timestamp, so no key function needed
-                for pending_chunk in heapq.merge(*chunk_generators):
-                    self._process_chunk_smart(pending_chunk)
+                # Process chunks in timestamp order using heapq.merge.
+                # For DECODE-bound chunks the (slow) zstd/lz4 decompression is
+                # offloaded to a small worker pool so that the main thread can
+                # keep writing the previous chunk's records while the next
+                # chunk decompresses in parallel. zstd/lz4 release the GIL so
+                # the speedup is genuine.
+                self._run_chunk_pipeline(heapq.merge(*chunk_generators))
 
                 # Complete progress
                 progress.update(task, completed=total_size)
@@ -1035,9 +1077,9 @@ class McapProcessor:
         if output_opts.is_rechunking:
             return ChunkDecision.DECODE
 
-        # Check if compression matches - must decode to re-compress
-        if chunk.compression != output_opts.compression_type.value:
-            return ChunkDecision.DECODE
+        # Compression mismatch alone doesn't need a full decode — if nothing
+        # else forces per-message work, RECOMPRESS (chunk-level) is enough.
+        compression_mismatch = chunk.compression != output_opts.compression_type.value
 
         # Single pass: check remapping, channel availability, and filtering
         has_include = False
@@ -1065,6 +1107,9 @@ class McapProcessor:
         # If chunk has ONLY excluded channels, skip it entirely
         if has_exclude and not has_include:
             return ChunkDecision.SKIP
+
+        if compression_mismatch:
+            return ChunkDecision.RECOMPRESS
 
         # No reason to decode - can fast-copy
         return ChunkDecision.CONTINUE
@@ -1158,60 +1203,145 @@ class McapProcessor:
             return routes[0]
         return tuple(routes)
 
-    def _process_chunk_smart(self, pending: PendingChunk) -> None:
-        """Smart chunk processing with fast copying when possible."""
+    def _run_chunk_pipeline(self, chunks: Iterator[PendingChunk]) -> None:
+        """Consume chunks from the merged iterator, decompressing DECODE chunks ahead.
+
+        Maintains a short queue of in-flight decompression futures so the main
+        thread can be writing chunk N's records while workers decompress chunks
+        N+1..N+W in parallel. For fast-copy and skip chunks the queue entry has
+        no future and is handled directly.
+        """
+        max_inflight = min(4, os.cpu_count() or 1)
+        queue: deque[
+            tuple[PendingChunk, ChunkDecision, Future[list[McapRecord]] | Future[Chunk] | None]
+        ] = deque()
+
+        with ThreadPoolExecutor(max_workers=max_inflight) as pool:
+            target_compression = self.options.output_options.compression_type
+
+            def enqueue_next() -> bool:
+                try:
+                    pending = next(chunks)
+                except StopIteration:
+                    return False
+                decision = self._should_decode_chunk(
+                    pending.chunk, pending.indexes, pending.stream_id
+                )
+                future: Future[list[McapRecord]] | Future[Chunk] | None = None
+                if decision in (ChunkDecision.DECODE, ChunkDecision.RECOMPRESS):
+                    try:
+                        # Seek+read happens on the shared input stream (main thread).
+                        # Only the CPU-bound codec work is offloaded to workers.
+                        materialized = pending.get_chunk()
+                    except (EOFError, McapError) as e:
+                        console.print(
+                            f"[yellow]Warning (stream {pending.stream_id}): "
+                            f"Failed to read chunk: {e}[/yellow]"
+                        )
+                        self.stats.errors_encountered += 1
+                        return True
+                    if decision == ChunkDecision.DECODE:
+                        future = pool.submit(_decode_chunk_records, materialized)
+                    else:
+                        future = pool.submit(_recompress_chunk, materialized, target_compression)
+                queue.append((pending, decision, future))
+                return True
+
+            # Prime the pipeline
+            while len(queue) < max_inflight and enqueue_next():
+                pass
+
+            # Drain in order, refilling as we go
+            while queue:
+                pending, decision, future = queue.popleft()
+                enqueue_next()
+                self._process_chunk_smart(pending, decision, future)
+
+    def _process_chunk_smart(
+        self,
+        pending: PendingChunk,
+        decision: ChunkDecision,
+        future: Future[list[McapRecord]] | Future[Chunk] | None,
+    ) -> None:
+        """Dispatch one pre-classified chunk."""
         assert self.output_manager is not None
-        decision = self._should_decode_chunk(pending.chunk, pending.indexes, pending.stream_id)
 
         if decision == ChunkDecision.SKIP:
             return
 
-        # Now we need the full chunk data
-        try:
-            chunk = pending.get_chunk()
-        except (EOFError, McapError) as e:
-            console.print(
-                f"[yellow]Warning (stream {pending.stream_id}): Failed to read chunk: {e}[/yellow]"
-            )
-            self.stats.errors_encountered += 1
+        if decision == ChunkDecision.DECODE:
+            assert future is not None
+            try:
+                records = cast("Future[list[McapRecord]]", future).result()
+            except McapError as e:
+                console.print(
+                    f"[yellow]Warning (stream {pending.stream_id}): "
+                    f"Failed to decode chunk: {e}[/yellow]"
+                )
+                self.stats.errors_encountered += 1
+                return
+            self._process_decoded_records(records, pending.stream_id)
             return
 
-        if decision == ChunkDecision.DECODE:
-            self._process_chunk_fallback(chunk, pending.stream_id)
-        else:
-            # Fast-copy path (CONTINUE) -> nothing about the chunk must be changed
-            route_key = self._get_chunk_route(chunk)
+        if decision == ChunkDecision.RECOMPRESS:
+            assert future is not None
+            try:
+                new_chunk = cast("Future[Chunk]", future).result()
+            except McapError as e:
+                console.print(
+                    f"[yellow]Warning (stream {pending.stream_id}): "
+                    f"Failed to recompress chunk: {e}[/yellow]"
+                )
+                self.stats.errors_encountered += 1
+                return
+            route_key = self._get_chunk_route(pending.chunk)
             if route_key is None:
                 route_key = 0
             target_writer = self.output_manager.get_writer(route_key)
             for idx in pending.indexes:
                 if self._is_channel_included(pending.stream_id, idx.channel_id):
                     self.output_manager.ensure_channel_written(idx.channel_id, route_key)
-
-            # Fast-copy the chunk with its indexes
-            target_writer.add_chunk(chunk, {idx.channel_id: idx for idx in pending.indexes})
+            indices_by_channel = {idx.channel_id: idx for idx in pending.indexes}
+            target_writer.add_chunk(new_chunk, indices_by_channel)
             self.stats.chunks_copied += 1
+            return
 
-    def _process_chunk_fallback(self, chunk: Chunk, stream_id: int) -> None:
-        """Fallback to decode chunk into individual records."""
-        try:
-            chunk_records = breakup_chunk(chunk, validate_crc=True)
-            self.stats.chunks_decoded += 1
+        # Fast-copy path (CONTINUE) -> nothing about the chunk must be changed.
+        # We pipe raw bytes from input to output (no Chunk materialization).
+        route_key = self._get_chunk_route(pending.chunk)
+        if route_key is None:
+            route_key = 0
+        target_writer = self.output_manager.get_writer(route_key)
+        for idx in pending.indexes:
+            if self._is_channel_included(pending.stream_id, idx.channel_id):
+                self.output_manager.ensure_channel_written(idx.channel_id, route_key)
 
-            for chunk_record in chunk_records:
-                if isinstance(chunk_record, Schema):
-                    self._handle_schema_record(chunk_record, stream_id)
-                elif isinstance(chunk_record, Channel):
-                    self._handle_channel_record(chunk_record, stream_id)
-                elif isinstance(chunk_record, Message):
-                    message_to_write = self.remapper.remap_message(stream_id, chunk_record)
-                    self.process_message(message_to_write, stream_id)
+        indices_by_channel = {idx.channel_id: idx for idx in pending.indexes}
+        if isinstance(pending.chunk, LazyChunk):
+            try:
+                target_writer.add_chunk_raw(pending.stream, pending.chunk, indices_by_channel)
+            except (EOFError, McapError) as e:
+                console.print(
+                    f"[yellow]Warning (stream {pending.stream_id}): Failed to copy chunk: "
+                    f"{e}[/yellow]"
+                )
+                self.stats.errors_encountered += 1
+                return
+        else:
+            target_writer.add_chunk(pending.chunk, indices_by_channel)
+        self.stats.chunks_copied += 1
 
-        except McapError as e:
-            console.print(
-                f"[yellow]Warning (stream {stream_id}): Failed to decode chunk: {e}[/yellow]"
-            )
-            self.stats.errors_encountered += 1
+    def _process_decoded_records(self, records: list[McapRecord], stream_id: int) -> None:
+        """Process records that were already decoded from a chunk (by a worker)."""
+        self.stats.chunks_decoded += 1
+        for chunk_record in records:
+            if isinstance(chunk_record, Message):
+                message_to_write = self.remapper.remap_message(stream_id, chunk_record)
+                self.process_message(message_to_write, stream_id)
+            elif isinstance(chunk_record, Schema):
+                self._handle_schema_record(chunk_record, stream_id)
+            elif isinstance(chunk_record, Channel):
+                self._handle_channel_record(chunk_record, stream_id)
 
     def _resolve_output_header(self) -> Header:
         """Choose output header metadata from readable inputs.

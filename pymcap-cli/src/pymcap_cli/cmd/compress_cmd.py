@@ -65,7 +65,9 @@ def compress(
         result = run_processor(
             files=[file],
             output=output,
-            input_options=InputOptions.from_args(always_decode_chunk=True),
+            # Do not force always_decode_chunk — the processor now has a
+            # chunk-level RECOMPRESS path that avoids per-message parsing.
+            input_options=InputOptions.from_args(),
             output_options=OutputOptions(
                 compression=compression.value,
                 chunk_size=chunk_size,
