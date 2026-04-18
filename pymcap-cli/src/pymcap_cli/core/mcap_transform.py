@@ -19,8 +19,7 @@ from pymcap_cli.display.osc_utils import OSCProgressColumn
 
 if TYPE_CHECKING:
     from rich.console import Console
-    from small_mcap import McapWriter
-    from small_mcap.reader import DecodedMessage
+    from small_mcap import DecodedMessage, McapWriter
 
 
 def create_progress(console: Console, *, title: str) -> Progress:

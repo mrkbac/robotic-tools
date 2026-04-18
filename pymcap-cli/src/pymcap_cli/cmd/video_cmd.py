@@ -50,7 +50,7 @@ from pymcap_cli.utils import confirm_output_overwrite
 if TYPE_CHECKING:
     from av.container import OutputContainer
     from av.video.stream import VideoStream
-    from small_mcap.reader import DecodedMessage
+    from small_mcap import DecodedMessage
 
 
 console = Console()

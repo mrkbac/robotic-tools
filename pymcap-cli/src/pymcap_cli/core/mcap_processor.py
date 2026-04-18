@@ -26,6 +26,7 @@ from small_mcap import (
     Header,
     LazyChunk,
     McapError,
+    McapRecord,
     McapWriter,
     Message,
     MessageIndex,
@@ -37,11 +38,12 @@ from small_mcap import (
     breakup_chunk,
     get_header,
     get_summary,
+    rebuild_summary,
     stream_reader,
 )
+
+# Private helpers — small-mcap does not re-export these at the top level.
 from small_mcap.reader import _predecompress_chunk
-from small_mcap.rebuild import rebuild_summary
-from small_mcap.records import McapRecord
 from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 
 from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor

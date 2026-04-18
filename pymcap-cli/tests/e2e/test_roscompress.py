@@ -21,8 +21,7 @@ from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
 from pymcap_cli.encoding.encoder_common import EncoderMode
-from small_mcap import McapWriter, get_summary
-from small_mcap.reader import read_message
+from small_mcap import McapWriter, get_summary, read_message
 
 from tests.fixtures.image_mcap_generator import (
     SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA,

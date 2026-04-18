@@ -11,8 +11,7 @@ from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
-from small_mcap import read_message_decoded
-from small_mcap.reader import include_topics
+from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 

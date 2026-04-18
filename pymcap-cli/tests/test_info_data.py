@@ -15,12 +15,12 @@ from pymcap_cli.types.info_data import (
     _calculate_stats,
     info_to_dict,
 )
-from small_mcap.rebuild import RebuildInfo
-from small_mcap.records import (
+from small_mcap import (
     Channel,
     ChunkIndex,
     Header,
     MessageIndex,
+    RebuildInfo,
     Schema,
     Statistics,
     Summary,

@@ -18,8 +18,8 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from small_mcap.writer import CompressionType, McapWriter
-from small_mcap.writer import CompressionType as WriterCompressionType
+from small_mcap import CompressionType, McapWriter
+from small_mcap import CompressionType as WriterCompressionType
 
 from pymcap_cli.core.msg_resolver import ROS2Distro, get_message_definition
 from pymcap_cli.display.osc_utils import OSCProgressColumn

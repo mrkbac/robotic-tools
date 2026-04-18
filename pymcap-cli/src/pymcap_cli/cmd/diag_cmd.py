@@ -14,7 +14,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
-from small_mcap.reader import include_topics, read_message_decoded
+from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.sparkline import sparkline

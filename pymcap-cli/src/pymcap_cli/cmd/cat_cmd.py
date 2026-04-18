@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
-    from small_mcap.reader import DecodedMessage
+    from small_mcap import DecodedMessage
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -21,9 +21,7 @@ from rich.panel import Panel
 from rich.text import Text
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import MessagePathError, ValidationError, parse_message_path
-from small_mcap import JSONDecoderFactory
-from small_mcap.reader import read_message_decoded
-from small_mcap.records import Channel
+from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.utils import MAX_INT64, ProgressTrackingIO, file_progress, parse_timestamp_args

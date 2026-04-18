@@ -8,9 +8,9 @@ from typing import Any
 
 from rich.console import Console
 from rich.prompt import Confirm
-from small_mcap import MAGIC, get_summary
-from small_mcap.exceptions import McapError
-from small_mcap.records import Footer, Opcode, Summary, SummaryOffset
+from small_mcap import MAGIC, Footer, McapError, Opcode, Summary, SummaryOffset, get_summary
+
+# Private helpers — not re-exported from small_mcap top-level.
 from small_mcap.writer import (
     _calculate_summary_crc,
     _calculate_summary_offset_start,

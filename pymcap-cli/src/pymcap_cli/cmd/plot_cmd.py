@@ -15,9 +15,7 @@ from ros_parser.message_path import (
     ValidationError,
     parse_message_path,
 )
-from small_mcap import JSONDecoderFactory
-from small_mcap.reader import read_message_decoded
-from small_mcap.records import Channel
+from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.utils import MAX_INT64, ProgressTrackingIO, file_progress, parse_timestamp_args

@@ -13,7 +13,7 @@ from pymcap_cli.encoding.encoder_common import EncoderMode
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from small_mcap.records import Channel
+    from small_mcap import Channel
 
     from pymcap_cli.encoding.video_protocols import DecompressedFrame
 

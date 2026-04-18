@@ -11,8 +11,7 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     ProcessingOptions,
 )
-from small_mcap import CompressionType, McapWriter, get_header, get_summary
-from small_mcap.rebuild import rebuild_summary
+from small_mcap import CompressionType, McapWriter, get_header, get_summary, rebuild_summary
 
 
 @pytest.mark.e2e

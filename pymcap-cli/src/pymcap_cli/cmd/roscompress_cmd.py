@@ -10,8 +10,7 @@ from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
-from small_mcap import McapWriter
-from small_mcap.reader import read_message_decoded
+from small_mcap import McapWriter, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_transform import (
@@ -45,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from rich.progress import Progress
-    from small_mcap.reader import DecodedMessage
+    from small_mcap import DecodedMessage
 
 
 console = Console()

@@ -2,7 +2,7 @@ from typing import Annotated
 
 from cyclopts import Group, Parameter
 from rich.console import Console
-from small_mcap.exceptions import WriterNotStartedError
+from small_mcap import WriterNotStartedError
 
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.core.mcap_processor import (

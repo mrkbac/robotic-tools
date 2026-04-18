@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.cmd.bag2mcap_cmd import Bag2McapOptions, convert_bag_to_mcap
 from pymcap_cli.rosbag_reader import read_bag_messages
-from small_mcap.reader import read_message
+from small_mcap import read_message
 
 if TYPE_CHECKING:
-    from small_mcap.records import Channel, Message, Schema
+    from small_mcap import Channel, Message, Schema
 
 from ..fixtures.bag_generator import (
     generate_multi_topic_bag,
@@ -193,7 +193,7 @@ class TestBag2McapMultiTopic:
 class TestBag2McapCompression:
     @pytest.mark.parametrize("compression", ["none", "lz4", "zstd"])
     def test_compression_options(self, simple_bag: Path, tmp_path: Path, compression: str) -> None:
-        from small_mcap.writer import CompressionType  # noqa: PLC0415
+        from small_mcap import CompressionType  # noqa: PLC0415
 
         compression_map = {
             "none": CompressionType.NONE,

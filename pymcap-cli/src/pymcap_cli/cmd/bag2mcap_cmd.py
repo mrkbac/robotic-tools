@@ -17,8 +17,8 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from small_mcap.writer import CompressionType, McapWriter
-from small_mcap.writer import CompressionType as WriterCompressionType
+from small_mcap import CompressionType, McapWriter
+from small_mcap import CompressionType as WriterCompressionType
 
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.types.types_manual import (

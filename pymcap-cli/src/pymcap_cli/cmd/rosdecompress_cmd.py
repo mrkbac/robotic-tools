@@ -6,14 +6,15 @@ from collections import deque
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 if TYPE_CHECKING:
-    from small_mcap.reader import DecodedMessage
+    from small_mcap import DecodedMessage
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
-from small_mcap import McapWriter
+from small_mcap import McapWriter, read_message_decoded
+
+# NOPDecoderFactory is not re-exported from the small_mcap top level.
 from small_mcap.nop_decoder import NOPDecoderFactory
-from small_mcap.reader import read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_transform import (

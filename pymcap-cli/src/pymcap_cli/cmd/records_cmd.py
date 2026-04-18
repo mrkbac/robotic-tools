@@ -3,7 +3,7 @@
 import sys
 
 from rich.console import Console
-from small_mcap.reader import stream_reader
+from small_mcap import stream_reader
 
 from pymcap_cli.core.input_handler import open_input
 
