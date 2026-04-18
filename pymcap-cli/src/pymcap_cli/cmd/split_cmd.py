@@ -8,10 +8,8 @@ from rich.console import Console
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.core.mcap_processor import OutputOptions
-from pymcap_cli.core.processors import (
-    DurationSplitProcessor,
-    TimestampSplitProcessor,
-)
+from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
+from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,

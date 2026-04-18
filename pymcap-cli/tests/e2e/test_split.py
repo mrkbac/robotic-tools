@@ -12,11 +12,9 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     ProcessingOptions,
 )
-from pymcap_cli.core.processors import (
-    DurationSplitProcessor,
-    ExpressionSplitProcessor,
-    TimestampSplitProcessor,
-)
+from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
+from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from small_mcap import stream_reader
 
 

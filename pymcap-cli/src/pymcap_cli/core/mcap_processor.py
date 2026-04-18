@@ -39,17 +39,12 @@ from small_mcap import (
 from small_mcap.rebuild import rebuild_summary
 from small_mcap.writer import _ChunkBuilder
 
-from pymcap_cli.core.processors import (
-    SPLIT_REQUIRED,
-    Action,
-    AlwaysDecodeProcessor,
-    AttachmentFilterProcessor,
-    ChunkDecision,
-    MetadataFilterProcessor,
-    Processor,
-    TimeFilterProcessor,
-    TopicFilterProcessor,
-)
+from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor
+from pymcap_cli.core.processors.attachment_filter import AttachmentFilterProcessor
+from pymcap_cli.core.processors.base import SPLIT_REQUIRED, Action, ChunkDecision, Processor
+from pymcap_cli.core.processors.metadata_filter import MetadataFilterProcessor
+from pymcap_cli.core.processors.time_filter import TimeFilterProcessor
+from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,

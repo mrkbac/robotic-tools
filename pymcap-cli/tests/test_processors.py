@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from pymcap_cli.core.processors import (
-    Action,
-    AlwaysDecodeProcessor,
-    AttachmentFilterProcessor,
-    ChunkDecision,
-    MetadataFilterProcessor,
-    TimeFilterProcessor,
-    TopicFilterProcessor,
-)
+from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor
+from pymcap_cli.core.processors.attachment_filter import AttachmentFilterProcessor
+from pymcap_cli.core.processors.base import Action, ChunkDecision
+from pymcap_cli.core.processors.metadata_filter import MetadataFilterProcessor
+from pymcap_cli.core.processors.time_filter import TimeFilterProcessor
+from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
 from small_mcap import Attachment, Channel, Message, Metadata
 from small_mcap.records import LazyChunk
 

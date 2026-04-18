@@ -5,14 +5,11 @@
 from __future__ import annotations
 
 import pytest
-from pymcap_cli.core.processors import (
-    SPLIT_REQUIRED,
-    ChunkDecision,
-    DurationSplitProcessor,
-    ExpressionSplitProcessor,
-    TimestampSplitProcessor,
-    global_time_range,
-)
+from pymcap_cli.core.processors.base import SPLIT_REQUIRED, ChunkDecision
+from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
+from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
+from pymcap_cli.core.processors.utils import global_time_range
 from small_mcap import Channel, Message, Summary
 from small_mcap import Statistics as SummaryStatistics
 from small_mcap.records import LazyChunk
