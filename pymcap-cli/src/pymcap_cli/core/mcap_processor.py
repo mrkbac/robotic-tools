@@ -1208,12 +1208,16 @@ class McapProcessor:
     def _run_chunk_pipeline(self, chunks: Iterator[PendingChunk]) -> None:
         """Consume chunks from the merged iterator, decompressing DECODE chunks ahead.
 
-        Maintains a short queue of in-flight decompression futures so the main
-        thread can be writing chunk N's records while workers decompress chunks
-        N+1..N+W in parallel. For fast-copy and skip chunks the queue entry has
-        no future and is handled directly.
+        Maintains a short queue of in-flight decompression/recompression futures
+        so the main thread can be writing chunk N's records while workers
+        process N+1..N+W in parallel. For fast-copy and skip chunks the queue
+        entry has no future and is handled directly.
+
+        The inflight limit is kept modest (≤8): zstd/lz4 work is CPU-bound and
+        more than ~8 workers on a typical MCAP saturates memory bandwidth
+        rather than helping throughput.
         """
-        max_inflight = min(4, os.cpu_count() or 1)
+        max_inflight = min(8, os.cpu_count() or 1)
         queue: deque[
             tuple[PendingChunk, ChunkDecision, Future[list[McapRecord]] | Future[Chunk] | None]
         ] = deque()
