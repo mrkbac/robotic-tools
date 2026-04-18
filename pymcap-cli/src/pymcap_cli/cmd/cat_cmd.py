@@ -33,11 +33,16 @@ FILTERING_GROUP = Group("Filtering")
 OUTPUT_GROUP = Group("Output")
 
 _TTY_BYTES_TRUNCATE = 32
+# Threshold (bytes) below which `smart` mode inlines the full payload as an int
+# list. Anything larger becomes a `<N bytes>` placeholder so large binary
+# payloads (Image, PointCloud2) don't drown out the rest of the message.
+_SMART_BYTES_INLINE_LIMIT = 64
 
 
 class BytesMode(str, Enum):
     """How to serialize bytes fields in JSON output."""
 
+    SMART = "smart"
     INTS = "ints"
     BASE64 = "base64"
     SKIP = "skip"
@@ -46,7 +51,7 @@ class BytesMode(str, Enum):
 def message_to_dict(
     obj: Any,
     *,
-    bytes_mode: BytesMode = BytesMode.INTS,
+    bytes_mode: BytesMode = BytesMode.SMART,
     truncate_bytes: int = 0,
 ) -> Any:
     """Recursively convert a message object to a JSON-serializable dict.
@@ -72,6 +77,12 @@ def message_to_dict(
             return f"<{total} bytes>"
         if bytes_mode == BytesMode.BASE64:
             return base64.b64encode(bytes(obj)).decode("ascii")
+        if bytes_mode == BytesMode.SMART:
+            # Small payloads inline as ints for easy inspection; large ones
+            # collapse to a placeholder so output stays grep/jq-friendly.
+            if total <= _SMART_BYTES_INLINE_LIMIT:
+                return list(obj)
+            return f"<{total} bytes>"
         if truncate_bytes and total > truncate_bytes:
             return [*list(obj[:truncate_bytes]), f"... ({total} bytes total)"]
         return list(obj)
@@ -150,8 +161,16 @@ def cat(
         Parameter(
             name=["--bytes"],
             group=OUTPUT_GROUP,
+            help=(
+                "How to render `bytes` fields in JSON output. `smart` (default) "
+                f"inlines payloads ≤{_SMART_BYTES_INLINE_LIMIT} bytes as int lists "
+                "and collapses larger ones to `<N bytes>` so `cat` stays readable "
+                "on messages with Image/PointCloud2 payloads. Use `ints` for the "
+                "full int list, `base64` for a compact serialisable string, or "
+                "`skip` to always drop the payload."
+            ),
         ),
-    ] = BytesMode.INTS,
+    ] = BytesMode.SMART,
 ) -> int:
     """Stream MCAP messages to stdout.
 

@@ -132,9 +132,11 @@ class TestCat:
         assert "header" in data["message"]
         assert "format" in data["message"]
         assert "data" in data["message"]
-        # Data should be a list of integers (converted from bytes)
-        assert isinstance(data["message"]["data"], list)
-        assert all(isinstance(b, int) for b in data["message"]["data"][:10])
+        # Default bytes_mode is `smart`: large binary payloads collapse to a
+        # `<N bytes>` placeholder. Compressed image `data` is always large.
+        assert isinstance(data["message"]["data"], str)
+        assert data["message"]["data"].startswith("<")
+        assert data["message"]["data"].endswith("bytes>")
 
     def test_cat_no_limit(self, simple_mcap: Path, capsys):
         """Test cat without limit outputs all messages."""
