@@ -91,6 +91,27 @@ except ImportError:
 
 
 try:
+    from pymcap_cli.cmd.export_parquet_cmd import export_parquet
+except ImportError:
+
+    def export_parquet() -> int:
+        """Export command is unavailable because 'pyarrow' is not installed.
+
+        To enable Parquet export, install pymcap-cli with the 'parquet' extra:
+
+            uv add 'pymcap-cli[parquet]'
+        """
+        print(  # noqa: T201
+            "Error:\n"
+            "Export to Parquet is unavailable because 'pyarrow' is not installed.\n"
+            "Install with:\n\n"
+            "    uv add 'pymcap-cli[parquet]'\n",
+            file=sys.stderr,
+        )
+        return 1
+
+
+try:
     from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
 except ImportError:
 
@@ -145,6 +166,7 @@ app.command(name="split", group=transform_group)(split_cmd.split)
 app.command(name="recover", group=transform_group)(recover_cmd.recover)
 app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
 app.command(name="plot", group=inspect_group)(plot)
+app.command(name="export-parquet", group=transform_group)(export_parquet)
 app.command(name="roscompress", group=transform_group)(roscompress)
 app.command(name="rosdecompress", group=transform_group)(rosdecompress)
 app.command(name="video", group=transform_group)(video)

@@ -4,11 +4,18 @@ version = "0.7.0"
 description = "High-performance Python CLI for MCAP file processing with advanced recovery, filtering, and optimization capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "GPL-3.0"}
-authors = [
-    {name = "Marko Bausch"}
+license = { text = "GPL-3.0" }
+authors = [{ name = "Marko Bausch" }]
+keywords = [
+    "mcap",
+    "cli",
+    "robotics",
+    "ros",
+    "ros2",
+    "recovery",
+    "filtering",
+    "compression",
 ]
-keywords = ["mcap", "cli", "robotics", "ros", "ros2", "recovery", "filtering", "compression"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -44,13 +51,10 @@ Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [project.optional-dependencies]
 video = ["av>=12.0.0", "numpy>=1.24.0"]
-pointcloud = ["pureini"]
-plot = [
-    "plotly>=6.0.0",
-]
-all = [
-    "pymcap-cli[video,pointcloud,plot]",
-]
+pointcloud = ["pureini", "numpy>=1.24.0"]
+plot = ["plotly>=6.0.0"]
+parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "pointcloud2"]
+all = ["pymcap-cli[video,pointcloud,plot,parquet]"]
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]
@@ -65,3 +69,4 @@ small-mcap = { workspace = true }
 mcap-ros2-support-fast = { workspace = true }
 ros-parser = { workspace = true }
 pureini = { workspace = true }
+pointcloud2 = { workspace = true }

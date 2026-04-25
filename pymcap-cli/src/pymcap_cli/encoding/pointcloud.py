@@ -1,8 +1,16 @@
-"""Pureini-based point cloud compression and decompression utilities."""
+"""Pureini-based point cloud compression and decompression utilities.
+
+Also exposes :class:`Pointcloud2DecoderFactory`, a small_mcap decoder
+factory that decodes ``sensor_msgs/PointCloud2`` payloads directly into a
+structured numpy array via :func:`pointcloud2.read_points`.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol
+
+from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -210,3 +218,72 @@ class PointCloudDecompressFactory:
             return self._decompress(cdr_decoder(data))
 
         return _decode
+
+
+class CompressedPointcloud2DecoderFactory:
+    """Decode ``point_cloud_interfaces/CompressedPointCloud2`` → structured numpy array.
+
+    Chains :class:`PointCloudDecompressFactory` (pureini decompression) with
+    :func:`pointcloud2.read_points`, so the output has the same shape as the
+    regular PointCloud2 path — a numpy structured array ready to be packed
+    into an Arrow ``LIST<STRUCT<...>>``.
+
+    Requires ``pureini``; construction raises ``ImportError`` if missing.
+    """
+
+    def __init__(self) -> None:
+        self._decompress_factory = PointCloudDecompressFactory()
+
+    def decoder_for(
+        self,
+        message_encoding: str,
+        schema: Any | None,
+    ) -> Callable[[bytes | memoryview], Any] | None:
+        decoder = self._decompress_factory.decoder_for(message_encoding, schema)
+        if decoder is None:
+            return None
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from pointcloud2 import read_points  # noqa: PLC0415
+
+        def _decode(data: bytes | memoryview) -> Any:
+            cloud_dict = decoder(data)
+            # read_points walks the message by attribute access.
+            ns = SimpleNamespace(**{k: v for k, v in cloud_dict.items() if k != "header"})
+            return read_points(ns, skip_nans=True)
+
+        return _decode
+
+
+_SCHEMA_ENCODING_ROS2 = "ros2msg"
+_MESSAGE_ENCODING_CDR = "cdr"
+
+
+class _SchemaProtocol(Protocol):
+    id: int
+    name: str
+    encoding: str
+    data: bytes
+
+
+class Pointcloud2DecoderFactory:
+    def __init__(self) -> None:
+        self._ros2_decoder_factory = Ros2DecoderFactory()
+
+    def decoder_for(
+        self, message_encoding: str, schema: _SchemaProtocol | None
+    ) -> Callable[[bytes | memoryview], Any] | None:
+        if (
+            message_encoding != _MESSAGE_ENCODING_CDR
+            or schema is None
+            or schema.encoding != _SCHEMA_ENCODING_ROS2
+            or schema.name not in {"sensor_msgs/PointCloud2", "sensor_msgs/msg/PointCloud2"}
+        ):
+            return None
+
+        if decoder := self._ros2_decoder_factory.decoder_for(message_encoding, schema):
+            from pointcloud2 import read_points  # noqa: PLC0415
+
+            return lambda data: read_points(decoder(data), skip_nans=True)
+        return None
