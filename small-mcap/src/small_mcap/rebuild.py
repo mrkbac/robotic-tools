@@ -10,6 +10,8 @@ from small_mcap.reader import (
     _RECORD_HEADER_SIZE,
     _get_chunk_data_stream,
     breakup_chunk,
+    get_header,
+    get_summary,
     stream_reader,
 )
 from small_mcap.records import (
@@ -116,6 +118,49 @@ class RebuildInfo:
     estimated_channel_sizes: bool = False
     chunk_information: dict[int, list[MessageIndex]] | None = None
     next_offset: int = 0
+
+
+def read_info_approximate(stream: IO[bytes]) -> RebuildInfo | None:
+    """Read MCAP summary plus per-chunk MessageIndex records by random-access seek.
+
+    Unlike :func:`rebuild_summary`, this never scans the data section — only the
+    summary block and the small MessageIndex records pointed to by each
+    ``ChunkIndex.message_index_offsets``. On a multi-GB file this is orders of
+    magnitude faster, at the cost of approximate per-channel sizes (computed
+    from MessageIndex offset deltas, identical to
+    ``rebuild_summary(exact_sizes=False)``).
+
+    Returns ``None`` if the file has no summary section.
+    """
+    if not stream.seekable():
+        return None
+    header = get_header(stream)
+    summary = get_summary(stream)
+    if summary is None:
+        return None
+
+    chunk_information: dict[int, list[MessageIndex]] = {}
+    channel_sizes: dict[int, int] = defaultdict(int)
+
+    for chunk_index in summary.chunk_indexes:
+        indexes: list[MessageIndex] = []
+        for offset in chunk_index.message_index_offsets.values():
+            stream.seek(offset)
+            indexes.append(MessageIndex.read_record(stream))
+        chunk_information[chunk_index.chunk_start_offset] = indexes
+
+        for channel_id, size in _estimate_size_from_indexes(
+            indexes, chunk_index.uncompressed_size
+        ).items():
+            channel_sizes[channel_id] += size
+
+    return RebuildInfo(
+        header=header,
+        summary=summary,
+        channel_sizes=dict(channel_sizes),
+        estimated_channel_sizes=True,
+        chunk_information=chunk_information,
+    )
 
 
 def _breakup_chunk_with_offsets(

@@ -36,7 +36,7 @@ from small_mcap.reader import (
     read_metadata,
     stream_reader,
 )
-from small_mcap.rebuild import RebuildInfo, rebuild_summary
+from small_mcap.rebuild import RebuildInfo, read_info_approximate, rebuild_summary
 from small_mcap.records import (
     MAGIC,
     MAGIC_SIZE,
@@ -132,6 +132,7 @@ __all__ = [
     "get_summary",
     "include_topics",
     "read_attachment",
+    "read_info_approximate",
     "read_message",
     "read_message_decoded",
     "read_metadata",
