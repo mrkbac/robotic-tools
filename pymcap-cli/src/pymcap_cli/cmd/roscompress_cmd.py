@@ -21,12 +21,14 @@ from pymcap_cli.core.mcap_transform import (
     get_total_message_count,
     print_size_comparison,
 )
+from pymcap_cli.encoding.decompress import COMPRESSED_IMAGE
 from pymcap_cli.encoding.encoder_common import (
     COMPRESSED_SCHEMAS,
     DEFAULT_FPS,
     DEFAULT_GOP_SIZE,
     FOXGLOVE_COMPRESSED_VIDEO,
     IMAGE_SCHEMAS,
+    RAW_SCHEMAS,
     EncoderConfig,
     EncoderMode,
     VideoEncoderError,
@@ -331,13 +333,20 @@ def roscompress(
             group=ENCODING_GROUP,
         ),
     ] = None,
-    video: Annotated[
-        bool,
+    image_format: Annotated[
+        Literal["video", "jpeg", "none"],
         Parameter(
-            name=["--video/--no-video"],
+            name=["--image-format"],
             group=ENCODING_GROUP,
         ),
-    ] = True,
+    ] = "video",
+    jpeg_quality: Annotated[
+        int,
+        Parameter(
+            name=["--jpeg-quality"],
+            group=ENCODING_GROUP,
+        ),
+    ] = 90,
     backend: Annotated[
         EncoderMode,
         Parameter(
@@ -355,7 +364,7 @@ def roscompress(
 ) -> int:
     """Compress ROS MCAP by converting image and point cloud topics.
 
-    Converts CompressedImage/Image topics to CompressedVideo and
+    Converts image topics to CompressedVideo or JPEG CompressedImage and
     PointCloud2 topics to CompressedPointCloud2 using pureini.
 
     Parameters
@@ -381,12 +390,30 @@ def roscompress(
         Point cloud encoding mode (lossy, lossless, none). Default: lossy.
     pc_compression
         Point cloud second-stage compression (zstd, lz4, none). Default: zstd.
-    video
-        Enable video compression of image topics. Default: True.
+    image_format
+        How to encode image topics:
+        ``video`` (default) — convert raw and compressed images to CompressedVideo
+        (H.264/H.265). ``jpeg`` — encode raw Image topics as JPEG CompressedImage;
+        already-compressed images are copied unchanged. ``none`` — copy all image
+        topics unchanged.
+    jpeg_quality
+        JPEG quality (1-100, higher = better) when ``image_format=jpeg``. Default: 90.
     pointcloud
         Enable point cloud compression. Default: True.
     """
     confirm_output_overwrite(output, force)
+
+    if not 1 <= jpeg_quality <= 100:
+        console.print(f"[red]Error:[/red] --jpeg-quality must be in [1, 100], got {jpeg_quality}")
+        return 1
+
+    do_video = image_format == "video"
+    do_jpeg = image_format == "jpeg"
+
+    # JPEG mode is implemented via PyAV's mjpeg encoder; force PyAV backend.
+    if do_jpeg and backend == EncoderMode.FFMPEG_CLI:
+        console.print("[red]Error:[/red] --image-format jpeg requires --backend pyav (or auto).")
+        return 1
 
     # Resolve backend.
     use_cli = backend == EncoderMode.FFMPEG_CLI
@@ -395,7 +422,7 @@ def roscompress(
         compress_backend = FfmpegCliBackend()
     else:
         pyav_backend = PyAVBackend()
-        if backend == EncoderMode.AUTO:
+        if backend == EncoderMode.AUTO and do_video:
             try:
                 pyav_backend.resolve_encoder(codec)
             except Exception:  # noqa: BLE001
@@ -408,7 +435,7 @@ def roscompress(
 
     # Detect encoder.
     encoder_name = ""
-    if video:
+    if do_video:
         if encoder:
             if not compress_backend.test_encoder(encoder):
                 console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
@@ -431,14 +458,17 @@ def roscompress(
     backend_label = "ffmpeg-cli" if use_cli else "pyav"
     console.print(f"[cyan]Input:[/cyan] {file}")
     console.print(f"[cyan]Output:[/cyan] {output}")
-    if video:
-        console.print(f"[cyan]Encoder:[/cyan] {encoder_name}")
-        console.print(f"[cyan]Backend:[/cyan] {backend_label}")
+    if do_video:
+        console.print(f"[cyan]Image mode:[/cyan] video ({encoder_name}, {backend_label})")
         console.print(f"[cyan]Quality (CRF):[/cyan] {quality}")
         if scale is not None:
             console.print(f"[cyan]Scale (max dim):[/cyan] {scale}px")
+    elif do_jpeg:
+        console.print(f"[cyan]Image mode:[/cyan] jpeg (raw → CompressedImage, q={jpeg_quality})")
+        if scale is not None:
+            console.print(f"[cyan]Scale (max dim):[/cyan] {scale}px")
     else:
-        console.print("[cyan]Video compression:[/cyan] disabled")
+        console.print("[cyan]Image mode:[/cyan] none (copy unchanged)")
     if pointcloud:
         console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
         console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
@@ -484,19 +514,22 @@ def roscompress(
             input_stream, decoder_factories=[decoder_factory], num_workers=4
         )
 
-        # Wrap with prefetching for PyAV backend.
+        # Video mode benefits from prefetching compressed image decodes. JPEG mode only
+        # transcodes raw Image topics and copies CompressedImage topics unchanged.
         decode_pool: ThreadPoolExecutor | None = None
         msg_iter: Iterator[tuple[DecodedMessage, Future[Any] | None]]
-        if not use_cli and isinstance(compress_backend, PyAVBackend):
+        if do_video and isinstance(compress_backend, PyAVBackend):
             decode_pool = ThreadPoolExecutor(max_workers=4)
             msg_iter = _prefetch_image_decodes(messages, compress_backend, decode_pool, prefetch=16)
         else:
             msg_iter = _iter_no_futures(messages)
 
-        _run_compress_loop(
+        compress_ok = _run_compress_loop(
             msg_iter,
             compress_backend,
-            video,
+            do_video,
+            do_jpeg,
+            jpeg_quality,
             pointcloud,
             encoders,
             encoder_name,
@@ -518,25 +551,32 @@ def roscompress(
         if decode_pool is not None:
             decode_pool.shutdown(wait=True)
 
-        # Flush remaining frames from video encoders.
-        for topic_name, video_enc in encoders.items():
-            if topic_name not in channel_ids:
-                continue
-            pending = pending_messages.get(topic_name, deque())
-            if hasattr(video_enc, "flush_packets"):
-                packets = video_enc.flush_packets()
-            else:
-                flushed = video_enc.flush()
-                packets = [flushed] if flushed else []
-            for packet in packets:
-                if pending:
-                    pending_msg = pending.popleft()
-                    _write_compressed_video(
-                        writer, channel_ids[topic_name], pending_msg, packet, codec
-                    )
-                    counters["converted"] += 1
+        # Flush remaining frames from video encoders. JPEG encoders are intra-only
+        # and write inline, so pending_messages stays empty and we skip them here.
+        if compress_ok:
+            for topic_name, video_enc in encoders.items():
+                if topic_name not in channel_ids:
+                    continue
+                pending = pending_messages.get(topic_name, deque())
+                if not pending:
+                    continue
+                if hasattr(video_enc, "flush_packets"):
+                    packets = video_enc.flush_packets()
+                else:
+                    flushed = video_enc.flush()
+                    packets = [flushed] if flushed else []
+                for packet in packets:
+                    if pending:
+                        pending_msg = pending.popleft()
+                        _write_compressed_video(
+                            writer, channel_ids[topic_name], pending_msg, packet, codec
+                        )
+                        counters["converted"] += 1
 
         writer.finish()
+
+    if not compress_ok:
+        return 1
 
     # Report statistics.
     messages_converted = counters["converted"]
@@ -545,10 +585,11 @@ def roscompress(
     total_converted = messages_converted + pointcloud_messages_converted
     console.print("\n[green bold]✓ Compression complete![/green bold]")
     if topics_converted:
-        console.print(f"[cyan]Video topics converted:[/cyan] {len(topics_converted)}")
+        target_label = "JPEG" if image_format == "jpeg" else "Video"
+        console.print(f"[cyan]{target_label} topics converted:[/cyan] {len(topics_converted)}")
         for topic in sorted(topics_converted):
             console.print(f"  - {topic}")
-        console.print(f"[cyan]Video messages converted:[/cyan] {messages_converted:,}")
+        console.print(f"[cyan]{target_label} messages converted:[/cyan] {messages_converted:,}")
     if pointcloud_topics_converted:
         console.print(
             f"[cyan]Point cloud topics converted:[/cyan] {len(pointcloud_topics_converted)}"
@@ -667,6 +708,89 @@ def _handle_pointcloud(
 
 
 # ---------------------------------------------------------------------------
+# Raw → JPEG path (CompressedImage output)
+# ---------------------------------------------------------------------------
+
+
+def _handle_raw_to_jpeg(
+    msg: DecodedMessage,
+    backend: CompressBackend,
+    decode_future: Future[Any] | None,
+    encoders: dict[str, Any],
+    jpeg_quality: int,
+    scale: int | None,
+    writer: McapWriter,
+    schema_ids: dict[str, int],
+    channel_ids: dict[str, int],
+    topics_converted: set[str],
+    counters: dict[str, int],
+) -> bool:
+    """Encode a raw Image message as JPEG and write it as a CompressedImage."""
+    from pymcap_cli.encoding.video_pyav import JpegEncoder  # noqa: PLC0415
+
+    topic = msg.channel.topic
+    schema_name = msg.schema.name if msg.schema else ""
+
+    if decode_future is not None:
+        frame, src_w, src_h = decode_future.result()
+    else:
+        frame, src_w, src_h = backend.decode_image(msg, schema_name, scale=scale)
+
+    if topic not in encoders:
+        if scale is not None:
+            target_w, target_h = calculate_downscale_dimensions(src_w, src_h, scale)
+        else:
+            target_w, target_h = src_w, src_h
+        target_w -= target_w % 2
+        target_h -= target_h % 2
+        try:
+            encoders[topic] = JpegEncoder(target_w, target_h, quality=jpeg_quality)
+        except VideoEncoderError as exc:
+            console.print(f"[red]Error:[/red] Failed to create JPEG encoder for {topic}: {exc}")
+            return False
+        topics_converted.add(topic)
+        schema_id = ensure_schema(
+            writer,
+            "sensor_msgs/msg/CompressedImage",
+            "ros2msg",
+            COMPRESSED_IMAGE.encode(),
+            schema_ids,
+        )
+        ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
+        console.print(
+            f"[green]✓[/green] Converting {topic}: {target_w}x{target_h} "
+            f"({schema_name} → CompressedImage/jpeg)"
+        )
+
+    try:
+        jpeg_bytes = encoders[topic].encode(frame)
+    except VideoEncoderError as exc:
+        console.print(f"[red]Error:[/red] Failed to encode JPEG for {topic}: {exc}")
+        return False
+
+    decoded = msg.decoded_message
+    compressed_msg = {
+        "header": {
+            "stamp": {
+                "sec": decoded.header.stamp.sec,
+                "nanosec": decoded.header.stamp.nanosec,
+            },
+            "frame_id": decoded.header.frame_id,
+        },
+        "format": "jpeg",
+        "data": jpeg_bytes,
+    }
+    writer.add_message_encode(
+        channel_id=channel_ids[topic],
+        log_time=msg.message.log_time,
+        data=compressed_msg,
+        publish_time=msg.message.publish_time,
+    )
+    counters["converted"] += 1
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Unified processing loop
 # ---------------------------------------------------------------------------
 
@@ -681,7 +805,9 @@ def _get_topic_pix_fmt(backend: CompressBackend, topic: str) -> str | None:
 def _run_compress_loop(
     messages: Iterator[tuple[DecodedMessage, Future[Any] | None]],
     backend: CompressBackend,
-    video: bool,
+    do_video: bool,
+    do_jpeg: bool,
+    jpeg_quality: int,
     pointcloud: bool,
     encoders: dict[str, Any],
     encoder_name: str,
@@ -699,11 +825,27 @@ def _run_compress_loop(
     progress: Progress,
     task_id: int,
     counters: dict[str, int],
-) -> None:
+) -> bool:
     for msg, decode_future in messages:
         schema_name = msg.schema.name if msg.schema else ""
 
-        if video and schema_name in IMAGE_SCHEMAS:
+        if do_jpeg and schema_name in RAW_SCHEMAS:
+            if not _handle_raw_to_jpeg(
+                msg,
+                backend,
+                decode_future,
+                encoders,
+                jpeg_quality,
+                scale,
+                writer,
+                schema_ids,
+                channel_ids,
+                topics_converted,
+                counters,
+            ):
+                return False
+
+        elif do_video and schema_name in IMAGE_SCHEMAS:
             topic = msg.channel.topic
 
             frame: Any = None
@@ -746,7 +888,7 @@ def _run_compress_loop(
                     )
                 except VideoEncoderError as exc:
                     console.print(f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}")
-                    return
+                    return False
 
             if frame is None:
                 if decode_future is not None:
@@ -803,3 +945,5 @@ def _run_compress_loop(
             counters["copied"] += 1
 
         progress.update(task_id, advance=1)
+
+    return True

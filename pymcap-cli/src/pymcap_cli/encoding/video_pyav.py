@@ -280,6 +280,78 @@ class VideoEncoder:
 
 
 # ---------------------------------------------------------------------------
+# JpegEncoder (single-frame MJPEG)
+# ---------------------------------------------------------------------------
+
+
+class JpegEncoder:
+    """PyAV-based MJPEG encoder for converting individual frames to JPEG.
+
+    JPEG is intra-only, so each call to ``encode`` produces exactly one
+    JPEG-encoded blob with no buffering.
+    """
+
+    def __init__(self, width: int, height: int, quality: int = 90) -> None:
+        if not 1 <= quality <= 100:
+            raise VideoEncoderError(f"JPEG quality must be in [1, 100], got {quality}")
+        self.config = EncoderConfig(width=width, height=height, codec_name="mjpeg")
+        self._quality = quality
+        try:
+            self._context: VideoCodecContext = cast(
+                "VideoCodecContext", av.CodecContext.create("mjpeg", "w")
+            )
+        except av.error.FFmpegError as exc:
+            raise VideoEncoderError(f"Failed to create mjpeg encoder: {exc}") from exc
+
+        self._context.width = width
+        self._context.height = height
+        self._context.pix_fmt = "yuvj420p"
+        self._context.time_base = Fraction(1, 1000)
+        # PyAV's mjpeg encoder maps q:v 1..31 (lower = better). Convert from 1..100.
+        qv = max(1, min(31, 32 - quality * 31 // 100))
+        self._context.options = {"q:v": str(qv)}
+
+        try:
+            self._context.open()
+        except av.error.FFmpegError as exc:
+            del self._context
+            raise VideoEncoderError(f"Failed to open mjpeg encoder: {exc}") from exc
+
+        self._frame_index = 0
+
+    def encode(self, frame: VideoFrame) -> bytes:
+        """Encode a single frame to a complete JPEG blob."""
+        if (
+            frame.width != self.config.width
+            or frame.height != self.config.height
+            or frame.format.name != "yuvj420p"
+        ):
+            frame = frame.reformat(
+                width=self.config.width, height=self.config.height, format="yuvj420p"
+            )
+        frame.pts = self._frame_index
+        self._frame_index += 1
+        try:
+            packets = list(self._context.encode(frame))
+        except av.error.FFmpegError as exc:
+            raise VideoEncoderError(f"JPEG encoding error: {exc}") from exc
+        if not packets:
+            raise VideoEncoderError("MJPEG encoder produced no output")
+        return b"".join(bytes(p) for p in packets)
+
+    def close(self) -> None:
+        """Release the native codec context."""
+        if hasattr(self, "_context"):
+            del self._context
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+# ---------------------------------------------------------------------------
 # PyAVVideoDecompressor (H.264/H.265 → Image)
 # ---------------------------------------------------------------------------
 
