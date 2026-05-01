@@ -173,7 +173,7 @@ def rosdecompress(
     channel_ids: dict[str, int] = {}
 
     # Pending video messages whose decoded data hasn't arrived yet (decoder buffering).
-    pending_video: dict[str, deque[DecodedMessage]] = {}
+    pending_video: dict[int, deque[DecodedMessage]] = {}
 
     # Track which video factory is used for flushing.
     video_factory: VideoDecompressFactory | None = None
@@ -214,16 +214,16 @@ def rosdecompress(
                 ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
 
                 # Buffer message metadata.
-                if topic not in pending_video:
-                    pending_video[topic] = deque()
-                pending_video[topic].append(msg)
+                if msg.channel.id not in pending_video:
+                    pending_video[msg.channel.id] = deque()
+                pending_video[msg.channel.id].append(msg)
 
                 if decoded is None:
                     progress.advance(task_id)
                     continue
 
                 # Write using oldest pending message's metadata.
-                pending_msg = pending_video[topic].popleft()
+                pending_msg = pending_video[msg.channel.id].popleft()
                 writer.add_message_encode(
                     channel_id=channel_ids[topic],
                     log_time=pending_msg.message.log_time,
@@ -263,16 +263,13 @@ def rosdecompress(
 
         # Flush buffered frames from video decompressors.
         if video_factory is not None:
-            flushed_frames = video_factory.flush_all()
-            for frame in flushed_frames:
-                # Find a topic with pending messages.
-                topic_name = next(
-                    (t for t, p in pending_video.items() if p and t in channel_ids),
-                    None,
-                )
-                if topic_name is None:
-                    break
-                pending_msg = pending_video[topic_name].popleft()
+            flushed_frames = video_factory.flush_all_by_channel()
+            for source_channel_id, frame in flushed_frames:
+                pending = pending_video.get(source_channel_id)
+                if not pending:
+                    continue
+                pending_msg = pending.popleft()
+                topic_name = pending_msg.channel.topic
                 header = _build_header(pending_msg)
                 if frame.is_jpeg:
                     msg_data: dict[str, Any] = {
@@ -297,6 +294,7 @@ def rosdecompress(
                     data=msg_data,
                 )
                 video_messages += 1
+                video_topics.add(topic_name)
 
         writer.finish()
         output_size = output_stream.tell()

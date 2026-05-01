@@ -12,6 +12,9 @@ from pymcap_cli.cmd import (
     diag_cmd,
     diff_cmd,
     du_cmd,
+    export_csv_cmd,
+    export_geo_cmd,
+    export_json_cmd,
     filter_cmd,
     info_cmd,
     info_json_cmd,
@@ -112,6 +115,44 @@ except ImportError:
 
 
 try:
+    from pymcap_cli.cmd.export_pcd_cmd import export_pcd
+except ImportError:
+
+    def export_pcd() -> int:
+        """PCD export is unavailable because numpy / pointcloud2 are not installed.
+
+        Install with:
+
+            uv add 'pymcap-cli[pointcloud]'
+        """
+        print(  # noqa: T201
+            "Error:\nPCD export requires numpy + pointcloud2.\n"
+            "Install with:\n\n    uv add 'pymcap-cli[pointcloud]'\n",
+            file=sys.stderr,
+        )
+        return 1
+
+
+try:
+    from pymcap_cli.cmd.export_images_cmd import export_images
+except ImportError:
+
+    def export_images() -> int:
+        """Image export is unavailable because required image deps are missing.
+
+        Install with:
+
+            uv add 'pymcap-cli[image]'
+        """
+        print(  # noqa: T201
+            "Error:\nImage export requires the 'image' extra (imagecodecs).\n"
+            "Install with:\n\n    uv add 'pymcap-cli[image]'\n",
+            file=sys.stderr,
+        )
+        return 1
+
+
+try:
     from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
 except ImportError:
 
@@ -166,6 +207,11 @@ app.command(name="split", group=transform_group)(split_cmd.split)
 app.command(name="recover", group=transform_group)(recover_cmd.recover)
 app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
 app.command(name="plot", group=inspect_group)(plot)
+app.command(name="export-csv", group=transform_group)(export_csv_cmd.export_csv)
+app.command(name="export-geo", group=transform_group)(export_geo_cmd.export_geo)
+app.command(name="export-json", group=transform_group)(export_json_cmd.export_json)
+app.command(name="export-pcd", group=transform_group)(export_pcd)
+app.command(name="export-images", group=transform_group)(export_images)
 app.command(name="export-parquet", group=transform_group)(export_parquet)
 app.command(name="roscompress", group=transform_group)(roscompress)
 app.command(name="rosdecompress", group=transform_group)(rosdecompress)

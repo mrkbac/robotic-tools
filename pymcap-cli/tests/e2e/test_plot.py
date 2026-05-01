@@ -3,7 +3,13 @@
 from pathlib import Path
 
 import pytest
-from pymcap_cli.cmd.plot_cmd import _downsample, _parse_path_arg, plot
+from pymcap_cli.cmd.plot_cmd import plot
+from pymcap_cli.exporters.plot_exporter import (
+    downsample_lttb as _downsample,
+)
+from pymcap_cli.exporters.plot_exporter import (
+    parse_path_arg as _parse_path_arg,
+)
 
 
 class TestParsePathArg:
@@ -118,12 +124,27 @@ class TestPlot:
         assert "Invalid path syntax" in captured.err
 
     def test_plot_nonexistent_topic(self, simple_mcap: Path, capsys):
-        """Test nonexistent topic reports error."""
+        """Nonexistent topic reports a clear error and a non-zero exit code."""
         exit_code = plot(file=str(simple_mcap), paths=["/nonexistent.field"])
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "not found" in captured.err
+        # Driver now reports "no matching topics" when the topic filter
+        # eliminates every message; either message is acceptable.
+        combined = captured.err + captured.out
+        assert ("not found" in combined) or ("No messages exported" in combined)
+
+    def test_plot_existing_topic_with_no_plottable_data(
+        self, simple_mcap: Path, tmp_path: Path, capsys
+    ):
+        """Existing topic but missing field should fail instead of writing an empty plot."""
+        output = tmp_path / "plot.html"
+        exit_code = plot(file=str(simple_mcap), paths=["/test.missing"], output=str(output))
+
+        assert exit_code == 1
+        assert not output.exists()
+        captured = capsys.readouterr()
+        assert "No plottable data" in captured.err + captured.out
 
     def test_plot_xy_requires_two_paths(self, simple_mcap: Path, capsys):
         """Test --xy mode requires exactly 2 paths."""
