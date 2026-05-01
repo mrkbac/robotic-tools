@@ -14,8 +14,10 @@ if TYPE_CHECKING:
 # ROS schema sets
 # ---------------------------------------------------------------------------
 
-COMPRESSED_SCHEMAS = {"sensor_msgs/msg/CompressedImage", "sensor_msgs/CompressedImage"}
-RAW_SCHEMAS = {"sensor_msgs/msg/Image", "sensor_msgs/Image"}
+# Canonical (short) schema names — compare via
+# :func:`pymcap_cli.exporters._common.normalize_schema_name`.
+COMPRESSED_SCHEMAS = {"sensor_msgs/CompressedImage"}
+RAW_SCHEMAS = {"sensor_msgs/Image"}
 IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
 
 FOXGLOVE_COMPRESSED_VIDEO = """builtin_interfaces/Time timestamp
@@ -69,6 +71,17 @@ class EncoderConfig:
     codec_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class DecompressedFrame:
+    """Result of decompressing a single video frame."""
+
+    data: bytes
+    """JPEG bytes (when ``is_jpeg=True``) or raw RGB24 bytes."""
+    width: int
+    height: int
+    is_jpeg: bool
+
+
 class VideoEncoderProtocol(Protocol):
     """Structural interface shared by VideoEncoder and FFmpegVideoEncoder."""
 
@@ -77,6 +90,18 @@ class VideoEncoderProtocol(Protocol):
     def encode(self, frame: Any) -> bytes | None: ...
 
     def flush(self) -> bytes | None: ...
+
+
+class VideoDecompressorProtocol(Protocol):
+    """Decompresses H.264/H.265 video packets to image data."""
+
+    def decompress(self, video_data: bytes, codec: str) -> DecompressedFrame | None:
+        """Decompress a single video packet."""
+        ...
+
+    def flush(self) -> list[DecompressedFrame]:
+        """Flush any buffered frames from the decoder."""
+        ...
 
 
 DEFAULT_FPS: float = 30.0
@@ -199,6 +224,31 @@ def calculate_downscale_dimensions(width: int, height: int, max_dimension: int) 
         new_width = int(new_height * aspect_ratio)
 
     return ensure_even(new_width), ensure_even(new_height)
+
+
+def raw_image_to_array(message: Any) -> Any:
+    """Convert a ROS Image message to an RGB numpy array."""
+    import numpy as np  # noqa: PLC0415
+
+    if not message.data:
+        raise VideoEncoderError("Image has no data")
+
+    width = message.width
+    height = message.height
+    encoding = str(message.encoding).lower()
+    data = bytes(message.data)
+
+    if encoding in {"rgb", "rgb8"}:
+        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
+        return array.copy()
+    if encoding in {"bgr", "bgr8"}:
+        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
+        return array[..., ::-1].copy()
+    if encoding in {"mono", "mono8", "8uc1"}:
+        mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
+        return np.repeat(mono_array[:, :, None], 3, axis=2)
+
+    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ def encoder():
 class TestVideoEncoderClose:
     def test_close_releases_context(self, encoder):
         encoder.close()
-        assert not hasattr(encoder, "_context")
+        assert encoder._context is None
 
     def test_close_is_idempotent(self, encoder):
         encoder.close()
@@ -30,8 +30,8 @@ class TestVideoEncoderClose:
 
     def test_context_manager_closes_on_exit(self):
         with _make_encoder() as enc:
-            assert hasattr(enc, "_context")
-        assert not hasattr(enc, "_context")
+            assert enc._context is not None
+        assert enc._context is None
 
     def test_context_manager_returns_encoder(self):
         enc = _make_encoder()
@@ -43,4 +43,4 @@ class TestVideoEncoderClose:
         enc = _make_encoder()
         with pytest.raises(RuntimeError), enc:
             raise RuntimeError("simulated error")
-        assert not hasattr(enc, "_context")
+        assert enc._context is None

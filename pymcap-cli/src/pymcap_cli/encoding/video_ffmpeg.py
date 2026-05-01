@@ -6,6 +6,7 @@ All ``ffmpeg`` / ``ffprobe`` subprocess usage is confined to this module.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ import time
 from queue import Empty, Queue
 
 from pymcap_cli.encoding.encoder_common import (
+    DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
@@ -21,7 +23,6 @@ from pymcap_cli.encoding.encoder_common import (
 from pymcap_cli.encoding.encoder_common import (
     resolve_encoder as _resolve_encoder,
 )
-from pymcap_cli.encoding.video_protocols import DecompressedFrame
 
 # ---------------------------------------------------------------------------
 # ffmpeg discovery
@@ -372,14 +373,12 @@ class FFmpegVideoEncoder:
                 "pipe:0",
             ]
         else:
-            # Compressed images (JPEG) — explicit mjpeg codec for reliable detection.
+            # Compressed images (JPEG/PNG/etc.) — let ffmpeg detect the image codec.
             cmd = [
                 ffmpeg,
                 "-hide_banner",
                 "-loglevel",
                 "error",
-                "-c:v",
-                "mjpeg",
                 "-f",
                 "image2pipe",
                 "-r",
@@ -570,6 +569,7 @@ class FFmpegVideoDecompressor:
         # For raw mode: need dimensions to know frame size
         self._width: int | None = None
         self._height: int | None = None
+        self._probe_buffer = bytearray()
 
     def _start_process(self, codec: str) -> None:
         ffmpeg = find_ffmpeg()
@@ -741,20 +741,26 @@ class FFmpegVideoDecompressor:
             self._stderr_lines.append(line.decode(errors="replace").rstrip())
 
     def decompress(self, video_data: bytes, codec: str) -> DecompressedFrame | None:
+        data_to_write = video_data
         # Start process on first call.
         if self._process is None:
             # For raw mode, detect dimensions before starting.
             if self._video_format != "compressed" and self._width is None:
-                import contextlib  # noqa: PLC0415
-
-                with contextlib.suppress(VideoEncoderError):
-                    self._width, self._height = self._detect_dimensions(video_data, codec)
+                self._probe_buffer.extend(video_data)
+                try:
+                    self._width, self._height = self._detect_dimensions(
+                        bytes(self._probe_buffer), codec
+                    )
+                except VideoEncoderError:
+                    return None
+                data_to_write = bytes(self._probe_buffer)
+                self._probe_buffer.clear()
             self._start_process(codec)
 
         if self._process is None or self._process.stdin is None:
             raise VideoEncoderError("ffmpeg process not started")
 
-        self._process.stdin.write(video_data)
+        self._process.stdin.write(data_to_write)
         self._process.stdin.flush()
 
         try:
@@ -783,6 +789,158 @@ class FFmpegVideoDecompressor:
 
         self._process.wait(timeout=5)
         return frames
+
+    def __del__(self) -> None:
+        try:
+            if self._process and self._process.poll() is None:
+                self._process.kill()
+                self._process.wait(timeout=2)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
+# ---------------------------------------------------------------------------
+# FFmpegMp4Encoder — raw RGB frames in via stdin, MP4 file out
+# ---------------------------------------------------------------------------
+
+
+class FFmpegMp4Encoder:
+    """Encode a stream of raw RGB frames to an MP4 file via ffmpeg subprocess.
+
+    Sibling of :class:`FFmpegVideoEncoder`, which emits raw Annex B bitstream
+    to stdout for in-MCAP ``CompressedVideo`` messages. This class instead
+    asks ffmpeg to mux into MP4 and write to disk directly — what the
+    ``video`` exporter wants when the user picks ``--mode ffmpeg-cli``.
+    """
+
+    def __init__(
+        self,
+        output_path: os.PathLike[str] | str,
+        *,
+        width: int,
+        height: int,
+        codec_name: str,
+        quality: int = 28,
+        target_fps: float = 30.0,
+        gop_size: int = 60,
+        input_pix_fmt: str | None = "rgb24",
+    ) -> None:
+        ffmpeg = _require_ffmpeg()
+
+        # Even dimensions required by yuv420p / common encoders.
+        width -= width % 2
+        height -= height % 2
+        if width < 2 or height < 2:
+            raise VideoEncoderError(f"Source frame too small ({width}x{height}) for video encoding")
+
+        if not check_encoder_cli(codec_name):
+            raise VideoEncoderError(
+                f"ffmpeg CLI does not support encoder {codec_name!r}. "
+                "Install a fuller ffmpeg build or pick a different --encoder backend."
+            )
+
+        options, bit_rate = build_encoder_options(codec_name, quality, width, height)
+        fps_int = max(round(target_fps), 1)
+
+        cmd: list[str] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if input_pix_fmt is None:
+            cmd.extend(["-f", "image2pipe", "-r", str(fps_int), "-i", "pipe:0"])
+        else:
+            cmd.extend(
+                [
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    input_pix_fmt,
+                    "-s",
+                    f"{width}x{height}",
+                    "-r",
+                    str(fps_int),
+                    "-i",
+                    "pipe:0",
+                ]
+            )
+
+        if input_pix_fmt is None:
+            cmd.extend(["-vf", f"scale={width}:{height}"])
+
+        cmd.extend(
+            [
+                "-c:v",
+                codec_name,
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                str(gop_size),
+                "-bf",
+                "0",
+            ]
+        )
+        if bit_rate is not None:
+            cmd.extend(["-b:v", str(bit_rate)])
+        for key, value in options.items():
+            cmd.extend([f"-{key}", value])
+
+        cmd.extend(["-movflags", "+faststart", "-f", "mp4", str(output_path)])
+
+        self._cmd = cmd
+        self.output_path = output_path
+        self.config = EncoderConfig(width=width, height=height, codec_name=codec_name)
+        self._stderr_lines: list[str] = []
+        self._frames_fed = 0
+
+        self._process = subprocess.Popen(  # noqa: S603 — args list, not shell
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _read_stderr(self) -> None:
+        if self._process.stderr is None:
+            return
+        for raw in iter(self._process.stderr.readline, b""):
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                self._stderr_lines.append(line)
+        self._process.stderr.close()
+
+    def write_frame(self, frame_bytes: bytes) -> None:
+        """Write one input frame to ffmpeg stdin."""
+        if self._process.stdin is None or self._process.stdin.closed:
+            raise VideoEncoderError("ffmpeg process stdin is closed")
+        try:
+            self._process.stdin.write(frame_bytes)
+        except BrokenPipeError as exc:
+            stderr_tail = "\n".join(self._stderr_lines[-5:])
+            raise VideoEncoderError(f"ffmpeg subprocess exited mid-stream:\n{stderr_tail}") from exc
+        self._frames_fed += 1
+
+    @property
+    def frames_fed(self) -> int:
+        return self._frames_fed
+
+    def close(self) -> None:
+        if self._process.poll() is not None and self._process.stdin is None:
+            return
+        if self._process.stdin and not self._process.stdin.closed:
+            with contextlib.suppress(BrokenPipeError):
+                self._process.stdin.close()
+        try:
+            self._process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=5)
+            raise VideoEncoderError("ffmpeg subprocess did not exit cleanly; killed") from None
+        self._stderr_thread.join(timeout=5)
+        if self._process.returncode != 0:
+            stderr_tail = "\n".join(self._stderr_lines[-10:])
+            raise VideoEncoderError(
+                f"ffmpeg exited with code {self._process.returncode}:\n{stderr_tail}"
+            )
 
     def __del__(self) -> None:
         try:

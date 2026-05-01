@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from small_mcap import Channel
 
-    from pymcap_cli.encoding.video_protocols import DecompressedFrame
+    from pymcap_cli.encoding.encoder_common import DecompressedFrame
 
 # ---------------------------------------------------------------------------
 # Schema constants
@@ -146,14 +146,18 @@ class VideoDecompressFactory:
 
     def flush_all(self) -> list[Any]:
         """Flush all decompressors and return remaining frames."""
-        frames: list[Any] = []
-        for decompressor in self._decompressors.values():
-            frames.extend(decompressor.flush())
+        return [frame for _, frame in self.flush_all_by_channel()]
+
+    def flush_all_by_channel(self) -> list[tuple[int, DecompressedFrame]]:
+        """Flush all decompressors and keep channel ownership for each frame."""
+        frames: list[tuple[int, DecompressedFrame]] = []
+        for channel_id, decompressor in self._decompressors.items():
+            frames.extend((channel_id, frame) for frame in decompressor.flush())
         return frames
 
     def _get_decompressor(self, channel_id: int) -> Any:
         if channel_id not in self._decompressors:
-            from pymcap_cli.encoding.video_factory import create_video_decompressor  # noqa: PLC0415
+            from pymcap_cli.encoding.video import create_video_decompressor  # noqa: PLC0415
 
             self._decompressors[channel_id] = create_video_decompressor(
                 video_format=self._video_format,

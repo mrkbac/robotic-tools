@@ -1,154 +1,153 @@
-"""E2E tests for the video command."""
+"""E2E tests for the video command (post-Exporter-pipeline refactor)."""
+
+from __future__ import annotations
 
 import shutil
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from pymcap_cli.cmd.video_cmd import encode_video
-from pymcap_cli.encoding.encoder_common import EncoderBackend, VideoCodec, VideoEncoderError
+from pymcap_cli.cmd.video_cmd import QualityPreset, video
+from pymcap_cli.encoding.encoder_common import EncoderBackend, EncoderMode, VideoCodec
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _ffmpeg_available() -> bool:
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 
 @pytest.mark.e2e
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg not available")
 class TestVideoCommand:
     """Test video command functionality."""
 
     def test_video_from_compressed_image(self, image_compressed_mcap: Path, tmp_path: Path):
-        """Test creating video from CompressedImage messages."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
+        """CompressedImage messages are encoded to a per-topic MP4."""
+        out_dir = tmp_path / "compressed_out"
 
-        output_file = tmp_path / "compressed_output.mp4"
-
-        encode_video(
-            mcap_path=str(image_compressed_mcap),
+        rc = video(
+            file=str(image_compressed_mcap),
             topics=["/camera/image_compressed"],
-            output_path=output_file,
+            output=out_dir,
             codec=VideoCodec.H264,
-            encoder_backend=EncoderBackend.SOFTWARE,
-            quality=23,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
         )
 
-        # Verify video was created
-        assert output_file.exists()
-        assert output_file.stat().st_size > 0
+        assert rc == 0
+        mp4s = list(out_dir.glob("*.mp4"))
+        assert len(mp4s) == 1
+        assert mp4s[0].stat().st_size > 0
 
     def test_video_from_raw_image(self, image_rgb_mcap: Path, tmp_path: Path):
-        """Test creating video from raw Image messages."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
+        """Raw Image messages are encoded to a per-topic MP4."""
+        out_dir = tmp_path / "raw_out"
 
-        output_file = tmp_path / "raw_output.mp4"
-
-        encode_video(
-            mcap_path=str(image_rgb_mcap),
+        rc = video(
+            file=str(image_rgb_mcap),
             topics=["/camera/image_raw"],
-            output_path=output_file,
+            output=out_dir,
             codec=VideoCodec.H264,
-            encoder_backend=EncoderBackend.SOFTWARE,
-            quality=23,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
         )
 
-        # Verify video was created
-        assert output_file.exists()
-        assert output_file.stat().st_size > 0
+        assert rc == 0
+        mp4s = list(out_dir.glob("*.mp4"))
+        assert len(mp4s) == 1
+        assert mp4s[0].stat().st_size > 0
 
     def test_video_small_file(self, image_small_mcap: Path, tmp_path: Path):
-        """Test creating video from small MCAP with few frames."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
+        """Tiny MCAP with few frames still produces a valid MP4."""
+        out_dir = tmp_path / "small_out"
 
-        output_file = tmp_path / "small_output.mp4"
-
-        encode_video(
-            mcap_path=str(image_small_mcap),
+        rc = video(
+            file=str(image_small_mcap),
             topics=["/camera/image_compressed"],
-            output_path=output_file,
+            output=out_dir,
             codec=VideoCodec.H264,
-            encoder_backend=EncoderBackend.SOFTWARE,
-            quality=23,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
         )
 
-        # Verify video was created
-        assert output_file.exists()
-        assert output_file.stat().st_size > 0
+        assert rc == 0
+        mp4s = list(out_dir.glob("*.mp4"))
+        assert len(mp4s) == 1
+        assert mp4s[0].stat().st_size > 0
 
     def test_video_topic_not_found(self, image_compressed_mcap: Path, tmp_path: Path):
-        """Test error handling when topic doesn't exist."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
+        """Nonexistent topic exits with non-zero status (no MP4 written)."""
+        out_dir = tmp_path / "miss_out"
 
-        output_file = tmp_path / "output.mp4"
+        rc = video(
+            file=str(image_compressed_mcap),
+            topics=["/nonexistent/topic"],
+            output=out_dir,
+            codec=VideoCodec.H264,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
+        )
 
-        with pytest.raises(VideoEncoderError, match="not found or not image topics"):
-            encode_video(
-                mcap_path=str(image_compressed_mcap),
-                topics=["/nonexistent/topic"],
-                output_path=output_file,
-                codec=VideoCodec.H264,
-                encoder_backend=EncoderBackend.SOFTWARE,
-                quality=23,
-            )
+        assert rc != 0
+        assert list(out_dir.glob("*.mp4")) == []
 
     def test_video_unsupported_schema(self, simple_mcap: Path, tmp_path: Path):
-        """Test error handling when schema is not an image type."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
+        """Non-image topic is skipped; no MP4 is produced."""
+        out_dir = tmp_path / "skip_out"
 
-        output_file = tmp_path / "output.mp4"
-
-        with pytest.raises(VideoEncoderError, match="not found or not image topics"):
-            encode_video(
-                mcap_path=str(simple_mcap),
-                topics=["/test"],
-                output_path=output_file,
-                codec=VideoCodec.H264,
-                encoder_backend=EncoderBackend.SOFTWARE,
-                quality=23,
-            )
-
-    def test_video_with_watermark(self, image_compressed_mcap: Path, tmp_path: Path):
-        """Test creating video with watermark enabled (default)."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
-
-        output_file = tmp_path / "watermark_output.mp4"
-
-        encode_video(
-            mcap_path=str(image_compressed_mcap),
-            topics=["/camera/image_compressed"],
-            output_path=output_file,
+        rc = video(
+            file=str(simple_mcap),
+            topics=["/test"],
+            output=out_dir,
             codec=VideoCodec.H264,
-            encoder_backend=EncoderBackend.SOFTWARE,
-            quality=23,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
         )
 
-        # Verify video was created
-        assert output_file.exists()
-        assert output_file.stat().st_size > 0
+        assert rc != 0
+        assert list(out_dir.glob("*.mp4")) == []
 
-    def test_video_without_watermark(self, image_compressed_mcap: Path, tmp_path: Path):
-        """Test creating video with watermark disabled."""
-        # Skip if ffmpeg not available
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            pytest.skip("ffmpeg not available")
+    def test_video_ffmpeg_cli_mode(self, image_compressed_mcap: Path, tmp_path: Path):
+        """`--mode ffmpeg-cli` produces an MP4 via the ffmpeg subprocess."""
+        out_dir = tmp_path / "ffmpeg_cli_out"
 
-        output_file = tmp_path / "no_watermark_output.mp4"
-
-        encode_video(
-            mcap_path=str(image_compressed_mcap),
+        rc = video(
+            file=str(image_compressed_mcap),
             topics=["/camera/image_compressed"],
-            output_path=output_file,
+            output=out_dir,
             codec=VideoCodec.H264,
-            encoder_backend=EncoderBackend.SOFTWARE,
-            quality=23,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
+            mode=EncoderMode.FFMPEG_CLI,
         )
 
-        # Verify video was created
-        assert output_file.exists()
-        assert output_file.stat().st_size > 0
+        assert rc == 0
+        mp4s = list(out_dir.glob("*.mp4"))
+        assert len(mp4s) == 1
+        assert mp4s[0].stat().st_size > 0
+        # MP4 magic: ISO base media file.
+        head = mp4s[0].read_bytes()[:12]
+        assert b"ftyp" in head
+
+    def test_video_force_overwrites_existing_dir(self, image_compressed_mcap: Path, tmp_path: Path):
+        """--force allows overwriting MP4s in an existing non-empty directory."""
+        out_dir = tmp_path / "force_out"
+        out_dir.mkdir()
+        (out_dir / "stale.mp4").write_bytes(b"placeholder")
+
+        rc = video(
+            file=str(image_compressed_mcap),
+            topics=["/camera/image_compressed"],
+            output=out_dir,
+            codec=VideoCodec.H264,
+            encoder=EncoderBackend.SOFTWARE,
+            quality=QualityPreset.MEDIUM,
+            force=True,
+        )
+
+        assert rc == 0
+        mp4s = list(out_dir.glob("*.mp4"))
+        # At least the new MP4 exists and is larger than the placeholder.
+        new_mp4s = [p for p in mp4s if p.stat().st_size > len(b"placeholder")]
+        assert new_mp4s

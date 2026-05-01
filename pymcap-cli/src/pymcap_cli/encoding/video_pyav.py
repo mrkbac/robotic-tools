@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import av
 import av.error
-import numpy as np
 from av import Packet, VideoFrame
 from typing_extensions import Self
 
 from pymcap_cli.encoding.encoder_common import (
+    DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
@@ -28,12 +28,10 @@ from pymcap_cli.encoding.encoder_common import (
 from pymcap_cli.encoding.encoder_common import (
     resolve_encoder_for_backend as _resolve_encoder_for_backend,
 )
-from pymcap_cli.encoding.video_protocols import DecompressedFrame
 
 if TYPE_CHECKING:
     from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
-    from numpy.typing import NDArray
 
 
 # ---------------------------------------------------------------------------
@@ -43,22 +41,6 @@ if TYPE_CHECKING:
 
 class CompressedImageMsg(Protocol):
     """Protocol for ROS CompressedImage messages."""
-
-    @property
-    def data(self) -> bytes | bytearray | memoryview: ...
-
-
-class ImageMsg(Protocol):
-    """Protocol for ROS Image messages."""
-
-    @property
-    def width(self) -> int: ...
-
-    @property
-    def height(self) -> int: ...
-
-    @property
-    def encoding(self) -> str: ...
 
     @property
     def data(self) -> bytes | bytearray | memoryview: ...
@@ -159,29 +141,6 @@ def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
     raise VideoEncoderError("Decoder produced no frames")
 
 
-def raw_image_to_array(message: ImageMsg) -> NDArray[np.uint8]:
-    """Convert a ROS Image message to an RGB numpy array."""
-    if not message.data:
-        raise VideoEncoderError("Image has no data")
-
-    width = message.width
-    height = message.height
-    encoding = str(message.encoding).lower()
-    data = bytes(message.data)
-
-    if encoding in {"rgb", "rgb8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array.copy()
-    if encoding in {"bgr", "bgr8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array[..., ::-1].copy()
-    if encoding in {"mono", "mono8", "8uc1"}:
-        mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
-        return np.repeat(mono_array[:, :, None], 3, axis=2)
-
-    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
-
-
 # ---------------------------------------------------------------------------
 # VideoEncoder (H.264/H.265 frame encoder)
 # ---------------------------------------------------------------------------
@@ -208,11 +167,10 @@ class VideoEncoder:
         self._frame_index = 0
         self._quality = quality
         self._gop_size = gop_size
+        self._context: VideoCodecContext | None = None
 
         try:
-            self._context: VideoCodecContext = cast(
-                "VideoCodecContext", av.CodecContext.create(codec_name, "w")
-            )
+            self._context = cast("VideoCodecContext", av.CodecContext.create(codec_name, "w"))
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Failed to create encoder {codec_name}: {exc}") from exc
 
@@ -234,13 +192,14 @@ class VideoEncoder:
         try:
             self._context.open()
         except av.error.FFmpegError as exc:
-            del self._context
+            self._context = None
             raise VideoEncoderError(f"Failed to open encoder {codec_name}: {exc}") from exc
 
     def close(self) -> None:
         """Release the native codec context."""
-        if hasattr(self, "_context"):
+        if self._context is not None:
             del self._context
+            self._context = None
 
     def __enter__(self) -> Self:
         return self
@@ -296,10 +255,9 @@ class JpegEncoder:
             raise VideoEncoderError(f"JPEG quality must be in [1, 100], got {quality}")
         self.config = EncoderConfig(width=width, height=height, codec_name="mjpeg")
         self._quality = quality
+        self._context: VideoCodecContext | None = None
         try:
-            self._context: VideoCodecContext = cast(
-                "VideoCodecContext", av.CodecContext.create("mjpeg", "w")
-            )
+            self._context = cast("VideoCodecContext", av.CodecContext.create("mjpeg", "w"))
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Failed to create mjpeg encoder: {exc}") from exc
 
@@ -314,7 +272,7 @@ class JpegEncoder:
         try:
             self._context.open()
         except av.error.FFmpegError as exc:
-            del self._context
+            self._context = None
             raise VideoEncoderError(f"Failed to open mjpeg encoder: {exc}") from exc
 
         self._frame_index = 0
@@ -341,8 +299,9 @@ class JpegEncoder:
 
     def close(self) -> None:
         """Release the native codec context."""
-        if hasattr(self, "_context"):
+        if self._context is not None:
             del self._context
+            self._context = None
 
     def __enter__(self) -> Self:
         return self
