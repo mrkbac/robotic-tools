@@ -51,10 +51,11 @@ Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [project.optional-dependencies]
 video = ["av>=12.0.0", "numpy>=1.24.0"]
-pointcloud = ["pureini", "numpy>=1.24.0"]
+pointcloud = ["pureini", "numpy>=1.24.0", "pointcloud2"]
 plot = ["plotly>=6.0.0"]
 parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "pointcloud2"]
-all = ["pymcap-cli[video,pointcloud,plot,parquet]"]
+image = ["imagecodecs>=2024.1.1", "numpy>=1.24.0", "pymcap-cli[video]"]
+all = ["pymcap-cli[video,pointcloud,plot,parquet,image]"]
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

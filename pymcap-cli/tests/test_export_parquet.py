@@ -8,7 +8,8 @@ import pyarrow.parquet as pq
 import pytest
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pointcloud2 import PointField, create_cloud
-from pymcap_cli.cmd.export_parquet_cmd import _unique_topic_filename, export_parquet
+from pymcap_cli.cmd.export_parquet_cmd import export_parquet
+from pymcap_cli.exporters._common import unique_topic_filename as _unique_topic_filename
 from small_mcap import McapWriter
 
 _POINTCLOUD2_SCHEMA = """\
@@ -201,9 +202,9 @@ def test_export_expands_pointcloud_to_list_struct(pointcloud_mcap: Path, tmp_pat
     assert first_row_points[0]["x"] == pytest.approx(0.0)
     assert first_row_points[0]["intensity"] == pytest.approx(0.0)
 
-    # _log_time is timestamp(ns).
-    assert table.schema.field("_log_time").type == pa.timestamp("ns")
-    times_ns = [s.value for s in table.column("_log_time")]
+    # _log_time_ns is timestamp(ns).
+    assert table.schema.field("_log_time_ns").type == pa.timestamp("ns")
+    times_ns = [s.value for s in table.column("_log_time_ns")]
     assert times_ns == [0, 1_000_000, 2_000_000]
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import array
 
-from pymcap_cli.cmd.export_parquet_cmd import _to_plain
+from pymcap_cli.types.to_plain import to_plain as _to_plain
 
 
 def _float64_mv(values: list[float]) -> memoryview:
