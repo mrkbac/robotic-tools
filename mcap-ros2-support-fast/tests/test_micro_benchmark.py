@@ -296,3 +296,45 @@ _diag_10x10_dc = _diag_dec(_diag_10x10_cdr)
 def test_encode_dataclass(benchmark, encoder, msg):
     """Benchmark encoding from dataclass inputs (_get_field getattr path)."""
     benchmark(encoder, msg)
+
+
+# ===========================================================================
+# ENCODE fixed primitive arrays — exercises _array_length / _to_packed_bytes
+# helpers that gained ndarray support and length validation.
+# ===========================================================================
+
+np = pytest.importorskip("numpy")
+
+_cov_enc = _build_codec("test_msgs/Cov", "float64[9] cov")[1]
+_xs16_enc = _build_codec("test_msgs/Xs", "int32[16] xs")[1]
+_bs64_enc = _build_codec("test_msgs/Bs", "uint8[64] bs")[1]
+
+_cov_list_msg = {"cov": [0.1 * i for i in range(9)]}
+_cov_np_match_msg = {"cov": np.arange(9, dtype=np.float64)}
+_cov_np_mismatch_msg = {"cov": np.arange(9, dtype=np.float32)}
+
+_xs16_list_msg = {"xs": list(range(16))}
+_xs16_np_match_msg = {"xs": np.arange(16, dtype=np.int32)}
+
+_bs64_list_msg = {"bs": list(range(64))}
+_bs64_bytes_msg = {"bs": bytes(range(64))}
+_bs64_np_match_msg = {"bs": np.arange(64, dtype=np.uint8)}
+
+
+@pytest.mark.benchmark(group="encode-fixed-primitive-array")
+@pytest.mark.parametrize(
+    ("encoder", "msg"),
+    [
+        pytest.param(_cov_enc, _cov_list_msg, id="float64x9_list"),
+        pytest.param(_cov_enc, _cov_np_match_msg, id="float64x9_np_f8"),
+        pytest.param(_cov_enc, _cov_np_mismatch_msg, id="float64x9_np_f4_cast"),
+        pytest.param(_xs16_enc, _xs16_list_msg, id="int32x16_list"),
+        pytest.param(_xs16_enc, _xs16_np_match_msg, id="int32x16_np_i4"),
+        pytest.param(_bs64_enc, _bs64_list_msg, id="uint8x64_list"),
+        pytest.param(_bs64_enc, _bs64_bytes_msg, id="uint8x64_bytes"),
+        pytest.param(_bs64_enc, _bs64_np_match_msg, id="uint8x64_np_u1"),
+    ],
+)
+def test_encode_fixed_primitive_array(benchmark, encoder, msg):
+    """Benchmark fixed-size primitive array encoding (validation + helper dispatch)."""
+    benchmark(encoder, msg)

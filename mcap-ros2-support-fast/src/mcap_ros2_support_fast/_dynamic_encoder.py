@@ -14,6 +14,67 @@ from ._plans import (
     TypeId,
 )
 
+_NP_DTYPE_FOR_CODE: dict[str, str] = {
+    "b": "i1",
+    "B": "u1",
+    "h": "i2",
+    "H": "u2",
+    "i": "i4",
+    "I": "u4",
+    "l": "i4",
+    "L": "u4",
+    "q": "i8",
+    "Q": "u8",
+    "f": "f4",
+    "d": "f8",
+    "?": "?",
+}
+
+# Numpy availability is fixed at import time, so we specialize the helpers once
+# rather than checking `_np is not None` on every call.
+try:
+    import numpy as np
+except ImportError:
+    _np: Any = None
+
+    def _to_packed_bytes(value: Any, code: str) -> bytes:
+        """Pack an array-like value into raw bytes for `code` (no-numpy build)."""
+        return array.array(code, value).tobytes()
+
+    def _array_length(value: Any) -> int:
+        """Return the number of serialized primitive elements (no-numpy build)."""
+        return len(value)
+
+    def _truncate_array(value: Any, size: int) -> Any:
+        """Truncate an array-like value (no-numpy build)."""
+        return value[:size]
+else:
+    _np = np
+    _ndarray: type = np.ndarray
+
+    def _to_packed_bytes(value: Any, code: str) -> bytes:
+        """Pack an array-like value into raw little/native-endian bytes for `code`.
+
+        Fast path for `numpy.ndarray` (any shape/dtype): cast to matching dtype,
+        flatten, then `tobytes()`. Falls back to `array.array(code, value).tobytes()`,
+        which accepts list, tuple, and any duck-typed iterable.
+        """
+        if isinstance(value, _ndarray):
+            return np.ascontiguousarray(value, dtype=_NP_DTYPE_FOR_CODE[code]).ravel().tobytes()
+        return array.array(code, value).tobytes()
+
+    def _array_length(value: Any) -> int:
+        """Return the number of serialized primitive elements in an array-like value."""
+        if isinstance(value, _ndarray):
+            return int(value.size)
+        return len(value)
+
+    def _truncate_array(value: Any, size: int) -> Any:
+        """Truncate an array-like value to the serialized primitive element count."""
+        if isinstance(value, _ndarray):
+            return value.ravel()[:size]
+        return value[:size]
+
 
 def _get_field(obj: Any, f: str, default: Any) -> Any:
     """Get field from object (dict or attribute) with default.
@@ -148,29 +209,43 @@ class EncoderGeneratorFactory:
         else:
             raise NotImplementedError(f"Unsupported type: {type_id}")
 
+    def _emit_fixed_length_check(self, value_expr: str, array_size: int) -> None:
+        """Emit a runtime check that ``len(value) == array_size``, raising ValueError otherwise."""
+        len_var = self.generate_var_name()
+        self.code.append(f"{len_var} = _array_length({value_expr})")
+        with self.code.indent(f"if {len_var} != {array_size}:"):
+            self.code.append(
+                "raise ValueError("
+                f"f'fixed array expected {array_size} elements, got {{{len_var}}}'"
+                ")"
+            )
+
     def generate_primitive_array_writer(
         self, value_expr: str, type_id: TypeId, array_size: int | None, is_upper_bound: bool = False
     ) -> None:
         """Generate code for primitive array fields."""
-        # Determine if we need dynamic offset tracking
-        needs_dynamic = (
-            array_size is None  # dynamic array
-            or is_upper_bound  # bounded array
-            or type_id in {TypeId.STRING, TypeId.WSTRING}  # variable per-element
-            or type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}  # byte arrays use len()
-        )
+        is_string_like = type_id in {TypeId.STRING, TypeId.WSTRING}
+        is_byte_like = type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}
+        fixed_size: int | None = None if is_upper_bound else array_size
+
+        # Byte arrays use runtime len() rather than a compile-time offset.
+        needs_dynamic = fixed_size is None or is_string_like or is_byte_like
         if needs_dynamic:
             self._ensure_dynamic()
 
-        # For dynamic or bounded arrays, write length prefix
-        if array_size is None or is_upper_bound:  # dynamic or bounded array
-            # For bounded arrays, truncate to upper bound if needed
+        if fixed_size is None:
+            length_expr = f"len({value_expr})" if is_string_like else f"_array_length({value_expr})"
             if is_upper_bound and array_size is not None:
                 len_var = self.generate_var_name()
-                self.code.append(f"{len_var} = len({value_expr})")
+                self.code.append(f"{len_var} = {length_expr}")
                 truncated_var = self.generate_var_name()
+                truncate_expr = (
+                    f"{value_expr}[:{array_size}]"
+                    if is_string_like
+                    else f"_truncate_array({value_expr}, {array_size})"
+                )
                 self.code.append(
-                    f"{truncated_var} = {value_expr}[:{array_size}] "
+                    f"{truncated_var} = {truncate_expr} "
                     f"if {len_var} > {array_size} else {value_expr}"
                 )
                 self.code.append(f"{len_var} = min({len_var}, {array_size})")
@@ -178,7 +253,7 @@ class EncoderGeneratorFactory:
                 self.generate_primitive_writer(len_var, TypeId.UINT32)
             else:
                 len_var = self.generate_var_name()
-                self.code.append(f"{len_var} = len({value_expr})")
+                self.code.append(f"{len_var} = {length_expr}")
                 self.generate_primitive_writer(len_var, TypeId.UINT32)
 
         if type_id == TypeId.STRING:
@@ -195,45 +270,48 @@ class EncoderGeneratorFactory:
         elif type_id == TypeId.WSTRING:
             self.code.append("raise NotImplementedError('wstring not implemented')")
 
-        elif type_id in {TypeId.UINT8, TypeId.BYTE, TypeId.CHAR}:
-            # Special case for byte arrays
+        elif is_byte_like:
+            if fixed_size is not None:
+                self._emit_fixed_length_check(value_expr, fixed_size)
             with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"):
                 self.code.append(f"_buffer += {value_expr}")
-            with self.code.indent("else:"):
-                # Convert list/tuple to bytes
+            with self.code.indent(f"elif isinstance({value_expr}, (list, tuple)):"):
                 self.code.append(f"_buffer += bytes({value_expr})")
-            self.code.append(f"_offset += len({value_expr})")
+            with self.code.indent("else:"):
+                self.code.append(f"_buffer += _to_packed_bytes({value_expr}, 'B')")
+            if fixed_size is not None:
+                self.code.append(f"_offset += {fixed_size}")
+            else:
+                self.code.append(f"_offset += _array_length({value_expr})")
             self.reset_alignment()  # After string unknown position readjustment
         else:
-            # Regular primitive arrays
             struct_name = TYPE_INFO[type_id]
             struct_size = struct.calcsize(struct_name)
             self.generate_alignment(struct_size)
 
-            # For fixed arrays (not bounded), use optimized struct packing
-            # For dynamic or bounded arrays, use a loop
-            if array_size is not None and not is_upper_bound:
-                # Fixed-size array - use optimized struct pack
-                pattern = f"{self.endianness}{array_size}{struct_name}"
+            if fixed_size is not None:
+                self._emit_fixed_length_check(value_expr, fixed_size)
+                pattern = f"{self.endianness}{fixed_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
-                self.code.append(f"_buffer += {pattern_var}(*{value_expr})")
+                with self.code.indent(f"if isinstance({value_expr}, (list, tuple)):"):
+                    self.code.append(f"_buffer += {pattern_var}(*{value_expr})")
+                with self.code.indent("else:"):
+                    self.code.append(f"_buffer += _to_packed_bytes({value_expr}, '{struct_name}')")
                 if self.static_offset is not None:
-                    self.static_offset += array_size * struct_size
+                    self.static_offset += fixed_size * struct_size
                 else:
-                    self.code.append(f"_offset += {array_size * struct_size}")
+                    self.code.append(f"_offset += {fixed_size * struct_size}")
             else:
-                # Dynamic or bounded array - use array.tobytes()
                 array_len_var = self.generate_var_name()
-                self.code.append(f"{array_len_var} = len({value_expr})")
+                self.code.append(f"{array_len_var} = _array_length({value_expr})")
                 with self.code.indent(f"if {array_len_var} > 0:"):
-                    # Type-check and optimize for different input types
                     with self.code.indent(
                         f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"
                     ):
                         self.code.append(f"_buffer += {value_expr}")
                     with self.code.indent("else:"):
                         self.code.append(
-                            f"_buffer += array.array('{struct_name}', {value_expr}).tobytes()"
+                            f"_buffer += _to_packed_bytes({value_expr}, '{struct_name}')"
                         )
                 self.code.append(f"_offset += {array_len_var} * {struct_size}")
 
@@ -316,10 +394,7 @@ class EncoderGeneratorFactory:
             self.generate_primitive_writer(field_var, step.data)
         elif step.type == ActionType.PRIMITIVE_ARRAY:
             field_var = self.generate_var_name()
-            # Arrays default to empty list or provided default
-            array_default: list[bool | int | float | str] = (  # type: ignore[invalid-assignment]
-                step.default_value if step.default_value is not None else []
-            )
+            array_default = step.default_value if step.default_value is not None else []
             self.code.append(
                 f"{field_var} = _get_field({parent_var}, '{step.target}', {array_default!r})"
             )
@@ -383,6 +458,9 @@ class EncoderGeneratorFactory:
 
         namespace: dict[str, Any] = {
             "_get_field": _get_field,
+            "_array_length": _array_length,
+            "_truncate_array": _truncate_array,
+            "_to_packed_bytes": _to_packed_bytes,
             "_PADS": (
                 b"",
                 b"\x00",
@@ -399,12 +477,15 @@ class EncoderGeneratorFactory:
             "__builtins__": {
                 "bytearray": bytearray,
                 "bytes": bytes,
+                "list": list,
                 "memoryview": memoryview,
+                "tuple": tuple,
                 "isinstance": isinstance,
                 "len": len,
                 "min": min,
                 "range": range,
                 "NotImplementedError": NotImplementedError,
+                "ValueError": ValueError,
             },
         }
 
