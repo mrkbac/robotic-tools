@@ -12,7 +12,7 @@ from websocket_proxy.dashboard import DashboardRenderer
 from websocket_proxy.proxy import ProxyBridge
 from websocket_proxy.transformers import TransformerRegistry
 from websocket_proxy.transformers.image_to_video import ImageToVideoTransformer
-from websocket_proxy.transformers.pointcloud_pureini import PointCloudPureiniTransformer
+from websocket_proxy.transformers.pointcloud_cloudini import PointCloudCloudiniTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ async def main_async(args: argparse.Namespace) -> None:
     )
     registry.register(image_transformer)
 
-    pointcloud_transformer = PointCloudPureiniTransformer(
+    pointcloud_transformer = PointCloudCloudiniTransformer(
         encoding=args.pointcloud_encoding,
         compression=args.pointcloud_compression,
         resolution=args.pointcloud_resolution,

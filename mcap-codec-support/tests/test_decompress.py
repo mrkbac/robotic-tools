@@ -2,9 +2,21 @@
 """Tests for the decompressors and DecompressDecoderFactory."""
 
 import io
+from types import SimpleNamespace
 
+import pytest
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from small_mcap import McapWriter, read_message_decoded
+
+
+def _ns(value):
+    """Recursively wrap dicts/lists in SimpleNamespace to mimic CDR-decoded messages."""
+    if isinstance(value, dict):
+        return SimpleNamespace(**{k: _ns(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [_ns(item) for item in value]
+    return value
+
 
 FOXGLOVE_COMPRESSED_VIDEO = """\
 builtin_interfaces/Time timestamp
@@ -110,6 +122,38 @@ def _create_compressed_pointcloud_mcap(
     return buf
 
 
+def _create_foxglove_compressed_pointcloud_mcap(
+    clouds: list[tuple[int, dict]],
+    *,
+    topic: str = "/lidar/compressed",
+) -> io.BytesIO:
+    from mcap_codec_support.pointcloud import (
+        FOXGLOVE_COMPRESSED_POINTCLOUD,
+        FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+    )
+
+    buf = io.BytesIO()
+    writer = McapWriter(buf, encoder_factory=ROS2EncoderFactory())
+    writer.start()
+
+    writer.add_schema(
+        1,
+        FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+        "ros2msg",
+        FOXGLOVE_COMPRESSED_POINTCLOUD.encode(),
+    )
+    writer.add_channel(1, topic, "cdr", 1)
+
+    for log_time, cloud_msg in clouds:
+        writer.add_message_encode(
+            channel_id=1, log_time=log_time, publish_time=log_time, data=cloud_msg
+        )
+
+    writer.finish()
+    buf.seek(0)
+    return buf
+
+
 def _make_h264_keyframe(width: int = 64, height: int = 32) -> bytes:
     from fractions import Fraction
 
@@ -168,6 +212,31 @@ def _make_compressed_pointcloud(n_points: int = 10) -> tuple[bytes, bytes]:
     return compressed, raw_bytes
 
 
+def _make_pointcloud2():
+    import numpy as np
+    from pointcloud2 import create_cloud, fields_from_dtype
+
+    points = np.array(
+        [
+            (1.0, 2.0, 3.0, 10.0, 1),
+            (4.0, 5.0, 6.0, 20.0, 2),
+            (7.0, 8.0, 9.0, 30.0, 3),
+        ],
+        dtype=[
+            ("x", np.float32),
+            ("y", np.float32),
+            ("z", np.float32),
+            ("intensity", np.float32),
+            ("ring", np.uint16),
+        ],
+    )
+    header = SimpleNamespace(
+        stamp=SimpleNamespace(sec=12, nanosec=345),
+        frame_id="lidar",
+    )
+    return create_cloud(header, fields_from_dtype(points.dtype), points)
+
+
 # ---------------------------------------------------------------------------
 # Video decompressor tests
 # ---------------------------------------------------------------------------
@@ -175,7 +244,7 @@ def _make_compressed_pointcloud(n_points: int = 10) -> tuple[bytes, bytes]:
 
 class TestVideoDecompressor:
     def test_decompress_h264_to_jpeg(self):
-        from pymcap_cli.encoding.video_pyav import PyAVVideoDecompressor
+        from mcap_codec_support.video.pyav import PyAVVideoDecompressor
 
         dec = PyAVVideoDecompressor("compressed", 80)
         h264_data = _make_h264_keyframe()
@@ -186,7 +255,7 @@ class TestVideoDecompressor:
         assert result.data[:2] == b"\xff\xd8"
 
     def test_decompress_h264_to_raw(self):
-        from pymcap_cli.encoding.video_pyav import PyAVVideoDecompressor
+        from mcap_codec_support.video.pyav import PyAVVideoDecompressor
 
         dec = PyAVVideoDecompressor("raw", 90)
         h264_data = _make_h264_keyframe(width=64, height=32)
@@ -203,8 +272,7 @@ class TestVideoDecompressFactoryTimestamp:
     """Test that VideoDecompressFactory preserves timestamps in the output message."""
 
     def test_timestamp_preserved_in_compressed_output(self):
-        from pymcap_cli.encoding.decompress import VideoDecompressFactory
-        from pymcap_cli.encoding.encoder_common import EncoderMode
+        from mcap_codec_support.video import EncoderMode, VideoDecompressFactory
 
         h264_data = _make_h264_keyframe()
         log_time = 999 * 1_000_000_000 + 12345
@@ -234,7 +302,7 @@ class TestVideoDecompressFactoryTimestamp:
 
 class TestPointCloudDecompressor:
     def test_roundtrip_decompress(self):
-        from pymcap_cli.encoding.pointcloud import PointCloudDecompressFactory
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
 
         compressed, original = _make_compressed_pointcloud(n_points=100)
         factory = PointCloudDecompressFactory()
@@ -256,7 +324,7 @@ class TestPointCloudDecompressor:
             "format": "cloudini",
         }
 
-        result = factory._decompress(msg)
+        result = factory._decompress(_ns(msg))
         assert result["header"] == msg["header"]
         assert result["height"] == 1
         assert result["width"] == 100
@@ -266,7 +334,7 @@ class TestPointCloudDecompressor:
         assert "compressed_data" not in result
 
     def test_preserves_metadata(self):
-        from pymcap_cli.encoding.pointcloud import PointCloudDecompressFactory
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
 
         compressed, _ = _make_compressed_pointcloud(n_points=5)
         factory = PointCloudDecompressFactory()
@@ -290,11 +358,35 @@ class TestPointCloudDecompressor:
             "format": "cloudini",
         }
 
-        result = factory._decompress(msg)
+        result = factory._decompress(_ns(msg))
         assert result["header"]["frame_id"] == "velodyne"
         assert result["fields"] == fields
         assert result["is_bigendian"] is False
         assert result["row_step"] == 60
+
+    def test_cloudini_from_foxglove_schema_uses_payload_layout(self):
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
+
+        compressed, original = _make_compressed_pointcloud(n_points=7)
+        factory = PointCloudDecompressFactory()
+
+        msg = {
+            "timestamp": {"sec": 42, "nanosec": 123},
+            "frame_id": "velodyne",
+            "pose": {
+                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            },
+            "data": compressed,
+            "format": "cloudini",
+        }
+
+        result = factory._decompress(_ns(msg))
+        assert result["header"]["frame_id"] == "velodyne"
+        assert result["height"] == 1
+        assert result["width"] == 7
+        assert [field["name"] for field in result["fields"]] == ["x", "y", "z"]
+        assert result["data"] == original
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +396,7 @@ class TestPointCloudDecompressor:
 
 class TestVideoDecompressFactory:
     def test_decode_compressed_video_from_mcap(self):
-        from pymcap_cli.encoding.decompress import VideoDecompressFactory
+        from mcap_codec_support.video import VideoDecompressFactory
 
         h264_data = _make_h264_keyframe()
         buf = _create_compressed_video_mcap([(1_000_000_000, h264_data, "h264")])
@@ -319,7 +411,7 @@ class TestVideoDecompressFactory:
         assert decoded["data"][:2] == b"\xff\xd8"
 
     def test_multi_topic_gets_separate_decoders(self):
-        from pymcap_cli.encoding.decompress import VideoDecompressFactory
+        from mcap_codec_support.video import VideoDecompressFactory
 
         h264_data = _make_h264_keyframe()
 
@@ -360,14 +452,14 @@ class TestVideoDecompressFactory:
 
 class TestVideoDecompressFactoryFlush:
     def test_flush_all_empty(self):
-        from pymcap_cli.encoding.decompress import VideoDecompressFactory
+        from mcap_codec_support.video import VideoDecompressFactory
 
         factory = VideoDecompressFactory()
         frames = factory.flush_all()
         assert frames == []
 
     def test_flush_all_after_decoding(self):
-        from pymcap_cli.encoding.decompress import VideoDecompressFactory
+        from mcap_codec_support.video import VideoDecompressFactory
 
         # Feed 1 keyframe through the factory and verify flush works
         h264_data = _make_h264_keyframe()
@@ -391,7 +483,7 @@ class TestVideoDecompressFactoryFlush:
 
 class TestPointCloudDecompressFactory:
     def test_decode_compressed_pointcloud_from_mcap(self):
-        from pymcap_cli.encoding.pointcloud import PointCloudDecompressFactory
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
 
         compressed, original = _make_compressed_pointcloud(n_points=50)
 
@@ -422,13 +514,68 @@ class TestPointCloudDecompressFactory:
         assert decoded["data"] == original
         assert decoded["width"] == 50
 
+    def test_decode_cloudini_foxglove_from_mcap(self):
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
+
+        compressed, original = _make_compressed_pointcloud(n_points=4)
+        cloud_msg = {
+            "timestamp": {"sec": 1, "nanosec": 0},
+            "frame_id": "lidar",
+            "pose": {
+                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            },
+            "data": compressed,
+            "format": "cloudini",
+        }
+
+        buf = _create_foxglove_compressed_pointcloud_mcap([(1_000_000_000, cloud_msg)])
+
+        factory = PointCloudDecompressFactory()
+        results = list(read_message_decoded(buf, decoder_factories=[factory]))
+
+        assert len(results) == 1
+        decoded = results[0].decoded_message
+        assert decoded["data"] == original
+        assert decoded["width"] == 4
+
+    def test_decode_draco_compressed_pointcloud2_from_mcap(self):
+        pytest.importorskip("DracoPy")
+        import numpy as np
+        from mcap_codec_support.pointcloud import (
+            DracoPointCloudCompressor,
+            PointCloudDecompressFactory,
+            build_compressed_pointcloud2_message,
+        )
+        from pointcloud2 import read_points
+
+        pointcloud = _make_pointcloud2()
+        compressor = DracoPointCloudCompressor(resolution=0.001, compression_level=4)
+        cloud_msg = build_compressed_pointcloud2_message(
+            pointcloud,
+            compressor.compress(pointcloud),
+            fmt="draco",
+        )
+        buf = _create_compressed_pointcloud_mcap([(1_000_000_000, cloud_msg)])
+
+        factory = PointCloudDecompressFactory()
+        results = list(read_message_decoded(buf, decoder_factories=[factory]))
+
+        assert len(results) == 1
+        decoded = results[0].decoded_message
+        assert decoded["header"]["frame_id"] == "lidar"
+        points = read_points(SimpleNamespace(**{k: v for k, v in decoded.items() if k != "header"}))
+        np.testing.assert_allclose(points["x"], [1.0, 4.0, 7.0], atol=0.01)
+        np.testing.assert_allclose(points["intensity"], [10.0, 20.0, 30.0], atol=0.01)
+        np.testing.assert_array_equal(points["ring"], [1, 2, 3])
+
 
 class TestBothFactoriesTogether:
     def test_non_compressed_topics_pass_through(self):
         """With both factories, non-matching schemas should raise (no CDR fallback)."""
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
+        from mcap_codec_support.video import VideoDecompressFactory
         from mcap_ros2_support_fast.decoder import DecoderFactory
-        from pymcap_cli.encoding.decompress import VideoDecompressFactory
-        from pymcap_cli.encoding.pointcloud import PointCloudDecompressFactory
 
         buf = io.BytesIO()
         writer = McapWriter(buf, encoder_factory=ROS2EncoderFactory())

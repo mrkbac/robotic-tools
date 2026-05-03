@@ -29,16 +29,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from rich.console import Console
-
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video import (
     IMAGE_SCHEMAS,
     EncoderBackend,
     EncoderMode,
     VideoCodec,
     VideoEncoderError,
+    VideoFileWriterSession,
+    create_video_file_writer,
 )
-from pymcap_cli.encoding.video import VideoFileWriterSession, create_video_file_writer
+from rich.console import Console
+
 from pymcap_cli.exporters._common import (
     message_timestamps_ns,
     normalize_schema_name,

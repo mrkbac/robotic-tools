@@ -6,8 +6,8 @@ import shutil
 from typing import TYPE_CHECKING
 
 import pytest
+from mcap_codec_support.video import EncoderBackend, EncoderMode, VideoCodec
 from pymcap_cli.cmd.video_cmd import QualityPreset, video
-from pymcap_cli.encoding.encoder_common import EncoderBackend, EncoderMode, VideoCodec
 
 if TYPE_CHECKING:
     from pathlib import Path

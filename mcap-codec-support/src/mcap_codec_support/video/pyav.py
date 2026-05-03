@@ -9,41 +9,29 @@ from __future__ import annotations
 import threading
 from fractions import Fraction
 from io import BytesIO
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 import av
 import av.error
 from av import Packet, VideoFrame
 from typing_extensions import Self
 
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video.common import (
     DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
 )
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video.common import (
     resolve_encoder as _resolve_encoder,
 )
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video.common import (
     resolve_encoder_for_backend as _resolve_encoder_for_backend,
 )
 
 if TYPE_CHECKING:
     from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
-
-
-# ---------------------------------------------------------------------------
-# ROS message protocols (for type checking)
-# ---------------------------------------------------------------------------
-
-
-class CompressedImageMsg(Protocol):
-    """Protocol for ROS CompressedImage messages."""
-
-    @property
-    def data(self) -> bytes | bytearray | memoryview: ...
 
 
 # ---------------------------------------------------------------------------
@@ -227,15 +215,13 @@ class VideoEncoder:
             return None
         return b"".join(bytes(packet) for packet in packets)
 
-    def flush(self) -> bytes | None:
-        """Flush remaining buffered frames from the encoder."""
+    def flush_packets(self) -> list[bytes]:
+        """Flush remaining buffered frames as one bytes blob per packet."""
         try:
             packets = list(self._context.encode(None))
         except av.error.FFmpegError:
-            return None
-        if not packets:
-            return None
-        return b"".join(bytes(packet) for packet in packets)
+            return []
+        return [bytes(packet) for packet in packets]
 
 
 # ---------------------------------------------------------------------------

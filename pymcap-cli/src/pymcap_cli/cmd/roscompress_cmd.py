@@ -7,6 +7,31 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from cyclopts import Group, Parameter
+from mcap_codec_support.pointcloud import (
+    COMPRESSED_POINTCLOUD2,
+    COMPRESSED_POINTCLOUD2_SCHEMA,
+    FOXGLOVE_COMPRESSED_POINTCLOUD,
+    FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+    POINTCLOUD2_SCHEMAS,
+    PointCloudCompressionError,
+    build_compressed_pointcloud2_message,
+    build_foxglove_compressed_pointcloud_message,
+)
+from mcap_codec_support.video import (
+    COMPRESSED_IMAGE,
+    FOXGLOVE_COMPRESSED_VIDEO,
+    IMAGE_SCHEMAS,
+    RAW_SCHEMAS,
+    EncoderConfig,
+    EncoderMode,
+    VideoCompressionBackend,
+    VideoEncoderError,
+    calculate_downscale_dimensions,
+    create_video_compression_backend,
+    encode_raw_image_to_jpeg,
+    get_software_encoder,
+    prefetch_image_decodes,
+)
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
@@ -20,24 +45,6 @@ from pymcap_cli.core.mcap_transform import (
     ensure_schema,
     get_total_message_count,
     print_size_comparison,
-)
-from pymcap_cli.encoding.decompress import COMPRESSED_IMAGE
-from pymcap_cli.encoding.encoder_common import (
-    FOXGLOVE_COMPRESSED_VIDEO,
-    IMAGE_SCHEMAS,
-    RAW_SCHEMAS,
-    EncoderConfig,
-    EncoderMode,
-    VideoEncoderError,
-    calculate_downscale_dimensions,
-    get_software_encoder,
-)
-from pymcap_cli.encoding.pointcloud import COMPRESSED_POINTCLOUD2, POINTCLOUD2_SCHEMAS
-from pymcap_cli.encoding.video import (
-    VideoCompressionBackend,
-    create_video_compression_backend,
-    encode_raw_image_to_jpeg,
-    prefetch_image_decodes,
 )
 from pymcap_cli.exporters._common import normalize_schema_name
 from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
@@ -65,13 +72,27 @@ POINTCLOUD_GROUP = Group("Point Cloud")
 
 
 def _create_pointcloud_compressor(
-    pc_encoding: str, pc_compression: str, resolution: float
+    pc_format: str,
+    pc_encoding: str,
+    pc_compression: str,
+    resolution: float,
+    draco_compression_level: int,
 ) -> Any | None:
     try:
-        from pymcap_cli.encoding.pointcloud import PointCloudCompressor  # noqa: PLC0415
+        if pc_format == "draco":
+            from mcap_codec_support.pointcloud import DracoPointCloudCompressor  # noqa: PLC0415
 
-        return PointCloudCompressor(
-            encoding=pc_encoding, compression=pc_compression, resolution=resolution
+            return DracoPointCloudCompressor(
+                resolution=resolution,
+                compression_level=draco_compression_level,
+            )
+
+        from mcap_codec_support.pointcloud import CloudiniPointCloudCompressor  # noqa: PLC0415
+
+        return CloudiniPointCloudCompressor(
+            encoding=pc_encoding,
+            compression=pc_compression,
+            resolution=resolution,
         )
     except ImportError:
         return None
@@ -115,6 +136,20 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = 0.01,
+    pc_format: Annotated[
+        Literal["cloudini", "draco"],
+        Parameter(
+            name=["--pc-format"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = "cloudini",
+    pc_schema: Annotated[
+        Literal["auto", "pointcloud2", "foxglove"],
+        Parameter(
+            name=["--pc-schema"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = "auto",
     pc_encoding: Annotated[
         Literal["lossy", "lossless", "none"],
         Parameter(
@@ -129,6 +164,13 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = "zstd",
+    draco_compression_level: Annotated[
+        int,
+        Parameter(
+            name=["--draco-compression-level"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = 7,
     scale: Annotated[
         int | None,
         Parameter(
@@ -168,7 +210,7 @@ def roscompress(
     """Compress ROS MCAP by converting image and point cloud topics.
 
     Converts image topics to CompressedVideo or JPEG CompressedImage and
-    PointCloud2 topics to CompressedPointCloud2 using pureini.
+    PointCloud2 topics to compressed point cloud messages using Cloudini or Draco.
 
     Parameters
     ----------
@@ -188,11 +230,18 @@ def roscompress(
         Cap the maximum image dimension (width or height) while preserving aspect ratio.
         When None, use original resolution.
     resolution
-        Resolution for lossy float compression of point clouds. Default: 0.01.
+        Resolution for lossy point cloud compression. Default: 0.01.
+    pc_format
+        Point cloud output format (cloudini or draco). Default: cloudini.
+    pc_schema
+        Point cloud output schema (auto, pointcloud2, foxglove). ``auto`` uses
+        CompressedPointCloud2 for Cloudini and Foxglove CompressedPointCloud for Draco.
     pc_encoding
-        Point cloud encoding mode (lossy, lossless, none). Default: lossy.
+        Cloudini point cloud encoding mode (lossy, lossless, none). Default: lossy.
     pc_compression
-        Point cloud second-stage compression (zstd, lz4, none). Default: zstd.
+        Cloudini point cloud second-stage compression (zstd, lz4, none). Default: zstd.
+    draco_compression_level
+        Draco compression level (0-10). Default: 7.
     image_format
         How to encode image topics:
         ``video`` (default) — convert raw and compressed images to CompressedVideo
@@ -208,6 +257,12 @@ def roscompress(
 
     if not 1 <= jpeg_quality <= 100:
         console.print(f"[red]Error:[/red] --jpeg-quality must be in [1, 100], got {jpeg_quality}")
+        return 1
+    if not 0 <= draco_compression_level <= 10:
+        console.print(
+            "[red]Error:[/red] --draco-compression-level must be in [0, 10], "
+            f"got {draco_compression_level}"
+        )
         return 1
 
     do_video = image_format == "video"
@@ -230,11 +285,20 @@ def roscompress(
     # Create point cloud compressor.
     pc_compressor: Any | None = None
     if pointcloud:
-        pc_compressor = _create_pointcloud_compressor(pc_encoding, pc_compression, resolution)
+        pc_compressor = _create_pointcloud_compressor(
+            pc_format,
+            pc_encoding,
+            pc_compression,
+            resolution,
+            draco_compression_level,
+        )
         if pc_compressor is None:
+            extra = "draco" if pc_format == "draco" else "pointcloud"
+            package = f"pymcap-cli[{extra}]"
             console.print(
-                "[red]Error:[/red] pureini is required for PointCloud2 compression. "
-                "Install with: uv add 'pymcap-cli[pointcloud]'"
+                f"[red]Error:[/red] {pc_format} dependencies are required for "
+                "PointCloud2 compression. "
+                f"Install with: uv add '{package}'"
             )
             return 1
 
@@ -252,9 +316,14 @@ def roscompress(
     else:
         console.print("[cyan]Image mode:[/cyan] none (copy unchanged)")
     if pointcloud:
-        console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
-        console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
-        if pc_encoding == "lossy":
+        console.print(f"[cyan]Point cloud format:[/cyan] {pc_format}")
+        console.print(f"[cyan]Point cloud schema:[/cyan] {pc_schema}")
+        if pc_format == "cloudini":
+            console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
+            console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
+        else:
+            console.print(f"[cyan]Draco compression level:[/cyan] {draco_compression_level}")
+        if pc_format == "draco" or pc_encoding == "lossy":
             console.print(f"[cyan]Point cloud resolution:[/cyan] {resolution}")
     else:
         console.print("[cyan]Point cloud compression:[/cyan] disabled")
@@ -313,6 +382,8 @@ def roscompress(
             do_jpeg,
             jpeg_quality,
             pointcloud,
+            pc_format,
+            pc_schema,
             encoders,
             encoder_name,
             codec,
@@ -342,12 +413,7 @@ def roscompress(
                 pending = pending_messages.get(topic_name, deque())
                 if not pending:
                     continue
-                if hasattr(video_enc, "flush_packets"):
-                    packets = video_enc.flush_packets()
-                else:
-                    flushed = video_enc.flush()
-                    packets = [flushed] if flushed else []
-                for packet in packets:
+                for packet in video_enc.flush_packets():
                     if pending:
                         pending_msg = pending.popleft()
                         _write_compressed_video(
@@ -430,56 +496,45 @@ def _write_compressed_video(
 def _handle_pointcloud(
     msg: DecodedMessage,
     pc_compressor: Any,
+    pc_format: str,
+    pc_schema: str,
     writer: McapWriter,
     schema_ids: dict[str, int],
     channel_ids: dict[str, int],
     pointcloud_topics_converted: set[str],
 ) -> None:
     topic = msg.channel.topic
-    compressed = pc_compressor.compress(msg.decoded_message)
+    decoded = msg.decoded_message
+    resolved_schema = pc_schema
+    if resolved_schema == "auto":
+        resolved_schema = "foxglove" if pc_format == "draco" else "pointcloud2"
+
+    compressed = pc_compressor.compress(decoded)
+    if resolved_schema == "foxglove":
+        compressed_pc_msg = build_foxglove_compressed_pointcloud_message(
+            decoded,
+            compressed,
+            fmt=pc_format,
+        )
+        target = f"CompressedPointCloud/{pc_format}"
+        schema_name_out = FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA
+        schema_data = FOXGLOVE_COMPRESSED_POINTCLOUD.encode()
+    else:
+        compressed_pc_msg = build_compressed_pointcloud2_message(
+            decoded,
+            compressed,
+            fmt=pc_format,
+        )
+        target = f"CompressedPointCloud2/{pc_format}"
+        schema_name_out = COMPRESSED_POINTCLOUD2_SCHEMA
+        schema_data = COMPRESSED_POINTCLOUD2.encode()
 
     if topic not in pointcloud_topics_converted:
         pointcloud_topics_converted.add(topic)
         schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
-        console.print(
-            f"[green]✓[/green] Converting {topic} ({schema_name} → CompressedPointCloud2)"
-        )
+        console.print(f"[green]✓[/green] Converting {topic} ({schema_name} → {target})")
 
-    decoded = msg.decoded_message
-    compressed_pc_msg = {
-        "header": {
-            "stamp": {
-                "sec": decoded.header.stamp.sec,
-                "nanosec": decoded.header.stamp.nanosec,
-            },
-            "frame_id": decoded.header.frame_id,
-        },
-        "height": decoded.height,
-        "width": decoded.width,
-        "fields": [
-            {
-                "name": f.name,
-                "offset": f.offset,
-                "datatype": f.datatype,
-                "count": f.count,
-            }
-            for f in decoded.fields
-        ],
-        "is_bigendian": decoded.is_bigendian,
-        "point_step": decoded.point_step,
-        "row_step": decoded.row_step,
-        "compressed_data": compressed,
-        "is_dense": decoded.is_dense,
-        "format": "cloudini",
-    }
-
-    schema_id = ensure_schema(
-        writer,
-        "point_cloud_interfaces/msg/CompressedPointCloud2",
-        "ros2msg",
-        COMPRESSED_POINTCLOUD2.encode(),
-        schema_ids,
-    )
+    schema_id = ensure_schema(writer, schema_name_out, "ros2msg", schema_data, schema_ids)
     channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
     writer.add_message_encode(
         channel_id=channel_id,
@@ -571,6 +626,8 @@ def _run_compress_loop(
     do_jpeg: bool,
     jpeg_quality: int,
     pointcloud: bool,
+    pc_format: str,
+    pc_schema: str,
     encoders: dict[str, Any],
     encoder_name: str,
     codec: str,
@@ -697,10 +754,26 @@ def _run_compress_loop(
             last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
 
         elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
-            _handle_pointcloud(
-                msg, pc_compressor, writer, schema_ids, channel_ids, pointcloud_topics_converted
-            )
-            counters["pc_converted"] += 1
+            try:
+                _handle_pointcloud(
+                    msg,
+                    pc_compressor,
+                    pc_format,
+                    pc_schema,
+                    writer,
+                    schema_ids,
+                    channel_ids,
+                    pointcloud_topics_converted,
+                )
+            except PointCloudCompressionError as exc:
+                console.print(
+                    f"[yellow]Warning:[/yellow] Skipping point cloud compression for "
+                    f"{msg.channel.topic}: {exc}"
+                )
+                copy_message(msg, writer, schema_ids, channel_ids)
+                counters["copied"] += 1
+            else:
+                counters["pc_converted"] += 1
 
         else:
             copy_message(msg, writer, schema_ids, channel_ids)

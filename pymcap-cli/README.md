@@ -307,7 +307,7 @@ pymcap-cli video data.mcap --topic /lidar/image --output lidar.mp4 --codec h265 
 
 ### `roscompress` — ROS Image Compression
 
-Compress ROS MCAP files by converting CompressedImage/Image topics to CompressedVideo format. Requires the `video` extra.
+Compress ROS MCAP files by converting CompressedImage/Image topics to CompressedVideo format and PointCloud2 topics to Cloudini or Draco compressed point clouds.
 
 ```bash
 # Basic compression
@@ -315,11 +315,14 @@ pymcap-cli roscompress data.mcap -o compressed.mcap
 
 # Specify quality and codec
 pymcap-cli roscompress data.mcap -o compressed.mcap --quality 28 --codec h265
+
+# Draco point cloud compression using the Foxglove compressed point cloud schema
+pymcap-cli roscompress data.mcap -o compressed.mcap --pc-format draco --pc-schema foxglove
 ```
 
 ### `rosdecompress` — ROS Decompression
 
-Decompress CompressedVideo and CompressedPointCloud2 topics back to standard ROS formats. Requires the `video` extra.
+Decompress CompressedVideo, CompressedPointCloud2, and Foxglove CompressedPointCloud topics back to standard ROS formats.
 
 ```bash
 # Decompress to CompressedImage (JPEG)

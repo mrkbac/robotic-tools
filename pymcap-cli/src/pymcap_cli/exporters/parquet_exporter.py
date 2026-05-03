@@ -8,7 +8,7 @@ file.
 
 Nested ROS messages map to Parquet/Arrow ``STRUCT``, arrays to ``LIST``, and
 ``sensor_msgs/PointCloud2`` payloads decoded by
-:class:`pymcap_cli.encoding.pointcloud.Pointcloud2DecoderFactory` become
+:class:`mcap_codec_support.pointcloud.Pointcloud2DecoderFactory` become
 ``LIST<STRUCT<...>>``.
 """
 
@@ -19,16 +19,19 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from mcap_codec_support.pointcloud import (
+    COMPRESSED_POINTCLOUD2_SCHEMA,
+    FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+    CompressedPointCloudDecoderFactory,
+    Pointcloud2DecoderFactory,
+)
 from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 
 from pymcap_cli.encoding.arrow_schema import ArrowSchemaCache
-from pymcap_cli.encoding.pointcloud import (
-    CompressedPointcloud2DecoderFactory,
-    Pointcloud2DecoderFactory,
-)
 from pymcap_cli.exporters._common import (
     SkipSchemaMixin,
     message_timestamps_ns,
+    normalize_schema_name,
     prepare_output_file,
 )
 from pymcap_cli.exporters.base import Exporter, TopicWriter
@@ -45,11 +48,24 @@ if TYPE_CHECKING:
     from pymcap_cli.exporters.base import TopicContext
 
 
-_COMPRESSED_POINTCLOUD2_SCHEMA = "point_cloud_interfaces/CompressedPointCloud2"
-
 # Cap on in-flight write futures — each queued Arrow Table can be hundreds of
 # MB, so keep the backlog shallow.
 _MAX_WRITER_BACKLOG = 4
+
+
+def _compressed_pointcloud_codec_available() -> bool:
+    try:
+        import pureini  # noqa: F401, PLC0415
+    except ImportError:
+        pass
+    else:
+        return True
+    try:
+        import DracoPy  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    else:
+        return True
 
 
 def _build_row(msg: DecodedMessage) -> dict[str, Any]:
@@ -235,14 +251,16 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
         )
 
         self._factories: list[Any] = [Pointcloud2DecoderFactory()]
-        try:
-            self._factories.append(CompressedPointcloud2DecoderFactory())
+        if _compressed_pointcloud_codec_available():
+            self._factories.append(CompressedPointCloudDecoderFactory())
             self._compressed_pointcloud_warning: str | None = None
-        except ImportError:
-            self._skipped_schemas.add(_COMPRESSED_POINTCLOUD2_SCHEMA)
+        else:
+            self._skipped_schemas.add(normalize_schema_name(COMPRESSED_POINTCLOUD2_SCHEMA))
+            self._skipped_schemas.add(normalize_schema_name(FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA))
             self._compressed_pointcloud_warning = (
-                "[dim]pureini not installed — skipping CompressedPointCloud2 "
-                "(install [yellow]pymcap-cli[pointcloud][/yellow] to include).[/dim]"
+                "[dim]point cloud codec support not installed — skipping compressed point clouds "
+                "(install [yellow]pymcap-cli[pointcloud][/yellow] or "
+                "[yellow]pymcap-cli[draco][/yellow] to include).[/dim]"
             )
         self._factories.append(Ros2DecoderFactory())
 

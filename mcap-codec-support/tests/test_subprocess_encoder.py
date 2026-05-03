@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import mcap_codec_support.video.compression as compression_module
 import pytest
-from pymcap_cli.encoding.video_ffmpeg import (
+from mcap_codec_support.video import EncoderMode, create_video_compression_backend
+from mcap_codec_support.video.ffmpeg import (
     AnnexBParser,
     FFmpegVideoEncoder,
     check_encoder_cli,
@@ -89,6 +91,22 @@ class TestFfmpegDiscovery:
         assert check_encoder_cli("totally_fake_encoder_xyz") is False
 
 
+class TestBackendSelection:
+    def test_auto_falls_back_to_ffmpeg_when_pyav_is_missing(self, monkeypatch) -> None:
+        def raise_import_error(*_args):
+            raise ImportError("No module named av")
+
+        monkeypatch.setattr(
+            compression_module._PyAVCompressionBackend,
+            "resolve_encoder",
+            raise_import_error,
+        )
+
+        backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
+
+        assert backend.label == "ffmpeg-cli"
+
+
 # ---------------------------------------------------------------------------
 # FFmpegVideoEncoder integration
 # ---------------------------------------------------------------------------
@@ -97,7 +115,7 @@ class TestFfmpegDiscovery:
 @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
 class TestFFmpegVideoEncoder:
     def test_encode_raw_bytes(self) -> None:
-        """Encode raw YUV420p bytes — no PyAV needed."""
+        """Encode raw YUV420p bytes without PyAV."""
         width, height = 64, 64
         frame_size = width * height * 3 // 2
         encoder = FFmpegVideoEncoder(
@@ -117,9 +135,7 @@ class TestFFmpegVideoEncoder:
             if result is not None:
                 outputs.append(result)
 
-        flushed = encoder.flush()
-        if flushed:
-            outputs.append(flushed)
+        outputs.extend(encoder.flush_packets())
 
         assert len(outputs) > 0
         total_bytes = sum(len(o) for o in outputs)
@@ -147,9 +163,8 @@ class TestFFmpegVideoEncoder:
                     f"Frame {i}: output does not start with start code"
                 )
 
-        flushed = encoder.flush()
-        if flushed:
-            assert flushed[:4] == b"\x00\x00\x00\x01"
+        for packet in encoder.flush_packets():
+            assert packet[:4] == b"\x00\x00\x00\x01"
 
     def test_cleanup_on_del(self) -> None:
         encoder = FFmpegVideoEncoder(

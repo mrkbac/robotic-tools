@@ -10,7 +10,7 @@ Output layout::
 
 Nested ROS messages map to Parquet/Arrow ``STRUCT``, arrays to ``LIST``, and
 ``sensor_msgs/PointCloud2`` payloads are decoded into a ``LIST<STRUCT<...>>``
-by :class:`pymcap_cli.encoding.pointcloud.Pointcloud2DecoderFactory`.
+by :class:`mcap_codec_support.pointcloud.Pointcloud2DecoderFactory`.
 
 The output is consumable by any tool that reads Parquet — DuckDB, Polars,
 pandas, Arrow, Spark, …::

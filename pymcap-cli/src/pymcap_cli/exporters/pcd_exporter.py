@@ -1,6 +1,6 @@
 """PCD exporter — one ``.pcd`` file per ``sensor_msgs/PointCloud2`` message.
 
-Reuses :class:`pymcap_cli.encoding.pointcloud.Pointcloud2DecoderFactory` to
+Reuses :class:`mcap_codec_support.pointcloud.Pointcloud2DecoderFactory` to
 decode the binary blob into a structured numpy array; writes ASCII PCD v0.7
 (universally readable by ``pcl_viewer``, Open3D, CloudCompare).
 """
@@ -10,12 +10,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
-from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
-
-from pymcap_cli.encoding.pointcloud import (
-    CompressedPointcloud2DecoderFactory,
+from mcap_codec_support.pointcloud import (
+    COMPRESSED_POINTCLOUD2_SCHEMA,
+    FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+    CompressedPointCloudDecoderFactory,
     Pointcloud2DecoderFactory,
 )
+from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
+
 from pymcap_cli.exporters._common import (
     message_timestamps_ns,
     normalize_schema_name,
@@ -90,9 +92,27 @@ def write_pcd_ascii(path: Path, points: np.ndarray) -> None:
 
 # Canonical (short) schema names — compare via :func:`normalize_schema_name`.
 _POINTCLOUD_SCHEMAS: frozenset[str] = frozenset(
-    {"sensor_msgs/PointCloud2", "point_cloud_interfaces/CompressedPointCloud2"}
+    {
+        "sensor_msgs/PointCloud2",
+        "point_cloud_interfaces/CompressedPointCloud2",
+        "foxglove_msgs/CompressedPointCloud",
+    }
 )
-_COMPRESSED_POINTCLOUD2 = "point_cloud_interfaces/CompressedPointCloud2"
+
+
+def _compressed_pointcloud_codec_available() -> bool:
+    try:
+        import pureini  # noqa: F401, PLC0415
+    except ImportError:
+        pass
+    else:
+        return True
+    try:
+        import DracoPy  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    else:
+        return True
 
 
 class _PcdTopicWriter(TopicWriter):
@@ -116,11 +136,9 @@ class PcdExporter(Exporter):
 
     def __init__(self) -> None:
         self._factories: list[Any] = [Pointcloud2DecoderFactory()]
-        try:
-            self._factories.append(CompressedPointcloud2DecoderFactory())
-            self._compressed_supported = True
-        except ImportError:
-            self._compressed_supported = False
+        self._compressed_supported = _compressed_pointcloud_codec_available()
+        if self._compressed_supported:
+            self._factories.append(CompressedPointCloudDecoderFactory())
         self._factories.append(Ros2DecoderFactory())
 
     def decoder_factories(self) -> list[Any]:
@@ -131,7 +149,10 @@ class PcdExporter(Exporter):
             return False
         assert schema is not None
         canonical = normalize_schema_name(schema.name)
-        if canonical == _COMPRESSED_POINTCLOUD2:
+        if canonical in {
+            normalize_schema_name(COMPRESSED_POINTCLOUD2_SCHEMA),
+            normalize_schema_name(FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA),
+        }:
             return self._compressed_supported
         return True
 

@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from mcap_codec_support.video import EncoderMode
 from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 from pymcap_cli.cmd.roscompress_cmd import roscompress
-from pymcap_cli.encoding.encoder_common import EncoderMode
 from small_mcap import read_message_decoded
 
 if TYPE_CHECKING:

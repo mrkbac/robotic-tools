@@ -1,313 +1,28 @@
-"""Unified video encode/decode facade for pymcap-cli.
-
-Backend modules hold the low-level PyAV and ffmpeg subprocess primitives. This
-module owns backend selection and the CLI-facing workflows.
-"""
+"""Lazy MP4 writer helpers for decoded image messages."""
 
 from __future__ import annotations
 
-from collections import deque
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from pymcap_cli.encoding.encoder_common import (
-    COMPRESSED_SCHEMAS,
-    DEFAULT_FPS,
-    DEFAULT_GOP_SIZE,
-    IMAGE_SCHEMAS,
-    RAW_SCHEMAS,
+from mcap_codec_support.video.common import (
     EncoderBackend,
     EncoderConfig,
     EncoderMode,
     VideoCodec,
-    VideoDecompressorProtocol,
     VideoEncoderError,
-    calculate_downscale_dimensions,
     get_encoder_options,
     raw_image_to_array,
     resolve_encoder_for_backend,
 )
+from mcap_codec_support.video.compression import decode_compressed_image_to_rgb_array
+from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS, IMAGE_SCHEMAS, RAW_SCHEMAS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
-    from concurrent.futures import Future, ThreadPoolExecutor
+    from collections.abc import Callable
     from pathlib import Path
 
-    from small_mcap import DecodedMessage
-
-
-class VideoCompressionBackend(Protocol):
-    """Backend used by roscompress for CompressedVideo output."""
-
-    label: str
-    prefetch_supported: bool
-
-    def test_encoder(self, encoder_name: str) -> bool: ...
-
-    def resolve_encoder(self, codec: str) -> str: ...
-
-    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]: ...
-
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[Any, int, int]: ...
-
-    def create_encoder(
-        self,
-        width: int,
-        height: int,
-        codec_name: str,
-        quality: int,
-        *,
-        input_pix_fmt: str | None = None,
-        scale: tuple[int, int] | None = None,
-    ) -> Any: ...
-
-    def get_pix_fmt(self, topic: str) -> str | None: ...
-
-
-class _PyAVCompressionBackend:
-    label = "pyav"
-    prefetch_supported = True
-
-    def test_encoder(self, encoder_name: str) -> bool:
-        from pymcap_cli.encoding.video_pyav import test_encoder  # noqa: PLC0415
-
-        return test_encoder(encoder_name)
-
-    def resolve_encoder(self, codec: str) -> str:
-        from pymcap_cli.encoding.video_pyav import resolve_encoder  # noqa: PLC0415
-
-        return resolve_encoder(codec)
-
-    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]:
-        from pymcap_cli.encoding.video_pyav import decode_compressed_frame  # noqa: PLC0415
-
-        frame = decode_compressed_frame(data)
-        return frame, frame.width, frame.height
-
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[Any, int, int]:
-        if schema_name in COMPRESSED_SCHEMAS:
-            return self.decode_compressed(bytes(msg.decoded_message.data))
-
-        import av  # noqa: PLC0415
-
-        rgb_array = raw_image_to_array(msg.decoded_message)
-        frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
-        return frame, frame.width, frame.height
-
-    def create_encoder(
-        self,
-        width: int,
-        height: int,
-        codec_name: str,
-        quality: int,
-        *,
-        input_pix_fmt: str | None = None,  # noqa: ARG002
-        scale: tuple[int, int] | None = None,  # noqa: ARG002
-    ) -> Any:
-        from pymcap_cli.encoding.video_pyav import VideoEncoder  # noqa: PLC0415
-
-        return VideoEncoder(
-            width=width,
-            height=height,
-            codec_name=codec_name,
-            quality=quality,
-            target_fps=DEFAULT_FPS,
-            gop_size=DEFAULT_GOP_SIZE,
-        )
-
-    def get_pix_fmt(self, topic: str) -> str | None:
-        del topic
-        return None
-
-
-class _FfmpegCliCompressionBackend:
-    label = "ffmpeg-cli"
-    prefetch_supported = False
-
-    def __init__(self) -> None:
-        self._topic_pix_fmt: dict[str, str | None] = {}
-
-    def get_pix_fmt(self, topic: str) -> str | None:
-        return self._topic_pix_fmt.get(topic)
-
-    def test_encoder(self, encoder_name: str) -> bool:
-        from pymcap_cli.encoding.video_ffmpeg import check_encoder_cli  # noqa: PLC0415
-
-        return check_encoder_cli(encoder_name)
-
-    def resolve_encoder(self, codec: str) -> str:
-        from pymcap_cli.encoding.video_ffmpeg import resolve_encoder  # noqa: PLC0415
-
-        return resolve_encoder(codec)
-
-    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]:
-        from pymcap_cli.encoding.video_ffmpeg import probe_image_dimensions  # noqa: PLC0415
-
-        width, height = probe_image_dimensions(data)
-        return data, width, height
-
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[Any, int, int]:
-        data = bytes(msg.decoded_message.data)
-        topic = msg.channel.topic
-
-        if schema_name in COMPRESSED_SCHEMAS:
-            self._topic_pix_fmt[topic] = None
-            frame, width, height = self.decode_compressed(data)
-            return frame, width, height
-
-        from pymcap_cli.encoding.video_ffmpeg import ROS_ENCODING_TO_PIX_FMT  # noqa: PLC0415
-
-        encoding = str(msg.decoded_message.encoding).lower()
-        pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)
-        if not pix_fmt:
-            raise VideoEncoderError(f"Unsupported image encoding: {msg.decoded_message.encoding}")
-        self._topic_pix_fmt[topic] = pix_fmt
-        return data, msg.decoded_message.width, msg.decoded_message.height
-
-    def create_encoder(
-        self,
-        width: int,
-        height: int,
-        codec_name: str,
-        quality: int,
-        *,
-        input_pix_fmt: str | None = None,
-        scale: tuple[int, int] | None = None,
-    ) -> Any:
-        from pymcap_cli.encoding.video_ffmpeg import FFmpegVideoEncoder  # noqa: PLC0415
-
-        return FFmpegVideoEncoder(
-            width=width,
-            height=height,
-            codec_name=codec_name,
-            quality=quality,
-            target_fps=DEFAULT_FPS,
-            gop_size=DEFAULT_GOP_SIZE,
-            input_pix_fmt=input_pix_fmt,
-            scale=scale,
-        )
-
-
-def create_video_compression_backend(
-    mode: EncoderMode, codec: str, *, do_video: bool
-) -> VideoCompressionBackend:
-    """Select the roscompress video backend."""
-    if mode is EncoderMode.FFMPEG_CLI:
-        return _FfmpegCliCompressionBackend()
-
-    pyav_backend = _PyAVCompressionBackend()
-    if mode is EncoderMode.AUTO and do_video:
-        try:
-            pyav_backend.resolve_encoder(codec)
-        except Exception:  # noqa: BLE001
-            return _FfmpegCliCompressionBackend()
-    return pyav_backend
-
-
-def prefetch_image_decodes(
-    messages: Iterable[DecodedMessage],
-    backend: VideoCompressionBackend,
-    pool: ThreadPoolExecutor,
-    prefetch: int = 8,
-) -> Iterator[tuple[DecodedMessage, Future[Any] | None]]:
-    """Wrap message iterator to decode compressed images in background threads."""
-    from pymcap_cli.exporters._common import normalize_schema_name  # noqa: PLC0415
-
-    buffer: deque[tuple[DecodedMessage, Future[Any] | None]] = deque()
-
-    for msg in messages:
-        schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
-        if schema_name in COMPRESSED_SCHEMAS:
-            data = bytes(msg.decoded_message.data)
-            future: Future[Any] | None = pool.submit(backend.decode_compressed, data)
-        else:
-            future = None
-        buffer.append((msg, future))
-
-        if len(buffer) > prefetch:
-            yield buffer.popleft()
-
-    while buffer:
-        yield buffer.popleft()
-
-
-def _encode_rgb_array_to_jpeg(rgb_array: Any, quality: int) -> bytes:
-    try:
-        import imagecodecs  # noqa: PLC0415
-    except ImportError as exc:
-        raise VideoEncoderError(
-            "imagecodecs is required for JPEG image encoding. "
-            "Install with: uv add 'pymcap-cli[image]'"
-        ) from exc
-    return bytes(imagecodecs.jpeg_encode(rgb_array, level=quality))
-
-
-def _resize_rgb_array(rgb_array: Any, width: int, height: int) -> Any:
-    import av  # noqa: PLC0415
-
-    frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
-    return frame.reformat(width=width, height=height, format="rgb24").to_ndarray(format="rgb24")
-
-
-def encode_raw_image_to_jpeg(
-    decoded_message: Any, *, jpeg_quality: int, scale: int | None
-) -> tuple[bytes, int, int]:
-    """Encode a raw ROS Image message to JPEG using imagecodecs for final encode."""
-    rgb_array = raw_image_to_array(decoded_message)
-    src_h, src_w = rgb_array.shape[:2]
-    if scale is not None:
-        target_w, target_h = calculate_downscale_dimensions(src_w, src_h, scale)
-    else:
-        target_w, target_h = src_w, src_h
-
-    target_w -= target_w % 2
-    target_h -= target_h % 2
-    if target_w < 2 or target_h < 2:
-        raise VideoEncoderError(f"Source frame too small ({target_w}x{target_h}) for JPEG encoding")
-
-    if target_w != src_w or target_h != src_h:
-        rgb_array = _resize_rgb_array(rgb_array, target_w, target_h)
-
-    return _encode_rgb_array_to_jpeg(rgb_array, jpeg_quality), target_w, target_h
-
-
-def decode_compressed_image_to_rgb_array(data: bytes) -> Any:
-    """Decode JPEG/PNG compressed image bytes to an RGB numpy array."""
-    from pymcap_cli.encoding.video_pyav import decode_compressed_frame  # noqa: PLC0415
-
-    return decode_compressed_frame(data).to_ndarray(format="rgb24")
-
-
-def create_video_decompressor(
-    video_format: str = "compressed",
-    jpeg_quality: int = 90,
-    *,
-    mode: EncoderMode = EncoderMode.AUTO,
-) -> VideoDecompressorProtocol:
-    """Create a video decompressor using the requested backend."""
-    if mode == EncoderMode.PYAV:
-        from pymcap_cli.encoding.video_pyav import PyAVVideoDecompressor  # noqa: PLC0415
-
-        return PyAVVideoDecompressor(video_format=video_format, jpeg_quality=jpeg_quality)
-
-    if mode == EncoderMode.FFMPEG_CLI:
-        from pymcap_cli.encoding.video_ffmpeg import FFmpegVideoDecompressor  # noqa: PLC0415
-
-        return FFmpegVideoDecompressor(video_format=video_format, jpeg_quality=jpeg_quality)
-
-    try:
-        from pymcap_cli.encoding.video_pyav import PyAVVideoDecompressor  # noqa: PLC0415
-
-        return PyAVVideoDecompressor(video_format=video_format, jpeg_quality=jpeg_quality)
-    except ImportError:
-        from pymcap_cli.encoding.video_ffmpeg import (  # noqa: PLC0415
-            FFmpegVideoDecompressor,
-            find_ffmpeg,
-        )
-
-        if find_ffmpeg():
-            return FFmpegVideoDecompressor(video_format=video_format, jpeg_quality=jpeg_quality)
-        raise
+    from mcap_codec_support._protocols import VideoFileStrategy
 
 
 _TARGET_BITRATE_BY_QUALITY: tuple[tuple[int, int], ...] = (
@@ -373,18 +88,6 @@ def _pack_raw_image_bytes(decoded: Any, *, width: int, height: int) -> bytes:
     return bytes(packed)
 
 
-class _VideoFileStrategy(Protocol):
-    config: EncoderConfig
-
-    def write_compressed(self, data: bytes, log_time_ns: int) -> None: ...
-
-    def write_raw(self, data: bytes, log_time_ns: int) -> None: ...
-
-    def write_rgb(self, rgb: Any, log_time_ns: int) -> None: ...
-
-    def close(self) -> int: ...
-
-
 class _PyAVMp4Strategy:
     """In-process PyAV MP4 writer."""
 
@@ -401,7 +104,7 @@ class _PyAVMp4Strategy:
         import av  # noqa: PLC0415
         import av.error  # noqa: PLC0415
 
-        from pymcap_cli.encoding.video_pyav import resolve_encoder_for_backend  # noqa: PLC0415
+        from mcap_codec_support.video.pyav import resolve_encoder_for_backend  # noqa: PLC0415
 
         self.path = path
         self._codec = codec
@@ -493,7 +196,7 @@ class _FfmpegMp4Strategy:
         height: int,
         input_pix_fmt: str | None,
     ) -> None:
-        from pymcap_cli.encoding.video_ffmpeg import (  # noqa: PLC0415
+        from mcap_codec_support.video.ffmpeg import (  # noqa: PLC0415
             FFmpegMp4Encoder,
             check_encoder_cli,
         )
@@ -548,7 +251,7 @@ class VideoFileWriterSession:
         self._quality = quality
         self._mode = mode
         self._on_fallback = on_fallback
-        self._strategy: _VideoFileStrategy | None = None
+        self._strategy: VideoFileStrategy | None = None
         self._input_kind: str | None = None
 
     def write_message(self, decoded: Any, schema_name: str, log_time_ns: int) -> None:
@@ -640,7 +343,7 @@ class VideoFileWriterSession:
         self._input_kind = "pyav"
 
     def _open_ffmpeg_compressed(self, data: bytes) -> None:
-        from pymcap_cli.encoding.video_ffmpeg import probe_image_dimensions  # noqa: PLC0415
+        from mcap_codec_support.video.ffmpeg import probe_image_dimensions  # noqa: PLC0415
 
         width, height = probe_image_dimensions(data)
         width, height = _even_dimensions(width, height)
@@ -656,7 +359,7 @@ class VideoFileWriterSession:
         self._input_kind = "ffmpeg"
 
     def _open_ffmpeg_raw(self, decoded: Any) -> None:
-        from pymcap_cli.encoding.video_ffmpeg import ROS_ENCODING_TO_PIX_FMT  # noqa: PLC0415
+        from mcap_codec_support.video.ffmpeg import ROS_ENCODING_TO_PIX_FMT  # noqa: PLC0415
 
         encoding = str(decoded.encoding).lower()
         pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)

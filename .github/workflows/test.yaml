@@ -21,6 +21,7 @@ jobs:
           - { dir: small-mcap, cov: true, submodules: true }
           - { dir: pymcap-cli, cov: true, submodules: true }
           - { dir: mcap-ros2-support-fast, cov: true, submodules: true }
+          - { dir: mcap-codec-support, cov: true, submodules: false }
           - { dir: ros-parser, cov: true, submodules: false }
           - { dir: pointcloud2, cov: true, submodules: false }
           - { dir: pureini, cov: true, submodules: false }

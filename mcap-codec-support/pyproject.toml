@@ -1,24 +1,14 @@
 [project]
-name = "pymcap-cli"
-version = "0.7.0"
-description = "High-performance Python CLI for MCAP file processing with advanced recovery, filtering, and optimization capabilities"
+name = "mcap-codec-support"
+version = "0.1.0"
+description = "Reusable MCAP encoder and decoder factories for robotics codecs"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0" }
 authors = [{ name = "Marko Bausch" }]
-keywords = [
-    "mcap",
-    "cli",
-    "robotics",
-    "ros",
-    "ros2",
-    "recovery",
-    "filtering",
-    "compression",
-]
+keywords = ["mcap", "robotics", "factories", "video", "pointcloud"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
@@ -29,19 +19,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
-    "Topic :: System :: Archiving",
-    "Topic :: Utilities",
     "Typing :: Typed",
 ]
 dependencies = [
-    "rich>=14.1.0",
-    "small-mcap[compression]",
-    "mcap-codec-support[ros2]",
-    "mcap-ros2-support-fast",
-    "cyclopts>=4",
-    "ros-parser",
-    "platformdirs>=4.0.0",
-    "pyyaml>=6.0",
     "typing-extensions>=4.15.0",
 ]
 
@@ -51,28 +31,31 @@ Repository = "https://github.com/mrkbac/robotic-tools"
 Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [project.optional-dependencies]
-video = ["mcap-codec-support[video]"]
-pointcloud = ["mcap-codec-support[pointcloud]"]
-plot = ["plotly>=6.0.0"]
-parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]
-image = ["mcap-codec-support[image]"]
-all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco]"]
+ros2 = ["mcap-ros2-support-fast"]
+video = ["av>=12.0.0", "numpy>=1.24.0"]
+pointcloud = ["mcap-ros2-support-fast", "pureini", "numpy>=1.24.0", "pointcloud2"]
+image = ["mcap-codec-support[video]", "imagecodecs>=2024.1.1"]
+all = ["mcap-codec-support[ros2,video,pointcloud,image,draco]"]
 draco = [
-    "mcap-codec-support[draco]",
+    "dracopy>=1.7.0",
+    "mcap-ros2-support-fast",
+    "numpy>=1.24.0",
+    "pointcloud2",
 ]
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]
 build-backend = "uv_build"
 
-[project.scripts]
-pymcap-cli = "pymcap_cli.cli:main"
-
+[dependency-groups]
+dev = [
+    "mcap-ros2-support-fast",
+    "small-mcap",
+    "pytest>=8.4.2",
+]
 
 [tool.uv.sources]
 small-mcap = { workspace = true }
-mcap-ros2-support-fast = { workspace = true }
-ros-parser = { workspace = true }
 pureini = { workspace = true }
 pointcloud2 = { workspace = true }
-mcap-codec-support = { workspace = true }
+mcap-ros2-support-fast = { workspace = true }

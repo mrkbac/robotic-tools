@@ -13,6 +13,7 @@ on:
         options:
           - all
           - digitalis
+          - mcap-codec-support
           - mcap-ros2-support-fast
           - pointcloud2
           - pureini
@@ -49,6 +50,7 @@ jobs:
       matrix:
         package:
           - digitalis
+          - mcap-codec-support
           - mcap-ros2-support-fast
           - pointcloud2
           - pureini

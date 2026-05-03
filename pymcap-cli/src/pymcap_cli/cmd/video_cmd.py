@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Group, Parameter
-from rich.console import Console
-
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video import (
     EncoderBackend,
     EncoderMode,
     VideoCodec,
     VideoEncoderError,
 )
+from rich.console import Console
+
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.video_exporter import VideoExporter
 

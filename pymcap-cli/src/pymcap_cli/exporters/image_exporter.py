@@ -13,7 +13,8 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, ClassVar
 
-from pymcap_cli.encoding.encoder_common import raw_image_to_array
+from mcap_codec_support.video import raw_image_to_array
+
 from pymcap_cli.exporters._common import (
     normalize_schema_name,
     prepare_topic_dir,

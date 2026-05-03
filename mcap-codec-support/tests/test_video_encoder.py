@@ -1,13 +1,12 @@
 """Tests for VideoEncoder resource management."""
 
 import pytest
-from pymcap_cli.encoding.video_pyav import VideoEncoder
+from mcap_codec_support.video.pyav import VideoEncoder
 
 av = pytest.importorskip("av")
 
 
-def _make_encoder():
-
+def _make_encoder() -> VideoEncoder:
     return VideoEncoder(width=16, height=16, codec_name="libx264")
 
 
@@ -15,7 +14,7 @@ def _make_encoder():
 def encoder():
     enc = _make_encoder()
     yield enc
-    # Belt-and-suspenders: close in case a test forgot to
+    # Close in case a test exits before releasing the encoder.
     enc.close()
 
 

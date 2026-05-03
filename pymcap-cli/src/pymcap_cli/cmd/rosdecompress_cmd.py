@@ -9,6 +9,19 @@ if TYPE_CHECKING:
     from small_mcap import DecodedMessage
 
 from cyclopts import Group, Parameter
+from mcap_codec_support.pointcloud import (
+    COMPRESSED_POINTCLOUD2_SCHEMA,
+    FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+    POINTCLOUD2,
+    CompressedPointCloudDecompressFactory,
+)
+from mcap_codec_support.video import (
+    COMPRESSED_IMAGE,
+    COMPRESSED_VIDEO_SCHEMA,
+    IMAGE,
+    EncoderMode,
+    VideoDecompressFactory,
+)
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
 from small_mcap import McapWriter, read_message_decoded
@@ -24,18 +37,6 @@ from pymcap_cli.core.mcap_transform import (
     ensure_schema,
     get_total_message_count,
     print_size_comparison,
-)
-from pymcap_cli.encoding.decompress import (
-    _COMPRESSED_VIDEO_SCHEMA,
-    COMPRESSED_IMAGE,
-    IMAGE,
-    POINTCLOUD2,
-    VideoDecompressFactory,
-)
-from pymcap_cli.encoding.encoder_common import EncoderMode
-from pymcap_cli.encoding.pointcloud import (
-    _COMPRESSED_POINTCLOUD2_SCHEMA,
-    PointCloudDecompressFactory,
 )
 from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
     ForceOverwriteOption,
@@ -104,7 +105,7 @@ def rosdecompress(
     """Decompress ROS MCAP by converting compressed topics back to standard formats.
 
     Converts CompressedVideo topics back to CompressedImage (JPEG) or raw Image,
-    and CompressedPointCloud2 topics back to PointCloud2.
+    CompressedPointCloud2 and Foxglove CompressedPointCloud topics back to PointCloud2.
 
     Parameters
     ----------
@@ -148,7 +149,9 @@ def rosdecompress(
     # Create decoder factories.
     # Video/pointcloud factories are channel-aware and handle compressed topics.
     # CDR factory handles all other ROS2 schemas (pass-through messages).
-    factories: list[VideoDecompressFactory | PointCloudDecompressFactory | NOPDecoderFactory] = []
+    factories: list[
+        VideoDecompressFactory | CompressedPointCloudDecompressFactory | NOPDecoderFactory
+    ] = []
     if video:
         factories.append(
             VideoDecompressFactory(
@@ -158,7 +161,7 @@ def rosdecompress(
             )
         )
     if pointcloud:
-        factories.append(PointCloudDecompressFactory())
+        factories.append(CompressedPointCloudDecompressFactory())
     factories.append(NOPDecoderFactory())
     encoder_factory = ROS2EncoderFactory()
 
@@ -198,7 +201,7 @@ def rosdecompress(
             schema_name = msg.schema.name if msg.schema else ""
             topic = msg.channel.topic
 
-            if schema_name == _COMPRESSED_VIDEO_SCHEMA and video:
+            if schema_name == COMPRESSED_VIDEO_SCHEMA and video:
                 decoded = msg.decoded_message  # triggers CDR decode via VideoDecompressFactory
                 if video_format == "compressed":
                     out_schema_name = "sensor_msgs/msg/CompressedImage"
@@ -233,7 +236,11 @@ def rosdecompress(
                 video_messages += 1
                 video_topics.add(topic)
 
-            elif schema_name == _COMPRESSED_POINTCLOUD2_SCHEMA and pointcloud:
+            elif (
+                schema_name
+                in {COMPRESSED_POINTCLOUD2_SCHEMA, FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA}
+                and pointcloud
+            ):
                 decoded = msg.decoded_message
                 schema_id = ensure_schema(
                     writer,

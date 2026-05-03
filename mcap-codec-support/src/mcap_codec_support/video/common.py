@@ -5,34 +5,14 @@ from __future__ import annotations
 import platform
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# ---------------------------------------------------------------------------
-# ROS schema sets
-# ---------------------------------------------------------------------------
+    import numpy as np
 
-# Canonical (short) schema names — compare via
-# :func:`pymcap_cli.exporters._common.normalize_schema_name`.
-COMPRESSED_SCHEMAS = {"sensor_msgs/CompressedImage"}
-RAW_SCHEMAS = {"sensor_msgs/Image"}
-IMAGE_SCHEMAS = COMPRESSED_SCHEMAS | RAW_SCHEMAS
-
-FOXGLOVE_COMPRESSED_VIDEO = """builtin_interfaces/Time timestamp
-string frame_id
-uint8[] data
-string format
-
-================================================================================
-MSG: builtin_interfaces/Time
-int32 sec
-uint32 nanosec"""
-
-# ---------------------------------------------------------------------------
-# Errors / enums
-# ---------------------------------------------------------------------------
+    from mcap_codec_support._protocols import RawImageMessage
 
 
 class VideoEncoderError(Exception):
@@ -80,28 +60,6 @@ class DecompressedFrame:
     width: int
     height: int
     is_jpeg: bool
-
-
-class VideoEncoderProtocol(Protocol):
-    """Structural interface shared by VideoEncoder and FFmpegVideoEncoder."""
-
-    config: EncoderConfig
-
-    def encode(self, frame: Any) -> bytes | None: ...
-
-    def flush(self) -> bytes | None: ...
-
-
-class VideoDecompressorProtocol(Protocol):
-    """Decompresses H.264/H.265 video packets to image data."""
-
-    def decompress(self, video_data: bytes, codec: str) -> DecompressedFrame | None:
-        """Decompress a single video packet."""
-        ...
-
-    def flush(self) -> list[DecompressedFrame]:
-        """Flush any buffered frames from the decoder."""
-        ...
 
 
 DEFAULT_FPS: float = 30.0
@@ -226,7 +184,7 @@ def calculate_downscale_dimensions(width: int, height: int, max_dimension: int) 
     return ensure_even(new_width), ensure_even(new_height)
 
 
-def raw_image_to_array(message: Any) -> Any:
+def raw_image_to_array(message: RawImageMessage) -> np.ndarray:
     """Convert a ROS Image message to an RGB numpy array."""
     import numpy as np  # noqa: PLC0415
 

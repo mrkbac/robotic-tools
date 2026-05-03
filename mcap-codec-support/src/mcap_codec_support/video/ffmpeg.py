@@ -14,13 +14,13 @@ import threading
 import time
 from queue import Empty, Queue
 
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video.common import (
     DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
 )
-from pymcap_cli.encoding.encoder_common import (
+from mcap_codec_support.video.common import (
     resolve_encoder as _resolve_encoder,
 )
 
@@ -526,11 +526,6 @@ class FFmpegVideoEncoder:
         needed = self._frames_fed - self._frames_returned
         return packets[:needed]
 
-    def flush(self) -> bytes | None:
-        """Close the encoder and return remaining data as a single blob."""
-        packets = self.flush_packets()
-        return b"".join(packets) if packets else None
-
     def __del__(self) -> None:
         try:
             if self._process.poll() is None:
@@ -764,11 +759,9 @@ class FFmpegVideoDecompressor:
         self._process.stdin.flush()
 
         try:
-            frame = self._output_queue.get(timeout=0.2)
+            return self._output_queue.get(timeout=0.2)
         except Empty:
             return None
-        else:
-            return frame if frame is not None else None
 
     def flush(self) -> list[DecompressedFrame]:
         if self._process is None:
