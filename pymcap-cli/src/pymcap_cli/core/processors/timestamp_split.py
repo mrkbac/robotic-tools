@@ -4,7 +4,12 @@ from __future__ import annotations
 import bisect
 from typing import TYPE_CHECKING
 
-from pymcap_cli.core.processors.base import SPLIT_REQUIRED, ChunkDecision, Processor
+from pymcap_cli.core.processors.base import (
+    SPLIT_REQUIRED,
+    ChunkDecision,
+    Processor,
+    _SplitRequiredSentinel,
+)
 from pymcap_cli.core.processors.utils import global_time_range
 
 if TYPE_CHECKING:
@@ -49,7 +54,7 @@ class TimestampSplitProcessor(Processor):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
-    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | object:
+    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | _SplitRequiredSentinel:
         if not self.boundaries:
             return 0
         start_segment = self._segment_index(chunk.message_start_time)

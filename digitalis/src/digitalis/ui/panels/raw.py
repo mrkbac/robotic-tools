@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from rich.highlighter import ISO8601Highlighter, ReprHighlighter
 from rich.text import Text
@@ -18,6 +18,14 @@ from digitalis.utilities import (
     nanoseconds_to_iso,
     quaternion_to_euler,
 )
+
+
+@runtime_checkable
+class Slotted(Protocol):
+    """ROS message-shaped object: defines `__slots__` for field iteration."""
+
+    __slots__: tuple[str, ...]
+
 
 highlighter = ReprHighlighter()
 iso_highlighter = ISO8601Highlighter()
@@ -38,7 +46,7 @@ def add_node(
     # Store the object's string representation for comparison
     node.data = repr(obj)
 
-    if not hasattr(obj, "__slots__"):
+    if not isinstance(obj, Slotted):
         node.allow_expand = False
         if isinstance(obj, bytes):
             # only show the first 100 bytes of bytes objects
@@ -85,7 +93,7 @@ def add_node(
                 if expand_depth >= 0 and auto_expand:
                     new_node.expand()
                 add_node(str(index), new_node, value, expand_depth - 1, auto_expand)
-                if index > 25:  # TODO: lazy load these?
+                if index > 25:
                     add_node("Truncated", new_node, "...", expand_depth - 1, auto_expand)
                     break
         else:
@@ -190,7 +198,7 @@ class TreeView(Tree[str]):
         # Update content incrementally
         if len(self.root.children) < 2:
             # Missing content node - rebuild content
-            if not hasattr(new_message.message, "__slots__"):
+            if not isinstance(new_message.message, Slotted):
                 primitive_node = self.root.add("")
                 primitive_node.data = repr(new_message.message)
                 label = highlighter(repr(new_message.message))
@@ -240,7 +248,7 @@ class TreeView(Tree[str]):
         node.data = new_data
 
         # Update the label based on object type
-        if not hasattr(new_obj, "__slots__"):
+        if not isinstance(new_obj, Slotted):
             # Primitive - just update label
             if isinstance(new_obj, bytes):
                 start_bytes = new_obj[:100]
@@ -415,7 +423,7 @@ class TreeView(Tree[str]):
         self._create_header_node(message)
 
         # Create content
-        if not hasattr(message.message, "__slots__"):
+        if not isinstance(message.message, Slotted):
             primitive_node = self.root.add("")
             primitive_node.data = repr(message.message)
             label = highlighter(repr(message.message))

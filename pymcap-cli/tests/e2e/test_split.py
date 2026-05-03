@@ -1,7 +1,5 @@
 """E2E tests for the split command."""
 
-# ruff: noqa: ARG001
-
 from pathlib import Path
 
 import pytest

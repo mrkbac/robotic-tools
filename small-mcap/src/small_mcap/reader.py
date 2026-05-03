@@ -1123,6 +1123,8 @@ def read_message_decoded(
     decoders: dict[tuple[int, int], _DecoderFn] = {}
 
     # Split factories once so we can dispatch without per-message getattr.
+    # `channel_aware` is the discriminator on the public Protocol union;
+    # getattr keeps the class attribute optional on plain DecoderFactoryProtocol.
     channel_factories: list[ChannelDecoderFactoryProtocol] = []
     schema_factories: list[DecoderFactoryProtocol] = []
     for f in decoder_factories:

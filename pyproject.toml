@@ -82,7 +82,7 @@ omit = [
     # Auto-generated Lark parser runtime (~2154 stmts)
     "ros-parser/src/ros_parser/_lark_standalone_runtime.py",
     # Auto-generated TypedDicts from JSON schema
-    "pymcap-cli/src/pymcap_cli/info_types.py",
+    "pymcap-cli/src/pymcap_cli/types/info_types.py",
 ]
 
 [tool.ruff]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum, IntFlag, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from small_mcap import (
@@ -17,7 +17,12 @@ if TYPE_CHECKING:
         Summary,
     )
 
-SPLIT_REQUIRED: object = object()
+
+class _SplitRequiredSentinel:
+    __slots__ = ()
+
+
+SPLIT_REQUIRED: Final = _SplitRequiredSentinel()
 
 
 class Action(IntFlag):
@@ -65,7 +70,7 @@ class Processor:
     def on_attachment(self, attachment: Attachment) -> Action:
         return Action.CONTINUE
 
-    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | str | object | None:
+    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | str | _SplitRequiredSentinel | None:
         return None
 
     def route_message(self, message: Message) -> int | str | None:

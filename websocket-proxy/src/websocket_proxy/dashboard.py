@@ -12,8 +12,11 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from typing_extensions import Self
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from .metrics import MetricsCollector
     from .proxy import ProxyBridge
 
@@ -87,7 +90,13 @@ class DashboardRenderer:
         self.metrics: MetricsCollector = proxy.metrics
         self.refresh_rate = refresh_rate
         self.console = console
-        self._live: Live | None = None
+        self._live: Live = Live(
+            self._create_layout(),
+            console=console,
+            refresh_per_second=1 / refresh_rate,
+            screen=False,
+            auto_refresh=True,
+        )
 
     def _create_header_panel(self) -> Panel:
         """Create the header panel with global stats."""
@@ -209,24 +218,21 @@ class DashboardRenderer:
 
         return Panel(layout, border_style="bright_blue", padding=(1, 2))
 
-    def start_sync(self) -> None:
-        """Start the live dashboard (synchronous - starts the Live display)."""
-        self._live = Live(
-            self._create_layout(),
-            console=self.console,
-            refresh_per_second=1 / self.refresh_rate,
-            screen=False,
-            auto_refresh=True,  # Enable auto-refresh so updates are visible
-        )
+    def __enter__(self) -> Self:
         self._live.start()
-        # Do an initial render
         self._live.update(self._create_layout())
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self._live.stop()
 
     async def run_updates(self) -> None:
-        """Run the dashboard update loop (call after start_sync)."""
-        if self._live is None:
-            return
-
+        """Render new layouts on a fixed cadence until cancelled."""
         while True:
             try:
                 self._live.update(self._create_layout())
@@ -234,12 +240,5 @@ class DashboardRenderer:
             except asyncio.CancelledError:
                 break
             except (RuntimeError, ValueError, KeyError, IndexError) as e:
-                # Log errors during rendering but continue
                 logger.debug("Dashboard rendering error: %s", e)
                 await asyncio.sleep(self.refresh_rate)
-
-    async def stop(self) -> None:
-        """Stop the live dashboard."""
-        if self._live:
-            self._live.stop()
-            self._live = None

@@ -326,7 +326,8 @@ class Tf(BasePanel[TFMessage]):
             self.tf_data.clear()
             self._last_channel_id = data.topic
 
-        # TODO: Subscribe to both topics and show correctly
+        # Static-vs-dynamic discrimination needs both /tf and /tf_static subscribed;
+        # currently only the active channel is shown so flag everything as dynamic.
         is_static = False
 
         # Process each transform in the message

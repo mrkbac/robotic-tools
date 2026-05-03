@@ -6,12 +6,13 @@ import json
 import logging
 import struct
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import websockets
 from websockets.typing import Subprotocol
 
 from .ws_types import (
+    AdvertiseMessage,
     BinaryOpCodes,
     ChannelInfo,
     ConnectionStatus,
@@ -20,6 +21,7 @@ from .ws_types import (
     ServerInfoMessage,
     StatusMessage,
     SubscribeMessage,
+    UnadvertiseMessage,
     UnsubscribeMessage,
 )
 
@@ -43,6 +45,16 @@ TimeUpdateHandler = Callable[[int], Awaitable[None] | None]
 # Constants for binary message structure
 _MESSAGE_DATA_HEADER_SIZE = 13  # 1 byte opcode + 4 bytes sub_id + 8 bytes timestamp
 _TIME_MESSAGE_SIZE = 9  # 1 byte opcode + 8 bytes timestamp
+
+_UNHANDLED_JSON_OPS = frozenset(
+    {
+        JsonOpCodes.PARAMETER_VALUES.value,
+        JsonOpCodes.ADVERTISE_SERVICES.value,
+        JsonOpCodes.UNADVERTISE_SERVICES.value,
+        JsonOpCodes.SERVICE_CALL_FAILURE.value,
+        JsonOpCodes.CONNECTION_GRAPH_UPDATE.value,
+    }
+)
 
 
 class WebSocketBridgeClient:
@@ -212,7 +224,7 @@ class WebSocketBridgeClient:
         self._on_time_update.append(handler)
 
     async def _invoke_handlers(
-        self, handlers: list[Callable[..., Awaitable[None] | None]], *args: Any
+        self, handlers: list[Callable[..., Awaitable[None] | None]], *args: object
     ) -> None:
         """Invoke a list of handlers with the given arguments.
 
@@ -534,16 +546,10 @@ class WebSocketBridgeClient:
                 await self._handle_advertise(msg)
             elif op == JsonOpCodes.UNADVERTISE.value:
                 await self._handle_unadvertise(msg)
-            elif op == JsonOpCodes.PARAMETER_VALUES.value:
-                pass  # TODO: Parameter handling
-            elif op == JsonOpCodes.ADVERTISE_SERVICES.value:
-                pass  # TODO: Advertise services handling
-            elif op == JsonOpCodes.UNADVERTISE_SERVICES.value:
-                pass  # TODO: Unadvertise services handling
-            elif op == JsonOpCodes.SERVICE_CALL_FAILURE.value:
-                pass  # TODO: Service call failure handling
-            elif op == JsonOpCodes.CONNECTION_GRAPH_UPDATE.value:
-                pass  # TODO: Connection graph handling
+            elif op in _UNHANDLED_JSON_OPS:
+                # Parameter, services, connection-graph, and service-call ops
+                # are accepted but not yet exposed via callbacks.
+                pass
             else:
                 logger.debug("Unknown JSON operation: %s", op)
         except Exception:
@@ -582,27 +588,25 @@ class WebSocketBridgeClient:
         """Handle remove status message."""
         logger.debug("Removing status messages: %s", ", ".join(msg["statusIds"]))
 
-    async def _handle_advertise(self, msg: dict[str, Any]) -> None:
+    async def _handle_advertise(self, msg: AdvertiseMessage) -> None:
         """Handle topic advertisement from the server."""
-        new_topics = []
+        new_channels: list[ChannelInfo] = []
 
-        for ch in msg.get("channels", []):
+        for ch in msg["channels"]:
             self._advertised_channels[ch["id"]] = ch
-            new_topics.append(ch)
+            new_channels.append(ch)
 
             logger.info(f"Topic advertised: {ch['topic']} (ID: {ch['id']})")
 
-            # Subscribe if we were waiting for this topic
             if ch["topic"] in self._subscribed_topics:
                 await self._subscribe_to_channel(ch["id"])
 
-        if new_topics:
-            for channel in new_topics:
-                await self._invoke_handlers(self._on_advertised_channel, channel)
+        for channel in new_channels:
+            await self._invoke_handlers(self._on_advertised_channel, channel)
 
-    async def _handle_unadvertise(self, msg: dict[str, Any]) -> None:
+    async def _handle_unadvertise(self, msg: UnadvertiseMessage) -> None:
         """Handle topic unadvertisement from the server."""
-        for channel_id in msg.get("channelIds", []):
+        for channel_id in msg["channelIds"]:
             channel = self._advertised_channels.pop(channel_id, None)
             if channel:
                 logger.info(f"Topic unadvertised: {channel['topic']}")
@@ -616,9 +620,11 @@ class WebSocketBridgeClient:
         elif opcode == BinaryOpCodes.TIME:
             await self._handle_time_data(data)
         elif opcode == BinaryOpCodes.SERVICE_CALL_RESPONSE:
-            pass  # TODO: Implement service call response handling
+            # Accepted but not surfaced; service-call API is intentionally not exposed yet.
+            pass
         elif opcode == BinaryOpCodes.FETCH_ASSET_RESPONSE:
-            pass  # TODO: Implement fetch asset response handling
+            # Accepted but not surfaced; fetch-asset API is intentionally not exposed yet.
+            pass
         else:
             logger.debug("Unknown binary opcode: %d", opcode)
 
@@ -652,7 +658,3 @@ class WebSocketBridgeClient:
             await self._invoke_handlers(self._on_time_update, server_time)
         else:
             logger.warning("Invalid time message format")
-
-    # TODO: Implement service call support (protocol: Service Call Response/Request binary messages)
-
-    # TODO: Implement fetch asset support (protocol: Fetch Asset Response binary message)

@@ -172,10 +172,13 @@ class McapSource(PlaybackSource):
             logger.warning("Cannot seek: not initialized")
             return
 
-        # Clamp timestamp to valid range
-        timestamp_ns = max(
-            self._stats.message_start_time, min(timestamp_ns, self._stats.message_end_time)
-        )
+        start = self._stats.message_start_time
+        end = self._stats.message_end_time
+        if not start <= timestamp_ns <= end:
+            logger.warning(
+                "Seek timestamp %d out of range [%d, %d]; clamping", timestamp_ns, start, end
+            )
+            timestamp_ns = max(start, min(timestamp_ns, end))
 
         self._current_time = timestamp_ns
         assert self._summary is not None, "McapReader not initialized"

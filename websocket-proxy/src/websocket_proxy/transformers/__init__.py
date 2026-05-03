@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import SimpleNamespace
 
 
@@ -28,14 +29,14 @@ class Transformer(ABC):
         ...
 
     @abstractmethod
-    def transform(self, message: SimpleNamespace) -> dict[str, Any]:
-        """Transform a decoded message object to a message dict.
+    def transform(self, message: SimpleNamespace) -> Mapping[str, object]:
+        """Transform a decoded message object to a CDR-encodable payload.
 
         Args:
             message: Decoded input message (SimpleNamespace from CDR decoder)
 
         Returns:
-            Transformed output message as a dictionary
+            Transformed output message as a payload matching the output schema.
 
         Raises:
             TransformError: If transformation fails

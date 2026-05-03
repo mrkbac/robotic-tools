@@ -21,7 +21,7 @@ from .metrics import MetricsCollector
 from .transformers import Transformer, TransformerRegistry, TransformError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from types import SimpleNamespace
 
     from robo_ws_bridge.ws_types import ChannelInfo
@@ -684,7 +684,7 @@ class ProxyBridge:
 
     def _transform_message_dict(
         self, channel: ChannelInfo, payload: bytes, transformer: Transformer
-    ) -> dict[str, Any] | None:
+    ) -> Mapping[str, object] | None:
         """Transform a message using the given transformer.
 
         Args:
@@ -729,7 +729,9 @@ class ProxyBridge:
             self._decoders[schema_name] = create_decoder_function(schema_name, schema_def)
         return self._decoders[schema_name](payload)
 
-    def _encode_message(self, schema_name: str, schema_def: str, message: dict[str, Any]) -> bytes:
+    def _encode_message(
+        self, schema_name: str, schema_def: str, message: Mapping[str, object]
+    ) -> bytes:
         """Encode a message to CDR format.
 
         Args:

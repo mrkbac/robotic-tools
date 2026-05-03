@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mcap_codec_support.pointcloud import (
     CLOUDINI_COMPRESSED_POINTCLOUD2,
@@ -14,6 +14,7 @@ from mcap_codec_support.pointcloud import (
 from . import Transformer, TransformError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class PointCloudCloudiniTransformer(Transformer):
     def get_output_schema_definition(self) -> str:
         return CLOUDINI_COMPRESSED_POINTCLOUD2
 
-    def transform(self, message: SimpleNamespace) -> dict[str, Any]:
+    def transform(self, message: SimpleNamespace) -> Mapping[str, object]:
         try:
             compressed = self._compressor.compress(message)
             return build_compressed_pointcloud2_message(message, compressed, fmt="cloudini")

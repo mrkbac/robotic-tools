@@ -26,7 +26,9 @@ from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from types import ModuleType
 
+    import numpy as np
     from small_mcap import DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
@@ -73,7 +75,7 @@ _COMPRESSED_FORMAT_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _supported_image_formats(imagecodecs_module: object | None = None) -> frozenset[str]:
+def _supported_image_formats(imagecodecs_module: ModuleType | None = None) -> frozenset[str]:
     """Return supported user-facing image formats for the imported module."""
     module = imagecodecs_module or importlib.import_module("imagecodecs")
     return frozenset(
@@ -89,8 +91,8 @@ def _normalize_image_format(format_str: str) -> str:
 
 
 def _resolve_raw_encoder(
-    raw_format: str, *, imagecodecs_module: object | None = None
-) -> tuple[str, Callable[[object], bytes]]:
+    raw_format: str, *, imagecodecs_module: ModuleType | None = None
+) -> tuple[str, Callable[[np.ndarray], bytes]]:
     """Resolve the output extension and encoder callable for raw images."""
     format_name = _normalize_image_format(raw_format)
     if not format_name:
@@ -99,24 +101,23 @@ def _resolve_raw_encoder(
     try:
         encoder_name, extension = _IMAGE_FORMATS[format_name]
     except KeyError as exc:
-        supported_formats = _supported_image_formats(module)
-        supported = ", ".join(sorted(supported_formats))
+        supported = ", ".join(sorted(_supported_image_formats(module)))
         raise TypeError(
             f"image format {raw_format!r} is not supported. Supported formats: {supported}"
         ) from exc
 
     encode = getattr(module, f"{encoder_name}_encode", None)
     if not callable(encode):
-        supported_formats = _supported_image_formats(module)
+        supported = ", ".join(sorted(_supported_image_formats(module)))
         raise TypeError(
             f"image format {raw_format!r} is not supported by installed imagecodecs. "
-            f"Supported formats: {', '.join(sorted(supported_formats))}"
+            f"Supported formats: {supported}"
         )
 
     return extension, encode
 
 
-def _decode_compressed_image_to_rgb(data: bytes) -> object:
+def _decode_compressed_image_to_rgb(data: bytes) -> np.ndarray:
     """Decode compressed image bytes with imagecodecs and return an RGB array."""
     import numpy as np  # noqa: PLC0415
 
@@ -144,7 +145,7 @@ class _CompressedImageWriter(TopicWriter):
     def __init__(self, dir_path: Path, *, target_format: str | None) -> None:
         self.dir_path = dir_path
         self._target_format = target_format
-        self._encode: Callable[[object], bytes] | None = None
+        self._encode: Callable[[np.ndarray], bytes] | None = None
         self._extension: str | None = None
         self._used_counts: dict[int, int] = {}
 
@@ -185,7 +186,7 @@ class _RawImageWriter(TopicWriter):
     def __init__(self, dir_path: Path, *, raw_format: str) -> None:
         self.dir_path = dir_path
         self._raw_format = raw_format
-        self._encode: Callable[[object], bytes] | None = None
+        self._encode: Callable[[np.ndarray], bytes] | None = None
         self._extension: str | None = None
         self._used_counts: dict[int, int] = {}
 

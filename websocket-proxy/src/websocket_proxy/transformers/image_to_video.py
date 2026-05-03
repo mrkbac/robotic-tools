@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mcap_codec_support.video import (
     FOXGLOVE_COMPRESSED_VIDEO,
@@ -21,7 +21,10 @@ from mcap_codec_support.video.pyav import (
 from . import Transformer, TransformError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import SimpleNamespace
+
+    from av import VideoFrame
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,7 @@ class ImageToVideoTransformer(Transformer):
     def get_output_schema_definition(self) -> str:
         return FOXGLOVE_COMPRESSED_VIDEO
 
-    def transform(self, message: SimpleNamespace) -> dict[str, Any]:
+    def transform(self, message: SimpleNamespace) -> Mapping[str, object]:
         if not message.data:
             raise TransformError(f"Empty image data, {message}")
 
@@ -164,7 +167,7 @@ class ImageToVideoTransformer(Transformer):
     # Image preparation helpers
     # ------------------------------------------------------------------
 
-    def _prepare_frame(self, image_data: bytes) -> tuple:
+    def _prepare_frame(self, image_data: bytes) -> tuple[VideoFrame, int, int]:
         try:
             frame = decode_compressed_frame(image_data)
         except VideoEncoderError as exc:

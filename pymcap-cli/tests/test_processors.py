@@ -161,25 +161,23 @@ class TestTimeFilterProcessorValidation:
 
     def test_valid_range_accepted(self):
         proc = TimeFilterProcessor(start_ns=0, end_ns=100)
-        assert proc.start == 0
-        assert proc.end == 100
+        assert proc.start_ns == 0
+        assert proc.end_ns == 100
 
     def test_only_start_accepted(self):
         proc = TimeFilterProcessor(start_ns=500)
-        assert proc.start == 500
-        assert proc._has_start is True
-        assert proc._has_end is False
+        assert proc.start_ns == 500
+        assert proc.end_ns is None
 
     def test_only_end_accepted(self):
         proc = TimeFilterProcessor(end_ns=500)
-        assert proc.end == 500
-        assert proc._has_start is False
-        assert proc._has_end is True
+        assert proc.start_ns is None
+        assert proc.end_ns == 500
 
     def test_no_bounds_accepted(self):
         proc = TimeFilterProcessor()
-        assert proc._has_start is False
-        assert proc._has_end is False
+        assert proc.start_ns is None
+        assert proc.end_ns is None
 
 
 # ---------------------------------------------------------------------------

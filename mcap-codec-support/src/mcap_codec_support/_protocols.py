@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    import numpy as np
+    from av import VideoFrame
     from small_mcap import DecodedMessage
 
     from mcap_codec_support.video.common import DecompressedFrame, EncoderConfig
@@ -31,7 +33,7 @@ class VideoEncoderProtocol(Protocol):
 
     config: EncoderConfig
 
-    def encode(self, frame: Any) -> bytes | None: ...
+    def encode(self, frame: VideoFrame) -> bytes | None: ...
 
     def flush_packets(self) -> list[bytes]: ...
 
@@ -58,9 +60,11 @@ class VideoCompressionBackend(Protocol):
 
     def resolve_encoder(self, codec: str) -> str: ...
 
-    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]: ...
+    def decode_compressed(self, data: bytes) -> tuple[VideoFrame, int, int]: ...
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[Any, int, int]: ...
+    def decode_image(
+        self, msg: DecodedMessage, schema_name: str
+    ) -> tuple[VideoFrame, int, int]: ...
 
     def create_encoder(
         self,
@@ -71,7 +75,7 @@ class VideoCompressionBackend(Protocol):
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
-    ) -> Any: ...
+    ) -> VideoEncoderProtocol: ...
 
     def get_pix_fmt(self, topic: str) -> str | None: ...
 
@@ -85,6 +89,6 @@ class VideoFileStrategy(Protocol):
 
     def write_raw(self, data: bytes, log_time_ns: int) -> None: ...
 
-    def write_rgb(self, rgb: Any, log_time_ns: int) -> None: ...
+    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None: ...
 
     def close(self) -> int: ...

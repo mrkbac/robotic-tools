@@ -14,6 +14,7 @@ from mcap_codec_support.pointcloud import (
     FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
     POINTCLOUD2_SCHEMAS,
     PointCloudCompressionError,
+    PointCloudCompressorProtocol,
     build_compressed_pointcloud2_message,
     build_foxglove_compressed_pointcloud_message,
 )
@@ -77,7 +78,7 @@ def _create_pointcloud_compressor(
     pc_compression: str,
     resolution: float,
     draco_compression_level: int,
-) -> Any | None:
+) -> PointCloudCompressorProtocol | None:
     try:
         if pc_format == "draco":
             from mcap_codec_support.pointcloud import DracoPointCloudCompressor  # noqa: PLC0415
@@ -283,7 +284,7 @@ def roscompress(
             encoder_name = compress_backend.resolve_encoder(codec)
 
     # Create point cloud compressor.
-    pc_compressor: Any | None = None
+    pc_compressor: PointCloudCompressorProtocol | None = None
     if pointcloud:
         pc_compressor = _create_pointcloud_compressor(
             pc_format,
@@ -495,7 +496,7 @@ def _write_compressed_video(
 
 def _handle_pointcloud(
     msg: DecodedMessage,
-    pc_compressor: Any,
+    pc_compressor: PointCloudCompressorProtocol,
     pc_format: str,
     pc_schema: str,
     writer: McapWriter,
@@ -633,7 +634,7 @@ def _run_compress_loop(
     codec: str,
     quality: int,
     scale: int | None,
-    pc_compressor: Any | None,
+    pc_compressor: PointCloudCompressorProtocol | None,
     writer: McapWriter,
     schema_ids: dict[str, int],
     channel_ids: dict[str, int],

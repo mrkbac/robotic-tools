@@ -155,34 +155,25 @@ async def main_async(args: argparse.Namespace) -> None:
         max_message_size=args.max_message_size if args.max_message_size > 0 else None,
     )
 
-    # Create dashboard if enabled (with shared console for logging integration)
-    dashboard = None
-    if not args.no_dashboard:
-        dashboard = DashboardRenderer(
-            bridge, refresh_rate=args.dashboard_refresh_rate, console=console
+    def configure_logging() -> None:
+        logging.basicConfig(
+            level=logging.DEBUG if args.verbose else logging.INFO,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[
+                RichHandler(
+                    console=console,
+                    rich_tracebacks=True,
+                    tracebacks_show_locals=args.verbose,
+                )
+            ],
         )
-        # Start dashboard BEFORE configuring logging
-        dashboard.start_sync()
 
-    # NOW configure logging with Rich handler (after dashboard is started)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[
-            RichHandler(
-                console=console,
-                rich_tracebacks=True,
-                tracebacks_show_locals=args.verbose,
-            )
-        ],
-    )
+    def announce_transformers() -> None:
+        logger.info("Registered transformers:")
+        for transformer in registry.get_all_transformers():
+            logger.info(f"  {transformer.get_input_schema()} -> {transformer.get_output_schema()}")
 
-    logger.info("Registered transformers:")
-    for transformer in registry.get_all_transformers():
-        logger.info(f"  {transformer.get_input_schema()} -> {transformer.get_output_schema()}")
-
-    # Setup signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
 
     def signal_handler() -> None:
@@ -193,23 +184,23 @@ async def main_async(args: argparse.Namespace) -> None:
         loop.add_signal_handler(sig, signal_handler)
 
     try:
-        if dashboard:
-            # Dashboard already started above (before logging config)
-            # Just create a background task for dashboard updates
-            dashboard_task = asyncio.create_task(dashboard.run_updates())
-
-            try:
-                # Start proxy (this will block until stop() is called)
-                await bridge.start()
-            finally:
-                # Cancel dashboard updates
-                dashboard_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await dashboard_task
-                await dashboard.stop()
-        else:
-            # No dashboard - just start proxy
+        if args.no_dashboard:
+            configure_logging()
+            announce_transformers()
             await bridge.start()
+        else:
+            with DashboardRenderer(
+                bridge, refresh_rate=args.dashboard_refresh_rate, console=console
+            ) as dashboard:
+                configure_logging()
+                announce_transformers()
+                dashboard_task = asyncio.create_task(dashboard.run_updates())
+                try:
+                    await bridge.start()
+                finally:
+                    dashboard_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await dashboard_task
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
     except Exception:
@@ -217,8 +208,6 @@ async def main_async(args: argparse.Namespace) -> None:
         sys.exit(1)
     finally:
         await bridge.stop()
-        if dashboard:
-            await dashboard.stop()
 
 
 def main() -> None:

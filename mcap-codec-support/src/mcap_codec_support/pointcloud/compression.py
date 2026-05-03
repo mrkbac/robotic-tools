@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
     from pointcloud2.messages import Pointcloud2Msg, PointFieldMsg
     from pureini import CompressionOption, EncodingInfo, EncodingOptions
 
@@ -14,6 +16,12 @@ DRACO_MAX_QUANTIZATION_BITS = 30
 
 class PointCloudCompressionError(ValueError):
     """Raised when a point cloud cannot be compressed into the requested format."""
+
+
+class PointCloudCompressorProtocol(Protocol):
+    """Common interface implemented by Cloudini and Draco point cloud compressors."""
+
+    def compress(self, msg: Pointcloud2Msg) -> bytes: ...
 
 
 def _build_encoding_info(
@@ -96,9 +104,9 @@ class CloudiniPointCloudCompressor:
 
 
 def _compute_position_quantization(
-    positions: Any,
+    positions: npt.NDArray[np.float32],
     resolution: float,
-) -> tuple[int, float, Any]:
+) -> tuple[int, float, npt.NDArray[np.float32]]:
     import numpy as np  # noqa: PLC0415
 
     origin = positions.min(axis=0).astype(np.float32, copy=False)
@@ -109,7 +117,7 @@ def _compute_position_quantization(
     return bits, quantization_range, origin
 
 
-def _native_numeric_array(values: Any) -> Any | None:
+def _native_numeric_array(values: npt.ArrayLike) -> npt.NDArray[np.number] | None:
     import numpy as np  # noqa: PLC0415
 
     arr = np.asarray(values)
@@ -144,7 +152,9 @@ def _native_numeric_array(values: Any) -> Any | None:
     return arr.reshape(arr.shape[0], -1)
 
 
-def _packed_color_attributes(values: Any, *, include_alpha: bool) -> dict[str, Any]:
+def _packed_color_attributes(
+    values: npt.ArrayLike, *, include_alpha: bool
+) -> dict[str, np.ndarray]:
     import numpy as np  # noqa: PLC0415
 
     arr = np.asarray(values)
@@ -163,8 +173,10 @@ def _packed_color_attributes(values: Any, *, include_alpha: bool) -> dict[str, A
     return attrs
 
 
-def _generic_attributes_from_points(points: Any, fields: list[PointFieldMsg]) -> dict[str, Any]:
-    attrs: dict[str, Any] = {}
+def _generic_attributes_from_points(
+    points: np.ndarray, fields: list[PointFieldMsg]
+) -> dict[str, np.ndarray]:
+    attrs: dict[str, np.ndarray] = {}
     names = set(points.dtype.names or ())
 
     for field in fields:
@@ -179,12 +191,12 @@ def _generic_attributes_from_points(points: Any, fields: list[PointFieldMsg]) ->
                 continue
             component_names = [f"{name}_{idx}" for idx in range(count)]
             if count in {3, 4} and all(component in names for component in component_names):
-                attrs["red"] = _native_numeric_array(points[component_names[0]])
-                attrs["green"] = _native_numeric_array(points[component_names[1]])
-                attrs["blue"] = _native_numeric_array(points[component_names[2]])
-                if count == 4:
-                    attrs["alpha"] = _native_numeric_array(points[component_names[3]])
-                attrs = {key: value for key, value in attrs.items() if value is not None}
+                for color, source in zip(
+                    ("red", "green", "blue", "alpha"), component_names, strict=False
+                ):
+                    arr = _native_numeric_array(points[source])
+                    if arr is not None:
+                        attrs[color] = arr
                 continue
 
         if count == 1:

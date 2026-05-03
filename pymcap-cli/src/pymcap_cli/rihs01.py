@@ -8,6 +8,7 @@
 import hashlib
 import json
 
+from ros_parser.models import MessageDefinition
 from ros_parser.models import Type as _RosType
 from ros_parser.ros2_msg import parse_schema_to_definitions
 
@@ -72,17 +73,16 @@ def _rihs01_type_name(name: str) -> str:
     return name
 
 
-def _rihs01_individual_type_desc(name: str, msgdef: object) -> dict[str, object]:
+def _rihs01_individual_type_desc(
+    name: str, msgdef: MessageDefinition
+) -> dict[str, str | list[dict[str, str | dict[str, int | str]]]]:
     return {
         "type_name": _rihs01_type_name(name),
-        "fields": [
-            {"name": f.name, "type": _rihs01_field_type(f.type)}
-            for f in msgdef.fields  # type: ignore[union-attr]
-        ],
+        "fields": [{"name": f.name, "type": _rihs01_field_type(f.type)} for f in msgdef.fields],
     }
 
 
-def _collect_refs(schema_name: str, canonical: dict[str, object]) -> list[str]:
+def _collect_refs(schema_name: str, canonical: dict[str, MessageDefinition]) -> list[str]:
     visited: set[str] = set()
     queue = [schema_name]
     while queue:
@@ -95,7 +95,7 @@ def _collect_refs(schema_name: str, canonical: dict[str, object]) -> list[str]:
         if resolved in visited or resolved not in canonical:
             continue
         visited.add(resolved)
-        for f in canonical[resolved].fields:  # type: ignore[union-attr]
+        for f in canonical[resolved].fields:
             if f.type.package_name is not None:
                 ref = f"{f.type.package_name}/msg/{f.type.type_name}"
                 if ref not in visited:
@@ -104,7 +104,9 @@ def _collect_refs(schema_name: str, canonical: dict[str, object]) -> list[str]:
     return sorted(visited)
 
 
-def _find_main_def(schema_name: str, canonical: dict[str, object]) -> tuple[str, object]:
+def _find_main_def(
+    schema_name: str, canonical: dict[str, MessageDefinition]
+) -> tuple[str, MessageDefinition]:
     if schema_name in canonical:
         return schema_name, canonical[schema_name]
     parts = schema_name.split("/")
@@ -124,7 +126,7 @@ def compute_rihs01(schema_name: str, schema_data: bytes) -> str:
     definitions = parse_schema_to_definitions(schema_name, schema_data)
 
     seen: set[int] = set()
-    canonical: dict[str, object] = {}
+    canonical: dict[str, MessageDefinition] = {}
     for key, msgdef in definitions.items():
         if id(msgdef) not in seen:
             seen.add(id(msgdef))

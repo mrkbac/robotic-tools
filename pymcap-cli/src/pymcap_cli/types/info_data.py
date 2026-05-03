@@ -273,7 +273,7 @@ def _calculate_optimal_bucket_count(duration_ns: int) -> int:
     min_buckets = 20
     max_buckets = 80
     best_bucket_count = 50  # Default middle value
-    min_error = float("inf")
+    min_error = math.inf
 
     for bucket_count in range(min_buckets, max_buckets + 1):
         bucket_duration = duration_ns / bucket_count

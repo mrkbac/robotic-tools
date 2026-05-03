@@ -60,11 +60,6 @@ class BasePanel(Widget, Generic[T], can_focus=True):
     ) -> None:
         super().__init_subclass__(can_focus, can_focus_children, inherit_css, inherit_bindings)
 
-        if not hasattr(cls, "SUPPORTED_SCHEMAS"):
-            raise TypeError(
-                f"Class {cls.__name__} must define a 'SUPPORTED_SCHEMAS' class variable."
-            )
-
         if not isinstance(cls.SUPPORTED_SCHEMAS, set):
             raise TypeError(f"'SUPPORTED_SCHEMAS' in {cls.__name__} must be a set of strings.")
 

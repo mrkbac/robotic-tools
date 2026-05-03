@@ -1,7 +1,7 @@
 import logging
 import math
 from collections import deque
-from typing import ClassVar, Protocol
+from typing import ClassVar, Protocol, cast
 
 import numpy as np
 from textual import work
@@ -116,12 +116,7 @@ class NavSatFix(InteractiveRenderPanel):
         if not data:
             return
 
-        message = data.message
-        if not hasattr(message, "latitude") or not hasattr(message, "longitude"):
-            logging.error("Invalid NavSatFix data: missing latitude or longitude")
-            return
-
-        # Check for valid coordinates
+        message = cast("NavSatFixMessage", data.message)
         lat = message.latitude
         lon = message.longitude
 
@@ -129,8 +124,7 @@ class NavSatFix(InteractiveRenderPanel):
             logging.warning("Invalid GPS coordinates: lat=%s, lon=%s", lat, lon)
             return
 
-        # Only add points with valid fix
-        if hasattr(message, "status") and message.status.status < 0:
+        if message.status.status < 0:
             logging.debug("Skipping GPS point with no fix (status=%d)", message.status.status)
             return
 
@@ -185,20 +179,14 @@ class NavSatFix(InteractiveRenderPanel):
         top = self.query_one("#top", Static)
         ts = self._get_common_status_prefix()
 
-        message = self.data.message
-        status_str = "No Status"
-        service_str = "No Service"
-        current_pos = "No Position"
-
-        if hasattr(message, "status"):
-            status_str = _status_to_string(message.status.status)
-            service_str = _service_to_string(message.status.service)
-
-        if hasattr(message, "latitude") and hasattr(message, "longitude"):
-            lat = message.latitude
-            lon = message.longitude
-            if np.isfinite(lat) and np.isfinite(lon):
-                current_pos = f"{lat:.6f}°, {lon:.6f}°"
+        message = cast("NavSatFixMessage", self.data.message)
+        status_str = _status_to_string(message.status.status)
+        service_str = _service_to_string(message.status.service)
+        lat = message.latitude
+        lon = message.longitude
+        current_pos = (
+            f"{lat:.6f}°, {lon:.6f}°" if np.isfinite(lat) and np.isfinite(lon) else "No Position"
+        )
 
         status_line = (
             f"{ts} | {status_str} ({service_str}) | "

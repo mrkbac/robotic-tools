@@ -39,12 +39,12 @@
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, cast
+from typing import ClassVar, cast
 
 import numpy as np
 from numpy.lib.recfunctions import unstructured_to_structured
 
-from pointcloud2.messages import Pointcloud2Msg, PointFieldDict, PointFieldMsg
+from pointcloud2.messages import HeaderMsg, Pointcloud2Msg, PointFieldDict, PointFieldMsg
 
 __docformat__ = "google"
 
@@ -93,7 +93,7 @@ class PointCloud2:
     Based on: https://github.com/ros2/common_interfaces/blob/humble/sensor_msgs/msg/PointCloud2.msg
     """
 
-    header: Any
+    header: HeaderMsg
     height: int
     width: int
     fields: Sequence[PointFieldMsg]
@@ -311,7 +311,7 @@ def read_points(
 
 
 def create_cloud(
-    header: Any,
+    header: HeaderMsg,
     fields: Iterable[PointFieldMsg | PointFieldDict],
     points: np.ndarray,
     step: int | None = None,

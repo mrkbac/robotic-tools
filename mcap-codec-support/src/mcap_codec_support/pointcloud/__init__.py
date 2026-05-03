@@ -4,6 +4,7 @@ from mcap_codec_support.pointcloud.compression import (
     CloudiniPointCloudCompressor,
     DracoPointCloudCompressor,
     PointCloudCompressionError,
+    PointCloudCompressorProtocol,
     build_compressed_pointcloud2_message,
     build_foxglove_compressed_pointcloud_message,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "CompressedPointCloudDecompressFactory",
     "DracoPointCloudCompressor",
     "PointCloudCompressionError",
+    "PointCloudCompressorProtocol",
     "PointCloudDecompressFactory",
     "Pointcloud2DecoderFactory",
     "build_compressed_pointcloud2_message",

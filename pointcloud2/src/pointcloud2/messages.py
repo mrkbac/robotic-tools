@@ -1,6 +1,20 @@
 """Python typing protocol definitions for the PointCloud2 message."""
 
-from typing import Any, Protocol, TypedDict
+from typing import Protocol, TypedDict
+
+
+class Stamp(Protocol):
+    """ROS builtin_interfaces/Time."""
+
+    sec: int
+    nanosec: int
+
+
+class HeaderMsg(Protocol):
+    """ROS std_msgs/Header — timestamp and coordinate frame ID."""
+
+    frame_id: str
+    stamp: Stamp
 
 
 class _PointFieldDictRequired(TypedDict):
@@ -60,7 +74,7 @@ class Pointcloud2Msg(Protocol):
     """
 
     @property
-    def header(self) -> Any:
+    def header(self) -> HeaderMsg:
         """Time of sensor data acquisition, and the coordinate frame ID (for 3d points)."""
         ...
 

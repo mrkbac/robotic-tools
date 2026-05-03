@@ -4,7 +4,6 @@ from typing import Annotated
 
 from cyclopts import Group, Parameter
 from rich.console import Console
-
 from ros_parser.message_path import MessagePathError
 
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy

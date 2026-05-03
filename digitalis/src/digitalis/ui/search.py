@@ -129,8 +129,6 @@ class TopicSearch(VerticalGroup):
         table.add_row("Schema", topic.schema_name)
         if topic.message_count is not None:
             table.add_row("Message Count", repr(topic.message_count))
-        # if channel.hz is not None:
-        #     table.add_row("Hz", f"{channel.hz:.2f} Hz")
         item.tooltip = table
 
         return item

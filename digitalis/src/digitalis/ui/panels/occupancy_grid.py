@@ -1,4 +1,4 @@
-from typing import ClassVar, Protocol
+from typing import ClassVar, Protocol, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -61,20 +61,16 @@ class OccupancyGrid(InteractiveRenderPanel):
         if not data:
             return
 
-        message = data.message
-        if not hasattr(message, "data") or not hasattr(message, "info"):
-            return
-
+        message = cast("OccupancyGridMessage", data.message)
         info = message.info
         grid_data = message.data
 
-        if not info or not grid_data:
+        if not grid_data:
             return
 
-        # Extract grid properties
-        self.grid_width = getattr(info, "width", 0)
-        self.grid_height = getattr(info, "height", 0)
-        self.grid_resolution = getattr(info, "resolution", 0.0)
+        self.grid_width = info.width
+        self.grid_height = info.height
+        self.grid_resolution = info.resolution
 
         if (
             self.grid_width <= 0

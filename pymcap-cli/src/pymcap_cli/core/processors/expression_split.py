@@ -1,7 +1,7 @@
 # ruff: noqa: ARG002
 from __future__ import annotations
 
-import sys
+import logging
 from typing import TYPE_CHECKING, Any
 
 from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
@@ -13,7 +13,12 @@ from ros_parser.message_path import (
 )
 from small_mcap import JSONDecoderFactory
 
-from pymcap_cli.core.processors.base import Action, ChunkDecision, Processor
+from pymcap_cli.core.processors.base import (
+    Action,
+    ChunkDecision,
+    Processor,
+    _SplitRequiredSentinel,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -28,7 +33,14 @@ if TYPE_CHECKING:
         Summary,
     )
 
-_UNSET: Any = object()  # sentinel — no previous value seen yet
+logger = logging.getLogger(__name__)
+
+
+class _Unset:
+    """Sentinel singleton for ``ExpressionSplitProcessor._prev_value``."""
+
+
+_UNSET = _Unset()
 
 
 class ExpressionSplitProcessor(Processor):
@@ -55,16 +67,14 @@ class ExpressionSplitProcessor(Processor):
         self._decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
         self._validated_schema_ids: set[int] = set()
         self._segment_index: int = 0
-        self._prev_value: Any = _UNSET
+        self._prev_value: object = _UNSET
 
     def initialize(self, summaries: list[Summary | None]) -> None:
         for summary in summaries:
             if summary is None:
                 continue
             for channel in summary.channels.values():
-                schema = (
-                    summary.schemas.get(channel.schema_id) if channel.schema_id else None
-                )
+                schema = summary.schemas.get(channel.schema_id) if channel.schema_id else None
                 self._register(channel, schema)
 
     def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
@@ -100,10 +110,7 @@ class ExpressionSplitProcessor(Processor):
         try:
             self.parsed.validate(root, all_defs)
         except ValidationError as e:
-            print(
-                f"Warning: path '{self.path_str}' invalid for {schema.name}: {e}",
-                file=sys.stderr,
-            )
+            logger.warning("path %r invalid for %s: %s", self.path_str, schema.name, e)
 
     def _chunk_has_target(self, indexes: list[MessageIndex]) -> bool:
         if not self.channels:
@@ -114,14 +121,12 @@ class ExpressionSplitProcessor(Processor):
             for idx in indexes
         )
 
-    def on_chunk(
-        self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]
-    ) -> ChunkDecision:
+    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
         if self._chunk_has_target(indexes):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
-    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | str | object | None:
+    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | str | _SplitRequiredSentinel | None:
         # Reached only for fast-copy chunks (on_chunk returned CONTINUE). Those
         # contain no target-topic messages, so route the whole chunk to the
         # current sticky segment.

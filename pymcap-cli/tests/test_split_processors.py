@@ -1,7 +1,5 @@
 """Tests for split processor classes."""
 
-# ruff: noqa: ARG001 ARG005
-
 from __future__ import annotations
 
 import pytest
@@ -314,9 +312,7 @@ def _make_expression_proc(path: str = "/t.field") -> ExpressionSplitProcessor:
     string and returns an object exposing that string as ``.field``.
     """
     proc = ExpressionSplitProcessor(path)
-    proc.channels[1] = Channel(
-        id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
-    )
+    proc.channels[1] = Channel(id=1, schema_id=1, topic="/t", message_encoding="json", metadata={})
     proc._decoders[1] = lambda data: type("M", (), {"field": bytes(data).decode()})()
     return proc
 

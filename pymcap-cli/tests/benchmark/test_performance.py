@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.core.mcap_processor import (
@@ -30,6 +30,9 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     ProcessingOptions,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 MCAP_CLI_AVAILABLE = shutil.which("mcap") is not None
 
