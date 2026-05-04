@@ -1,7 +1,7 @@
 """Rebuild MCAP summary section from data section."""
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import IO
 
@@ -120,7 +120,10 @@ class RebuildInfo:
     next_offset: int = 0
 
 
-def read_info_approximate(stream: IO[bytes]) -> RebuildInfo | None:
+def read_info_approximate(
+    stream: IO[bytes],
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> RebuildInfo | None:
     """Read MCAP summary plus per-chunk MessageIndex records by random-access seek.
 
     Unlike :func:`rebuild_summary`, this never scans the data section — only the
@@ -141,12 +144,21 @@ def read_info_approximate(stream: IO[bytes]) -> RebuildInfo | None:
 
     chunk_information: dict[int, list[MessageIndex]] = {}
     channel_sizes: dict[int, int] = defaultdict(int)
+    message_index_count = sum(
+        len(chunk_index.message_index_offsets) for chunk_index in summary.chunk_indexes
+    )
+    read_message_indexes = 0
+    if progress_callback is not None:
+        progress_callback(read_message_indexes, message_index_count)
 
     for chunk_index in summary.chunk_indexes:
         indexes: list[MessageIndex] = []
         for offset in chunk_index.message_index_offsets.values():
             stream.seek(offset)
             indexes.append(MessageIndex.read_record(stream))
+            read_message_indexes += 1
+            if progress_callback is not None:
+                progress_callback(read_message_indexes, message_index_count)
         chunk_information[chunk_index.chunk_start_offset] = indexes
 
         for channel_id, size in _estimate_size_from_indexes(

@@ -11,9 +11,9 @@ from typing import Annotated, TypeVar
 from cyclopts import Parameter
 from rich.console import Console
 from rich.table import Table
-from small_mcap import RebuildInfo, Schema, Statistics, Summary, rebuild_summary
+from small_mcap import RebuildInfo, Schema, Statistics, Summary
 
-from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.mcap_compare import collect_message_timestamps, read_compare_file
 from pymcap_cli.rihs01 import compute_rihs01
 from pymcap_cli.utils import bytes_to_human
 
@@ -49,6 +49,7 @@ def _file_label(path: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FileSummary:
+    label: str
     path: str
     size_bytes: int
     summary: Summary
@@ -57,10 +58,6 @@ class FileSummary:
     @property
     def duration_ns(self) -> int:
         return self.statistics.message_end_time - self.statistics.message_start_time
-
-    @property
-    def label(self) -> str:
-        return _file_label(self.path)
 
 
 @dataclass(slots=True)
@@ -195,34 +192,33 @@ def _check_channel_schema_mismatches(
     return mismatches, warnings
 
 
-def _extract_summary(path: str, info: RebuildInfo, file_size: int) -> FileSummary:
+def _unique_label(path: str, seen: dict[str, int]) -> str:
+    base = _file_label(path)
+    count = seen.get(base, 0) + 1
+    seen[base] = count
+    if count == 1:
+        return base
+    return f"{base}#{count}"
+
+
+def _extract_summary(path: str, label: str, info: RebuildInfo, file_size: int) -> FileSummary:
     summary = info.summary
     stats = summary.statistics
     assert stats is not None
-    return FileSummary(path=path, size_bytes=file_size, summary=summary, statistics=stats)
+    return FileSummary(
+        label=label,
+        path=path,
+        size_bytes=file_size,
+        summary=summary,
+        statistics=stats,
+    )
 
 
-def _collect_message_timestamps(info: RebuildInfo) -> dict[int, set[int]]:
-    timestamps_by_channel: dict[int, set[int]] = {}
-    if not info.chunk_information:
-        return timestamps_by_channel
-    for msg_idx_list in info.chunk_information.values():
-        for msg_idx in msg_idx_list:
-            if not msg_idx.timestamps:
-                continue
-            channel_id = msg_idx.channel_id
-            if channel_id not in timestamps_by_channel:
-                timestamps_by_channel[channel_id] = set()
-            timestamps_by_channel[channel_id].update(msg_idx.timestamps)
-    return timestamps_by_channel
-
-
-def _process_file(path: str) -> tuple[FileSummary, dict[int, set[int]]]:
-    with open_input(path, buffering=0) as (f, size):
-        info = rebuild_summary(
-            f, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
-        )
-        return _extract_summary(path, info, size), _collect_message_timestamps(info)
+def _process_file(path: str, label: str) -> tuple[FileSummary, dict[int, set[int]]]:
+    result = read_compare_file(path, rebuild_missing=True)
+    return _extract_summary(
+        path, label, result.info, result.size_bytes
+    ), collect_message_timestamps(result.info)
 
 
 def _compare_channels(
@@ -572,11 +568,11 @@ def diff_cmd(
         ),
     ] = 3,
 ) -> int:
-    """Compare MCAP files using message index timestamps.
+    """Compare MCAP files using summary and message index timestamps.
 
-    Fast comparison by scanning data sections and extracting message
-    timestamps from message indexes. Works even with broken or
-    summary-less MCAP files.
+    Fast comparison reads indexed files through their footer/summary first,
+    then falls back to rebuilding metadata from the data section when the
+    footer summary is unavailable.
 
     Parameters
     ----------
@@ -607,15 +603,16 @@ def diff_cmd(
     summaries: list[FileSummary] = []
     all_timestamps: dict[str, dict[int, set[int]]] = {}
     all_summaries: dict[str, FileSummary] = {}
+    seen_labels: dict[str, int] = {}
 
     for path in files:
+        label = _unique_label(path, seen_labels)
         try:
-            fs, ts = _process_file(path)
+            fs, ts = _process_file(path, label)
         except Exception:
             logger.exception(f"Error reading {path}")
             return 1
         summaries.append(fs)
-        label = fs.label
         all_timestamps[label] = ts
         all_summaries[label] = fs
 

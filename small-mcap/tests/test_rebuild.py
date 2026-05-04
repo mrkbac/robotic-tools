@@ -4,7 +4,13 @@ import io
 from pathlib import Path
 
 import pytest
-from small_mcap import McapWriter, get_summary, rebuild_summary, stream_reader
+from small_mcap import (
+    McapWriter,
+    get_summary,
+    read_info_approximate,
+    rebuild_summary,
+    stream_reader,
+)
 from small_mcap.exceptions import McapError
 from small_mcap.rebuild import MESSAGE_RECORD_OVERHEAD, _estimate_size_from_indexes
 from small_mcap.records import LazyChunk, MessageIndex
@@ -12,6 +18,46 @@ from small_mcap.writer import CompressionType, IndexType
 
 # Path to conformance test data
 CONFORMANCE_DIR = Path(__file__).parent.parent.parent / "data" / "conformance"
+
+
+def test_read_info_approximate_reports_message_index_progress():
+    buffer = io.BytesIO()
+    writer = McapWriter(buffer, chunk_size=256, compression=CompressionType.NONE)
+    writer.start(profile="test", library="small-mcap-test")
+    writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+    writer.add_channel(channel_id=1, topic="/left", message_encoding="json", schema_id=1)
+    writer.add_channel(channel_id=2, topic="/right", message_encoding="json", schema_id=1)
+    for index in range(50):
+        log_time = index * 1_000_000
+        writer.add_message(
+            channel_id=1,
+            log_time=log_time,
+            publish_time=log_time,
+            data=b'{"channel": 1}',
+        )
+        writer.add_message(
+            channel_id=2,
+            log_time=log_time,
+            publish_time=log_time,
+            data=b'{"channel": 2}',
+        )
+    writer.finish()
+
+    progress_updates: list[tuple[int, int]] = []
+    buffer.seek(0)
+    info = read_info_approximate(
+        buffer,
+        progress_callback=lambda completed, total: progress_updates.append((completed, total)),
+    )
+
+    assert info is not None
+    expected_total = sum(
+        len(chunk_index.message_index_offsets) for chunk_index in info.summary.chunk_indexes
+    )
+    assert expected_total > 0
+    assert progress_updates[0] == (0, expected_total)
+    assert progress_updates[-1] == (expected_total, expected_total)
+    assert [completed for completed, _ in progress_updates] == list(range(expected_total + 1))
 
 
 @pytest.mark.conformance
