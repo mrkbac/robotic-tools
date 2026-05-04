@@ -1,5 +1,6 @@
 """Rebuild MCAP summary section from data section."""
 
+import io
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -156,10 +157,21 @@ def read_info_approximate(
         progress_callback(read_message_indexes, message_index_count)
 
     for chunk_index in summary.chunk_indexes:
+        offsets_by_channel = chunk_index.message_index_offsets
+        if not offsets_by_channel:
+            chunk_information[chunk_index.chunk_start_offset] = []
+            continue
+
+        sorted_offsets = sorted(offsets_by_channel.values())
+        first_offset = sorted_offsets[0]
+        stream.seek(first_offset)
+        group_blob = stream.read(chunk_index.message_index_length)
+        group_buffer = io.BytesIO(group_blob)
+
         indexes: list[MessageIndex] = []
-        for offset in chunk_index.message_index_offsets.values():
-            stream.seek(offset)
-            indexes.append(MessageIndex.read_record(stream))
+        for offset in sorted_offsets:
+            group_buffer.seek(offset - first_offset)
+            indexes.append(MessageIndex.read_record(group_buffer))
             read_message_indexes += 1
             if progress_callback is not None:
                 progress_callback(read_message_indexes, message_index_count)
