@@ -188,7 +188,7 @@ def rosdecompress(
     with (
         open_input(file) as (input_stream, input_size),
         output.open("wb") as output_stream,
-        create_progress(console, title="Decompressing topics") as progress,
+        create_progress(title="Decompressing topics") as progress,
     ):
         task_id = progress.add_task("Processing messages", total=total_message_count)
 
@@ -322,6 +322,6 @@ def rosdecompress(
     if messages_copied:
         console.print(f"[dim]Copied:[/dim] {messages_copied:,} messages unchanged")
 
-    print_size_comparison(console, input_size, output_size)
+    print_size_comparison(input_size, output_size)
 
     return 0

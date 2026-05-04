@@ -7,6 +7,7 @@ elements.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, ClassVar
 from xml.sax.saxutils import escape
 
@@ -27,10 +28,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from rich.console import Console
     from small_mcap import DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
+
+logger = logging.getLogger(__name__)
 
 
 def _coord_string(sample: Sample) -> str:
@@ -92,7 +94,6 @@ class KmlExporter(Ros2Exporter):
 
     def finish(
         self,
-        console: Console,
         output_path: Path,
         counts: Mapping[int, int],  # noqa: ARG002 - driver already reports per-topic counts.
     ) -> None:
@@ -111,7 +112,7 @@ class KmlExporter(Ros2Exporter):
                 self._write_folder(fh, writer.topic, writer)
             fh.write("  </Document>\n")
             fh.write("</kml>\n")
-        console.print(f"[green]Wrote {path}[/green]")
+        logger.info(f"Wrote {path}")
 
     def _write_folder(self, fh: Any, topic: str, writer: _KmlTopicWriter) -> None:
         samples = stride(writer.samples, self._stride_n)

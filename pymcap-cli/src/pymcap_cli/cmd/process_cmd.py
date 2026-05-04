@@ -1,5 +1,6 @@
 """Unified process command combining recovery and filtering capabilities."""
 
+import logging
 from enum import Enum
 from typing import Annotated
 
@@ -25,6 +26,7 @@ from pymcap_cli.utils import (
     MetadataMode,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -188,7 +190,7 @@ def process(
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
     try:
@@ -206,7 +208,7 @@ def process(
             always_decode_chunk=always_decode_chunk,
         )
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        logger.error(str(e))  # noqa: TRY400
         return 1
 
     try:
@@ -221,12 +223,12 @@ def process(
             ),
         )
         if len(file) > 1:
-            console.print(f"[green]✓ Successfully processed {len(file)} files![/green]")
+            logger.info(f"[green]✓ Successfully processed {len(file)} files![/green]")
         else:
-            console.print("[green]✓ Processing completed successfully![/green]")
+            logger.info("[green]✓ Processing completed successfully![/green]")
         console.print(result.stats)
-    except Exception as e:  # noqa: BLE001
-        console.print(f"[red]Error during processing: {e}[/red]")
+    except Exception:
+        logger.exception("Error during processing")
         return 1
 
     return 0

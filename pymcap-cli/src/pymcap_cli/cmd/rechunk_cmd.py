@@ -1,5 +1,6 @@
 """Rechunk command - reorganize MCAP messages into chunks based on topic patterns."""
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -26,6 +27,7 @@ from pymcap_cli.utils import compile_topic_patterns
 if TYPE_CHECKING:
     from re import Pattern
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -102,15 +104,12 @@ def rechunk(
     """
     # Validate pattern is provided when using PATTERN strategy
     if strategy == RechunkStrategy.PATTERN and not pattern:
-        console.print(
-            "[red]Error: --strategy=pattern requires at least one regex pattern. "
-            "Use -p PATTERN[/red]"
-        )
+        logger.error("--strategy=pattern requires at least one regex pattern. Use -p PATTERN")
         return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
     output_file = Path(output)
@@ -119,22 +118,19 @@ def rechunk(
     patterns: list[Pattern[str]] = []
 
     if strategy == RechunkStrategy.ALL:
-        console.print("[dim]Strategy: Each topic in its own chunk group[/dim]")
+        logger.info("Strategy: Each topic in its own chunk group")
     elif strategy == RechunkStrategy.AUTO:
-        console.print("[dim]Strategy: Auto-grouping based on size (>15% threshold)[/dim]")
+        logger.info("Strategy: Auto-grouping based on size (>15% threshold)")
     else:  # PATTERN
-        console.print("[dim]Strategy: Pattern-based grouping[/dim]")
+        logger.info("Strategy: Pattern-based grouping")
         try:
             patterns = compile_topic_patterns(pattern or [])
         except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+            logger.error(str(e))  # noqa: TRY400
             return 1
 
         if not patterns:
-            console.print(
-                "[yellow]Warning: No patterns specified. "
-                "All messages will be in one group.[/yellow]"
-            )
+            logger.warning("No patterns specified. All messages will be in one group.")
 
     result = run_processor(
         files=[file],
@@ -150,7 +146,7 @@ def rechunk(
     )
 
     # Report results
-    console.print("[green]✓ Rechunking completed successfully![/green]")
+    logger.info("[green]✓ Rechunking completed successfully![/green]")
     console.print(
         f"Processed {result.stats.messages_processed:,} messages, "
         f"wrote {result.stats.writer_statistics.message_count:,} messages"

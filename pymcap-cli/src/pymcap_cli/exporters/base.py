@@ -8,6 +8,7 @@ forwards decoded MCAP messages to them. A new export format is one new
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -16,8 +17,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from rich.console import Console
     from small_mcap import Channel, DecodedMessage, Schema
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -79,9 +81,7 @@ class Exporter(ABC):
     def open_topic(self, ctx: TopicContext) -> TopicWriter:
         """Create a per-topic writer. Called once per topic on first message."""
 
-    def validate_output(
-        self, output: str | Path | None, *, force: bool, console: Console
-    ) -> Path | None:
+    def validate_output(self, output: str | Path | None, *, force: bool) -> Path | None:
         """Resolve and validate the user-provided output path.
 
         Default treats ``output`` as a directory (the historic behaviour for
@@ -92,16 +92,15 @@ class Exporter(ABC):
         from pymcap_cli.exporters._common import validate_output_dir  # noqa: PLC0415
 
         if output is None:
-            console.print("[red]Error:[/red] this exporter requires an output directory.")
+            logger.error("this exporter requires an output directory.")
             return None
-        return validate_output_dir(output, force=force, console=console)
+        return validate_output_dir(output, force=force)
 
-    def setup(self, console: Console, output_path: Path) -> None:  # noqa: B027
+    def setup(self, output_path: Path) -> None:  # noqa: B027
         """Called once before iteration. Default is a no-op."""
 
     def finish(  # noqa: B027
         self,
-        console: Console,
         output_path: Path,
         counts: Mapping[int, int],
     ) -> None:

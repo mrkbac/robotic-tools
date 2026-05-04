@@ -1,5 +1,6 @@
 """Merge command for pymcap-cli."""
 
+import logging
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -24,6 +25,7 @@ from pymcap_cli.utils import (
     MetadataMode,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -85,12 +87,12 @@ def merge(
     ```
     """
     if len(files) < 2:
-        console.print("[red]Error: At least 2 input files are required for merging[/red]")
+        logger.error("At least 2 input files are required for merging")
         return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
     try:
@@ -107,10 +109,10 @@ def merge(
                 overwrite_policy=overwrite_policy,
             ),
         )
-        console.print(f"[green]✓ Successfully merged {len(files)} files![/green]")
+        logger.info(f"[green]✓ Successfully merged {len(files)} files![/green]")
         console.print(result.stats)
-    except Exception as e:  # noqa: BLE001
-        console.print(f"[red]Error during merge: {e}[/red]")
+    except Exception:
+        logger.exception("Error during merge")
         return 1
 
     return 0

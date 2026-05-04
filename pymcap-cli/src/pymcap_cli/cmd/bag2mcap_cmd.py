@@ -249,7 +249,7 @@ def bag2mcap(
     """
     input_path = Path(file)
     if not input_path.exists():
-        console.print(f"[red]Error: Input file '{file}' does not exist[/red]")
+        logger.error(f"Input file '{file}' does not exist")
         return 1
 
     confirm_output_overwrite(output, force)
@@ -266,20 +266,20 @@ def bag2mcap(
         compression=writer_compression,
     )
 
-    console.print(f"[blue]Converting '{file}' to '{output}'[/blue]")
+    logger.info(f"Converting '{file}' to '{output}'")
 
     with output.open("wb") as output_stream:
         try:
             stats = convert_bag_to_mcap(input_path, output_stream, options)
 
-            console.print("[green]Conversion completed successfully[/green]")
+            logger.info("[green]Conversion completed successfully[/green]")
             console.print(
                 f"Converted {stats.topic_count} topics, "
                 f"{stats.message_count:,} messages, "
                 f"{stats.schema_count} schemas"
             )
-        except Exception as e:  # noqa: BLE001
-            console.print(f"[red]Error during conversion: {e}[/red]")
+        except Exception:
+            logger.exception("Error during conversion")
             return 1
 
     return 0

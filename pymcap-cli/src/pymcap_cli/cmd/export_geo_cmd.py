@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Literal
 
 from cyclopts import Parameter
@@ -17,6 +18,7 @@ from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclo
     OutputPathOption,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -77,7 +79,7 @@ def export_geo(
     try:
         max_gap_ns = parse_duration_ns(max_gap)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        logger.error(str(exc))  # noqa: TRY400
         return 2
 
     if format == "kml":
@@ -109,5 +111,4 @@ def export_geo(
         topics=topic,
         force=force,
         num_workers=num_workers,
-        console=console,
     )

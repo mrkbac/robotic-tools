@@ -1,5 +1,6 @@
 """TF tree command - display transform tree from MCAP file."""
 
+import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -318,8 +320,8 @@ def tftree(
                 frame_msg = f"  - Frame [bold]'{child}'[/bold] has parents: {parents_str}"
                 console.print(frame_msg, style="yellow")
 
-    except (OSError, ValueError, RuntimeError) as e:
-        console.print(f"[red]Error reading MCAP file: {e}[/red]")
+    except (OSError, ValueError, RuntimeError):
+        logger.exception("Error reading MCAP file")
         return 1
 
     return 0

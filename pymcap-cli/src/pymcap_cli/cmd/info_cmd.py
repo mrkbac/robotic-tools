@@ -3,6 +3,7 @@
 import base64
 import gzip
 import json
+import logging
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,7 @@ from pymcap_cli.types.info_link import ScanMode, generate_link
 from pymcap_cli.types.info_types import McapInfoOutput
 from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -525,33 +527,33 @@ def info(
         if json_output:
             print('{"error": "At least one file must be specified"}', file=sys.stderr)  # noqa: T201
         else:
-            console.print("[red]Error:[/] At least one file must be specified")
+            logger.error("At least one file must be specified")
         return 1
 
     if compress and not json_output:
-        console.print("[red]Error:[/] --compress requires --json")
+        logger.error("--compress requires --json")
         return 1
 
     if link:
         if json_output:
-            console.print("[red]Error:[/] --link is incompatible with --json")
+            logger.error("--link is incompatible with --json")
             return 1
         if compress:
-            console.print("[red]Error:[/] --link is incompatible with --compress")
+            logger.error("--link is incompatible with --compress")
             return 1
         if watch:
-            console.print("[red]Error:[/] --link is incompatible with --watch")
+            logger.error("--link is incompatible with --watch")
             return 1
 
     if watch:
         if json_output:
-            console.print("[red]Error:[/] --watch is incompatible with --json")
+            logger.error("--watch is incompatible with --json")
             return 1
         if compress:
-            console.print("[red]Error:[/] --watch is incompatible with --compress")
+            logger.error("--watch is incompatible with --compress")
             return 1
         if len(files) != 1:
-            console.print("[red]Error:[/] --watch requires exactly one file")
+            logger.error("--watch requires exactly one file")
             return 1
         return _watch_file(
             files[0], sort.value, reverse, index_duration, median, tree, watch_interval

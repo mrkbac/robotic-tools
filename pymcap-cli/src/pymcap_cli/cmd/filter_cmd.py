@@ -1,5 +1,6 @@
 """Filter command for pymcap-cli."""
 
+import logging
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -24,6 +25,7 @@ from pymcap_cli.utils import (
     MetadataMode,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -160,7 +162,7 @@ def filter_cmd(
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
     try:
@@ -177,7 +179,7 @@ def filter_cmd(
             include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
         )
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        logger.error(str(e))  # noqa: TRY400
         return 1
 
     try:
@@ -191,10 +193,10 @@ def filter_cmd(
                 overwrite_policy=overwrite_policy,
             ),
         )
-        console.print("[green]✓ Filter completed successfully![/green]")
+        logger.info("[green]✓ Filter completed successfully![/green]")
         console.print(result.stats)
-    except Exception as e:  # noqa: BLE001
-        console.print(f"[red]Error during filtering: {e}[/red]")
+    except Exception:
+        logger.exception("Error during filtering")
         return 1
 
     return 0

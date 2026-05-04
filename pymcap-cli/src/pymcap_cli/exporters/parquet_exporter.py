@@ -14,6 +14,7 @@ Nested ROS messages map to Parquet/Arrow ``STRUCT``, arrays to ``LIST``, and
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
@@ -42,11 +43,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pyarrow as pa
-    from rich.console import Console
     from small_mcap import DecodedMessage
 
     from pymcap_cli.exporters.base import TopicContext
 
+
+logger = logging.getLogger(__name__)
 
 # Cap on in-flight write futures — each queued Arrow Table can be hundreds of
 # MB, so keep the backlog shallow.
@@ -272,13 +274,13 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
     def decoder_factories(self) -> list[Any]:
         return list(self._factories)
 
-    def setup(self, console: Console, output_path: Path) -> None:
+    def setup(self, output_path: Path) -> None:
         if self._compressed_pointcloud_warning:
-            console.print(self._compressed_pointcloud_warning)
+            logger.warning(self._compressed_pointcloud_warning)
         if self._skipped_schemas:
-            console.print(
-                f"[dim]Skipping {len(self._skipped_schemas)} blob schema(s) — pass "
-                f"[yellow]--include-blobs[/yellow] to include them.[/dim]"
+            logger.info(
+                f"Skipping {len(self._skipped_schemas)} blob schema(s) — pass "
+                "--include-blobs to include them."
             )
         # Clear any leftover .parquet files so partial reruns don't mix old +
         # new outputs (validate_output_dir leaves the directory intact).
@@ -302,7 +304,7 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
         self._writers[ctx.writer_key] = writer
         return writer
 
-    def finish(self, console: Console, output_path: Path, counts: Mapping[int, int]) -> None:
+    def finish(self, output_path: Path, counts: Mapping[int, int]) -> None:
         # Drain anything still in-flight, then shut the writer pool down.
         while self._pending:
             self._pending.popleft().result()
@@ -328,7 +330,6 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
         pq.write_table(pa.Table.from_pylist(index_rows), output_path / "_topics.parquet")
 
         for w in sorted(self._writers.values(), key=lambda writer: writer.topic):
-            console.print(
-                f"  [cyan]{w.topic}[/cyan] → [yellow]{w.safe_filename}.parquet[/yellow] "
-                f"({counts.get(w.writer_key, 0):,} rows)"
+            logger.info(
+                f"  {w.topic} → {w.safe_filename}.parquet ({counts.get(w.writer_key, 0):,} rows)"
             )

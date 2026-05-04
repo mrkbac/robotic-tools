@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -19,6 +20,7 @@ from pymcap_cli.types.types_manual import (
     OutputPathOption,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -70,7 +72,7 @@ def recover(
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
     try:
@@ -84,16 +86,16 @@ def recover(
                 overwrite_policy=overwrite_policy,
             ),
         )
-        console.print("[green]✓ Recovery completed successfully![/green]")
+        logger.info("[green]✓ Recovery completed successfully![/green]")
         console.print(result.stats)
     except WriterNotStartedError:
-        console.print("[yellow]Warning: File appears to be empty or severely corrupted[/yellow]")
-        console.print("No valid MCAP data found to recover")
-    except RuntimeError as e:
-        console.print(f"[red]Error during recovery: {e}[/red]")
+        logger.warning("File appears to be empty or severely corrupted")
+        logger.warning("No valid MCAP data found to recover")
+    except RuntimeError:
+        logger.exception("Error during recovery")
         return 1
-    except Exception as e:  # noqa: BLE001
-        console.print(f"[red]Error during recovery: {e}[/red]")
+    except Exception:
+        logger.exception("Error during recovery")
         return 1
 
     return 0

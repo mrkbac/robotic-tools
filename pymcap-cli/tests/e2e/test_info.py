@@ -89,7 +89,7 @@ class TestInfo:
         )
 
         assert result.returncode == 1
-        assert "--watch is incompatible with --json" in result.stdout
+        assert "--watch is incompatible with --json" in result.stderr
 
     def test_info_watch_with_multiple_files_errors(
         self, image_small_mcap: Path, image_rgb_mcap: Path
@@ -103,7 +103,7 @@ class TestInfo:
         )
 
         assert result.returncode == 1
-        assert "--watch requires exactly one file" in result.stdout
+        assert "--watch requires exactly one file" in result.stderr
 
 
 @pytest.mark.e2e

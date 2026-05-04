@@ -7,9 +7,9 @@ selected :class:`~pymcap_cli.exporters.base.Exporter`.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-from rich.console import Console
 from small_mcap import read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
     from pymcap_cli.exporters.base import Exporter, TopicWriter
 
+logger = logging.getLogger(__name__)
+
 
 def run_export(
     *,
@@ -37,7 +39,6 @@ def run_export(
     num_workers: int = 8,
     start_time_ns: int = 0,
     end_time_ns: int | None = None,
-    console: Console | None = None,
 ) -> int:
     """Drive an export run end-to-end.
 
@@ -51,9 +52,7 @@ def run_export(
     ``start_time_ns`` / ``end_time_ns`` filter messages at the reader level.
     ``end_time_ns=None`` means "no upper bound".
     """
-    console = console or Console()
-
-    resolved_output = exporter.validate_output(output, force=force, console=console)
+    resolved_output = exporter.validate_output(output, force=force)
     if resolved_output is None:
         return 1
 
@@ -61,8 +60,8 @@ def run_export(
 
     try:
         total = get_total_message_count(file)
-    except (FileNotFoundError, OSError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+    except (FileNotFoundError, OSError):
+        logger.exception(f"Error reading {file}")
         return 1
 
     writers: dict[int, TopicWriter] = {}
@@ -70,17 +69,17 @@ def run_export(
     counts: dict[int, int] = {}
     error_count = 0
 
-    console.print(f"[cyan]Input:[/cyan] {file}")
-    console.print(f"[cyan]Output:[/cyan] {resolved_output}")
-    console.print(f"[cyan]Format:[/cyan] {exporter.name}")
+    logger.info(f"Input: {file}")
+    logger.info(f"Output: {resolved_output}")
+    logger.info(f"Format: {exporter.name}")
 
-    exporter.setup(console, resolved_output)
+    exporter.setup(resolved_output)
 
     read_buffer_bytes = 4 * 1024 * 1024
     try:
         with (
             open_input(file, buffering=read_buffer_bytes) as (stream, _size),
-            create_progress(console, title=f"Exporting to {exporter.name}") as progress,
+            create_progress(title=f"Exporting to {exporter.name}") as progress,
         ):
             task_id = progress.add_task("Processing messages", total=total)
 
@@ -116,9 +115,7 @@ def run_export(
                     writer.write(msg)
                 except Exception as exc:  # noqa: BLE001
                     error_count += 1
-                    console.print(
-                        f"[yellow]Warning:[/yellow] failed to write message on {topic}: {exc}"
-                    )
+                    logger.warning(f"failed to write message on {topic}: {exc}")
                 else:
                     counts[writer_key] = counts.get(writer_key, 0) + 1
     finally:
@@ -127,25 +124,25 @@ def run_export(
                 writer.close()
             except Exception as exc:  # noqa: BLE001
                 error_count += 1
-                console.print(f"[yellow]Warning:[/yellow] writer close failed: {exc}")
+                logger.warning(f"writer close failed: {exc}")
         try:
-            exporter.finish(console, resolved_output, counts)
+            exporter.finish(resolved_output, counts)
         except Exception as exc:  # noqa: BLE001
             error_count += 1
-            console.print(f"[yellow]Warning:[/yellow] exporter finish failed: {exc}")
+            logger.warning(f"exporter finish failed: {exc}")
 
     if not writers:
-        console.print("[yellow]No messages exported (no matching topics).[/yellow]")
+        logger.warning("No messages exported (no matching topics).")
         return 1
 
     written = sum(counts.values())
     if error_count:
-        console.print(
-            f"[yellow]Exported {written} messages across {len(writers)} topic(s) "
-            f"to {resolved_output} — {error_count} message(s) failed.[/yellow]"
+        logger.warning(
+            f"Exported {written} messages across {len(writers)} topic(s) "
+            f"to {resolved_output} — {error_count} message(s) failed."
         )
         return 1
-    console.print(
+    logger.info(
         f"[green]Exported {written} messages[/green] across {len(writers)} "
         f"topic(s) to {resolved_output}"
     )

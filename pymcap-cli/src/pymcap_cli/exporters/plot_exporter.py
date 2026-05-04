@@ -11,12 +11,12 @@ When ``output`` is ``None`` the figure is opened interactively
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import plotly.graph_objects as go
-from rich.console import Console
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
     MessagePath,
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from small_mcap import DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -103,7 +105,7 @@ def downsample_lttb(
 
 
 def _validate_series_against_schema(
-    series: SeriesData, schema_name: str, schema_data: bytes, *, console: Console
+    series: SeriesData, schema_name: str, schema_data: bytes
 ) -> bool:
     """Validate one series against a ROS message schema.
 
@@ -114,7 +116,7 @@ def _validate_series_against_schema(
     try:
         all_definitions = parse_schema_to_definitions(schema_name, schema_data)
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[yellow]Warning:[/yellow] could not parse schema {schema_name!r}: {exc}")
+        logger.warning(f"could not parse schema {schema_name!r}: {exc}")
         return True
 
     root_msgdef = all_definitions.get(schema_name)
@@ -123,13 +125,13 @@ def _validate_series_against_schema(
         short_name = f"{parts[0]}/{parts[-1]}"
         root_msgdef = all_definitions.get(short_name)
     if root_msgdef is None:
-        console.print(f"[yellow]Warning:[/yellow] no message definition for schema {schema_name!r}")
+        logger.warning(f"no message definition for schema {schema_name!r}")
         return True
 
     try:
         series.parsed.validate(root_msgdef, all_definitions)
-    except ValidationError as exc:
-        console.print(f"[red]Query validation error for path {series.path_str!r}:[/red] {exc}")
+    except ValidationError:
+        logger.exception(f"Query validation error for path {series.path_str!r}")
         return False
     return True
 
@@ -137,9 +139,8 @@ def _validate_series_against_schema(
 class _PlotTopicWriter(TopicWriter):
     """Buffer values for every series whose topic matches this writer."""
 
-    def __init__(self, series: list[SeriesData], console: Console) -> None:
+    def __init__(self, series: list[SeriesData]) -> None:
         self.series = series
-        self._console = console
         self._validated = False
 
     def write(self, msg: DecodedMessage) -> None:
@@ -151,7 +152,6 @@ class _PlotTopicWriter(TopicWriter):
                         series,
                         msg.schema.name,
                         msg.schema.data,
-                        console=self._console,
                     )
                     if not ok:
                         raise ValidationError(f"Validation failed for {series.path_str!r}")
@@ -201,7 +201,6 @@ class PlotExporter(JsonRos2Exporter):
         self._downsample = downsample
         self._xy = xy
         self._force = force
-        self._console = Console(stderr=True)
 
         # Pre-parse paths up-front; surface syntax errors immediately.
         self._series: list[SeriesData] = []
@@ -224,12 +223,7 @@ class PlotExporter(JsonRos2Exporter):
         # the writer.
         return True
 
-    def setup(self, console: Console, output_path: Path) -> None:  # noqa: ARG002
-        self._console = console
-
-    def validate_output(
-        self, output: str | Path | None, *, force: bool, console: Console
-    ) -> Path | None:
+    def validate_output(self, output: str | Path | None, *, force: bool) -> Path | None:
         if output is None:
             # Sentinel — the exporter writes (or doesn't) on its own from
             # finish(); the driver only uses the returned path for status
@@ -239,21 +233,20 @@ class PlotExporter(JsonRos2Exporter):
 
         path = Path(output)
         if path.exists() and path.is_dir():
-            console.print(f"[red]Error:[/red] {path} is a directory; expected an HTML file path.")
+            logger.error(f"{path} is a directory; expected an HTML file path.")
             return None
         if path.exists() and not (force or self._force):
-            console.print(f"[red]Error:[/red] {path} exists. Use --force to overwrite.")
+            logger.error(f"{path} exists. Use --force to overwrite.")
             return None
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
     def open_topic(self, ctx: TopicContext) -> _PlotTopicWriter:
         series = self._series_by_topic.get(ctx.topic, [])
-        return _PlotTopicWriter(series, console=self._console)
+        return _PlotTopicWriter(series)
 
     def finish(
         self,
-        console: Console,
         output_path: Path,  # noqa: ARG002 - plot writes to self._output.
         counts: Mapping[int, int],  # noqa: ARG002 - counts are irrelevant to rendering.
     ) -> None:
@@ -270,7 +263,7 @@ class PlotExporter(JsonRos2Exporter):
 
         for series in self._series:
             if not series.times_ns:
-                console.print(f"[yellow]Warning:[/yellow] no plottable data for {series.label!r}")
+                logger.warning(f"no plottable data for {series.label!r}")
 
         rendered_series = [
             (series, [(ts - first_ns) / 1e9 for ts in series.times_ns])
@@ -287,9 +280,7 @@ class PlotExporter(JsonRos2Exporter):
                 before = len(times_s)
                 t_out, v_out = downsample_lttb(times_s, series.values, self._downsample)
                 if before != len(t_out):
-                    console.print(
-                        f"[dim]Downsampled {series.label!r}: {before} → {len(t_out)} points[/dim]"
-                    )
+                    logger.info(f"Downsampled {series.label!r}: {before} → {len(t_out)} points")
                 # Stash the downsampled values back onto the series so XY
                 # mode also benefits.
                 series.values = v_out
@@ -297,7 +288,7 @@ class PlotExporter(JsonRos2Exporter):
             rendered_series = new_rendered
 
         if self._xy:
-            self._render_xy(console, rendered_series)
+            self._render_xy(rendered_series)
             return
 
         fig = go.Figure()
@@ -316,11 +307,10 @@ class PlotExporter(JsonRos2Exporter):
             yaxis_title="Value",
             hovermode="x unified",
         )
-        self._emit(console, fig)
+        self._emit(fig)
 
     def _render_xy(
         self,
-        console: Console,
         rendered_series: list[tuple[SeriesData, list[float]]],
     ) -> None:
         if len(rendered_series) != 2:
@@ -355,11 +345,11 @@ class PlotExporter(JsonRos2Exporter):
             hovermode="closest",
         )
         fig.update_yaxes(scaleanchor="x", scaleratio=1)
-        self._emit(console, fig)
+        self._emit(fig)
 
-    def _emit(self, console: Console, fig: go.Figure) -> None:
+    def _emit(self, fig: go.Figure) -> None:
         if self._output is None:
             fig.show()
             return
         fig.write_html(str(self._output))
-        console.print(f"[green]Plot saved to {self._output}[/green]")
+        logger.info(f"Plot saved to {self._output}")

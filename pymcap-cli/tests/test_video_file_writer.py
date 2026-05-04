@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import io
-
 import pytest
 from mcap_codec_support.video import (
     EncoderBackend,
@@ -11,7 +9,6 @@ from mcap_codec_support.video import (
 )
 from pymcap_cli.exporters import video_exporter
 from pymcap_cli.exporters.video_exporter import _VideoTopicWriter
-from rich.console import Console
 
 
 def test_video_topic_writer_close_reraises_flush_failure(monkeypatch, tmp_path) -> None:
@@ -38,7 +35,6 @@ def test_video_topic_writer_close_reraises_flush_failure(monkeypatch, tmp_path) 
         encoder_backend=EncoderBackend.SOFTWARE,
         quality=28,
         mode=EncoderMode.FFMPEG_CLI,
-        console=Console(file=io.StringIO()),
     )
 
     with pytest.raises(VideoEncoderError, match=r"Flush failed .*ffmpeg failed"):

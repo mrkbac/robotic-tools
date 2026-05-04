@@ -1,13 +1,13 @@
 """Records command for pymcap-cli - print all MCAP records."""
 
+import logging
 import sys
 
-from rich.console import Console
 from small_mcap import stream_reader
 
 from pymcap_cli.core.input_handler import open_input
 
-console_err = Console(stderr=True)
+logger = logging.getLogger(__name__)
 
 
 def records(
@@ -29,11 +29,11 @@ def records(
                 print(record, file=sys.stdout)  # noqa: T201
 
     except KeyboardInterrupt:
-        console_err.print("\n[yellow]Interrupted by user[/yellow]")
+        logger.warning("Interrupted by user")
         return 0
 
-    except Exception as e:  # noqa: BLE001
-        console_err.print(f"[red]Error reading MCAP: {e}[/red]")
+    except Exception:
+        logger.exception("Error reading MCAP")
         return 1
 
     return 0

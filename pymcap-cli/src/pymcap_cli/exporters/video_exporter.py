@@ -27,6 +27,7 @@ and applies to both modes.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from mcap_codec_support.video import (
@@ -38,7 +39,6 @@ from mcap_codec_support.video import (
     VideoFileWriterSession,
     create_video_file_writer,
 )
-from rich.console import Console
 
 from pymcap_cli.exporters._common import (
     message_timestamps_ns,
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
     from pymcap_cli.exporters.base import TopicContext
 
+logger = logging.getLogger(__name__)
 
 _CANONICAL_IMAGE_SCHEMAS = frozenset(normalize_schema_name(s) for s in IMAGE_SCHEMAS)
 
@@ -75,21 +76,19 @@ class _VideoTopicWriter(TopicWriter):
         encoder_backend: EncoderBackend,
         quality: int,
         mode: EncoderMode,
-        console: Console,
     ) -> None:
         self.path = path
         self._codec = codec
         self._encoder_backend = encoder_backend
         self._quality = quality
         self._mode = mode
-        self._console = console
         self._writer: VideoFileWriterSession = create_video_file_writer(
             path,
             codec=codec,
             encoder_backend=encoder_backend,
             quality=quality,
             mode=mode,
-            on_fallback=lambda message: console.print(f"[yellow]{message}[/yellow]"),
+            on_fallback=logger.warning,
         )
         self._closed = False
 
@@ -112,7 +111,7 @@ class _VideoTopicWriter(TopicWriter):
             count = self._writer.close()
         except VideoEncoderError as exc:
             raise VideoEncoderError(f"Flush failed for {self.path}: {exc}") from exc
-        self._console.print(f"[green]✓[/green] {self.path}  ({count} frame(s))")
+        logger.info(f"[green]✓[/green] {self.path}  ({count} frame(s))")
 
 
 class VideoExporter(Ros2Exporter):
@@ -135,13 +134,9 @@ class VideoExporter(Ros2Exporter):
         self._encoder_backend = encoder_backend
         self._quality = quality
         self._mode = mode
-        self._console = Console()
 
     def accepts(self, schema: Schema | None) -> bool:
         return schema_name_in(schema, _CANONICAL_IMAGE_SCHEMAS)
-
-    def setup(self, console: Console, output_path: Path) -> None:  # noqa: ARG002
-        self._console = console
 
     def open_topic(self, ctx: TopicContext) -> _VideoTopicWriter:
         path = prepare_output_file(ctx.output_path / f"{ctx.safe_filename}.mp4", force=ctx.force)
@@ -151,5 +146,4 @@ class VideoExporter(Ros2Exporter):
             encoder_backend=self._encoder_backend,
             quality=self._quality,
             mode=self._mode,
-            console=self._console,
         )

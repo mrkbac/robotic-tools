@@ -30,6 +30,7 @@ from small_mcap import (
 )
 
 from pymcap_cli.display.osc_utils import OSCProgressColumn
+from pymcap_cli.log_setup import ERR
 
 
 def bytes_to_human(size_bytes: float | None) -> str:
@@ -45,7 +46,8 @@ def file_progress(title: str, console: Console | None = None) -> Progress:
 
     Args:
         title: Progress bar title text (also used for terminal title)
-        console: Rich console instance (None for default)
+        console: Rich console instance. ``None`` routes progress to the shared
+            stderr console so it does not pollute piped stdout.
 
     Returns:
         Configured Rich Progress instance with OSC support if available
@@ -62,7 +64,7 @@ def file_progress(title: str, console: Console | None = None) -> Progress:
         DownloadColumn(),
         TransferSpeedColumn(),
         OSCProgressColumn(title=clean_title),
-        console=console,
+        console=console if console is not None else ERR,
     )
 
 
@@ -375,5 +377,5 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
     if output.exists() and not force:
         response = input(f"Output file '{output}' already exists. Overwrite? [y/N]: ")
         if response.lower() not in ("y", "yes"):
-            print("Aborted.")  # noqa: T201
+            ERR.print("Aborted.")
             raise SystemExit(1)

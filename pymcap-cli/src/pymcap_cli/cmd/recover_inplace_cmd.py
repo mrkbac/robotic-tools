@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import io
+import logging
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
 from rich.prompt import Confirm
 from small_mcap import MAGIC, Footer, McapError, Opcode, Summary, SummaryOffset, get_summary
 
@@ -19,7 +19,7 @@ from small_mcap.writer import (
 
 from pymcap_cli.utils import rebuild_info
 
-console = Console()
+logger = logging.getLogger(__name__)
 
 
 def _summaries_equal(a: Summary, b: Summary) -> bool:
@@ -105,7 +105,7 @@ def recover_inplace(file: str, *, exact_sizes: bool = False, force: bool = False
     """Rebuild an MCAP's summary/footer in place using recovered info."""
     path = Path(file)
     if not path.exists():
-        console.print(f"[red]File not found:[/red] {path}")
+        logger.error(f"File not found: {path}")
         return 1
 
     file_size = path.stat().st_size
@@ -120,24 +120,22 @@ def recover_inplace(file: str, *, exact_sizes: bool = False, force: bool = False
             has_valid_summary = False
         read_stream.seek(0)
 
-        info = rebuild_info(read_stream, file_size, exact_sizes=exact_sizes, console=console)
+        info = rebuild_info(read_stream, file_size, exact_sizes=exact_sizes)
 
     if has_valid_summary and existing_summary is not None:
         rebuilt = info.summary
         if _summaries_equal(existing_summary, rebuilt):
-            console.print("[yellow]File already appears to have a valid summary/footer[/yellow]")
+            logger.warning("File already appears to have a valid summary/footer")
         else:
-            console.print(
-                "[yellow]Existing summary differs from rebuilt version (will overwrite):[/yellow]"
-            )
+            logger.warning("Existing summary differs from rebuilt version (will overwrite):")
             for line in _describe_summary_diff(existing_summary, rebuilt):
-                console.print(f"  {line}")
+                logger.warning(f"  {line}")
 
     if not force and not Confirm.ask(
         f"[yellow]This will overwrite[/yellow] {path} [yellow]in place. Continue?[/yellow]",
         default=False,
     ):
-        console.print("[yellow]Aborted[/yellow]")
+        logger.warning("Aborted")
         return 1
 
     summary_start = info.next_offset
@@ -168,5 +166,5 @@ def recover_inplace(file: str, *, exact_sizes: bool = False, force: bool = False
         footer.write_record_to(f)
         f.write(MAGIC)
 
-    console.print("[green]✓ In-place recovery completed[/green]")
+    logger.info("[green]✓ In-place recovery completed[/green]")
     return 0

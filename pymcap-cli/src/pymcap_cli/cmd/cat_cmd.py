@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import re
 import sys
 from contextlib import ExitStack
@@ -26,7 +27,7 @@ from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.utils import MAX_INT64, ProgressTrackingIO, file_progress, parse_timestamp_args
 
-console_err = Console(stderr=True)
+logger = logging.getLogger(__name__)
 console_out = Console()
 
 FILTERING_GROUP = Group("Filtering")
@@ -220,8 +221,8 @@ def cat(
     if query:
         try:
             parsed_query = parse_message_path(query)
-        except Exception as e:  # noqa: BLE001
-            console_err.print(f"[red]Invalid query syntax: {e}[/red]")
+        except Exception:
+            logger.exception("Invalid query syntax")
             return 1
 
     # Determine output mode
@@ -256,18 +257,12 @@ def cat(
                 root_msgdef = all_definitions.get(f"{parts[0]}/{parts[-1]}")
 
             if root_msgdef is None:
-                console_err.print(
-                    f"[yellow]Warning: Could not find message definition "
-                    f"for schema '{msg_schema_name}'[/yellow]"
-                )
+                logger.warning(f"Could not find message definition for schema '{msg_schema_name}'")
             else:
                 parsed_query.validate(root_msgdef, all_definitions)  # type: ignore[union-attr]
-        except ValidationError as e:
-            console_err.print(f"[red]Query validation error for topic '{topic}':[/red]")
-            console_err.print(f"[red]{e}[/red]")
-            console_err.print(
-                f"\n[yellow]Query:[/yellow] {query}\n[yellow]Schema:[/yellow] {msg_schema_name}"
-            )
+        except ValidationError:
+            logger.exception(f"Query validation error for topic '{topic}'")
+            logger.exception(f"Query: {query}  Schema: {msg_schema_name}")
             return 1
         return None
 
@@ -288,7 +283,7 @@ def cat(
         with open_input(file) as (input_stream, file_size), ExitStack() as stack:
             stream: IO[bytes] = input_stream
             if writing_to_file and file_size:
-                progress = file_progress("[bold blue]Reading MCAP...", console_err)
+                progress = file_progress("[bold blue]Reading MCAP...")
                 progress.start()
                 stack.callback(progress.stop)
                 task = progress.add_task("Processing", total=file_size)
@@ -312,9 +307,9 @@ def cat(
                     validated_topics.add(msg.channel.topic)
 
                     if msg.schema is None:
-                        console_err.print(
-                            f"[yellow]Warning: Cannot validate query for topic "
-                            f"'{msg.channel.topic}' (no schema available)[/yellow]"
+                        logger.warning(
+                            f"Cannot validate query for topic '{msg.channel.topic}' "
+                            "(no schema available)"
                         )
                     else:
                         err = _validate_query(msg.schema.name, msg.schema.data, msg.channel.topic)
@@ -328,9 +323,7 @@ def cat(
                         if data is None:
                             continue
                     except MessagePathError as e:
-                        console_err.print(
-                            f"[yellow]Filter error on {msg.channel.topic}: {e}[/yellow]",
-                        )
+                        logger.warning(f"Filter error on {msg.channel.topic}: {e}")
                         continue
                 else:
                     data = msg.decoded_message
@@ -369,22 +362,18 @@ def cat(
                         print(line, file=sys.stdout)  # noqa: T201
 
         if writing_to_file:
-            console_err.print(
-                f"Wrote [bold]{message_count:,}[/bold] messages to [cyan]{output}[/cyan]"
-            )
+            logger.info(f"Wrote {message_count:,} messages to {output}")
 
         if parsed_query and not validated_topics:
-            console_err.print(
-                f"[red]Error: Topic '{parsed_query.topic}' not found in MCAP file[/red]"
-            )
+            logger.error(f"Topic '{parsed_query.topic}' not found in MCAP file")
             return 1
 
     except KeyboardInterrupt:
-        console_err.print("\n[yellow]Interrupted by user[/yellow]")
+        logger.warning("Interrupted by user")
         return 0
 
-    except Exception as e:  # noqa: BLE001
-        console_err.print(f"[red]Error reading MCAP: {e}[/red]")
+    except Exception:
+        logger.exception("Error reading MCAP")
         return 1
 
     return 0

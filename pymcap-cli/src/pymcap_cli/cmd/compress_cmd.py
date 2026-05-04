@@ -1,5 +1,7 @@
 """Compress command for pymcap-cli."""
 
+import logging
+
 from rich.console import Console
 
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
@@ -17,6 +19,7 @@ from pymcap_cli.types.types_manual import (
     OutputPathOption,
 )
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -56,10 +59,10 @@ def compress(
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
-    console.print(f"[blue]Compressing '{file}' to '{output}'[/blue]")
+    logger.info(f"Compressing '{file}' to '{output}'")
 
     try:
         result = run_processor(
@@ -74,10 +77,10 @@ def compress(
                 overwrite_policy=overwrite_policy,
             ),
         )
-        console.print("[green]✓ Compression completed successfully![/green]")
+        logger.info("[green]✓ Compression completed successfully![/green]")
         console.print(result.stats)
-    except Exception as e:  # noqa: BLE001
-        console.print(f"[red]Error during compression: {e}[/red]")
+    except Exception:
+        logger.exception("Error during compression")
         return 1
 
     return 0

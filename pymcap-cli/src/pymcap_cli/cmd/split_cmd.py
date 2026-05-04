@@ -1,5 +1,6 @@
 """Split command - divide MCAP files into multiple output segments."""
 
+import logging
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -22,6 +23,7 @@ from pymcap_cli.types.types_manual import (
 )
 from pymcap_cli.utils import parse_time_arg
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -149,15 +151,12 @@ def split(
     ```
     """
     if not duration and not split_at and not expression:
-        console.print(
-            "[red]Error: Specify --duration, --split-at and/or --expression "
-            "to define split points.[/red]"
-        )
+        logger.error("Specify --duration, --split-at and/or --expression to define split points.")
         return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
-        console.print("[red]Error: --force and --no-clobber cannot be used together.[/red]")
+        logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
     # Parse split-at timestamps
@@ -166,8 +165,8 @@ def split(
         for ts in split_at:
             try:
                 split_points.append(parse_time_arg(ts))
-            except ValueError as e:
-                console.print(f"[red]Error parsing timestamp '{ts}': {e}[/red]")
+            except ValueError:
+                logger.exception(f"Error parsing timestamp '{ts}'")
                 return 1
 
     # Build split processors
@@ -175,26 +174,26 @@ def split(
     if duration:
         try:
             duration_ns = _parse_duration(duration)
-        except ValueError as e:
-            console.print(f"[red]Error parsing duration '{duration}': {e}[/red]")
+        except ValueError:
+            logger.exception(f"Error parsing duration '{duration}'")
             return 1
         if duration_ns <= 0:
-            console.print("[red]Error: Duration must be positive.[/red]")
+            logger.error("Duration must be positive.")
             return 1
         processors.append(DurationSplitProcessor(duration_ns))
-        console.print(f"[dim]Duration split: every {duration} ({duration_ns:,} ns)[/dim]")
+        logger.info(f"Duration split: every {duration} ({duration_ns:,} ns)")
 
     if split_points:
         processors.append(TimestampSplitProcessor(split_points))
-        console.print(f"[dim]Timestamp split: {len(split_points)} point(s)[/dim]")
+        logger.info(f"Timestamp split: {len(split_points)} point(s)")
 
     if expression:
         try:
             processors.append(ExpressionSplitProcessor(expression))
-        except MessagePathError as e:
-            console.print(f"[red]Error parsing expression '{expression}': {e}[/red]")
+        except MessagePathError:
+            logger.exception(f"Error parsing expression '{expression}'")
             return 1
-        console.print(f"[dim]Expression split: {expression}[/dim]")
+        logger.info(f"Expression split: {expression}")
 
     # Display split mode
     modes = []
@@ -204,7 +203,7 @@ def split(
         modes.append("Timestamp")
     if expression:
         modes.append("Expression")
-    console.print(f"[dim]Mode: {' + '.join(modes)} split[/dim]")
+    logger.info(f"Mode: {' + '.join(modes)} split")
 
     result = run_processor_multi(
         files=[file],
@@ -218,7 +217,7 @@ def split(
     )
 
     # Report results
-    console.print("[green]✓ Splitting completed successfully![/green]")
+    logger.info("[green]✓ Splitting completed successfully![/green]")
     console.print(
         f"Processed {result.stats.messages_processed:,} messages, "
         f"wrote {result.stats.writer_statistics.message_count:,} messages"

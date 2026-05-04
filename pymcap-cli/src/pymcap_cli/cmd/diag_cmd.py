@@ -1,6 +1,7 @@
 """Diag command - inspect ROS2 diagnostics from MCAP files."""
 
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass, field
@@ -18,9 +19,10 @@ from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.sparkline import sparkline
+from pymcap_cli.log_setup import ERR
 
+logger = logging.getLogger(__name__)
 console = Console()
-console_err = Console(stderr=True)
 
 LEVEL_NAMES = {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
 LEVEL_STYLES = {0: "green", 1: "yellow", 2: "red", 3: "dim"}
@@ -64,7 +66,7 @@ def _collect_diagnostics(file: str, topics: list[str]) -> dict[str, DiagEntry]:
             TextColumn("[cyan]{task.fields[msgs]} msgs"),
             TextColumn("[dim]{task.fields[components]} components"),
             TimeElapsedColumn(),
-            console=console_err,
+            console=ERR,
             transient=True,
         ) as progress,
     ):
@@ -186,7 +188,7 @@ def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str]:
     try:
         return re.compile(pattern, re.IGNORECASE)
     except re.error as e:
-        console_err.print(f"[red]Invalid regex for {flag_name}: {e}[/red]")
+        logger.exception(f"Invalid regex for {flag_name}")
         raise SystemExit(1) from e
 
 
@@ -559,16 +561,16 @@ def diag(
 
     try:
         entries = _collect_diagnostics(file, resolved_topics)
-    except (OSError, ValueError, RuntimeError) as e:
-        console_err.print(f"[red]Error reading MCAP file: {e}[/red]")
+    except (OSError, ValueError, RuntimeError):
+        logger.exception("Error reading MCAP file")
         return 1
     except KeyboardInterrupt:
-        console_err.print("\n[yellow]Interrupted by user[/yellow]")
+        logger.warning("Interrupted by user")
         return 0
 
     if not entries:
         topic_str = ", ".join(resolved_topics)
-        console_err.print(f"[yellow]No diagnostics found on topic(s) '{topic_str}'[/yellow]")
+        logger.warning(f"No diagnostics found on topic(s) '{topic_str}'")
         return 0
 
     level_totals: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
@@ -592,7 +594,7 @@ def diag(
     if inspect_re:
         matched = [e for e in filtered if inspect_re.search(e.name)]
         if not matched:
-            console_err.print(f"[yellow]No components matching '{inspect}'[/yellow]")
+            logger.warning(f"No components matching '{inspect}'")
             return 0
 
         for renderable in _build_inspect_view(matched):

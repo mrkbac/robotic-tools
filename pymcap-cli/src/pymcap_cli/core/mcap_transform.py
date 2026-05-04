@@ -14,16 +14,15 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-
 from pymcap_cli.display.osc_utils import OSCProgressColumn
+from pymcap_cli.log_setup import ERR, OUT
 
 if TYPE_CHECKING:
-    from rich.console import Console
     from small_mcap import DecodedMessage, McapWriter
 
 
-def create_progress(console: Console, *, title: str) -> Progress:
-    """Create a rich progress bar with the standard column layout."""
+def create_progress(*, title: str) -> Progress:
+    """Create a rich progress bar with the standard column layout, on stderr."""
     return Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -33,7 +32,7 @@ def create_progress(console: Console, *, title: str) -> Progress:
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         OSCProgressColumn(title=title),
-        console=console,
+        console=ERR,
     )
 
 
@@ -122,16 +121,16 @@ def copy_message(
     )
 
 
-def print_size_comparison(console: Console, input_size: int, output_size: int) -> None:
-    """Print input/output file size comparison."""
+def print_size_comparison(input_size: int, output_size: int) -> None:
+    """Print input/output file size comparison to stdout."""
     if input_size > 0:
         ratio = output_size / input_size
-        console.print(f"\n[cyan]Input size:[/cyan] {input_size / 1024 / 1024:.1f} MB")
-        console.print(f"[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.1f} MB")
+        OUT.print(f"\n[cyan]Input size:[/cyan] {input_size / 1024 / 1024:.1f} MB")
+        OUT.print(f"[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.1f} MB")
         reduction_pct = (1 - ratio) * 100
         if reduction_pct > 0:
-            console.print(f"[green]Reduction:[/green] {reduction_pct:.1f}%")
+            OUT.print(f"[green]Reduction:[/green] {reduction_pct:.1f}%")
         else:
-            console.print(f"[yellow]Size change:[/yellow] {-reduction_pct:.1f}% increase")
+            OUT.print(f"[yellow]Size change:[/yellow] {-reduction_pct:.1f}% increase")
     else:
-        console.print(f"\n[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.1f} MB")
+        OUT.print(f"\n[cyan]Output size:[/cyan] {output_size / 1024 / 1024:.1f} MB")

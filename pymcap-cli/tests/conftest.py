@@ -1,11 +1,29 @@
 """Pytest configuration and shared fixtures."""
 
+import logging
 from pathlib import Path
 
 import pytest
+from pymcap_cli.log_setup import setup_logging
 
 from tests.fixtures.image_mcap_generator import ensure_image_fixtures
 from tests.fixtures.mcap_generator import ensure_fixtures
+
+
+@pytest.fixture(autouse=True)
+def _wire_pymcap_logging():
+    """Run the CLI's logging setup so command-level logger calls reach stderr.
+
+    Production runs go through `cli.app.meta()` which calls `setup_logging`
+    before dispatch. Tests that import command functions directly need the
+    same wiring or `logger.error/warning/info` calls would be silently
+    dropped.
+    """
+    setup_logging()
+    yield
+    pkg_logger = logging.getLogger("pymcap_cli")
+    for handler in list(pkg_logger.handlers):
+        pkg_logger.removeHandler(handler)
 
 
 @pytest.fixture(scope="session")

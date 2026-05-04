@@ -522,7 +522,7 @@ def convert(
     # Validate input file
     input_path = Path(file)
     if not input_path.exists():
-        console.print(f"[red]Error: Input file '{file}' does not exist[/red]")
+        logger.error(f"Input file '{file}' does not exist")
         return 1
 
     # Confirm overwrite if needed
@@ -546,17 +546,17 @@ def convert(
         use_chunking=True,
     )
 
-    console.print(f"[blue]Converting '{file}' to '{output}'[/blue]")
-    console.print(f"[dim]ROS2 distro: {distro.value}[/dim]")
+    logger.info(f"Converting '{file}' to '{output}'")
+    logger.info(f"ROS2 distro: {distro.value}")
     if extra_path:
-        console.print(f"[dim]Extra paths: {', '.join(str(p) for p in extra_path)}[/dim]")
+        logger.info(f"Extra paths: {', '.join(str(p) for p in extra_path)}")
 
     # Perform conversion
     with output.open("wb") as output_stream:
         try:
             stats = convert_db3_to_mcap(input_path, output_stream, options)
 
-            console.print("[green]✓ Conversion completed successfully![/green]")
+            logger.info("[green]✓ Conversion completed successfully![/green]")
             console.print(
                 f"Converted {stats.topic_count} topics, "
                 f"{stats.message_count:,} messages, "
@@ -565,18 +565,16 @@ def convert(
 
             # Report skipped topics if any
             if stats.skipped_topics:
-                console.print(
-                    "[yellow]"
-                    f"⚠ Skipped {len(stats.skipped_topics)} topics "
+                logger.warning(
+                    f"Skipped {len(stats.skipped_topics)} topics "
                     f"({stats.skipped_message_count:,} messages) due to missing message definitions"
-                    "[/]"
                 )
                 console.print("[dim]Skipped topics:[/dim]")
                 for topic in sorted(stats.skipped_topics):
                     console.print(f"  [dim]- {topic}[/dim]")
 
-        except Exception as e:  # noqa: BLE001
-            console.print(f"[red]Error during conversion: {e}[/red]")
+        except Exception:
+            logger.exception("Error during conversion")
             return 1
 
     return 0

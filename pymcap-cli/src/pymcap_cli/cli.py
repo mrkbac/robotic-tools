@@ -1,8 +1,8 @@
 """Main CLI entry point for pymcap-cli using Cyclopts."""
 
-import sys
+from typing import Annotated
 
-from cyclopts import App, Group
+from cyclopts import App, Group, Parameter
 
 from pymcap_cli.cmd import (
     bag2mcap_cmd,
@@ -29,6 +29,7 @@ from pymcap_cli.cmd import (
     tftree_cmd,
     topic_chunks_cmd,
 )
+from pymcap_cli.log_setup import ERR, setup_logging
 
 try:
     from pymcap_cli.cmd.video_cmd import video
@@ -41,12 +42,11 @@ except ImportError:
 
             uv add --group video pymcap-cli
         """
-        print(  # noqa: T201
-            "Error:\n"
+        ERR.print(
+            "[red]Error:[/red]\n"
             "Video command is unavailable because the 'av' and/or 'numpy' are not installed.\n"
             "To enable video functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    uv add --group video pymcap-cli\n",
-            file=sys.stderr,
+            "    uv add --group video pymcap-cli\n"
         )
         return 1
 
@@ -62,12 +62,11 @@ except ImportError:
 
             uv add --group plot pymcap-cli
         """
-        print(  # noqa: T201
-            "Error:\n"
+        ERR.print(
+            "[red]Error:[/red]\n"
             "Plot command is unavailable because 'plotly' is not installed.\n"
             "To enable plot functionality, please install pymcap-cli with the 'plot' extra:\n\n"
-            "    uv add --group plot pymcap-cli\n",
-            file=sys.stderr,
+            "    uv add --group plot pymcap-cli\n"
         )
         return 1
 
@@ -83,12 +82,11 @@ except ImportError:
 
             uv add --group video pymcap-cli
         """
-        print(  # noqa: T201
-            "Error:\n"
+        ERR.print(
+            "[red]Error:[/red]\n"
             "ROS compress command is unavailable because the 'av' package is not installed.\n"
             "To enable this functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    uv add --group video pymcap-cli\n",
-            file=sys.stderr,
+            "    uv add --group video pymcap-cli\n"
         )
         return 1
 
@@ -104,12 +102,11 @@ except ImportError:
 
             uv add 'pymcap-cli[parquet]'
         """
-        print(  # noqa: T201
-            "Error:\n"
+        ERR.print(
+            "[red]Error:[/red]\n"
             "Export to Parquet is unavailable because 'pyarrow' is not installed.\n"
             "Install with:\n\n"
-            "    uv add 'pymcap-cli[parquet]'\n",
-            file=sys.stderr,
+            "    uv add 'pymcap-cli[parquet]'\n"
         )
         return 1
 
@@ -125,10 +122,9 @@ except ImportError:
 
             uv add 'pymcap-cli[pointcloud]'
         """
-        print(  # noqa: T201
-            "Error:\nPCD export requires numpy + pointcloud2.\n"
-            "Install with:\n\n    uv add 'pymcap-cli[pointcloud]'\n",
-            file=sys.stderr,
+        ERR.print(
+            "[red]Error:[/red]\nPCD export requires numpy + pointcloud2.\n"
+            "Install with:\n\n    uv add 'pymcap-cli[pointcloud]'\n"
         )
         return 1
 
@@ -144,10 +140,9 @@ except ImportError:
 
             uv add 'pymcap-cli[image]'
         """
-        print(  # noqa: T201
-            "Error:\nImage export requires the 'image' extra (imagecodecs).\n"
-            "Install with:\n\n    uv add 'pymcap-cli[image]'\n",
-            file=sys.stderr,
+        ERR.print(
+            "[red]Error:[/red]\nImage export requires the 'image' extra (imagecodecs).\n"
+            "Install with:\n\n    uv add 'pymcap-cli[image]'\n"
         )
         return 1
 
@@ -163,12 +158,11 @@ except ImportError:
 
             uv add --group video pymcap-cli
         """
-        print(  # noqa: T201
-            "Error:\n"
+        ERR.print(
+            "[red]Error:[/red]\n"
             "ROS decompress command is unavailable because the 'av' package is not installed.\n"
             "To enable this functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    uv add --group video pymcap-cli\n",
-            file=sys.stderr,
+            "    uv add --group video pymcap-cli\n"
         )
         return 1
 
@@ -218,8 +212,32 @@ app.command(name="rosdecompress", group=transform_group)(rosdecompress)
 app.command(name="video", group=transform_group)(video)
 
 
+@app.meta.default
+def launcher(
+    *tokens: Annotated[str, Parameter(allow_leading_hyphen=True)],
+    verbose: Annotated[
+        int,
+        Parameter(
+            name=["--verbose", "-v"],
+            count=True,
+            help="Increase log verbosity. -v: DEBUG.",
+        ),
+    ] = 0,
+    quiet: Annotated[
+        int,
+        Parameter(
+            name=["--quiet"],
+            count=True,
+            help="Decrease log verbosity. Once: WARNING; twice: ERROR.",
+        ),
+    ] = 0,
+) -> int | None:
+    setup_logging(verbose=verbose, quiet=quiet)
+    return app(tokens)
+
+
 def main() -> None:
-    app()
+    app.meta()
 
 
 if __name__ == "__main__":

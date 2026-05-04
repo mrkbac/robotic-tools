@@ -21,10 +21,10 @@ pandas, Arrow, Spark, …::
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from cyclopts import Parameter
-from rich.console import Console
 
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.parquet_exporter import ParquetExporter
@@ -32,6 +32,8 @@ from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclo
     ForceOverwriteOption,
     OutputPathOption,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def export_parquet(
@@ -83,9 +85,8 @@ def export_parquet(
             skip_schema=skip_schema,
         )
     except ImportError:
-        Console().print(
-            "[red]Error:[/red] The 'pyarrow' package is required. "
-            "Install with: uv add 'pymcap-cli[parquet]'"
+        logger.exception(
+            "The 'pyarrow' package is required. Install with: uv add 'pymcap-cli[parquet]'"
         )
         return 1
 

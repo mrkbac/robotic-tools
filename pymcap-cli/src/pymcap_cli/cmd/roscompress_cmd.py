@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from small_mcap import DecodedMessage
 
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
@@ -257,13 +259,10 @@ def roscompress(
     confirm_output_overwrite(output, force)
 
     if not 1 <= jpeg_quality <= 100:
-        console.print(f"[red]Error:[/red] --jpeg-quality must be in [1, 100], got {jpeg_quality}")
+        logger.error(f"--jpeg-quality must be in [1, 100], got {jpeg_quality}")
         return 1
     if not 0 <= draco_compression_level <= 10:
-        console.print(
-            "[red]Error:[/red] --draco-compression-level must be in [0, 10], "
-            f"got {draco_compression_level}"
-        )
+        logger.error(f"--draco-compression-level must be in [0, 10], got {draco_compression_level}")
         return 1
 
     do_video = image_format == "video"
@@ -277,7 +276,7 @@ def roscompress(
     if do_video:
         if encoder:
             if not compress_backend.test_encoder(encoder):
-                console.print(f"[red]Error:[/red] Encoder '{encoder}' not available on this system")
+                logger.error(f"Encoder '{encoder}' not available on this system")
                 return 1
             encoder_name = encoder
         else:
@@ -296,38 +295,37 @@ def roscompress(
         if pc_compressor is None:
             extra = "draco" if pc_format == "draco" else "pointcloud"
             package = f"pymcap-cli[{extra}]"
-            console.print(
-                f"[red]Error:[/red] {pc_format} dependencies are required for "
-                "PointCloud2 compression. "
+            logger.error(
+                f"{pc_format} dependencies are required for PointCloud2 compression. "
                 f"Install with: uv add '{package}'"
             )
             return 1
 
-    console.print(f"[cyan]Input:[/cyan] {file}")
-    console.print(f"[cyan]Output:[/cyan] {output}")
+    logger.info(f"Input: {file}")
+    logger.info(f"Output: {output}")
     if do_video:
-        console.print(f"[cyan]Image mode:[/cyan] video ({encoder_name}, {compress_backend.label})")
-        console.print(f"[cyan]Quality (CRF):[/cyan] {quality}")
+        logger.info(f"Image mode: video ({encoder_name}, {compress_backend.label})")
+        logger.info(f"Quality (CRF): {quality}")
         if scale is not None:
-            console.print(f"[cyan]Scale (max dim):[/cyan] {scale}px")
+            logger.info(f"Scale (max dim): {scale}px")
     elif do_jpeg:
-        console.print(f"[cyan]Image mode:[/cyan] jpeg (raw → CompressedImage, q={jpeg_quality})")
+        logger.info(f"Image mode: jpeg (raw → CompressedImage, q={jpeg_quality})")
         if scale is not None:
-            console.print(f"[cyan]Scale (max dim):[/cyan] {scale}px")
+            logger.info(f"Scale (max dim): {scale}px")
     else:
-        console.print("[cyan]Image mode:[/cyan] none (copy unchanged)")
+        logger.info("Image mode: none (copy unchanged)")
     if pointcloud:
-        console.print(f"[cyan]Point cloud format:[/cyan] {pc_format}")
-        console.print(f"[cyan]Point cloud schema:[/cyan] {pc_schema}")
+        logger.info(f"Point cloud format: {pc_format}")
+        logger.info(f"Point cloud schema: {pc_schema}")
         if pc_format == "cloudini":
-            console.print(f"[cyan]Point cloud encoding:[/cyan] {pc_encoding}")
-            console.print(f"[cyan]Point cloud compression:[/cyan] {pc_compression}")
+            logger.info(f"Point cloud encoding: {pc_encoding}")
+            logger.info(f"Point cloud compression: {pc_compression}")
         else:
-            console.print(f"[cyan]Draco compression level:[/cyan] {draco_compression_level}")
+            logger.info(f"Draco compression level: {draco_compression_level}")
         if pc_format == "draco" or pc_encoding == "lossy":
-            console.print(f"[cyan]Point cloud resolution:[/cyan] {resolution}")
+            logger.info(f"Point cloud resolution: {resolution}")
     else:
-        console.print("[cyan]Point cloud compression:[/cyan] disabled")
+        logger.info("Point cloud compression: disabled")
 
     # Get message count from summary for progress bar.
     total_message_count = get_total_message_count(file)
@@ -347,7 +345,7 @@ def roscompress(
     with (
         open_input(file) as (input_stream, input_size),
         output.open("wb") as output_stream,
-        create_progress(console, title="Compressing images") as progress,
+        create_progress(title="Compressing images") as progress,
     ):
         task_id = progress.add_task("Processing messages", total=total_message_count)
 
@@ -432,7 +430,7 @@ def roscompress(
     messages_copied = counters["copied"]
     pointcloud_messages_converted = counters["pc_converted"]
     total_converted = messages_converted + pointcloud_messages_converted
-    console.print("\n[green bold]✓ Compression complete![/green bold]")
+    logger.info("[green bold]✓ Compression complete![/green bold]")
     if topics_converted:
         target_label = "JPEG" if image_format == "jpeg" else "Video"
         console.print(f"[cyan]{target_label} topics converted:[/cyan] {len(topics_converted)}")
@@ -452,7 +450,7 @@ def roscompress(
     console.print(f"[cyan]Total messages:[/cyan] {total_converted + messages_copied:,}")
 
     # Show file size comparison.
-    print_size_comparison(console, input_size, output.stat().st_size)
+    print_size_comparison(input_size, output.stat().st_size)
 
     return 0
 
@@ -533,7 +531,7 @@ def _handle_pointcloud(
     if topic not in pointcloud_topics_converted:
         pointcloud_topics_converted.add(topic)
         schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
-        console.print(f"[green]✓[/green] Converting {topic} ({schema_name} → {target})")
+        logger.info(f"[green]✓[/green] Converting {topic} ({schema_name} → {target})")
 
     schema_id = ensure_schema(writer, schema_name_out, "ros2msg", schema_data, schema_ids)
     channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
@@ -573,8 +571,8 @@ def _handle_raw_to_jpeg(
         jpeg_bytes, target_w, target_h = encode_raw_image_to_jpeg(
             msg.decoded_message, jpeg_quality=jpeg_quality, scale=scale
         )
-    except VideoEncoderError as exc:
-        console.print(f"[red]Error:[/red] Failed to encode JPEG for {topic}: {exc}")
+    except VideoEncoderError:
+        logger.exception(f"Failed to encode JPEG for {topic}")
         return False
 
     if topic not in encoders:
@@ -588,7 +586,7 @@ def _handle_raw_to_jpeg(
             schema_ids,
         )
         ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
-        console.print(
+        logger.info(
             f"[green]✓[/green] Converting {topic}: {target_w}x{target_h} "
             f"({schema_name} → CompressedImage/jpeg)"
         )
@@ -702,12 +700,12 @@ def _run_compress_loop(
                         schema_ids,
                     )
                     ensure_channel(writer, topic, "cdr", vid_schema_id, channel_ids)
-                    console.print(
+                    logger.info(
                         f"[green]✓[/green] Converting {topic}: {width}x{height} "
                         f"({schema_name} → CompressedVideo)"
                     )
-                except VideoEncoderError as exc:
-                    console.print(f"[red]Error:[/red] Failed to create encoder for {topic}: {exc}")
+                except VideoEncoderError:
+                    logger.exception(f"Failed to create encoder for {topic}")
                     return False
 
             if frame is None:
@@ -721,10 +719,7 @@ def _run_compress_loop(
             except VideoEncoderError:
                 sw = get_software_encoder(codec)
                 if encoders[topic].config.codec_name != sw:
-                    console.print(
-                        f"[yellow]Warning:[/yellow] Encoder failed for {topic}, "
-                        f"falling back to {sw}"
-                    )
+                    logger.warning(f"Encoder failed for {topic}, falling back to {sw}")
                     cfg: EncoderConfig = encoders[topic].config
                     pix_fmt = backend.get_pix_fmt(topic)
                     encoders[topic] = backend.create_encoder(
@@ -767,10 +762,7 @@ def _run_compress_loop(
                     pointcloud_topics_converted,
                 )
             except PointCloudCompressionError as exc:
-                console.print(
-                    f"[yellow]Warning:[/yellow] Skipping point cloud compression for "
-                    f"{msg.channel.topic}: {exc}"
-                )
+                logger.warning(f"Skipping point cloud compression for {msg.channel.topic}: {exc}")
                 copy_message(msg, writer, schema_ids, channel_ids)
                 counters["copied"] += 1
             else:

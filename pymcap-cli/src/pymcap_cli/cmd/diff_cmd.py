@@ -1,6 +1,7 @@
 """Diff command - compare MCAP files using message indexes."""
 
 import hashlib
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -16,6 +17,7 @@ from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.rihs01 import compute_rihs01
 from pymcap_cli.utils import bytes_to_human
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 _NS_TO_MS = 1_000_000
@@ -599,7 +601,7 @@ def diff_cmd(
     ```
     """
     if len(files) < 2:
-        console.print("[red]Error:[/] At least two files must be specified")
+        logger.error("At least two files must be specified")
         return 1
 
     summaries: list[FileSummary] = []
@@ -609,8 +611,8 @@ def diff_cmd(
     for path in files:
         try:
             fs, ts = _process_file(path)
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[red]Error reading {path}:[/] {exc}")
+        except Exception:
+            logger.exception(f"Error reading {path}")
             return 1
         summaries.append(fs)
         label = fs.label

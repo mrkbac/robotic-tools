@@ -5,6 +5,7 @@ GPX 1.1 is the format consumed by JOSM, GPSBabel, Strava, Garmin Connect, etc.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, ClassVar
 from xml.sax.saxutils import escape
 
@@ -25,10 +26,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from rich.console import Console
     from small_mcap import DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
+
+logger = logging.getLogger(__name__)
 
 
 class _GpxTopicWriter(TopicWriter):
@@ -79,7 +81,6 @@ class GpxExporter(Ros2Exporter):
 
     def finish(
         self,
-        console: Console,
         output_path: Path,
         counts: Mapping[int, int],  # noqa: ARG002 - driver already reports per-topic counts.
     ) -> None:
@@ -95,7 +96,7 @@ class GpxExporter(Ros2Exporter):
             for writer in sorted(self._writers.values(), key=lambda w: w.topic):
                 self._write_topic(fh, writer.topic, writer)
             fh.write("</gpx>\n")
-        console.print(f"[green]Wrote {path}[/green]")
+        logger.info(f"Wrote {path}")
 
     def _write_topic(self, fh: Any, topic: str, writer: _GpxTopicWriter) -> None:
         samples = stride(writer.samples, self._stride_n)

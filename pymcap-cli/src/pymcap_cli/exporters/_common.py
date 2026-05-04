@@ -6,6 +6,7 @@ directory validation, and a topic+schema predicate factory.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -17,9 +18,9 @@ from small_mcap import include_topics
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from rich.console import Console
     from small_mcap import Channel, DecodedMessage, Schema
 
+logger = logging.getLogger(__name__)
 _TABLE_NAME_RE = re.compile(r"[^0-9a-zA-Z_]+")
 
 
@@ -133,7 +134,7 @@ def unique_message_path(
     return directory / f"{stem}.{extension.lstrip('.')}"
 
 
-def validate_output_dir(output: str | Path, *, force: bool, console: Console) -> Path | None:
+def validate_output_dir(output: str | Path, *, force: bool) -> Path | None:
     """Resolve and validate the output directory. Returns ``None`` on error.
 
     On ``force=True``, the directory is left intact (callers decide which
@@ -141,10 +142,10 @@ def validate_output_dir(output: str | Path, *, force: bool, console: Console) ->
     """
     out_dir = Path(output)
     if out_dir.exists() and not out_dir.is_dir():
-        console.print(f"[red]Error:[/red] {out_dir} exists and is not a directory.")
+        logger.error(f"{out_dir} exists and is not a directory.")
         return None
     if out_dir.exists() and any(out_dir.iterdir()) and not force:
-        console.print(f"[red]Error:[/red] {out_dir} is not empty. Use --force to overwrite.")
+        logger.error(f"{out_dir} is not empty. Use --force to overwrite.")
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir

@@ -6,6 +6,7 @@ Wraps :class:`pymcap_cli.exporters.video_exporter.VideoExporter`.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
@@ -22,6 +23,7 @@ from rich.console import Console
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.video_exporter import VideoExporter
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 INPUT_GROUP = Group("Input Options")
@@ -90,7 +92,7 @@ def video(
         pymcap-cli video data.mcap -t /cam/left -t /cam/right -o ./out
     """
     if not topics:
-        console.print("[red]Error:[/red] At least one --topic is required.")
+        logger.error("At least one --topic is required.")
         return 1
 
     quality_value = crf if crf is not None else _QUALITY_PRESETS[codec][quality]
@@ -103,7 +105,7 @@ def video(
             mode=mode,
         )
     except VideoEncoderError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        logger.error(str(exc))  # noqa: TRY400
         return 1
 
     return run_export(
@@ -112,5 +114,4 @@ def video(
         exporter=exporter,
         topics=topics,
         force=force,
-        console=console,
     )
