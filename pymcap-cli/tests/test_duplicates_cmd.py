@@ -477,6 +477,65 @@ def test_duplicates_reports_progress_stages(
     assert any("index record" in str(update.get("current", "")) for update in fake_progress.updates)
 
 
+def test_duplicates_index_progress_weights_bar_by_file_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProgress:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, float | int | str | None]] = []
+
+        def update(self, task: int, **fields: float | str | None) -> None:
+            self.updates.append({"task": task, **fields})
+
+    big_path = tmp_path / "big.mcap"
+    small_path = tmp_path / "small.mcap"
+    big_path.write_bytes(b"\0" * 9_000)
+    small_path.write_bytes(b"\0" * 1_000)
+
+    def fake_read_index_identity(
+        path: str,
+        *,
+        rebuild_missing: bool,  # noqa: ARG001
+        index_progress: duplicates_cmd.IndexReadProgress | None = None,
+    ) -> duplicates_cmd.SkippedFile:
+        total_indexes = 100_000 if path.endswith("big.mcap") else 5
+        if index_progress is not None:
+            for completed in range(total_indexes + 1):
+                index_progress(completed, total_indexes)
+        return duplicates_cmd.SkippedFile(path=path, reason="test")
+
+    fake_progress = FakeProgress()
+    monkeypatch.setattr(duplicates_cmd, "_read_index_identity", fake_read_index_identity)
+
+    _scanned, skipped = duplicates_cmd._read_candidate_index_identities(
+        {str(big_path), str(small_path)},
+        rebuild_missing=False,
+        progress=fake_progress,
+        task=7,
+    )
+
+    completed_values = [
+        update["completed"]
+        for update in fake_progress.updates
+        if isinstance(update.get("completed"), int | float)
+    ]
+    assert len(skipped) == 2
+    assert completed_values[0] == 0
+    assert completed_values[-1] == 2
+    assert all(0 <= value <= 2 for value in completed_values)
+
+    small_start = next(
+        update["completed"]
+        for update in fake_progress.updates
+        if "small.mcap" in str(update.get("current", ""))
+    )
+    assert small_start == pytest.approx(1.8, abs=1e-9)
+
+    big_sub_updates = [value for value in completed_values if 0 < value < small_start]
+    assert len(big_sub_updates) <= duplicates_cmd._PROGRESS_INDEX_PERCENT_STEPS + 1
+
+
 def test_duplicates_returns_error_for_missing_path(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
 

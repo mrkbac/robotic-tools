@@ -6,6 +6,8 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import accumulate
+from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -50,7 +52,7 @@ console = Console()
 _NS_TO_SEC = 1_000_000_000
 _MAX_SKIPPED_DETAILS = 10
 _PROGRESS_PAIR_UPDATE_INTERVAL = 128
-_PROGRESS_INDEX_UPDATE_INTERVAL = 64
+_PROGRESS_INDEX_PERCENT_STEPS = 100
 _MAX_TOPIC_EVIDENCE_ROWS = 3
 
 
@@ -478,39 +480,47 @@ def _read_candidate_index_identities(
 
     sorted_paths = sorted(candidate_paths)
     file_count = len(sorted_paths)
+    weights = [_file_weight(path) for path in sorted_paths]
+    total_weight = sum(weights) or 1
+    slice_sizes = [file_count * weight / total_weight for weight in weights]
+    slice_starts = [0.0, *accumulate(slice_sizes)]
+
     for file_index, path in enumerate(sorted_paths):
         file_number = file_index + 1
         progress_file = _progress_file(path)
+        slice_start = slice_starts[file_index]
+        slice_size = slice_sizes[file_index]
         if progress is not None and task is not None:
             progress.update(
                 task,
-                completed=file_index,
+                completed=slice_start,
                 current=f"{file_number:,}/{file_count:,} {progress_file}",
             )
+
+        last_progress_step = -1
 
         def index_progress(
             completed_indexes: int,
             total_indexes: int,
-            progress_file_index: int = file_index,
+            progress_slice_start: float = slice_start,
+            progress_slice_size: float = slice_size,
             progress_file_number: int = file_number,
             progress_file_name: str = progress_file,
         ) -> None:
-            if progress is None or task is None:
+            nonlocal last_progress_step
+            if progress is None or task is None or total_indexes == 0:
                 return
-            if (
-                completed_indexes not in (0, total_indexes)
-                and completed_indexes % _PROGRESS_INDEX_UPDATE_INTERVAL != 0
-            ):
+            progress_step = (completed_indexes * _PROGRESS_INDEX_PERCENT_STEPS) // total_indexes
+            if progress_step == last_progress_step and completed_indexes != total_indexes:
                 return
-            if total_indexes:
-                completed = progress_file_index + (completed_indexes / total_indexes)
-                current = (
-                    f"{progress_file_number:,}/{file_count:,} {progress_file_name} "
-                    f"({completed_indexes:,}/{total_indexes:,} index records)"
-                )
-            else:
-                completed = progress_file_index
-                current = f"{progress_file_number:,}/{file_count:,} {progress_file_name}"
+            last_progress_step = progress_step
+            completed = progress_slice_start + progress_slice_size * (
+                completed_indexes / total_indexes
+            )
+            current = (
+                f"{progress_file_number:,}/{file_count:,} {progress_file_name} "
+                f"({completed_indexes:,}/{total_indexes:,} index records)"
+            )
             progress.update(task, completed=completed, current=current)
 
         result = _read_index_identity(
@@ -522,8 +532,6 @@ def _read_candidate_index_identities(
             scanned.append(result)
         else:
             skipped.append(result)
-        if progress is not None and task is not None:
-            progress.update(task, completed=file_index + 1)
 
     if progress is not None and task is not None:
         progress.update(
@@ -533,6 +541,13 @@ def _read_candidate_index_identities(
         )
 
     return scanned, skipped
+
+
+def _file_weight(path: str) -> int:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 1
 
 
 def _analyze_indexed_matches(
