@@ -242,13 +242,13 @@ class _TopicEvidenceAccumulator:
 
 def _update_str(hasher: HashSink, value: str) -> None:
     data = value.encode("utf-8")
-    hasher.update(f"s:{len(data)}:".encode("ascii"))
+    hasher.update(b"s:%d:" % len(data))
     hasher.update(data)
     hasher.update(b";")
 
 
 def _update_int(hasher: HashSink, value: int) -> None:
-    hasher.update(f"i:{value};".encode("ascii"))
+    hasher.update(b"i:%d;" % value)
 
 
 def _update_schema(hasher: HashSink, schema: SchemaFingerprint) -> None:
@@ -304,23 +304,25 @@ def _channel_semantic_digest(channel: ChannelFingerprint) -> str:
     return hasher.hexdigest()
 
 
-def _indexed_channel_digest(channel: ChannelFingerprint, timestamps: list[int]) -> str:
+def _encode_timestamps(timestamps: list[int]) -> bytes:
+    return b"".join(b"i:%d;" % ts for ts in timestamps)
+
+
+def _indexed_channel_digest(channel: ChannelFingerprint, ts_count: int, ts_bytes: bytes) -> str:
     hasher = hashlib.sha256()
     _update_str(hasher, "pymcap-cli.compare.indexed-channel.v1")
     _update_channel(hasher, channel)
-    _update_int(hasher, len(timestamps))
-    for timestamp in timestamps:
-        _update_int(hasher, timestamp)
+    _update_int(hasher, ts_count)
+    hasher.update(ts_bytes)
     return hasher.hexdigest()
 
 
-def _unknown_indexed_channel_digest(channel_id: int, timestamps: list[int]) -> str:
+def _unknown_indexed_channel_digest(channel_id: int, ts_count: int, ts_bytes: bytes) -> str:
     hasher = hashlib.sha256()
     _update_str(hasher, "pymcap-cli.compare.unknown-indexed-channel.v1")
     _update_int(hasher, channel_id)
-    _update_int(hasher, len(timestamps))
-    for timestamp in timestamps:
-        _update_int(hasher, timestamp)
+    _update_int(hasher, ts_count)
+    hasher.update(ts_bytes)
     return hasher.hexdigest()
 
 
@@ -426,7 +428,7 @@ def _summary_channel_ranges(
             semantic_digest = entry.semantic_digest
             topic = entry.fingerprint.topic
         else:
-            semantic_digest = _unknown_indexed_channel_digest(channel_id, [])
+            semantic_digest = _unknown_indexed_channel_digest(channel_id, 0, b"")
             topic = _unknown_channel_topic(channel_id)
         ranges.append(
             SummaryChannelRange(
@@ -522,16 +524,19 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
     indexed_channel_digests: list[str] = []
     indexed_channels: list[IndexedChannelIdentity] = []
     for entry, timestamps in indexed_entries:
+        ts_count = len(timestamps)
+        ts_bytes = _encode_timestamps(timestamps)
         _update_channel(hasher, entry.fingerprint)
-        _update_int(hasher, len(timestamps))
-        for timestamp in timestamps:
-            _update_int(hasher, timestamp)
-        indexed_channel_digests.append(_indexed_channel_digest(entry.fingerprint, timestamps))
+        _update_int(hasher, ts_count)
+        hasher.update(ts_bytes)
+        indexed_channel_digests.append(
+            _indexed_channel_digest(entry.fingerprint, ts_count, ts_bytes)
+        )
         indexed_channels.append(
             IndexedChannelIdentity(
                 channel_semantic_digest=entry.semantic_digest,
                 topic=entry.fingerprint.topic,
-                message_count=len(timestamps),
+                message_count=ts_count,
                 message_start_time=timestamps[0] if timestamps else 0,
                 message_end_time=timestamps[-1] if timestamps else 0,
                 timestamps=tuple(timestamps),
@@ -543,16 +548,19 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
     )
     _update_int(hasher, len(unknown_entries))
     for channel_id, timestamps in unknown_entries:
+        ts_count = len(timestamps)
+        ts_bytes = _encode_timestamps(timestamps)
         _update_int(hasher, channel_id)
-        _update_int(hasher, len(timestamps))
-        for timestamp in timestamps:
-            _update_int(hasher, timestamp)
-        indexed_channel_digests.append(_unknown_indexed_channel_digest(channel_id, timestamps))
+        _update_int(hasher, ts_count)
+        hasher.update(ts_bytes)
+        indexed_channel_digests.append(
+            _unknown_indexed_channel_digest(channel_id, ts_count, ts_bytes)
+        )
         indexed_channels.append(
             IndexedChannelIdentity(
-                channel_semantic_digest=_unknown_indexed_channel_digest(channel_id, []),
+                channel_semantic_digest=_unknown_indexed_channel_digest(channel_id, 0, b""),
                 topic=_unknown_channel_topic(channel_id),
-                message_count=len(timestamps),
+                message_count=ts_count,
                 message_start_time=timestamps[0] if timestamps else 0,
                 message_end_time=timestamps[-1] if timestamps else 0,
                 timestamps=tuple(timestamps),
