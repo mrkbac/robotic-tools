@@ -71,6 +71,22 @@ def _progress_pair(left_path: str, right_path: str) -> str:
     return f"{_progress_file(left_path)} <-> {_progress_file(right_path)}"
 
 
+def _maybe_update_progress(
+    progress: Progress | None,
+    task: TaskID | None,
+    *,
+    completed: int,
+    is_last: bool,
+    interval: int,
+    current: str,
+) -> None:
+    if progress is None or task is None:
+        return
+    if not is_last and completed % interval != 0:
+        return
+    progress.update(task, completed=completed, current=current)
+
+
 @dataclass(frozen=True, slots=True)
 class SkippedFile:
     path: str
@@ -389,19 +405,14 @@ def _candidate_paths_for_index_stage(
                 paths.add(left.path)
                 paths.add(right.path)
             completed_pairs += 1
-            if (
-                progress is not None
-                and task is not None
-                and (
-                    completed_pairs % _PROGRESS_PAIR_UPDATE_INTERVAL == 0
-                    or completed_pairs == pair_count
-                )
-            ):
-                progress.update(
-                    task,
-                    completed=completed_pairs,
-                    current=_progress_pair(left.path, right.path),
-                )
+            _maybe_update_progress(
+                progress,
+                task,
+                completed=completed_pairs,
+                is_last=completed_pairs == pair_count,
+                interval=_PROGRESS_PAIR_UPDATE_INTERVAL,
+                current=_progress_pair(left.path, right.path),
+            )
 
     if progress is not None and task is not None:
         progress.update(
@@ -549,19 +560,14 @@ def _analyze_indexed_matches(
                 completed_pairs += 1
                 continue
 
-            if (
-                progress is not None
-                and task is not None
-                and (
-                    completed_pairs % _PROGRESS_PAIR_UPDATE_INTERVAL == 0
-                    or completed_pairs + 1 == pair_count
-                )
-            ):
-                progress.update(
-                    task,
-                    completed=completed_pairs,
-                    current=_progress_pair(left.path, right.path),
-                )
+            _maybe_update_progress(
+                progress,
+                task,
+                completed=completed_pairs,
+                is_last=completed_pairs + 1 == pair_count,
+                interval=_PROGRESS_PAIR_UPDATE_INTERVAL,
+                current=_progress_pair(left.path, right.path),
+            )
 
             shared_channels, shared_messages = _indexed_overlap(
                 counters_by_file[left_index], counters_by_file[right_index]

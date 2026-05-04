@@ -12,6 +12,7 @@ from small_mcap import (
     Channel,
     RebuildInfo,
     Schema,
+    Statistics,
     Summary,
     get_header,
     get_summary,
@@ -217,10 +218,68 @@ def _channel_fingerprint(
     )
 
 
+def _unknown_channel_topic(channel_id: int) -> str:
+    return f"Channel_{channel_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class _ChannelIntermediate:
+    channel_id: int
+    fingerprint: ChannelFingerprint
+    semantic_digest: str
+    digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityIntermediates:
+    statistics: Statistics
+    schemas: tuple[SchemaFingerprint, ...]
+    channels: tuple[_ChannelIntermediate, ...]
+    unknown_counts: tuple[tuple[int, int], ...]
+
+
+def _build_identity_intermediates(info: RebuildInfo) -> _IdentityIntermediates:
+    summary = info.summary
+    statistics = summary.statistics
+    if statistics is None:
+        raise ValueError("missing statistics")
+
+    schemas_by_id = {
+        schema_id: _schema_fingerprint(schema) for schema_id, schema in summary.schemas.items()
+    }
+    channels: list[_ChannelIntermediate] = []
+    for channel in summary.channels.values():
+        fingerprint = _channel_fingerprint(
+            channel, schemas_by_id, statistics.channel_message_counts
+        )
+        channels.append(
+            _ChannelIntermediate(
+                channel_id=channel.id,
+                fingerprint=fingerprint,
+                semantic_digest=_channel_semantic_digest(fingerprint),
+                digest=_channel_digest(fingerprint),
+            )
+        )
+    channels.sort(key=lambda entry: entry.fingerprint)
+
+    known_channel_ids = set(summary.channels)
+    unknown_counts = sorted(
+        (channel_id, count)
+        for channel_id, count in statistics.channel_message_counts.items()
+        if channel_id not in known_channel_ids
+    )
+
+    return _IdentityIntermediates(
+        statistics=statistics,
+        schemas=tuple(sorted(schemas_by_id.values())),
+        channels=tuple(channels),
+        unknown_counts=tuple(unknown_counts),
+    )
+
+
 def _summary_channel_ranges(
     summary: Summary,
-    channel_semantic_by_id: dict[int, str],
-    channel_topics_by_id: dict[int, str],
+    channels: tuple[_ChannelIntermediate, ...],
     channel_message_counts: dict[int, int],
 ) -> tuple[SummaryChannelRange, ...]:
     start_by_channel: dict[int, int] = {}
@@ -239,14 +298,20 @@ def _summary_channel_ranges(
                 end_by_channel[channel_id], chunk_index.message_end_time
             )
 
+    entries_by_id = {entry.channel_id: entry for entry in channels}
     ranges: list[SummaryChannelRange] = []
     for channel_id, message_count in channel_message_counts.items():
+        entry = entries_by_id.get(channel_id)
+        if entry is not None:
+            semantic_digest = entry.semantic_digest
+            topic = entry.fingerprint.topic
+        else:
+            semantic_digest = _unknown_indexed_channel_digest(channel_id, [])
+            topic = _unknown_channel_topic(channel_id)
         ranges.append(
             SummaryChannelRange(
-                channel_semantic_digest=channel_semantic_by_id.get(
-                    channel_id, _unknown_indexed_channel_digest(channel_id, [])
-                ),
-                topic=channel_topics_by_id.get(channel_id, f"Channel_{channel_id}"),
+                channel_semantic_digest=semantic_digest,
+                topic=topic,
                 message_count=message_count,
                 message_start_time=start_by_channel.get(channel_id),
                 message_end_time=end_by_channel.get(channel_id),
@@ -256,35 +321,10 @@ def _summary_channel_ranges(
     return tuple(sorted(ranges, key=lambda item: (item.channel_semantic_digest, item.topic)))
 
 
-def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
-    summary = info.summary
-    statistics = summary.statistics
-    if statistics is None:
-        raise ValueError("missing statistics")
-
-    schemas_by_id = {
-        schema_id: _schema_fingerprint(schema) for schema_id, schema in summary.schemas.items()
-    }
-    schemas = sorted(schemas_by_id.values())
-    channel_entries = [
-        (
-            channel.id,
-            _channel_fingerprint(channel, schemas_by_id, statistics.channel_message_counts),
-        )
-        for channel in summary.channels.values()
-    ]
-    channels = sorted(channel for _, channel in channel_entries)
-    channel_semantic_by_id = {
-        channel_id: _channel_semantic_digest(channel) for channel_id, channel in channel_entries
-    }
-    channel_topics_by_id = {channel_id: channel.topic for channel_id, channel in channel_entries}
-
-    known_channel_ids = set(summary.channels)
-    unknown_counts = sorted(
-        (channel_id, count)
-        for channel_id, count in statistics.channel_message_counts.items()
-        if channel_id not in known_channel_ids
-    )
+def _identity_from_intermediates(
+    info: RebuildInfo, intermediates: _IdentityIntermediates
+) -> McapIdentity:
+    statistics = intermediates.statistics
 
     hasher = hashlib.sha256()
     _update_str(hasher, "pymcap-cli.compare.identity.v1")
@@ -298,28 +338,26 @@ def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
     _update_int(hasher, statistics.attachment_count)
     _update_int(hasher, statistics.metadata_count)
 
-    _update_int(hasher, len(schemas))
-    for schema in schemas:
+    _update_int(hasher, len(intermediates.schemas))
+    for schema in intermediates.schemas:
         _update_schema(hasher, schema)
 
-    _update_int(hasher, len(channels))
-    for channel in channels:
-        _update_channel(hasher, channel)
-    channel_digests = tuple(sorted(_channel_digest(channel) for channel in channels))
-    channel_semantic_digests = tuple(
-        sorted(_channel_semantic_digest(channel) for channel in channels)
-    )
-    channel_ranges = _summary_channel_ranges(
-        summary,
-        channel_semantic_by_id,
-        channel_topics_by_id,
-        statistics.channel_message_counts,
-    )
+    _update_int(hasher, len(intermediates.channels))
+    for entry in intermediates.channels:
+        _update_channel(hasher, entry.fingerprint)
 
-    _update_int(hasher, len(unknown_counts))
-    for channel_id, count in unknown_counts:
+    _update_int(hasher, len(intermediates.unknown_counts))
+    for channel_id, count in intermediates.unknown_counts:
         _update_int(hasher, channel_id)
         _update_int(hasher, count)
+
+    channel_digests = tuple(sorted(entry.digest for entry in intermediates.channels))
+    channel_semantic_digests = tuple(
+        sorted(entry.semantic_digest for entry in intermediates.channels)
+    )
+    channel_ranges = _summary_channel_ranges(
+        info.summary, intermediates.channels, statistics.channel_message_counts
+    )
 
     return McapIdentity(
         digest=hasher.hexdigest(),
@@ -334,16 +372,13 @@ def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
     )
 
 
-def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
-    summary_identity = recording_identity_from_info(info)
-    summary = info.summary
-    statistics = summary.statistics
-    if statistics is None:
-        raise ValueError("missing statistics")
+def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
+    return _identity_from_intermediates(info, _build_identity_intermediates(info))
 
-    schemas_by_id = {
-        schema_id: _schema_fingerprint(schema) for schema_id, schema in summary.schemas.items()
-    }
+
+def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
+    intermediates = _build_identity_intermediates(info)
+    summary_identity = _identity_from_intermediates(info, intermediates)
 
     timestamps_by_channel: dict[int, list[int]] = {}
     if info.chunk_information:
@@ -353,33 +388,28 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
                     message_index.timestamps
                 )
 
-    channel_entries = [
-        (
-            _channel_fingerprint(channel, schemas_by_id, statistics.channel_message_counts),
-            sorted(timestamps_by_channel.pop(channel.id, [])),
-        )
-        for channel in summary.channels.values()
+    indexed_entries = [
+        (entry, sorted(timestamps_by_channel.pop(entry.channel_id, [])))
+        for entry in intermediates.channels
     ]
-
-    channel_entries.sort(key=lambda item: (item[0], item[1]))
+    indexed_entries.sort(key=lambda item: (item[0].fingerprint, item[1]))
 
     hasher = hashlib.sha256()
     _update_str(hasher, "pymcap-cli.compare.message-index.v1")
     _update_str(hasher, summary_identity.digest)
-    _update_int(hasher, len(channel_entries))
-    indexed_channel_digests = []
+    _update_int(hasher, len(indexed_entries))
+    indexed_channel_digests: list[str] = []
     indexed_channels: list[IndexedChannelIdentity] = []
-    for channel, timestamps in channel_entries:
-        channel_semantic_digest = _channel_semantic_digest(channel)
-        _update_channel(hasher, channel)
+    for entry, timestamps in indexed_entries:
+        _update_channel(hasher, entry.fingerprint)
         _update_int(hasher, len(timestamps))
         for timestamp in timestamps:
             _update_int(hasher, timestamp)
-        indexed_channel_digests.append(_indexed_channel_digest(channel, timestamps))
+        indexed_channel_digests.append(_indexed_channel_digest(entry.fingerprint, timestamps))
         indexed_channels.append(
             IndexedChannelIdentity(
-                channel_semantic_digest=channel_semantic_digest,
-                topic=channel.topic,
+                channel_semantic_digest=entry.semantic_digest,
+                topic=entry.fingerprint.topic,
                 message_count=len(timestamps),
                 message_start_time=timestamps[0] if timestamps else 0,
                 message_end_time=timestamps[-1] if timestamps else 0,
@@ -392,7 +422,6 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
     )
     _update_int(hasher, len(unknown_entries))
     for channel_id, timestamps in unknown_entries:
-        channel_semantic_digest = _unknown_indexed_channel_digest(channel_id, [])
         _update_int(hasher, channel_id)
         _update_int(hasher, len(timestamps))
         for timestamp in timestamps:
@@ -400,8 +429,8 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
         indexed_channel_digests.append(_unknown_indexed_channel_digest(channel_id, timestamps))
         indexed_channels.append(
             IndexedChannelIdentity(
-                channel_semantic_digest=channel_semantic_digest,
-                topic=f"Channel_{channel_id}",
+                channel_semantic_digest=_unknown_indexed_channel_digest(channel_id, []),
+                topic=_unknown_channel_topic(channel_id),
                 message_count=len(timestamps),
                 message_start_time=timestamps[0] if timestamps else 0,
                 message_end_time=timestamps[-1] if timestamps else 0,
