@@ -76,13 +76,13 @@ def _maybe_update_progress(
     task: TaskID | None,
     *,
     completed: int,
-    is_last: bool,
+    total: int,
     interval: int,
     current: str,
 ) -> None:
     if progress is None or task is None:
         return
-    if not is_last and completed % interval != 0:
+    if completed != total and completed % interval != 0:
         return
     progress.update(task, completed=completed, current=current)
 
@@ -409,7 +409,7 @@ def _candidate_paths_for_index_stage(
                 progress,
                 task,
                 completed=completed_pairs,
-                is_last=completed_pairs == pair_count,
+                total=pair_count,
                 interval=_PROGRESS_PAIR_UPDATE_INTERVAL,
                 current=_progress_pair(left.path, right.path),
             )
@@ -556,15 +556,15 @@ def _analyze_indexed_matches(
 
     for left_index, left in enumerate(scanned):
         for right_index, right in enumerate(scanned[left_index + 1 :], start=left_index + 1):
+            completed_pairs += 1
             if left.identity.digest == right.identity.digest:
-                completed_pairs += 1
                 continue
 
             _maybe_update_progress(
                 progress,
                 task,
                 completed=completed_pairs,
-                is_last=completed_pairs + 1 == pair_count,
+                total=pair_count,
                 interval=_PROGRESS_PAIR_UPDATE_INTERVAL,
                 current=_progress_pair(left.path, right.path),
             )
@@ -590,7 +590,6 @@ def _analyze_indexed_matches(
                         shared_messages=shared_messages,
                     )
                 )
-            completed_pairs += 1
 
     if progress is not None and task is not None:
         progress.update(task, completed=pair_count, current=f"{len(matches):,} partial match(es)")
@@ -628,11 +627,19 @@ def _indexed_overlap(
     left_counters: dict[str, list[Counter[int]]],
     right_counters: dict[str, list[Counter[int]]],
 ) -> tuple[int, int]:
+    shared_channels = 0
+    shared_messages_total = 0
     candidate_pairs: list[tuple[int, str, int, int]] = []
 
     for channel_digest in left_counters.keys() & right_counters.keys():
         left_group = left_counters[channel_digest]
         right_group = right_counters[channel_digest]
+        if len(left_group) == 1 and len(right_group) == 1:
+            shared_messages = sum((left_group[0] & right_group[0]).values())
+            if shared_messages > 0:
+                shared_channels += 1
+                shared_messages_total += shared_messages
+            continue
         for left_index, left_counter in enumerate(left_group):
             for right_index, right_counter in enumerate(right_group):
                 shared_messages = sum((left_counter & right_counter).values())
@@ -643,8 +650,6 @@ def _indexed_overlap(
 
     used_left: set[tuple[str, int]] = set()
     used_right: set[tuple[str, int]] = set()
-    shared_channels = 0
-    shared_messages_total = 0
     for shared_messages, channel_digest, left_index, right_index in sorted(
         candidate_pairs, reverse=True
     ):

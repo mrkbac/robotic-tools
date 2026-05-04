@@ -12,7 +12,6 @@ from small_mcap import (
     Channel,
     RebuildInfo,
     Schema,
-    Statistics,
     Summary,
     get_header,
     get_summary,
@@ -232,7 +231,6 @@ class _ChannelIntermediate:
 
 @dataclass(frozen=True, slots=True)
 class _IdentityIntermediates:
-    statistics: Statistics
     schemas: tuple[SchemaFingerprint, ...]
     channels: tuple[_ChannelIntermediate, ...]
     unknown_counts: tuple[tuple[int, int], ...]
@@ -270,7 +268,6 @@ def _build_identity_intermediates(info: RebuildInfo) -> _IdentityIntermediates:
     )
 
     return _IdentityIntermediates(
-        statistics=statistics,
         schemas=tuple(sorted(schemas_by_id.values())),
         channels=tuple(channels),
         unknown_counts=tuple(unknown_counts),
@@ -324,7 +321,8 @@ def _summary_channel_ranges(
 def _identity_from_intermediates(
     info: RebuildInfo, intermediates: _IdentityIntermediates
 ) -> McapIdentity:
-    statistics = intermediates.statistics
+    statistics = info.summary.statistics
+    assert statistics is not None
 
     hasher = hashlib.sha256()
     _update_str(hasher, "pymcap-cli.compare.identity.v1")
