@@ -59,7 +59,7 @@ def run_export(
     should_include = make_should_include(topics=topics, accepts_schema=exporter.accepts)
 
     try:
-        total = get_total_message_count(file)
+        total = get_total_message_count(file, should_include)
     except (FileNotFoundError, OSError):
         logger.exception(f"Error reading {file}")
         return 1

@@ -14,11 +14,16 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from small_mcap import get_summary
+
+from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR, OUT
 
 if TYPE_CHECKING:
-    from small_mcap import DecodedMessage, McapWriter
+    from collections.abc import Callable
+
+    from small_mcap import Channel, DecodedMessage, McapWriter, Schema
 
 
 def create_progress(*, title: str) -> Progress:
@@ -36,20 +41,36 @@ def create_progress(*, title: str) -> Progress:
     )
 
 
-def get_total_message_count(file: str) -> int | None:
-    """Read MCAP summary and return total message count, or None."""
-    from small_mcap import get_summary  # noqa: PLC0415
+def get_total_message_count(
+    file: str,
+    should_include: Callable[[Channel, Schema | None], bool] | None = None,
+) -> int | None:
+    """Read MCAP summary and return total message count, or None.
 
-    from pymcap_cli.core.input_handler import open_input  # noqa: PLC0415
-
+    When ``should_include`` is provided, sum only the counts for channels whose
+    ``(channel, schema)`` pair passes the predicate — matching the filter used
+    by ``small_mcap.read_message_decoded`` so progress totals reflect what will
+    actually be iterated.
+    """
     with open_input(file) as (f, _file_size):
-        if (
+        if not (
             (summary := get_summary(f))
             and summary.statistics
             and summary.statistics.channel_message_counts
         ):
-            return sum(summary.statistics.channel_message_counts.values())
-    return None
+            return None
+        counts = summary.statistics.channel_message_counts
+        if should_include is None:
+            return sum(counts.values())
+        total = 0
+        for channel_id, count in counts.items():
+            channel = summary.channels.get(channel_id)
+            if channel is None:
+                continue
+            schema = summary.schemas.get(channel.schema_id) if channel.schema_id else None
+            if should_include(channel, schema):
+                total += count
+        return total
 
 
 def ensure_schema(
