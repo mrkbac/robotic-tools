@@ -26,6 +26,7 @@ from small_mcap import (
     RebuildInfo,
     get_header,
     get_summary,
+    read_info_approximate,
     rebuild_summary,
 )
 
@@ -226,9 +227,12 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
 def rebuild_info(
     f: IO[bytes], file_size: int, *, exact_sizes: bool = False, console: Console | None = None
 ) -> RebuildInfo:
-    """Rebuild MCAP summary with progress bar.
+    """Rebuild MCAP summary, preferring index-based read when possible.
 
-    Thin wrapper around small-mcap's rebuild_summary that adds progress visualization.
+    For ``exact_sizes=False``, tries the index-based ``read_info_approximate`` first
+    (only reads summary + per-chunk MessageIndex records — orders of magnitude faster
+    on large files). Falls back to a full data-section scan via ``rebuild_summary``
+    when the file has no usable summary or no chunks.
 
     Args:
         f: Input file stream
@@ -238,6 +242,13 @@ def rebuild_info(
     Returns:
         Info (RebuildInfo) with header, summary, and channel_sizes
     """
+    if not exact_sizes:
+        start_offset = f.tell()
+        approximate = read_info_approximate(f)
+        if approximate is not None and approximate.chunk_information:
+            return approximate
+        f.seek(start_offset)
+
     with file_progress("[bold blue]Rebuilding MCAP info...", console) as progress:
         task = progress.add_task("Processing", total=file_size)
 
