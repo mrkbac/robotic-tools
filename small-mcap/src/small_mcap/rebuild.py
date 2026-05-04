@@ -133,6 +133,10 @@ def read_info_approximate(
     from MessageIndex offset deltas, identical to
     ``rebuild_summary(exact_sizes=False)``).
 
+    If ``progress_callback`` is provided, it is invoked as
+    ``progress_callback(read_message_indexes, message_index_count)`` once before
+    any indexes are read and again after each MessageIndex record.
+
     Returns ``None`` if the file has no summary section.
     """
     if not stream.seekable():

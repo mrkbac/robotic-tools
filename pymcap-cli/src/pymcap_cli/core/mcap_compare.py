@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Literal, Protocol
@@ -28,7 +27,10 @@ class HashSink(Protocol):
 
 
 ReadMode = Literal["summary", "index", "rebuild"]
-IndexReadProgress = Callable[[int, int], None]
+
+
+class IndexReadProgress(Protocol):
+    def __call__(self, completed_indexes: int, total_indexes: int) -> None: ...
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -255,10 +257,6 @@ def _summary_channel_ranges(
 
 
 def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
-    header = info.header
-    if header is None:
-        raise ValueError("missing header")
-
     summary = info.summary
     statistics = summary.statistics
     if statistics is None:
@@ -290,7 +288,7 @@ def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
 
     hasher = hashlib.sha256()
     _update_str(hasher, "pymcap-cli.compare.identity.v1")
-    _update_str(hasher, header.profile)
+    _update_str(hasher, info.header.profile)
 
     _update_int(hasher, statistics.message_count)
     _update_int(hasher, statistics.message_start_time)
@@ -567,6 +565,13 @@ def path_from_input(value: str) -> Path:
     if parsed.scheme == "file":
         return Path(unquote(parsed.path))
     return Path(value)
+
+
+def path_basename(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https", "file"}:
+        return Path(unquote(parsed.path)).name or value
+    return Path(value).name or value
 
 
 def discover_mcap_candidates(inputs: list[str]) -> list[str]:

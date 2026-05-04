@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd import compress_cmd, duplicates_cmd
+from pymcap_cli.core.mcap_compare import discover_mcap_candidates
 from rich.console import Console
 from small_mcap import CompressionType, IndexType, McapWriter, rebuild_summary
 from typing_extensions import Self
@@ -137,7 +138,7 @@ def test_discover_candidates_recurses_deduplicates_and_keeps_explicit_files(
     shutil.copyfile(simple_mcap, explicit)
     ignored.write_text("not an mcap")
 
-    candidates = duplicates_cmd._discover_candidates([str(root), str(nested), str(explicit)])
+    candidates = discover_mcap_candidates([str(root), str(nested), str(explicit)])
 
     assert candidates == [str(first), str(second), str(explicit)]
 

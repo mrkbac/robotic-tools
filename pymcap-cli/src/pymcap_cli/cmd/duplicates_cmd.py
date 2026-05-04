@@ -6,9 +6,7 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated
-from urllib.parse import unquote, urlparse
 
 from cyclopts import Parameter
 from rich.console import Console
@@ -35,6 +33,7 @@ from pymcap_cli.core.mcap_compare import (
     MessageIndexIdentityReadResult,
     SummaryChannelRange,
     discover_mcap_candidates,
+    path_basename,
     read_identity_file,
     read_message_index_identity_file,
 )
@@ -65,7 +64,7 @@ def _create_progress() -> Progress:
 
 
 def _progress_file(path: str) -> str:
-    return escape(_path_name(path))
+    return escape(path_basename(path))
 
 
 def _progress_pair(left_path: str, right_path: str) -> str:
@@ -135,10 +134,6 @@ class IndexedAnalysis:
     partial_matches: list[PartialMatch]
 
 
-def _discover_candidates(inputs: list[str]) -> list[str]:
-    return discover_mcap_candidates(inputs)
-
-
 def _read_summary_identity(path: str, *, rebuild_missing: bool) -> IdentityReadResult | SkippedFile:
     try:
         result = read_identity_file(path, rebuild_missing=rebuild_missing)
@@ -182,16 +177,8 @@ def _time_range(identity: MessageIndexIdentity) -> str:
     )
 
 
-def _path_name(path: str) -> str:
-    parsed = urlparse(path)
-    if parsed.scheme in {"http", "https"}:
-        return Path(unquote(parsed.path)).name or path
-    return Path(path).name or path
-
-
 def _file_label(path: str) -> str:
-    name = _path_name(path)
-    return f"[green]{name}[/green]\n[dim]{path}[/dim]"
+    return f"[green]{path_basename(path)}[/green]\n[dim]{path}[/dim]"
 
 
 def _format_count(value: int, singular: str, plural: str | None = None) -> str:
@@ -282,14 +269,14 @@ def _build_partial_tree(matches: list[PartialMatch]) -> Tree:
 
     for index, (anchor, relations) in enumerate(_anchored_partial_relations(matches), start=1):
         anchor_node = root.add(
-            f"[bold]Anchor {index}: {_path_name(anchor.path)}[/bold] "
+            f"[bold]Anchor {index}: {path_basename(anchor.path)}[/bold] "
             f"[dim]({len(relations)} relation(s), {_identity_summary(anchor.identity)})[/dim]"
         )
         anchor_node.add(f"[dim]{anchor.path}[/dim]")
 
         for relation in relations:
             related_node = anchor_node.add(
-                f"[green]{_path_name(relation.related.path)}[/green] "
+                f"[green]{path_basename(relation.related.path)}[/green] "
                 f"[dim](msgs {_format_delta(relation.message_delta)}, "
                 f"channels {_format_delta(relation.channel_delta)}; "
                 f"{_format_count(relation.match.shared_messages, 'shared msg', 'shared msgs')}, "
@@ -356,11 +343,11 @@ def _summary_ranges_by_semantic_digest(
     return result
 
 
-def _has_approx_channel_overlap(left: IdentityReadResult, right: IdentityReadResult) -> bool:
-    left_ranges = _summary_ranges_by_semantic_digest(left.identity.channel_ranges)
-    right_ranges = _summary_ranges_by_semantic_digest(right.identity.channel_ranges)
-
-    for channel_digest in set(left_ranges) & set(right_ranges):
+def _has_approx_channel_overlap(
+    left_ranges: dict[str, list[SummaryChannelRange]],
+    right_ranges: dict[str, list[SummaryChannelRange]],
+) -> bool:
+    for channel_digest in left_ranges.keys() & right_ranges.keys():
         for left_range in left_ranges[channel_digest]:
             for right_range in right_ranges[channel_digest]:
                 if _ranges_overlap(
@@ -390,9 +377,15 @@ def _candidate_paths_for_index_stage(
         if include_all or len(group) > 1:
             paths.update(summary_result.path for summary_result in group)
 
+    ranges_by_file = [
+        _summary_ranges_by_semantic_digest(scanned_file.identity.channel_ranges)
+        for scanned_file in scanned
+    ]
+
     for index, left in enumerate(scanned):
-        for right in scanned[index + 1 :]:
-            if _has_approx_channel_overlap(left, right):
+        left_ranges = ranges_by_file[index]
+        for right_offset, right in enumerate(scanned[index + 1 :], start=index + 1):
+            if _has_approx_channel_overlap(left_ranges, ranges_by_file[right_offset]):
                 paths.add(left.path)
                 paths.add(right.path)
             completed_pairs += 1
@@ -499,12 +492,14 @@ def _is_full_index_overlap(
     *,
     shared_channels: int,
     shared_messages: int,
+    left_message_bearing_channels: int,
+    right_message_bearing_channels: int,
 ) -> bool:
     return (
         shared_messages == left.identity.message_count
         and shared_messages == right.identity.message_count
-        and shared_channels == _message_bearing_channel_count(left)
-        and shared_channels == _message_bearing_channel_count(right)
+        and shared_channels == left_message_bearing_channels
+        and shared_channels == right_message_bearing_channels
     )
 
 
@@ -540,12 +535,18 @@ def _analyze_indexed_matches(
             continue
         union(first_index, index)
 
+    counters_by_file = [
+        _channel_counters_by_digest(scanned_file.identity.indexed_channels)
+        for scanned_file in scanned
+    ]
+    message_bearing_by_file = [
+        _message_bearing_channel_count(scanned_file) for scanned_file in scanned
+    ]
+
     for left_index, left in enumerate(scanned):
         for right_index, right in enumerate(scanned[left_index + 1 :], start=left_index + 1):
             if left.identity.digest == right.identity.digest:
                 completed_pairs += 1
-                if progress is not None and task is not None and completed_pairs == pair_count:
-                    progress.update(task, completed=completed_pairs)
                 continue
 
             if (
@@ -562,12 +563,16 @@ def _analyze_indexed_matches(
                     current=_progress_pair(left.path, right.path),
                 )
 
-            shared_channels, shared_messages = _indexed_overlap(left, right)
+            shared_channels, shared_messages = _indexed_overlap(
+                counters_by_file[left_index], counters_by_file[right_index]
+            )
             if _is_full_index_overlap(
                 left,
                 right,
                 shared_channels=shared_channels,
                 shared_messages=shared_messages,
+                left_message_bearing_channels=message_bearing_by_file[left_index],
+                right_message_bearing_channels=message_bearing_by_file[right_index],
             ):
                 union(left_index, right_index)
             elif shared_channels > 0 and shared_messages > 0:
@@ -604,30 +609,27 @@ def _analyze_indexed_matches(
     )
 
 
-def _channels_by_semantic_digest(
+def _channel_counters_by_digest(
     channels: tuple[IndexedChannelIdentity, ...],
-) -> dict[str, list[IndexedChannelIdentity]]:
-    result: dict[str, list[IndexedChannelIdentity]] = defaultdict(list)
+) -> dict[str, list[Counter[int]]]:
+    result: dict[str, list[Counter[int]]] = defaultdict(list)
     for channel in channels:
-        result[channel.channel_semantic_digest].append(channel)
+        result[channel.channel_semantic_digest].append(Counter(channel.timestamps))
     return result
 
 
 def _indexed_overlap(
-    left: MessageIndexIdentityReadResult,
-    right: MessageIndexIdentityReadResult,
+    left_counters: dict[str, list[Counter[int]]],
+    right_counters: dict[str, list[Counter[int]]],
 ) -> tuple[int, int]:
-    left_channels = _channels_by_semantic_digest(left.identity.indexed_channels)
-    right_channels = _channels_by_semantic_digest(right.identity.indexed_channels)
     candidate_pairs: list[tuple[int, str, int, int]] = []
 
-    for channel_digest in set(left_channels) & set(right_channels):
-        for left_index, left_channel in enumerate(left_channels[channel_digest]):
-            left_timestamps = Counter(left_channel.timestamps)
-            for right_index, right_channel in enumerate(right_channels[channel_digest]):
-                shared_messages = sum(
-                    (left_timestamps & Counter(right_channel.timestamps)).values()
-                )
+    for channel_digest in left_counters.keys() & right_counters.keys():
+        left_group = left_counters[channel_digest]
+        right_group = right_counters[channel_digest]
+        for left_index, left_counter in enumerate(left_group):
+            for right_index, right_counter in enumerate(right_group):
+                shared_messages = sum((left_counter & right_counter).values())
                 if shared_messages > 0:
                     candidate_pairs.append(
                         (shared_messages, channel_digest, left_index, right_index)
@@ -683,7 +685,6 @@ def duplicates(
 
     summary_scanned: list[IdentityReadResult] = []
     skipped: list[SkippedFile] = []
-    index_scanned: list[MessageIndexIdentityReadResult] = []
 
     with _create_progress() as progress:
         discovery_task = progress.add_task(
@@ -693,7 +694,7 @@ def duplicates(
         )
         discovery_error: str | None = None
         try:
-            candidates = _discover_candidates(paths)
+            candidates = discover_mcap_candidates(paths)
         except (OSError, ValueError) as exc:
             discovery_error = str(exc)
             candidates = []
