@@ -1,13 +1,14 @@
 """Split command - divide MCAP files into multiple output segments."""
 
 import logging
+from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Group, Parameter
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy
+from pymcap_cli.cmd._run_processor import finalize_delete_source, resolve_overwrite_policy
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.core.mcap_processor import OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
@@ -18,6 +19,7 @@ from pymcap_cli.types.types_manual import (
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
+    DeleteSourceOption,
     ForceOverwriteOption,
     NoClobberOption,
 )
@@ -97,6 +99,7 @@ def split(
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
+    delete_source: DeleteSourceOption = False,
 ) -> int:
     """Split an MCAP file into multiple output segments.
 
@@ -124,6 +127,10 @@ def split(
         Force overwrite of output files without confirmation.
     no_clobber
         Fail instead of prompting if any split output path already exists.
+    delete_source
+        Delete the source file after every split output is validated
+        (header + summary). URL inputs and any source whose path equals one
+        of the outputs are skipped.
 
     Examples
     --------
@@ -240,6 +247,12 @@ def split(
             f"{bytes_to_human(seg_stats.chunk_count * chunk_size)} "
             f"({seg_stats.chunk_count} chunks)"
         )
+
+    if delete_source:
+        outputs = [
+            Path(segment.path) for segment in result.processor.output_manager.segments.values()
+        ]
+        return finalize_delete_source(sources=[file], outputs=outputs)
 
     return 0
 

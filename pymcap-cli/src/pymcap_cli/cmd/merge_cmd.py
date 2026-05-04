@@ -6,7 +6,11 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.cmd._run_processor import (
+    finalize_delete_source,
+    resolve_overwrite_policy,
+    run_processor,
+)
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
@@ -16,6 +20,7 @@ from pymcap_cli.types.types_manual import (
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
+    DeleteSourceOption,
     ForceOverwriteOption,
     NoClobberOption,
     OutputPathOption,
@@ -54,6 +59,7 @@ def merge(
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
+    delete_source: DeleteSourceOption = False,
 ) -> int:
     """Merge multiple MCAP files into one.
 
@@ -78,6 +84,9 @@ def merge(
         Force overwrite of output file without confirmation.
     no_clobber
         Fail instead of prompting if the output file already exists.
+    delete_source
+        Delete source file(s) after the output is validated (header + summary).
+        URL inputs and any source whose path equals the output are skipped.
 
     Examples
     --------
@@ -114,5 +123,8 @@ def merge(
     except Exception:
         logger.exception("Error during merge")
         return 1
+
+    if delete_source:
+        return finalize_delete_source(sources=list(files), outputs=[output])
 
     return 0

@@ -1,9 +1,13 @@
 """Shared processor pipeline for transform commands."""
 
 import contextlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+from urllib.parse import urlparse
+
+from small_mcap import InvalidMagicError, McapError
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_processor import (
@@ -15,7 +19,9 @@ from pymcap_cli.core.mcap_processor import (
     ProcessingOptions,
     ProcessingStats,
 )
-from pymcap_cli.utils import confirm_output_overwrite
+from pymcap_cli.utils import confirm_output_overwrite, read_info
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -79,3 +85,62 @@ def run_processor(
         stats = processor.process(output_stream)
 
     return ProcessorResult(stats=stats, processor=processor)
+
+
+def validate_mcap_output(path: Path) -> bool:
+    """Return True iff the MCAP at ``path`` has a readable header and summary."""
+    try:
+        with path.open("rb") as f:
+            read_info(f)
+    except (McapError, InvalidMagicError, OSError, AssertionError) as e:
+        logger.debug(f"Output validation failed for {path}: {e}")
+        return False
+    return True
+
+
+def delete_source_files(sources: list[str], outputs: list[Path]) -> None:
+    """Delete each local source file. Skip URLs and any source path that
+    resolves to one of ``outputs`` (with a warning).
+    """
+    output_resolved = {p.resolve() for p in outputs}
+    for src in sources:
+        scheme = urlparse(src).scheme
+        if scheme in ("http", "https"):
+            logger.warning(f"Skipping delete: '{src}' is a remote URL")
+            continue
+        path = Path(src)
+        try:
+            resolved = path.resolve()
+        except OSError as e:
+            logger.warning(f"Skipping delete '{src}': {e}")
+            continue
+        if resolved in output_resolved:
+            logger.warning(f"Skipping delete: source '{src}' is also an output")
+            continue
+        try:
+            path.unlink()
+            logger.info(f"Deleted source: {src}")
+        except FileNotFoundError:
+            logger.debug(f"Source already gone: {src}")
+        except OSError:
+            logger.exception(f"Failed to delete '{src}'")
+
+
+def finalize_delete_source(
+    *,
+    sources: list[str],
+    outputs: list[Path],
+) -> int:
+    """Validate every output and, if all valid, delete the eligible sources.
+
+    Returns 0 on success (sources deleted or skipped with warning) and 1 if
+    any output failed validation (no sources are deleted in that case).
+    """
+    invalid = [p for p in outputs if not validate_mcap_output(p)]
+    if invalid:
+        for p in invalid:
+            logger.error(f"[red]Output failed validation: {p}[/red]")
+        logger.error("Source file(s) preserved — output not safe to replace source.")
+        return 1
+    delete_source_files(sources, outputs)
+    return 0

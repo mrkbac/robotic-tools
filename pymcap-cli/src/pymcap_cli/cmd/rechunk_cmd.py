@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.cmd._run_processor import (
+    finalize_delete_source,
+    resolve_overwrite_policy,
+    run_processor,
+)
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
@@ -18,6 +22,7 @@ from pymcap_cli.types.types_manual import (
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
+    DeleteSourceOption,
     ForceOverwriteOption,
     NoClobberOption,
     OutputPathOption,
@@ -56,6 +61,7 @@ def rechunk(
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
+    delete_source: DeleteSourceOption = False,
 ) -> int:
     """Reorganize MCAP messages into chunks based on topic patterns.
 
@@ -85,6 +91,9 @@ def rechunk(
         Force overwrite of output file without confirmation.
     no_clobber
         Fail instead of prompting if the output file already exists.
+    delete_source
+        Delete source file(s) after the output is validated (header + summary).
+        URL inputs and any source whose path equals the output are skipped.
 
     Examples
     --------
@@ -166,5 +175,8 @@ def rechunk(
         )
     elif strategy == RechunkStrategy.PATTERN and patterns:
         console.print(f"Used {len(patterns)} topic pattern(s) for grouping")
+
+    if delete_source:
+        return finalize_delete_source(sources=[file], outputs=[output_file])
 
     return 0

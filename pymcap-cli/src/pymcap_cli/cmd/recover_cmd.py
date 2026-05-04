@@ -5,7 +5,11 @@ from cyclopts import Group, Parameter
 from rich.console import Console
 from small_mcap import WriterNotStartedError
 
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.cmd._run_processor import (
+    finalize_delete_source,
+    resolve_overwrite_policy,
+    run_processor,
+)
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
@@ -15,6 +19,7 @@ from pymcap_cli.types.types_manual import (
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
+    DeleteSourceOption,
     ForceOverwriteOption,
     NoClobberOption,
     OutputPathOption,
@@ -42,6 +47,7 @@ def recover(
     ] = False,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
+    delete_source: DeleteSourceOption = False,
 ) -> int:
     """Recover data from a potentially corrupt MCAP file.
 
@@ -63,6 +69,10 @@ def recover(
         Force overwrite of output file without confirmation.
     no_clobber
         Fail instead of prompting if the output file already exists.
+    delete_source
+        Delete source file(s) after the output is validated (header + summary).
+        URL inputs and any source whose path equals the output are skipped.
+        Skipped if recovery yielded no valid MCAP data.
 
     Examples
     --------
@@ -75,6 +85,7 @@ def recover(
         logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
+    recovered = False
     try:
         result = run_processor(
             files=[file],
@@ -88,6 +99,7 @@ def recover(
         )
         logger.info("[green]✓ Recovery completed successfully![/green]")
         console.print(result.stats)
+        recovered = True
     except WriterNotStartedError:
         logger.warning("File appears to be empty or severely corrupted")
         logger.warning("No valid MCAP data found to recover")
@@ -97,5 +109,10 @@ def recover(
     except Exception:
         logger.exception("Error during recovery")
         return 1
+
+    if delete_source and recovered:
+        return finalize_delete_source(sources=[file], outputs=[output])
+    if delete_source:
+        logger.warning("Skipping source deletion: recovery did not produce a valid output")
 
     return 0

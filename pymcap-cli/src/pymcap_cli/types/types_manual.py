@@ -77,3 +77,11 @@ NoClobberOption = Annotated[
         group=OUTPUT_OPTIONS_GROUP,
     ),
 ]
+
+DeleteSourceOption = Annotated[
+    bool,
+    Parameter(
+        name=["--delete-source"],
+        group=OUTPUT_OPTIONS_GROUP,
+    ),
+]
