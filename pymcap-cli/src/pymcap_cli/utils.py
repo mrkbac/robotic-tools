@@ -32,6 +32,8 @@ from small_mcap import (
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR
 
+_NS_TO_SEC = 1_000_000_000
+
 
 def bytes_to_human(size_bytes: float | None) -> str:
     """Convert bytes to a human-readable format."""
@@ -39,6 +41,10 @@ def bytes_to_human(size_bytes: float | None) -> str:
         return "N/A"
 
     return filesize.decimal(int(abs(size_bytes)), separator="")
+
+
+def format_ts_short(time_ns: int) -> str:
+    return datetime.fromtimestamp(time_ns / _NS_TO_SEC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def file_progress(title: str, console: Console | None = None) -> Progress:

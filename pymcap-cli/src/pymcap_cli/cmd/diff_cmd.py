@@ -10,12 +10,24 @@ from typing import Annotated, TypeVar
 
 from cyclopts import Parameter
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
+from rich.tree import Tree
 from small_mcap import RebuildInfo, Schema, Statistics, Summary
 
-from pymcap_cli.core.mcap_compare import collect_message_timestamps, read_compare_file
+from pymcap_cli.core.mcap_compare import (
+    IndexedCompareKind,
+    IndexedComparison,
+    MessageIndexIdentityReadResult,
+    TimestampRangeSummary,
+    collect_message_timestamps,
+    compare_indexed_identities,
+    message_index_identity_from_info,
+    read_compare_file,
+    split_timestamps_into_segments,
+)
 from pymcap_cli.rihs01 import compute_rihs01
-from pymcap_cli.utils import bytes_to_human
+from pymcap_cli.utils import bytes_to_human, format_ts_short
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -73,6 +85,13 @@ class ChannelDiff:
 
     def unique_in(self, label: str) -> int:
         return len(self.timestamps.get(label, set()))
+
+
+@dataclass(frozen=True, slots=True)
+class LabeledIndexedComparison:
+    left_label: str
+    right_label: str
+    comparison: IndexedComparison
 
 
 def _schema_fingerprint(schema: Schema) -> str:
@@ -214,11 +233,21 @@ def _extract_summary(path: str, label: str, info: RebuildInfo, file_size: int) -
     )
 
 
-def _process_file(path: str, label: str) -> tuple[FileSummary, dict[int, set[int]]]:
+def _process_file(
+    path: str, label: str
+) -> tuple[FileSummary, dict[int, set[int]], MessageIndexIdentityReadResult]:
     result = read_compare_file(path, rebuild_missing=True)
-    return _extract_summary(
-        path, label, result.info, result.size_bytes
-    ), collect_message_timestamps(result.info)
+    indexed = MessageIndexIdentityReadResult(
+        path=path,
+        size_bytes=result.size_bytes,
+        identity=message_index_identity_from_info(result.info),
+        read_mode=result.read_mode,
+    )
+    return (
+        _extract_summary(path, label, result.info, result.size_bytes),
+        collect_message_timestamps(result.info),
+        indexed,
+    )
 
 
 def _compare_channels(
@@ -391,31 +420,6 @@ def _build_channel_diff_table(
     return table
 
 
-def _format_ts_short(time_ns: int) -> str:
-    dt = datetime.fromtimestamp(time_ns / _NS_TO_SEC)
-    return dt.strftime("%H:%M:%S.%f")[:-3]
-
-
-def _split_into_segments(sorted_ts: list[int], gap_multiplier: float = 3.0) -> list[list[int]]:
-    if len(sorted_ts) <= 1:
-        return [sorted_ts[:]] if sorted_ts else []
-
-    gaps = [sorted_ts[i + 1] - sorted_ts[i] for i in range(len(sorted_ts) - 1)]
-    median_gap = sorted(gaps)[len(gaps) // 2]
-    threshold = median_gap * gap_multiplier
-
-    segments: list[list[int]] = []
-    current = [sorted_ts[0]]
-    for i, gap in enumerate(gaps):
-        if gap > threshold:
-            segments.append(current)
-            current = [sorted_ts[i + 1]]
-        else:
-            current.append(sorted_ts[i + 1])
-    segments.append(current)
-    return segments
-
-
 def _format_timestamp_ranges(
     timestamps: set[int], max_ranges: int = 3, *, total: int | None = None
 ) -> str:
@@ -425,15 +429,15 @@ def _format_timestamp_ranges(
     if total is not None and len(timestamps) == total:
         return f"all ({len(timestamps):,} msgs)"
 
-    segments = _split_into_segments(sorted(timestamps))
+    segments = split_timestamps_into_segments(sorted(timestamps))
     parts: list[str] = []
 
     for seg in segments[:max_ranges]:
         if len(seg) == 1:
-            parts.append(_format_ts_short(seg[0]))
+            parts.append(format_ts_short(seg[0]))
         else:
             parts.append(
-                f"{_format_ts_short(seg[0])} - {_format_ts_short(seg[-1])} ({len(seg):,} msgs)"
+                f"{format_ts_short(seg[0])} - {format_ts_short(seg[-1])} ({len(seg):,} msgs)"
             )
 
     total_msgs = len(timestamps)
@@ -544,6 +548,130 @@ def _build_channel_schema_mismatch_table(
     return table
 
 
+def _format_count(value: int, singular: str, plural: str | None = None) -> str:
+    unit = singular if value == 1 else plural or f"{singular}s"
+    return f"{value:,} {unit}"
+
+
+def _format_optional_time_window(start_time: int | None, end_time: int | None) -> str:
+    if start_time is None or end_time is None:
+        return "N/A"
+    if start_time == end_time:
+        return format_ts_short(start_time)
+    return f"{format_ts_short(start_time)} - {format_ts_short(end_time)}"
+
+
+def _format_range_summary(summary: TimestampRangeSummary) -> str:
+    if not summary.ranges and summary.hidden_messages == 0:
+        return "-"
+
+    parts: list[str] = []
+    for segment in summary.ranges:
+        count_label = _format_count(segment.message_count, "msg")
+        if segment.start_time == segment.end_time:
+            parts.append(f"{format_ts_short(segment.start_time)} ({count_label})")
+        else:
+            parts.append(
+                f"{format_ts_short(segment.start_time)} - "
+                f"{format_ts_short(segment.end_time)} ({count_label})"
+            )
+
+    if summary.hidden_messages > 0:
+        parts.append(f"+{_format_count(summary.hidden_messages, 'msg')}")
+
+    return ", ".join(parts)
+
+
+def _verdict_text(
+    comparison: IndexedComparison,
+    *,
+    left_label: str,
+    right_label: str,
+) -> str:
+    if comparison.kind is IndexedCompareKind.EXACT:
+        return "[green]exact indexed duplicate[/green]"
+    if comparison.kind is IndexedCompareKind.FULL_OVERLAP:
+        return "[green]full message overlap[/green] [dim](footer/statistics differ)[/dim]"
+    if comparison.kind is IndexedCompareKind.LEFT_SUBSET:
+        return f"[yellow]{escape(left_label)} is contained in {escape(right_label)}[/yellow]"
+    if comparison.kind is IndexedCompareKind.RIGHT_SUBSET:
+        return f"[yellow]{escape(right_label)} is contained in {escape(left_label)}[/yellow]"
+    if comparison.kind is IndexedCompareKind.EDGE_OVERLAP:
+        return "[yellow]edge overlap[/yellow]"
+    if comparison.kind is IndexedCompareKind.PARTIAL_OVERLAP:
+        return "[yellow]partial overlap[/yellow]"
+    return "[red]no indexed message overlap[/red]"
+
+
+def _build_smart_diff_tree(
+    comparisons: list[LabeledIndexedComparison],
+    *,
+    max_topic_rows: int = 3,
+) -> Tree:
+    root = Tree("[bold cyan]Smart Diff Verdict[/bold cyan]")
+
+    for item in comparisons:
+        comparison = item.comparison
+        verdict = _verdict_text(
+            comparison,
+            left_label=item.left_label,
+            right_label=item.right_label,
+        )
+        node = root.add(
+            f"[bold]{escape(item.left_label)} <-> {escape(item.right_label)}[/bold]: "
+            f"{verdict} "
+            f"[dim]({_format_count(comparison.shared_messages, 'shared msg', 'shared msgs')}, "
+            f"{_format_count(comparison.shared_channels, 'shared channel')}; "
+            f"left-only {_format_count(comparison.left_extra_messages, 'msg')}, "
+            f"right-only {_format_count(comparison.right_extra_messages, 'msg')})[/dim]"
+        )
+
+        for topic in comparison.topics[:max_topic_rows]:
+            overlap_window = _format_optional_time_window(
+                topic.shared_start_time, topic.shared_end_time
+            )
+            topic_node = node.add(
+                f"[cyan]{escape(topic.topic)}[/cyan] "
+                f"[dim]({_format_count(topic.shared_messages, 'shared msg', 'shared msgs')}, "
+                f"left-only {_format_count(topic.left_only_messages, 'msg')}, "
+                f"right-only {_format_count(topic.right_only_messages, 'msg')}, "
+                f"overlap {overlap_window})[/dim]"
+            )
+            if topic.left_only_messages or topic.right_only_messages:
+                topic_node.add(
+                    f"[dim]left-only: {_format_range_summary(topic.left_only_ranges)}; "
+                    f"right-only: {_format_range_summary(topic.right_only_ranges)}[/dim]"
+                )
+
+        hidden_topic_count = len(comparison.topics) - max_topic_rows
+        if hidden_topic_count > 0:
+            node.add(f"[dim]... {hidden_topic_count:,} more topic(s)[/dim]")
+
+    return root
+
+
+def _compare_to_first(
+    indexed_results: list[MessageIndexIdentityReadResult],
+    labels: list[str],
+    *,
+    max_range_preview: int,
+) -> list[LabeledIndexedComparison]:
+    first = indexed_results[0]
+    first_label = labels[0]
+    return [
+        LabeledIndexedComparison(
+            left_label=first_label,
+            right_label=labels[index],
+            comparison=compare_indexed_identities(
+                first,
+                indexed_result,
+                max_range_preview=max_range_preview,
+            ),
+        )
+        for index, indexed_result in enumerate(indexed_results[1:], start=1)
+    ]
+
+
 def diff_cmd(
     files: Annotated[
         list[str],
@@ -603,21 +731,28 @@ def diff_cmd(
     summaries: list[FileSummary] = []
     all_timestamps: dict[str, dict[int, set[int]]] = {}
     all_summaries: dict[str, FileSummary] = {}
+    indexed_results: list[MessageIndexIdentityReadResult] = []
     seen_labels: dict[str, int] = {}
 
     for path in files:
         label = _unique_label(path, seen_labels)
         try:
-            fs, ts = _process_file(path, label)
+            fs, ts, indexed = _process_file(path, label)
         except Exception:
             logger.exception(f"Error reading {path}")
             return 1
         summaries.append(fs)
         all_timestamps[label] = ts
         all_summaries[label] = fs
+        indexed_results.append(indexed)
 
     labels = [fs.label for fs in summaries]
     first_label = labels[0]
+    smart_comparisons = _compare_to_first(
+        indexed_results,
+        labels,
+        max_range_preview=max_ranges,
+    )
 
     channel_diffs = _compare_channels(all_timestamps, all_summaries)
     schema_diffs = _compare_schemas(all_summaries)
@@ -629,6 +764,9 @@ def diff_cmd(
     has_diffs = total_added > 0 or total_removed > 0
     has_schema_diffs = any(not d.is_identical for d in schema_diffs.values())
     has_mismatches = bool(channel_schema_mismatches)
+
+    console.print()
+    console.print(_build_smart_diff_tree(smart_comparisons))
 
     console.print()
     console.print(_build_summary_table(summaries))

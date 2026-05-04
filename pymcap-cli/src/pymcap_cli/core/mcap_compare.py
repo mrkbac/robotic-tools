@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import operator
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import IO, Literal, Protocol
 from urllib.parse import unquote, urlparse
@@ -115,6 +118,126 @@ class CompareReadResult:
     size_bytes: int
     info: RebuildInfo
     read_mode: ReadMode
+
+
+class IndexedCompareKind(Enum):
+    EXACT = "exact"
+    FULL_OVERLAP = "full_overlap"
+    LEFT_SUBSET = "left_subset"
+    RIGHT_SUBSET = "right_subset"
+    EDGE_OVERLAP = "edge_overlap"
+    PARTIAL_OVERLAP = "partial_overlap"
+    NO_OVERLAP = "no_overlap"
+
+
+@dataclass(frozen=True, slots=True)
+class TimestampRangePreview:
+    start_time: int
+    end_time: int
+    message_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TimestampRangeSummary:
+    ranges: tuple[TimestampRangePreview, ...]
+    hidden_messages: int
+
+
+@dataclass(frozen=True, slots=True)
+class TopicOverlapEvidence:
+    topic: str
+    shared_messages: int
+    left_only_messages: int
+    right_only_messages: int
+    shared_start_time: int | None
+    shared_end_time: int | None
+    left_only_ranges: TimestampRangeSummary
+    right_only_ranges: TimestampRangeSummary
+
+    def swapped(self) -> TopicOverlapEvidence:
+        return TopicOverlapEvidence(
+            topic=self.topic,
+            shared_messages=self.shared_messages,
+            left_only_messages=self.right_only_messages,
+            right_only_messages=self.left_only_messages,
+            shared_start_time=self.shared_start_time,
+            shared_end_time=self.shared_end_time,
+            left_only_ranges=self.right_only_ranges,
+            right_only_ranges=self.left_only_ranges,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedOverlap:
+    shared_channels: int
+    shared_messages: int
+    topics: tuple[TopicOverlapEvidence, ...]
+    is_edge_overlap: bool
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedComparison:
+    left: MessageIndexIdentityReadResult
+    right: MessageIndexIdentityReadResult
+    kind: IndexedCompareKind
+    overlap: IndexedOverlap
+
+    @property
+    def shared_channels(self) -> int:
+        return self.overlap.shared_channels
+
+    @property
+    def shared_messages(self) -> int:
+        return self.overlap.shared_messages
+
+    @property
+    def topics(self) -> tuple[TopicOverlapEvidence, ...]:
+        return self.overlap.topics
+
+    @property
+    def left_extra_channels(self) -> int:
+        return len(self.left.identity.indexed_channels) - self.shared_channels
+
+    @property
+    def right_extra_channels(self) -> int:
+        return len(self.right.identity.indexed_channels) - self.shared_channels
+
+    @property
+    def left_extra_messages(self) -> int:
+        return self.left.identity.message_count - self.shared_messages
+
+    @property
+    def right_extra_messages(self) -> int:
+        return self.right.identity.message_count - self.shared_messages
+
+    @property
+    def is_duplicate(self) -> bool:
+        return self.kind in {
+            IndexedCompareKind.EXACT,
+            IndexedCompareKind.FULL_OVERLAP,
+        }
+
+    @property
+    def has_overlap(self) -> bool:
+        return self.shared_channels > 0 and self.shared_messages > 0
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexedChannelView:
+    topic: str
+    timestamps: Counter[int]
+
+
+@dataclass(slots=True)
+class _TopicEvidenceAccumulator:
+    topic: str
+    shared_timestamps: Counter[int]
+    left_only_timestamps: Counter[int]
+    right_only_timestamps: Counter[int]
+
+    @property
+    def shared_messages(self) -> int:
+        return _counter_message_count(self.shared_timestamps)
 
 
 def _update_str(hasher: HashSink, value: str) -> None:
@@ -445,6 +568,342 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
         message_end_time=summary_identity.message_end_time,
         schema_count=summary_identity.schema_count,
         channel_count=summary_identity.channel_count,
+    )
+
+
+def _counter_message_count(counter: Counter[int]) -> int:
+    return sum(counter.values())
+
+
+def split_timestamps_into_segments(
+    sorted_timestamps: list[int], gap_multiplier: float = 3.0
+) -> list[list[int]]:
+    if len(sorted_timestamps) <= 1:
+        return [sorted_timestamps[:]] if sorted_timestamps else []
+
+    gaps = [
+        sorted_timestamps[index + 1] - sorted_timestamps[index]
+        for index in range(len(sorted_timestamps) - 1)
+    ]
+    median_gap = sorted(gaps)[len(gaps) // 2]
+    threshold = median_gap * gap_multiplier
+
+    segments: list[list[int]] = []
+    current = [sorted_timestamps[0]]
+    for index, gap in enumerate(gaps):
+        if gap > threshold:
+            segments.append(current)
+            current = [sorted_timestamps[index + 1]]
+        else:
+            current.append(sorted_timestamps[index + 1])
+    segments.append(current)
+    return segments
+
+
+def _counter_range_summary(counter: Counter[int], *, max_ranges: int) -> TimestampRangeSummary:
+    if not counter:
+        return TimestampRangeSummary(ranges=(), hidden_messages=0)
+
+    segments = split_timestamps_into_segments(sorted(counter))
+    ranges: list[TimestampRangePreview] = []
+    displayed_messages = 0
+    display_limit = max(max_ranges, 0)
+    for segment in segments[:display_limit]:
+        message_count = sum(counter[timestamp] for timestamp in segment)
+        displayed_messages += message_count
+        ranges.append(
+            TimestampRangePreview(
+                start_time=segment[0],
+                end_time=segment[-1],
+                message_count=message_count,
+            )
+        )
+
+    return TimestampRangeSummary(
+        ranges=tuple(ranges),
+        hidden_messages=_counter_message_count(counter) - displayed_messages,
+    )
+
+
+def _channel_views_by_digest(
+    channels: tuple[IndexedChannelIdentity, ...],
+) -> dict[str, list[_IndexedChannelView]]:
+    result: dict[str, list[_IndexedChannelView]] = defaultdict(list)
+    for channel in channels:
+        result[channel.channel_semantic_digest].append(
+            _IndexedChannelView(topic=channel.topic, timestamps=Counter(channel.timestamps))
+        )
+    return result
+
+
+def _channel_pair_overlap(
+    left_channel: _IndexedChannelView,
+    right_channel: _IndexedChannelView,
+) -> _TopicEvidenceAccumulator | None:
+    shared_timestamps = left_channel.timestamps & right_channel.timestamps
+    if not shared_timestamps:
+        return None
+
+    return _TopicEvidenceAccumulator(
+        topic=left_channel.topic,
+        shared_timestamps=shared_timestamps,
+        left_only_timestamps=left_channel.timestamps - shared_timestamps,
+        right_only_timestamps=right_channel.timestamps - shared_timestamps,
+    )
+
+
+def _accumulate_channel_overlap(
+    accumulators: dict[str, _TopicEvidenceAccumulator],
+    overlap: _TopicEvidenceAccumulator,
+) -> None:
+    accumulator = accumulators.get(overlap.topic)
+    if accumulator is None:
+        accumulators[overlap.topic] = overlap
+        return
+    accumulator.shared_timestamps.update(overlap.shared_timestamps)
+    accumulator.left_only_timestamps.update(overlap.left_only_timestamps)
+    accumulator.right_only_timestamps.update(overlap.right_only_timestamps)
+
+
+def _relative_side(counter: Counter[int], start_time: int, end_time: int) -> str:
+    if not counter:
+        return "none"
+
+    has_before = False
+    has_after = False
+    has_inside = False
+    for timestamp in counter:
+        if timestamp < start_time:
+            has_before = True
+        elif timestamp > end_time:
+            has_after = True
+        else:
+            has_inside = True
+
+    if has_inside or (has_before and has_after):
+        return "mixed"
+    if has_before:
+        return "before"
+    if has_after:
+        return "after"
+    return "none"
+
+
+def _is_edge_overlap(accumulators: dict[str, _TopicEvidenceAccumulator]) -> bool:
+    orientation: tuple[str, str] | None = None
+    for accumulator in accumulators.values():
+        if not accumulator.shared_timestamps:
+            continue
+
+        shared_times = sorted(accumulator.shared_timestamps)
+        shared_start = shared_times[0]
+        shared_end = shared_times[-1]
+        left_side = _relative_side(accumulator.left_only_timestamps, shared_start, shared_end)
+        right_side = _relative_side(accumulator.right_only_timestamps, shared_start, shared_end)
+
+        if left_side == "none" or right_side == "none":
+            continue
+        if (left_side, right_side) not in {("before", "after"), ("after", "before")}:
+            return False
+        if orientation is None:
+            orientation = (left_side, right_side)
+        elif orientation != (left_side, right_side):
+            return False
+
+    return orientation is not None
+
+
+def _topic_evidence_from_accumulators(
+    accumulators: dict[str, _TopicEvidenceAccumulator],
+    *,
+    max_range_preview: int,
+) -> tuple[TopicOverlapEvidence, ...]:
+    evidence: list[TopicOverlapEvidence] = []
+    for accumulator in accumulators.values():
+        shared_times = sorted(accumulator.shared_timestamps)
+        evidence.append(
+            TopicOverlapEvidence(
+                topic=accumulator.topic,
+                shared_messages=_counter_message_count(accumulator.shared_timestamps),
+                left_only_messages=_counter_message_count(accumulator.left_only_timestamps),
+                right_only_messages=_counter_message_count(accumulator.right_only_timestamps),
+                shared_start_time=shared_times[0] if shared_times else None,
+                shared_end_time=shared_times[-1] if shared_times else None,
+                left_only_ranges=_counter_range_summary(
+                    accumulator.left_only_timestamps,
+                    max_ranges=max_range_preview,
+                ),
+                right_only_ranges=_counter_range_summary(
+                    accumulator.right_only_timestamps,
+                    max_ranges=max_range_preview,
+                ),
+            )
+        )
+
+    return tuple(
+        sorted(
+            evidence,
+            key=lambda item: (
+                -item.shared_messages,
+                -(item.left_only_messages + item.right_only_messages),
+                item.topic,
+            ),
+        )
+    )
+
+
+def indexed_overlap(
+    left_channels: tuple[IndexedChannelIdentity, ...],
+    right_channels: tuple[IndexedChannelIdentity, ...],
+    *,
+    max_range_preview: int = 1,
+) -> IndexedOverlap:
+    left_by_digest = _channel_views_by_digest(left_channels)
+    right_by_digest = _channel_views_by_digest(right_channels)
+
+    shared_channels = 0
+    shared_messages_total = 0
+    evidence_by_topic: dict[str, _TopicEvidenceAccumulator] = {}
+    candidate_pairs: list[tuple[int, str, int, int, _TopicEvidenceAccumulator]] = []
+
+    for channel_digest in left_by_digest.keys() & right_by_digest.keys():
+        left_group = left_by_digest[channel_digest]
+        right_group = right_by_digest[channel_digest]
+        if len(left_group) == 1 and len(right_group) == 1:
+            overlap = _channel_pair_overlap(left_group[0], right_group[0])
+            if overlap is not None:
+                shared_channels += 1
+                shared_messages_total += overlap.shared_messages
+                _accumulate_channel_overlap(evidence_by_topic, overlap)
+            continue
+
+        for left_index, left_channel in enumerate(left_group):
+            for right_index, right_channel in enumerate(right_group):
+                overlap = _channel_pair_overlap(left_channel, right_channel)
+                if overlap is not None:
+                    candidate_pairs.append(
+                        (
+                            overlap.shared_messages,
+                            channel_digest,
+                            left_index,
+                            right_index,
+                            overlap,
+                        )
+                    )
+
+    used_left: set[tuple[str, int]] = set()
+    used_right: set[tuple[str, int]] = set()
+    for shared_messages, channel_digest, left_index, right_index, overlap in sorted(
+        candidate_pairs,
+        key=operator.itemgetter(0, 1, 2, 3),
+        reverse=True,
+    ):
+        left_key = (channel_digest, left_index)
+        right_key = (channel_digest, right_index)
+        if left_key in used_left or right_key in used_right:
+            continue
+        used_left.add(left_key)
+        used_right.add(right_key)
+        shared_channels += 1
+        shared_messages_total += shared_messages
+        _accumulate_channel_overlap(evidence_by_topic, overlap)
+
+    return IndexedOverlap(
+        shared_channels=shared_channels,
+        shared_messages=shared_messages_total,
+        topics=_topic_evidence_from_accumulators(
+            evidence_by_topic,
+            max_range_preview=max_range_preview,
+        ),
+        is_edge_overlap=_is_edge_overlap(evidence_by_topic),
+    )
+
+
+def message_bearing_channel_count(identity: MessageIndexIdentity) -> int:
+    return sum(1 for channel in identity.indexed_channels if channel.message_count)
+
+
+def _is_full_index_overlap(
+    left: MessageIndexIdentity,
+    right: MessageIndexIdentity,
+    overlap: IndexedOverlap,
+    *,
+    left_message_bearing_channels: int,
+    right_message_bearing_channels: int,
+) -> bool:
+    return (
+        overlap.shared_messages == left.message_count
+        and overlap.shared_messages == right.message_count
+        and overlap.shared_channels == left_message_bearing_channels
+        and overlap.shared_channels == right_message_bearing_channels
+    )
+
+
+def _compare_kind(
+    left: MessageIndexIdentity,
+    right: MessageIndexIdentity,
+    overlap: IndexedOverlap,
+    *,
+    left_message_bearing_channels: int,
+    right_message_bearing_channels: int,
+) -> IndexedCompareKind:
+    if left.digest == right.digest:
+        return IndexedCompareKind.EXACT
+
+    if _is_full_index_overlap(
+        left,
+        right,
+        overlap,
+        left_message_bearing_channels=left_message_bearing_channels,
+        right_message_bearing_channels=right_message_bearing_channels,
+    ):
+        return IndexedCompareKind.FULL_OVERLAP
+
+    if overlap.shared_channels == 0 or overlap.shared_messages == 0:
+        return IndexedCompareKind.NO_OVERLAP
+
+    if (
+        overlap.shared_messages == left.message_count
+        and overlap.shared_channels == left_message_bearing_channels
+    ):
+        return IndexedCompareKind.LEFT_SUBSET
+
+    if (
+        overlap.shared_messages == right.message_count
+        and overlap.shared_channels == right_message_bearing_channels
+    ):
+        return IndexedCompareKind.RIGHT_SUBSET
+
+    if overlap.is_edge_overlap:
+        return IndexedCompareKind.EDGE_OVERLAP
+
+    return IndexedCompareKind.PARTIAL_OVERLAP
+
+
+def compare_indexed_identities(
+    left: MessageIndexIdentityReadResult,
+    right: MessageIndexIdentityReadResult,
+    *,
+    max_range_preview: int = 1,
+) -> IndexedComparison:
+    overlap = indexed_overlap(
+        left.identity.indexed_channels,
+        right.identity.indexed_channels,
+        max_range_preview=max_range_preview,
+    )
+    left_message_bearing_channels = message_bearing_channel_count(left.identity)
+    right_message_bearing_channels = message_bearing_channel_count(right.identity)
+    return IndexedComparison(
+        left=left,
+        right=right,
+        kind=_compare_kind(
+            left.identity,
+            right.identity,
+            overlap,
+            left_message_bearing_channels=left_message_bearing_channels,
+            right_message_bearing_channels=right_message_bearing_channels,
+        ),
+        overlap=overlap,
     )
 
 

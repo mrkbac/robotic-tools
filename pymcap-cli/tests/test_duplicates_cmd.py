@@ -153,6 +153,7 @@ def test_duplicates_groups_copied_mcaps(
 
     assert exit_code == 0
     assert "Duplicate MCAP Groups" in output
+    assert "exact indexed duplicate" in output
     assert simple_mcap.name in output
     assert duplicate.name in output
 
@@ -262,6 +263,7 @@ def test_duplicates_promotes_full_index_overlap_to_duplicate_group(
     assert exit_code == 0
     assert "Duplicate MCAP Groups" in output
     assert "Partial MCAP Matches" not in output
+    assert "full message overlap, footer/statistics differ" in output
     assert first.name in output
     assert second.name in output
     assert "found 1 duplicate group" in output
@@ -284,6 +286,10 @@ def test_duplicates_reports_cutout_inside_larger_mcap(
     assert cutout.name in output
     assert "msgs -6" in output
     assert "4 shared msgs" in output
+    assert "/test" in output
+    assert "anchor-only 6 msgs" in output
+    assert "file-only 0 msgs" in output
+    assert "overlap" in output
 
 
 def test_duplicates_groups_multiple_partial_relations_under_anchor(
@@ -306,6 +312,27 @@ def test_duplicates_groups_multiple_partial_relations_under_anchor(
     assert cutout_a.name in output
     assert cutout_b.name in output
     assert "2 partial match" in output
+
+
+def test_duplicates_caps_topic_evidence_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full = tmp_path / "full.mcap"
+    cutout = tmp_path / "cutout.mcap"
+    topics = [f"/topic_{index}" for index in range(5)]
+    _write_channels_mcap(full, topics, messages_per_topic=10)
+    _write_channels_mcap(cutout, topics, messages_per_topic=5)
+
+    exit_code, output = _run_duplicates([full, cutout], monkeypatch)
+
+    assert exit_code == 0
+    assert "Partial MCAP Matches" in output
+    assert "/topic_0" in output
+    assert "/topic_1" in output
+    assert "/topic_2" in output
+    assert "/topic_3" not in output
+    assert "/topic_4" not in output
+    assert "... 2 more topic(s)" in output
 
 
 def test_duplicates_reports_edge_overlap_between_mcaps(
