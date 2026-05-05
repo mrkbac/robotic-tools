@@ -2156,7 +2156,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2707,7 +2707,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]
