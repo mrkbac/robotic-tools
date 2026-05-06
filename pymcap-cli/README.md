@@ -27,6 +27,7 @@ uv add pymcap-cli[video]
 - **Smart Chunk Copying** — fast chunk copying without decompression when possible, up to 10x faster for filtering operations
 - **Unified Processing** — single `process` command combines recovery + filtering + compression in one optimized pass
 - **Precise Filtering** — regex topic filtering, time range filtering, and content type filtering with deferred schema/channel writing
+- **Broad Format Coverage** — converts ROS 1 `.bag` and ROS 2 `.db3` to MCAP, exports to NDJSON, CSV, Parquet, PCD, GeoJSON/KML/GPX, and image/video files
 - **Rich Terminal Output** — colored topics, Unicode distribution histograms, tree views, and responsive layouts
 - **Robust Error Handling** — graceful degradation with detailed error reporting and recovery statistics
 
@@ -233,6 +234,39 @@ pymcap-cli convert input.db3 -o output.mcap --distro jazzy
 pymcap-cli convert input.db3 -o output.mcap --extra-path /path/to/msgs
 ```
 
+### `bag2mcap` — Convert ROS 1 Bag to MCAP
+
+Convert ROS 1 `.bag` files to MCAP using the `ros1` profile. Message bytes are
+preserved as raw ROS 1 serialization and schemas use `ros1msg` encoding with
+the full message definition from the bag.
+
+```bash
+# Basic conversion
+pymcap-cli bag2mcap recording.bag -o recording.mcap
+
+# Pick a different compression / chunk size
+pymcap-cli bag2mcap recording.bag -o recording.mcap --compression lz4 --chunk-size 8388608
+```
+
+### `split` — Split into Segments
+
+Split an MCAP file into multiple output segments by duration, explicit
+timestamps, or value-change of a message-path expression.
+
+```bash
+# Split every 60 seconds
+pymcap-cli split data.mcap --duration 60s -t "out_{index:03d}.mcap"
+
+# Split at specific RFC3339 timestamps
+pymcap-cli split data.mcap --split-at "2024-01-01T10:00:00Z" --split-at "2024-01-01T10:30:00Z"
+
+# Start a new segment when /gps/fix.status.status changes value
+pymcap-cli split data.mcap -E "/gps/fix.status.status"
+
+# Predicate trigger — split on match/no-match transitions
+pymcap-cli split data.mcap -E "/detections.objects[:]{confidence>0.8}"
+```
+
 ### `rechunk` — Topic-Based Rechunking
 
 Reorganize MCAP messages into separate chunk groups based on topic patterns for optimized playback.
@@ -290,6 +324,57 @@ pymcap-cli list attachments data.mcap
 pymcap-cli list metadata data.mcap
 ```
 
+### `diff` — Compare Files
+
+Compare MCAP files using summary and message-index timestamps. Reads through the
+footer/summary first and falls back to rebuilding metadata from the data section
+when the summary is missing.
+
+```bash
+# Compare two recordings
+pymcap-cli diff a.mcap b.mcap
+
+# Hide channels with identical timestamps
+pymcap-cli diff a.mcap b.mcap --skip-identical
+
+# Show more timestamp ranges per channel
+pymcap-cli diff a.mcap b.mcap --max-ranges 10
+```
+
+### `duplicates` — Find Duplicate Recordings
+
+Scan files and directories for likely duplicate MCAP recordings using summary
+and message-index fingerprints.
+
+```bash
+# Scan a directory tree
+pymcap-cli duplicates /data/recordings
+
+# Include singleton groups
+pymcap-cli duplicates /data/recordings --all
+
+# Rebuild summaries for files missing them
+pymcap-cli duplicates /data/recordings --rebuild-missing
+```
+
+### `records` — Raw Record Dump
+
+Print every MCAP record in file order using its `repr`. Useful for inspecting
+raw file structure when debugging readers/writers.
+
+```bash
+pymcap-cli records data.mcap
+```
+
+### `topic-chunks` — Topic/Chunk Layout
+
+Show which topics appear in which chunks, sorted by chunk count and percentage
+of total chunks. Helps identify topics that would benefit from `rechunk`.
+
+```bash
+pymcap-cli topic-chunks data.mcap
+```
+
 ### `video` — Video Generation
 
 Generate MP4 videos from image topics using hardware-accelerated encoding. Requires the `video` extra.
@@ -333,6 +418,88 @@ pymcap-cli rosdecompress input.mcap output.mcap --video-format raw
 
 # Skip point cloud decompression
 pymcap-cli rosdecompress input.mcap output.mcap --no-pointcloud
+```
+
+### `export-images` — Image Files
+
+Export image topics to per-topic folders of image files. `CompressedImage`
+payloads keep their original encoding by default (`--format native`); set
+`--format` to an `imagecodecs` encoder name (e.g. `jpeg`, `png`, `webp`) to
+re-encode. Raw `Image` messages always use `--raw-format` (default `png`).
+Requires the `image` extra.
+
+```bash
+# Native passthrough for CompressedImage; PNG for raw Image
+pymcap-cli export-images data.mcap -o ./images -t /camera/front
+
+# Force re-encoding to JPEG for everything
+pymcap-cli export-images data.mcap -o ./images --format jpeg
+```
+
+### `export-csv` — CSV Files
+
+Export an MCAP file to a directory of CSV files (one per topic). Nested fields
+are flattened with dot notation (`pose.position.x`); arrays remain JSON
+strings to preserve row counts. Schemas with raw media payloads (`Image`,
+`CompressedImage`, …) are skipped unless `--include-blobs` is set.
+
+```bash
+pymcap-cli export-csv data.mcap -o ./csv
+pymcap-cli export-csv data.mcap -o ./csv -t /odom -t /imu
+```
+
+### `export-json` — NDJSON / Per-Message JSON
+
+Export an MCAP file to NDJSON (one line per message) or per-message JSON
+files. Default writes one `<topic>.ndjson` per topic; with `--per-message`
+each topic gets a directory of `<log_time_ns>.json` files — handy for
+downstream tools that expect one record per file.
+
+```bash
+# One NDJSON per topic
+pymcap-cli export-json data.mcap -o ./ndjson
+
+# One JSON file per message
+pymcap-cli export-json data.mcap -o ./json --per-message
+```
+
+### `export-parquet` — Parquet Files
+
+Export an MCAP file to a directory of Parquet files (one per topic). Requires
+the `parquet` extra.
+
+```bash
+pymcap-cli export-parquet data.mcap -o ./parquet
+pymcap-cli export-parquet data.mcap -o ./parquet --compression snappy
+```
+
+### `export-pcd` — Point Cloud Files
+
+Export `sensor_msgs/PointCloud2` topics to ASCII PCD v0.7 files
+(`<output>/<safe_topic>/<log_time_ns>.pcd`) — readable by `pcl_viewer`,
+Open3D, and CloudCompare. Requires the `pointcloud` extra.
+
+```bash
+pymcap-cli export-pcd data.mcap -o ./pcd
+pymcap-cli export-pcd data.mcap -o ./pcd -t /lidar/points
+```
+
+### `export-geo` — Map Formats
+
+Export geographic topics (`NavSatFix`, `geographic_msgs/*`) to GeoJSON, KML,
+or GPX. GeoJSON writes one `<topic>.geojson` per topic; KML and GPX produce
+a single `export.{kml,gpx}` covering all topics. Local-frame poses
+(`Odometry`, `geometry_msgs/Pose*`) are out of scope — they need a datum.
+
+```bash
+# Default GeoJSON, track + points per topic
+pymcap-cli export-geo data.mcap -o ./geo
+
+# GPX track every 5th sample
+pymcap-cli export-geo data.mcap -o ./geo --format gpx --mode track --stride 5
+
+# Keep NO_FIX samples too
+pymcap-cli export-geo data.mcap -o ./geo --include-no-fix
 ```
 
 ### Shell Autocompletion
