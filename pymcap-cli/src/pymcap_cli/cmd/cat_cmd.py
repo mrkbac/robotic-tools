@@ -49,6 +49,35 @@ class BytesMode(str, Enum):
     SKIP = "skip"
 
 
+def message_matches_grep(obj: Any, pattern: re.Pattern[str]) -> bool:
+    """Return True if ``pattern`` matches any scalar value reachable from ``obj``.
+
+    Walks ``__slots__`` objects, lists/tuples, dicts, scalars. Bytes-like
+    fields are skipped — regex'ing image/point-cloud payloads is rarely what
+    a user wants and is expensive on large messages.
+    """
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return False
+
+    if hasattr(obj, "__slots__"):
+        return any(
+            message_matches_grep(getattr(obj, slot, None), pattern)
+            for slot in obj.__slots__
+            if not slot.startswith("_")
+        )
+
+    if isinstance(obj, (list, tuple)):
+        return any(message_matches_grep(item, pattern) for item in obj)
+
+    if isinstance(obj, dict):
+        return any(message_matches_grep(value, pattern) for value in obj.values())
+
+    if obj is None:
+        return False
+
+    return bool(pattern.search(str(obj)))
+
+
 def message_to_dict(
     obj: Any,
     *,
@@ -115,6 +144,26 @@ def cat(
             group=FILTERING_GROUP,
         ),
     ] = None,
+    grep: Annotated[
+        str | None,
+        Parameter(
+            name=["-g", "--grep"],
+            group=FILTERING_GROUP,
+            help=(
+                "Regex applied to every scalar value in the decoded message. "
+                "Messages with no match are skipped. Bytes-like fields are not "
+                "searched. Composes with --query: the regex runs on the post-"
+                "query result so '--query <path> --grep <re>' scopes the search."
+            ),
+        ),
+    ] = None,
+    grep_ignore_case: Annotated[
+        bool,
+        Parameter(
+            name=["-i", "--grep-ignore-case"],
+            group=FILTERING_GROUP,
+        ),
+    ] = False,
     start: Annotated[
         str,
         Parameter(
@@ -225,6 +274,14 @@ def cat(
             logger.exception("Invalid query syntax")
             return 1
 
+    grep_pattern: re.Pattern[str] | None = None
+    if grep:
+        try:
+            grep_pattern = re.compile(grep, re.IGNORECASE if grep_ignore_case else 0)
+        except re.error:
+            logger.exception("Invalid --grep regex")
+            return 1
+
     # Determine output mode
     writing_to_file = output is not None
     is_tty = not writing_to_file and sys.stdout.isatty()
@@ -327,6 +384,10 @@ def cat(
                         continue
                 else:
                     data = msg.decoded_message
+
+                if grep_pattern is not None and not message_matches_grep(data, grep_pattern):
+                    message_count -= 1
+                    continue
 
                 if is_tty:
                     json_str = json.dumps(
