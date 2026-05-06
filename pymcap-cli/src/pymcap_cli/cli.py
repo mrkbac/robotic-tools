@@ -11,6 +11,7 @@ from pymcap_cli.cmd import (
     convert_cmd,
     diag_cmd,
     diff_cmd,
+    doctor_cmd,
     du_cmd,
     duplicates_cmd,
     export_csv_cmd,
@@ -181,6 +182,7 @@ transform_group = Group("Transform", sort_key=1)
 # Inspect commands — read-only, extract information
 app.command(name="cat", group=inspect_group)(cat_cmd.cat)
 app.command(name="diag", group=inspect_group)(diag_cmd.diag)
+app.command(name="doctor", group=inspect_group)(doctor_cmd.doctor)
 app.command(name="du", group=inspect_group)(du_cmd.du)
 app.command(name="diff", group=inspect_group)(diff_cmd.diff_cmd)
 app.command(name="duplicates", group=inspect_group)(duplicates_cmd.duplicates)
