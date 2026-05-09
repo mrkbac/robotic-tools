@@ -43,6 +43,11 @@ repos:
     hooks:
       - id: uv-lock
 
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.25
+    hooks:
+      - id: validate-pyproject
+
   - repo: https://github.com/sbrunner/jsonschema-gentypes
     rev: 2.13.0
     hooks:
