@@ -46,22 +46,21 @@ dependencies = [
     "typing-extensions>=4.15.0",
 ]
 
+[project.optional-dependencies]
+all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco,bridge]"]
+bridge = ["robo-ws-bridge"]
+draco = ["mcap-codec-support[draco]"]
+image = ["mcap-codec-support[image]"]
+parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]
+plot = ["plotly>=6.0.0"]
+pointcloud = ["mcap-codec-support[pointcloud]"]
+video = ["mcap-codec-support[video]"]
+
+
 [project.urls]
 Homepage = "https://github.com/mrkbac/robotic-tools"
 Repository = "https://github.com/mrkbac/robotic-tools"
 Issues = "https://github.com/mrkbac/robotic-tools/issues"
-
-[project.optional-dependencies]
-video = ["mcap-codec-support[video]"]
-pointcloud = ["mcap-codec-support[pointcloud]"]
-plot = ["plotly>=6.0.0"]
-parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]
-image = ["mcap-codec-support[image]"]
-all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco]"]
-draco = [
-    "mcap-codec-support[draco]",
-]
-
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]
 build-backend = "uv_build"
@@ -77,3 +76,4 @@ ros-parser = { workspace = true }
 pureini = { workspace = true }
 pointcloud2 = { workspace = true }
 mcap-codec-support = { workspace = true }
+robo-ws-bridge = { workspace = true }

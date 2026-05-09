@@ -35,6 +35,26 @@ from pymcap_cli.cmd import (
 from pymcap_cli.log_setup import ERR, setup_logging
 
 try:
+    from pymcap_cli.cmd.bridge_cmd import bridge
+except ImportError:
+
+    def bridge(*_args: Annotated[str, Parameter(allow_leading_hyphen=True)]) -> int:
+        """Bridge command is unavailable because 'robo-ws-bridge' is not installed.
+
+        To enable bridge inspection, install pymcap-cli with the 'bridge' extra:
+
+            uv add 'pymcap-cli[bridge]'
+        """
+        ERR.print(
+            "[red]Error:[/red]\n"
+            "Bridge command is unavailable because 'robo-ws-bridge' is not installed.\n"
+            "Install with:\n\n"
+            "    uv add 'pymcap-cli[bridge]'\n"
+        )
+        return 1
+
+
+try:
     from pymcap_cli.cmd.video_cmd import video
 except ImportError:
 
@@ -181,6 +201,7 @@ inspect_group = Group("Inspect", sort_key=0)
 transform_group = Group("Transform", sort_key=1)
 
 # Inspect commands — read-only, extract information
+app.command(name="bridge", group=inspect_group)(bridge)
 app.command(name="cat", group=inspect_group)(cat_cmd.cat)
 app.command(name="diag", group=inspect_group)(diag_cmd.diag)
 app.command(name="doctor", group=inspect_group)(doctor_cmd.doctor)

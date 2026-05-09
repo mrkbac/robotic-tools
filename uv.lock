@@ -2177,6 +2177,10 @@ all = [
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "plotly" },
     { name = "pyarrow" },
+    { name = "robo-ws-bridge" },
+]
+bridge = [
+    { name = "robo-ws-bridge" },
 ]
 draco = [
     { name = "mcap-codec-support", extra = ["draco"] },
@@ -2214,14 +2218,15 @@ requires-dist = [
     { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "plotly", marker = "extra == 'plot'", specifier = ">=6.0.0" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=15.0.0" },
-    { name = "pymcap-cli", extras = ["video", "pointcloud", "plot", "parquet", "image", "draco"], marker = "extra == 'all'" },
+    { name = "pymcap-cli", extras = ["video", "pointcloud", "plot", "parquet", "image", "draco", "bridge"], marker = "extra == 'all'" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=14.1.0" },
+    { name = "robo-ws-bridge", marker = "extra == 'bridge'", editable = "robo-ws-bridge" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
 ]
-provides-extras = ["video", "pointcloud", "plot", "parquet", "image", "all", "draco"]
+provides-extras = ["all", "bridge", "draco", "image", "parquet", "plot", "pointcloud", "video"]
 
 [[package]]
 name = "pytest"

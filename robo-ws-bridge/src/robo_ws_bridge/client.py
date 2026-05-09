@@ -6,22 +6,32 @@ import json
 import logging
 import struct
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import websockets
 from websockets.typing import Subprotocol
 
 from .ws_types import (
+    AdvertisedService,
     AdvertiseMessage,
+    AdvertiseServicesMessage,
     BinaryOpCodes,
     ChannelInfo,
+    ConnectionGraphUpdateMessage,
     ConnectionStatus,
     JsonOpCodes,
+    PublishedTopic,
     RemoveStatusMessage,
     ServerInfoMessage,
+    ServiceInfo,
     StatusMessage,
+    SubscribeConnectionGraphMessage,
+    SubscribedTopic,
     SubscribeMessage,
     UnadvertiseMessage,
+    UnadvertiseServicesMessage,
+    UnsubscribeConnectionGraphMessage,
     UnsubscribeMessage,
 )
 
@@ -37,9 +47,22 @@ DisconnectHandler = Callable[[], Awaitable[None] | None]
 ReconnectingHandler = Callable[[], Awaitable[None] | None]
 ServerInfoHandler = Callable[[str, list[str], str | None], Awaitable[None] | None]
 StatusHandler = Callable[[int, str, str | None], Awaitable[None] | None]
+RemoveStatusHandler = Callable[[list[str]], Awaitable[None] | None]
 ChannelHandler = Callable[[ChannelInfo], Awaitable[None] | None]
 MessageHandler = Callable[[ChannelInfo, int, bytes], Awaitable[None] | None]
 TimeUpdateHandler = Callable[[int], Awaitable[None] | None]
+
+
+@dataclass(frozen=True)
+class ConnectionGraph:
+    """Snapshot of the most recently observed connection-graph state."""
+
+    published_topics: tuple[PublishedTopic, ...]
+    subscribed_topics: tuple[SubscribedTopic, ...]
+    advertised_services: tuple[AdvertisedService, ...]
+
+
+ConnectionGraphHandler = Callable[[ConnectionGraph], Awaitable[None] | None]
 
 
 # Constants for binary message structure
@@ -49,10 +72,7 @@ _TIME_MESSAGE_SIZE = 9  # 1 byte opcode + 8 bytes timestamp
 _UNHANDLED_JSON_OPS = frozenset(
     {
         JsonOpCodes.PARAMETER_VALUES.value,
-        JsonOpCodes.ADVERTISE_SERVICES.value,
-        JsonOpCodes.UNADVERTISE_SERVICES.value,
         JsonOpCodes.SERVICE_CALL_FAILURE.value,
-        JsonOpCodes.CONNECTION_GRAPH_UPDATE.value,
     }
 )
 
@@ -91,6 +111,7 @@ class WebSocketBridgeClient:
 
         # Subscription state tracking
         self._advertised_channels: dict[int, ChannelInfo] = {}
+        self._advertised_services: dict[int, ServiceInfo] = {}
 
         self._subscribed_topics: set[str] = set()  # User's intended subscriptions
         self._intended_subscriptions: set[str] = set()  # Persist across disconnections
@@ -104,6 +125,12 @@ class WebSocketBridgeClient:
         # Server info
         self._server_info: ServerInfoMessage | None = None
 
+        # Connection graph state (populated when subscribed; keyed by name)
+        self._graph_published: dict[str, PublishedTopic] = {}
+        self._graph_subscribed: dict[str, SubscribedTopic] = {}
+        self._graph_services: dict[str, AdvertisedService] = {}
+        self._wants_connection_graph = False
+
         self._lock = asyncio.Lock()
 
         # Handler storage lists
@@ -112,10 +139,12 @@ class WebSocketBridgeClient:
         self._on_reconnecting: list[ReconnectingHandler] = []
         self._on_server_info: list[ServerInfoHandler] = []
         self._on_status: list[StatusHandler] = []
+        self._on_remove_status: list[RemoveStatusHandler] = []
         self._on_advertised_channel: list[ChannelHandler] = []
         self._on_channel_unadvertised: list[ChannelHandler] = []
         self._on_message: list[MessageHandler] = []
         self._on_time_update: list[TimeUpdateHandler] = []
+        self._on_connection_graph_update: list[ConnectionGraphHandler] = []
 
     async def connect(self) -> None:
         """Open the websocket connection and start receiving frames."""
@@ -179,9 +208,23 @@ class WebSocketBridgeClient:
         return dict(self._advertised_channels)
 
     @property
+    def services(self) -> dict[int, ServiceInfo]:
+        """Return the currently advertised services."""
+        return dict(self._advertised_services)
+
+    @property
     def server_info(self) -> ServerInfoMessage | None:
         """Return the cached serverInfo message."""
         return self._server_info
+
+    @property
+    def connection_graph(self) -> ConnectionGraph:
+        """Return a snapshot of the most recent connection-graph state."""
+        return ConnectionGraph(
+            published_topics=tuple(self._graph_published.values()),
+            subscribed_topics=tuple(self._graph_subscribed.values()),
+            advertised_services=tuple(self._graph_services.values()),
+        )
 
     def get_connection_status(self) -> ConnectionStatus:
         """Get the current connection status."""
@@ -207,6 +250,10 @@ class WebSocketBridgeClient:
         """Register a callback for status messages."""
         self._on_status.append(handler)
 
+    def on_remove_status(self, handler: RemoveStatusHandler) -> None:
+        """Register a callback for removeStatus messages."""
+        self._on_remove_status.append(handler)
+
     def on_advertised_channel(self, handler: ChannelHandler) -> None:
         """Register a callback for channel advertisement events."""
         self._on_advertised_channel.append(handler)
@@ -222,6 +269,32 @@ class WebSocketBridgeClient:
     def on_time_update(self, handler: TimeUpdateHandler) -> None:
         """Register a callback for server time updates."""
         self._on_time_update.append(handler)
+
+    def on_connection_graph_update(self, handler: ConnectionGraphHandler) -> None:
+        """Register a callback for connection graph changes."""
+        self._on_connection_graph_update.append(handler)
+
+    async def subscribe_connection_graph(self) -> None:
+        """Ask the server to start sending connectionGraphUpdate messages."""
+        self._wants_connection_graph = True
+        if not self._websocket:
+            logger.debug("WebSocket not connected, connection-graph subscription deferred")
+            return
+        msg: SubscribeConnectionGraphMessage = {"op": JsonOpCodes.SUBSCRIBE_CONNECTION_GRAPH.value}
+        await self._websocket.send(json.dumps(msg))
+
+    async def unsubscribe_connection_graph(self) -> None:
+        """Stop receiving connectionGraphUpdate messages from the server."""
+        self._wants_connection_graph = False
+        self._graph_published.clear()
+        self._graph_subscribed.clear()
+        self._graph_services.clear()
+        if not self._websocket:
+            return
+        msg: UnsubscribeConnectionGraphMessage = {
+            "op": JsonOpCodes.UNSUBSCRIBE_CONNECTION_GRAPH.value
+        }
+        await self._websocket.send(json.dumps(msg))
 
     async def _invoke_handlers(
         self, handlers: list[Callable[..., Awaitable[None] | None]], *args: object
@@ -300,27 +373,25 @@ class WebSocketBridgeClient:
 
     async def _restore_subscriptions(self) -> None:
         """Restore subscriptions after reconnection."""
-        if not self._intended_subscriptions:
-            return
+        if self._intended_subscriptions:
+            logger.info(
+                f"Restoring {len(self._intended_subscriptions)} subscriptions after reconnection"
+            )
+            for topic in self._intended_subscriptions.copy():
+                channel_id = None
+                for channel in self._advertised_channels.values():
+                    if channel["topic"] == topic:
+                        channel_id = channel["id"]
+                        break
 
-        logger.info(
-            f"Restoring {len(self._intended_subscriptions)} subscriptions after reconnection"
-        )
-
-        # Copy the set to avoid modification during iteration
-        intended_subs = self._intended_subscriptions.copy()
-        for topic in intended_subs:
-            # Check if the topic is still advertised
-            channel_id = None
-            for channel in self._advertised_channels.values():
-                if channel["topic"] == topic:
-                    channel_id = channel["id"]
-                    break
-
-            if channel_id is not None:
-                await self._subscribe_to_channel(channel_id)
-            else:
-                logger.debug("Topic %s not yet re-advertised, will subscribe when available", topic)
+                if channel_id is not None:
+                    await self._subscribe_to_channel(channel_id)
+                else:
+                    logger.debug(
+                        "Topic %s not yet re-advertised, will subscribe when available", topic
+                    )
+        if self._wants_connection_graph:
+            await self.subscribe_connection_graph()
 
     async def subscribe(self, topic: str) -> None:
         """Subscribe to messages from a topic."""
@@ -546,6 +617,12 @@ class WebSocketBridgeClient:
                 await self._handle_advertise(msg)
             elif op == JsonOpCodes.UNADVERTISE.value:
                 await self._handle_unadvertise(msg)
+            elif op == JsonOpCodes.ADVERTISE_SERVICES.value:
+                await self._handle_advertise_services(msg)
+            elif op == JsonOpCodes.UNADVERTISE_SERVICES.value:
+                await self._handle_unadvertise_services(msg)
+            elif op == JsonOpCodes.CONNECTION_GRAPH_UPDATE.value:
+                await self._handle_connection_graph_update(msg)
             elif op in _UNHANDLED_JSON_OPS:
                 # Parameter, services, connection-graph, and service-call ops
                 # are accepted but not yet exposed via callbacks.
@@ -586,7 +663,9 @@ class WebSocketBridgeClient:
 
     async def _handle_remove_status(self, msg: RemoveStatusMessage) -> None:
         """Handle remove status message."""
-        logger.debug("Removing status messages: %s", ", ".join(msg["statusIds"]))
+        status_ids = msg["statusIds"]
+        logger.debug("Removing status messages: %s", ", ".join(status_ids))
+        await self._invoke_handlers(self._on_remove_status, status_ids)
 
     async def _handle_advertise(self, msg: AdvertiseMessage) -> None:
         """Handle topic advertisement from the server."""
@@ -611,6 +690,34 @@ class WebSocketBridgeClient:
             if channel:
                 logger.info(f"Topic unadvertised: {channel['topic']}")
                 await self._invoke_handlers(self._on_channel_unadvertised, channel)
+
+    async def _handle_advertise_services(self, msg: AdvertiseServicesMessage) -> None:
+        """Handle service advertisement from the server."""
+        for svc in msg["services"]:
+            self._advertised_services[svc["id"]] = svc
+            logger.info(f"Service advertised: {svc['name']} (ID: {svc['id']})")
+
+    async def _handle_unadvertise_services(self, msg: UnadvertiseServicesMessage) -> None:
+        """Handle service unadvertisement from the server."""
+        for service_id in msg["serviceIds"]:
+            svc = self._advertised_services.pop(service_id, None)
+            if svc:
+                logger.info(f"Service unadvertised: {svc['name']}")
+
+    async def _handle_connection_graph_update(self, msg: ConnectionGraphUpdateMessage) -> None:
+        """Apply an incremental connection-graph update and notify handlers."""
+        for entry in msg.get("publishedTopics", []) or []:
+            self._graph_published[entry["name"]] = entry
+        for entry in msg.get("subscribedTopics", []) or []:
+            self._graph_subscribed[entry["name"]] = entry
+        for entry in msg.get("advertisedServices", []) or []:
+            self._graph_services[entry["name"]] = entry
+        for name in msg.get("removedTopics", []) or []:
+            self._graph_published.pop(name, None)
+            self._graph_subscribed.pop(name, None)
+        for name in msg.get("removedServices", []) or []:
+            self._graph_services.pop(name, None)
+        await self._invoke_handlers(self._on_connection_graph_update, self.connection_graph)
 
     async def _handle_binary(self, data: bytes) -> None:
         """Handle binary message data."""
