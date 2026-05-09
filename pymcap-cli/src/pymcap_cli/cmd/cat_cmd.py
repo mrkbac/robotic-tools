@@ -1,11 +1,13 @@
 """Cat command for pymcap-cli - stream MCAP messages to stdout."""
 
 import base64
+import dataclasses
 import json
 import logging
 import re
 import sys
 from contextlib import ExitStack
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Annotated, Any
@@ -17,11 +19,18 @@ from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
-from rich.json import JSON
 from rich.panel import Panel
 from rich.text import Text
+from rich.tree import Tree
 from ros_parser import parse_schema_to_definitions
-from ros_parser.message_path import MessagePathError, ValidationError, parse_message_path
+from ros_parser.message_path import (
+    MessagePath,
+    MessagePathError,
+    ValidationError,
+    parse_message_path,
+)
+from ros_parser.models import Constant, MessageDefinition
+from ros_parser.models import Type as RosType
 from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
@@ -52,18 +61,18 @@ class BytesMode(str, Enum):
 def message_matches_grep(obj: Any, pattern: re.Pattern[str]) -> bool:
     """Return True if ``pattern`` matches any scalar value reachable from ``obj``.
 
-    Walks ``__slots__`` objects, lists/tuples, dicts, scalars. Bytes-like
+    Walks decoded message dataclasses, lists/tuples, dicts, scalars. Bytes-like
     fields are skipped — regex'ing image/point-cloud payloads is rarely what
     a user wants and is expensive on large messages.
     """
     if isinstance(obj, (bytes, bytearray, memoryview)):
         return False
 
-    if hasattr(obj, "__slots__"):
+    if _is_message_obj(obj):
         return any(
-            message_matches_grep(getattr(obj, slot, None), pattern)
-            for slot in obj.__slots__
-            if not slot.startswith("_")
+            message_matches_grep(getattr(obj, f.name), pattern)
+            for f in dataclasses.fields(obj)
+            if not f.name.startswith("_")
         )
 
     if isinstance(obj, (list, tuple)):
@@ -91,11 +100,11 @@ def message_to_dict(
     """
     recurse = lambda v: message_to_dict(v, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)  # noqa: E731
 
-    if hasattr(obj, "__slots__"):
+    if _is_message_obj(obj):
         return {
-            slot: recurse(getattr(obj, slot, None))
-            for slot in obj.__slots__
-            if not slot.startswith("_")
+            f.name: recurse(getattr(obj, f.name))
+            for f in dataclasses.fields(obj)
+            if not f.name.startswith("_")
         }
 
     if isinstance(obj, (list, tuple)):
@@ -118,6 +127,409 @@ def message_to_dict(
         return list(obj)
 
     return obj
+
+
+_FOXGLOVE_ENUM_SUFFIXES = ("__foxglove_enum", "_foxglove_enum")
+# Integer-ish primitive types eligible for the "same-message constants" rule.
+# Floats/strings/time/duration are excluded because they're rarely used as enums
+# and the heuristic would over-trigger (e.g. on string defaults).
+_ENUM_PRIMITIVE_TYPES = frozenset(
+    {
+        "bool",
+        "byte",
+        "char",
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+    }
+)
+# Cap rendered list lengths so a 100k-element array doesn't drown the panel.
+_TREE_PRIMITIVE_ARRAY_LIMIT = 12
+_TREE_COMPLEX_ARRAY_LIMIT = 16
+
+
+@dataclass(frozen=True)
+class FieldEnum:
+    """Maps primitive enum values to their constant names for one field."""
+
+    by_value: dict[bool | int | float | str, str]
+
+
+@dataclass(frozen=True)
+class InlineSeparateEnum:
+    """Wrapper-field hint: render `<wrapper_field>: <inner_value> [LABEL]` instead of nesting."""
+
+    inner_field: str
+    enum: FieldEnum
+
+
+@dataclass(frozen=True)
+class EnumPlan:
+    """Per-MessageDefinition rendering hints used by the TTY tree renderer."""
+
+    schema_name: str | None
+    skip_fields: frozenset[str]
+    field_enums: dict[str, FieldEnum]
+    nested_plans: dict[str, "EnumPlan"]
+    inline_separate_enum: dict[str, InlineSeparateEnum]
+
+
+def _annotated_target_name(field_name: str) -> str | None:
+    """Return the value-field name if `field_name` is a `_foxglove_enum` annotation, else None."""
+    for suffix in _FOXGLOVE_ENUM_SUFFIXES:
+        if field_name.endswith(suffix):
+            base = field_name[: -len(suffix)]
+            if base:
+                return base
+    return None
+
+
+def _resolve_msgdef(
+    field_type: RosType,
+    all_definitions: dict[str, MessageDefinition],
+) -> MessageDefinition | None:
+    """Resolve a complex Type to its MessageDefinition, mirroring ros_parser's key probing."""
+    if field_type.is_primitive:
+        return None
+    type_name = field_type.type_name
+    package = field_type.package_name
+    if package is not None:
+        return (
+            all_definitions.get(f"{package}/msg/{type_name}")
+            or all_definitions.get(f"{package}/{type_name}")
+            or all_definitions.get(type_name)
+        )
+    return all_definitions.get(type_name)
+
+
+def _resolve_msgdef_by_name(
+    schema_name: str,
+    all_definitions: dict[str, MessageDefinition],
+) -> MessageDefinition | None:
+    """Look up a MessageDefinition by schema name, trying common key variants."""
+    msgdef = all_definitions.get(schema_name)
+    if msgdef is not None:
+        return msgdef
+    if "/msg/" in schema_name:
+        msgdef = all_definitions.get(schema_name.replace("/msg/", "/"))
+        if msgdef is not None:
+            return msgdef
+    bare = schema_name.rsplit("/", maxsplit=1)[-1]
+    return all_definitions.get(bare)
+
+
+def _constants_to_field_enum(
+    constants: list[Constant],
+    target_type_name: str,
+) -> FieldEnum | None:
+    """Build a FieldEnum from constants whose primitive type matches `target_type_name`."""
+    by_value: dict[bool | int | float | str, str] = {}
+    for c in constants:
+        if c.type.type_name != target_type_name:
+            continue
+        # First name wins on duplicate values — match the source ordering.
+        by_value.setdefault(c.value, c.name)
+    if not by_value:
+        return None
+    return FieldEnum(by_value=by_value)
+
+
+def build_enum_plan(
+    schema_name: str,
+    all_definitions: dict[str, MessageDefinition],
+    _visited: dict[str, EnumPlan | None] | None = None,
+) -> EnumPlan | None:
+    """Walk a schema graph and return an EnumPlan describing where to surface enum names.
+
+    Returns None when no field anywhere in the message tree carries enum decoration.
+    """
+    if _visited is None:
+        _visited = {}
+    if schema_name in _visited:
+        return _visited[schema_name]
+
+    msgdef = _resolve_msgdef_by_name(schema_name, all_definitions)
+    if msgdef is None:
+        _visited[schema_name] = None
+        return None
+
+    # Tentative None guards against cycles while we recurse.
+    _visited[schema_name] = None
+
+    skip_fields: set[str] = set()
+    field_enums: dict[str, FieldEnum] = {}
+    nested_plans: dict[str, EnumPlan] = {}
+    inline_separate_enum: dict[str, InlineSeparateEnum] = {}
+
+    fields_by_name = {f.name: f for f in msgdef.fields}
+
+    for f in msgdef.fields:
+        target = _annotated_target_name(f.name)
+        if target is None or target not in fields_by_name:
+            continue
+        target_field = fields_by_name[target]
+        if not target_field.type.is_primitive or target_field.type.is_array:
+            continue
+        ann_msgdef = _resolve_msgdef(f.type, all_definitions)
+        if ann_msgdef is None or not ann_msgdef.constants:
+            continue
+        field_enum = _constants_to_field_enum(ann_msgdef.constants, target_field.type.type_name)
+        if field_enum is None:
+            continue
+        field_enums[target] = field_enum
+        skip_fields.add(f.name)
+
+    for f in msgdef.fields:
+        if (
+            f.name in skip_fields
+            or _annotated_target_name(f.name) is not None
+            or f.name in field_enums
+        ):
+            continue
+
+        if f.type.is_primitive:
+            # Same-message constants: e.g. DiagnosticStatus declares OK/WARN/ERROR
+            # constants alongside a `level: byte` field. Restricted to integer-ish
+            # types to avoid wrongly decorating string fields next to string constants.
+            if msgdef.constants and f.type.type_name in _ENUM_PRIMITIVE_TYPES:
+                same_msg_enum = _constants_to_field_enum(msgdef.constants, f.type.type_name)
+                if same_msg_enum is not None:
+                    field_enums[f.name] = same_msg_enum
+            continue
+
+        nested_msgdef = _resolve_msgdef(f.type, all_definitions)
+        if nested_msgdef is None:
+            continue
+
+        # "Separate enum message" pattern: constants + a single primitive non-array field,
+        # consumed only when accessed via a non-array field (the array case is rare and the
+        # collapse semantics are unclear there).
+        if nested_msgdef.constants and len(nested_msgdef.fields) == 1 and not f.type.is_array:
+            inner = nested_msgdef.fields[0]
+            if inner.type.is_primitive and not inner.type.is_array:
+                field_enum = _constants_to_field_enum(nested_msgdef.constants, inner.type.type_name)
+                if field_enum is not None:
+                    inline_separate_enum[f.name] = InlineSeparateEnum(inner.name, field_enum)
+                    continue
+
+        nested_key = (
+            f"{f.type.package_name}/{f.type.type_name}" if f.type.package_name else f.type.type_name
+        )
+        sub_plan = build_enum_plan(nested_key, all_definitions, _visited)
+        if sub_plan is not None:
+            nested_plans[f.name] = sub_plan
+
+    if not (skip_fields or field_enums or nested_plans or inline_separate_enum):
+        _visited[schema_name] = None
+        return None
+
+    plan = EnumPlan(
+        schema_name=msgdef.name,
+        skip_fields=frozenset(skip_fields),
+        field_enums=dict(field_enums),
+        nested_plans=dict(nested_plans),
+        inline_separate_enum=dict(inline_separate_enum),
+    )
+    _visited[schema_name] = plan
+    return plan
+
+
+def _is_message_obj(obj: Any) -> bool:
+    """True if `obj` is a slot-based ROS2 decoded message instance."""
+    return dataclasses.is_dataclass(obj) and not isinstance(obj, type)
+
+
+def _format_bytes_for_tree(
+    value: bytes | bytearray | memoryview,
+    *,
+    bytes_mode: BytesMode,
+    truncate_bytes: int,
+) -> str:
+    total = len(value)
+    if bytes_mode == BytesMode.SKIP:
+        return f"<{total} bytes>"
+    if bytes_mode == BytesMode.BASE64:
+        return json.dumps(base64.b64encode(bytes(value)).decode("ascii"))
+    if bytes_mode == BytesMode.SMART:
+        if total <= _SMART_BYTES_INLINE_LIMIT:
+            return repr(list(value))
+        return f"<{total} bytes>"
+    if truncate_bytes and total > truncate_bytes:
+        return f"{list(value[:truncate_bytes])} ... ({total} bytes total)"
+    return repr(list(value))
+
+
+def _format_scalar(value: Any, *, bytes_mode: BytesMode, truncate_bytes: int) -> str:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _format_bytes_for_tree(value, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value)
+    return str(value)
+
+
+def _enum_label(value: Any, field_enum: FieldEnum) -> Text:
+    name = field_enum.by_value.get(value)
+    text = Text()
+    text.append(str(value))
+    if name is not None:
+        text.append(" [", style="dim")
+        text.append(name, style="bold magenta")
+        text.append("]", style="dim")
+    return text
+
+
+def _key_label(name: str) -> Text:
+    text = Text()
+    text.append(name, style="bold cyan")
+    text.append(": ", style="dim")
+    return text
+
+
+def _render_into(
+    parent: Tree,
+    obj: Any,
+    plan: EnumPlan | None,
+    *,
+    bytes_mode: BytesMode,
+    truncate_bytes: int,
+) -> None:
+    """Populate `parent` with one node per (name, value) pair on `obj`."""
+    items: list[tuple[str, Any]]
+    if isinstance(obj, dict):
+        items = [(str(k), v) for k, v in obj.items()]
+    elif _is_message_obj(obj):
+        items = [
+            (f.name, getattr(obj, f.name, None))
+            for f in dataclasses.fields(obj)
+            if not f.name.startswith("_")
+        ]
+    else:
+        parent.add(_format_scalar(obj, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes))
+        return
+
+    skip = plan.skip_fields if plan else frozenset()
+    field_enums = plan.field_enums if plan else {}
+    nested_plans = plan.nested_plans if plan else {}
+    inline_separate = plan.inline_separate_enum if plan else {}
+
+    for name, value in items:
+        if name in skip:
+            continue
+
+        if name in inline_separate:
+            entry = inline_separate[name]
+            inner_value = getattr(value, entry.inner_field, None) if value is not None else None
+            label = _key_label(name)
+            label.append_text(_enum_label(inner_value, entry.enum))
+            parent.add(label)
+            continue
+
+        if name in field_enums and not isinstance(value, (list, tuple)):
+            label = _key_label(name)
+            label.append_text(_enum_label(value, field_enums[name]))
+            parent.add(label)
+            continue
+
+        if name in field_enums and isinstance(value, (list, tuple)):
+            field_enum = field_enums[name]
+            label = _key_label(name)
+            label.append("[", style="dim")
+            shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
+            for i, item in enumerate(shown):
+                if i:
+                    label.append(", ", style="dim")
+                label.append_text(_enum_label(item, field_enum))
+            if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT:
+                label.append(f", … ({len(value)} total)", style="dim")
+            label.append("]", style="dim")
+            parent.add(label)
+            continue
+
+        if _is_message_obj(value):
+            child = parent.add(Text(name, style="bold cyan"))
+            _render_into(
+                child,
+                value,
+                nested_plans.get(name),
+                bytes_mode=bytes_mode,
+                truncate_bytes=truncate_bytes,
+            )
+            continue
+
+        if isinstance(value, dict):
+            child = parent.add(Text(name, style="bold cyan"))
+            _render_into(
+                child,
+                value,
+                nested_plans.get(name),
+                bytes_mode=bytes_mode,
+                truncate_bytes=truncate_bytes,
+            )
+            continue
+
+        if isinstance(value, (list, tuple)):
+            if value and (_is_message_obj(value[0]) or isinstance(value[0], dict)):
+                header = Text()
+                header.append(name, style="bold cyan")
+                header.append(f"  ({len(value)})", style="dim")
+                child = parent.add(header)
+                inner_plan = nested_plans.get(name)
+                shown_items = list(value)[:_TREE_COMPLEX_ARRAY_LIMIT]
+                for i, item in enumerate(shown_items):
+                    sub = child.add(Text(f"[{i}]", style="dim"))
+                    _render_into(
+                        sub,
+                        item,
+                        inner_plan,
+                        bytes_mode=bytes_mode,
+                        truncate_bytes=truncate_bytes,
+                    )
+                if len(value) > _TREE_COMPLEX_ARRAY_LIMIT:
+                    child.add(
+                        Text(
+                            f"… ({len(value) - _TREE_COMPLEX_ARRAY_LIMIT} more)",
+                            style="dim",
+                        )
+                    )
+                continue
+
+            label = _key_label(name)
+            shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
+            shown_str = ", ".join(
+                _format_scalar(v, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)
+                for v in shown
+            )
+            suffix = f", … ({len(value)} total)" if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT else ""
+            label.append(f"[{shown_str}{suffix}]")
+            parent.add(label)
+            continue
+
+        label = _key_label(name)
+        label.append(_format_scalar(value, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes))
+        parent.add(label)
+
+
+def render_message_tree(
+    obj: Any,
+    plan: EnumPlan | None,
+    *,
+    title: Text,
+    bytes_mode: BytesMode,
+    truncate_bytes: int,
+) -> Tree:
+    """Render a decoded message as a Rich Tree, decorating known enum fields with names."""
+    tree = Tree(title)
+    _render_into(tree, obj, plan, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)
+    return tree
 
 
 def cat(
@@ -282,12 +694,23 @@ def cat(
             logger.exception("Invalid --grep regex")
             return 1
 
+    try:
+        topic_patterns = [re.compile(pattern) for pattern in topics] if topics else []
+        exclude_topic_patterns = (
+            [re.compile(pattern) for pattern in exclude_topics] if exclude_topics else []
+        )
+    except re.error:
+        logger.exception("Invalid topic regex")
+        return 1
+
     # Determine output mode
     writing_to_file = output is not None
     is_tty = not writing_to_file and sys.stdout.isatty()
 
     message_count = 0
     validated_topics: set[str] = set()
+    parsed_schemas: dict[int, dict[str, MessageDefinition] | None] = {}
+    enum_plans: dict[int, EnumPlan | None] = {}
 
     def should_include_message(
         channel: Channel,
@@ -299,27 +722,46 @@ def cat(
         if parsed_query:
             if topic != parsed_query.topic:
                 return False
-        elif topics and not any(re.search(pattern, topic) for pattern in topics):
+        elif topic_patterns and not any(p.search(topic) for p in topic_patterns):
             return False
 
-        return not (exclude_topics and any(re.search(pattern, topic) for pattern in exclude_topics))
+        return not any(p.search(topic) for p in exclude_topic_patterns)
 
-    def _validate_query(msg_schema_name: str, msg_schema_data: bytes, topic: str) -> int | None:
-        """Validate query against schema. Returns 1 on error, None on success."""
+    def _get_parsed_schema(schema: Schema) -> dict[str, MessageDefinition] | None:
+        """Parse and cache schema definitions per schema id."""
+        if schema.id in parsed_schemas:
+            return parsed_schemas[schema.id]
         try:
-            all_definitions = parse_schema_to_definitions(msg_schema_name, msg_schema_data)
-            root_msgdef = all_definitions.get(msg_schema_name)
-            if root_msgdef is None:
-                parts = msg_schema_name.split("/")
-                root_msgdef = all_definitions.get(f"{parts[0]}/{parts[-1]}")
+            parsed = parse_schema_to_definitions(schema.name, schema.data)
+        except Exception:
+            logger.exception(f"Failed to parse schema '{schema.name}'")
+            parsed = None
+        parsed_schemas[schema.id] = parsed
+        return parsed
 
+    def _get_enum_plan(schema: Schema) -> EnumPlan | None:
+        """Build and cache the EnumPlan for a schema."""
+        if schema.id in enum_plans:
+            return enum_plans[schema.id]
+        parsed = _get_parsed_schema(schema)
+        plan = build_enum_plan(schema.name, parsed) if parsed else None
+        enum_plans[schema.id] = plan
+        return plan
+
+    def _validate_query(query_path: MessagePath, schema: Schema, topic: str) -> int | None:
+        """Validate query against schema. Returns 1 on error, None on success."""
+        all_definitions = _get_parsed_schema(schema)
+        if all_definitions is None:
+            return None
+        try:
+            root_msgdef = _resolve_msgdef_by_name(schema.name, all_definitions)
             if root_msgdef is None:
-                logger.warning(f"Could not find message definition for schema '{msg_schema_name}'")
+                logger.warning(f"Could not find message definition for schema '{schema.name}'")
             else:
-                parsed_query.validate(root_msgdef, all_definitions)  # type: ignore[union-attr]
+                query_path.validate(root_msgdef, all_definitions)
         except ValidationError:
             logger.exception(f"Query validation error for topic '{topic}'")
-            logger.exception(f"Query: {query}  Schema: {msg_schema_name}")
+            logger.exception(f"Query: {query}  Schema: {schema.name}")
             return 1
         return None
 
@@ -357,7 +799,6 @@ def cat(
             ):
                 if limit is not None and message_count >= limit:
                     break
-                message_count += 1
 
                 # Validate query against schema on first message of each topic
                 if parsed_query and msg.channel.topic not in validated_topics:
@@ -369,7 +810,7 @@ def cat(
                             "(no schema available)"
                         )
                     else:
-                        err = _validate_query(msg.schema.name, msg.schema.data, msg.channel.topic)
+                        err = _validate_query(parsed_query, msg.schema, msg.channel.topic)
                         if err:
                             return err
 
@@ -386,19 +827,11 @@ def cat(
                     data = msg.decoded_message
 
                 if grep_pattern is not None and not message_matches_grep(data, grep_pattern):
-                    message_count -= 1
                     continue
 
-                if is_tty:
-                    json_str = json.dumps(
-                        message_to_dict(
-                            data,
-                            bytes_mode=bytes_mode,
-                            truncate_bytes=_TTY_BYTES_TRUNCATE,
-                        ),
-                        indent=2,
-                    )
+                message_count += 1
 
+                if is_tty:
                     header = Text()
                     header.append(msg.channel.topic, style="bold cyan")
                     header.append(" @ ", style="dim")
@@ -407,10 +840,24 @@ def cat(
                     header.append(msg.schema.name if msg.schema else "unknown", style="yellow")
                     header.append("]", style="dim")
 
+                    # Post-query data has lost its schema context, so skip enum decoration.
+                    plan = (
+                        None
+                        if parsed_query
+                        else (_get_enum_plan(msg.schema) if msg.schema else None)
+                    )
+
+                    tree = render_message_tree(
+                        data,
+                        plan,
+                        title=header,
+                        bytes_mode=bytes_mode,
+                        truncate_bytes=_TTY_BYTES_TRUNCATE,
+                    )
+
                     console_out.print(
                         Panel(
-                            JSON(json_str),
-                            title=header,
+                            tree,
                             border_style="blue",
                             expand=False,
                         )
