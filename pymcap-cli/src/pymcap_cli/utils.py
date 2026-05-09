@@ -4,7 +4,10 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from _typeshed import WriteableBuffer
 
 from rich import filesize
 from rich.console import Console
@@ -133,50 +136,38 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
         self._progress_task = progress_task
         self._progress = progress_obj
         self._last_position = initial_offset
-        self._max_position = initial_offset  # Track high water mark
-        self._pending_delta = 0  # Accumulated delta waiting to be reported
+        self._max_position = initial_offset
+        self._pending_delta = 0
 
-    def _update_progress(self) -> None:
-        """Update progress bar based on current position.
-
-        Uses batched updates to reduce overhead from frequent small reads.
-        Progress is only reported when accumulated delta exceeds threshold.
-        """
-        if self._last_position > self._max_position:
-            delta = self._last_position - self._max_position
-            self._pending_delta += delta
-            self._max_position = self._last_position
-
-            # Only update progress bar when we've accumulated enough
-            if self._pending_delta >= self._UPDATE_THRESHOLD:
-                self._progress.advance(self._progress_task, self._pending_delta)
-                self._pending_delta = 0
+    def _advance_to(self, position: int) -> None:
+        # Advance only on forward progress so re-reads (e.g. summary scan then
+        # rewind to the data section) don't push the bar past 100%.
+        if position <= self._max_position:
+            return
+        self._pending_delta += position - self._max_position
+        self._max_position = position
+        if self._pending_delta >= self._UPDATE_THRESHOLD:
+            self._progress.advance(self._progress_task, self._pending_delta)
+            self._pending_delta = 0
 
     def flush_progress(self) -> None:
-        """Flush any pending progress updates.
-
-        Call this when processing is complete to ensure the progress bar
-        shows the final position accurately.
-        """
+        """Flush any pending progress updates."""
         if self._pending_delta > 0:
             self._progress.advance(self._progress_task, self._pending_delta)
             self._pending_delta = 0
 
     def read(self, size: int = -1) -> bytes:
-        """Read bytes and advance progress by delta."""
         data = self._stream.read(size)
-        delta = len(data)
-        if delta > 0:
-            self._last_position += delta
-            self._update_progress()
+        if data:
+            self._last_position += len(data)
+            self._advance_to(self._last_position)
         return data
 
-    def readinto(self, b: Any) -> int | None:
-        """Read bytes into buffer and advance progress by delta."""
+    def readinto(self, b: "WriteableBuffer") -> int | None:
         result: int | None = self._stream.readinto(b)  # type: ignore[attr-defined]
         if result is not None and result > 0:
             self._last_position += result
-            self._update_progress()
+            self._advance_to(self._last_position)
         return result
 
     def readable(self) -> bool:
@@ -184,10 +175,9 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
         return True
 
     def seek(self, offset: int, whence: int = 0) -> int:
-        """Seek and advance progress by delta."""
         result = self._stream.seek(offset, whence)
         self._last_position = result
-        self._update_progress()
+        self._advance_to(result)
         return result
 
     def tell(self) -> int:
