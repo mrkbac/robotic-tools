@@ -1,8 +1,11 @@
 """Main CLI entry point for pymcap-cli using Cyclopts."""
 
-from typing import Annotated
+import importlib
+from collections.abc import Callable
+from typing import Annotated, TypeAlias, cast
 
 from cyclopts import App, Group, Parameter
+from rich.markup import escape
 
 from pymcap_cli.cmd import (
     bag2mcap_cmd,
@@ -34,160 +37,119 @@ from pymcap_cli.cmd import (
 )
 from pymcap_cli.log_setup import ERR, setup_logging
 
-try:
-    from pymcap_cli.cmd.bridge_cmd import bridge
-except ImportError:
+CommandFunction: TypeAlias = Callable[..., int]
 
-    def bridge(*_args: Annotated[str, Parameter(allow_leading_hyphen=True)]) -> int:
-        """Bridge command is unavailable because 'robo-ws-bridge' is not installed.
 
-        To enable bridge inspection, install pymcap-cli with the 'bridge' extra:
+def _is_expected_missing_module(
+    exc: ModuleNotFoundError, expected_modules: tuple[str, ...]
+) -> bool:
+    missing_name = exc.name
+    if missing_name is None:
+        return False
+    return any(
+        missing_name == module_name or missing_name.startswith(f"{module_name}.")
+        for module_name in expected_modules
+    )
 
-            uv add 'pymcap-cli[bridge]'
-        """
+
+def _unavailable_command(
+    function_name: str,
+    *,
+    message: str,
+    install_command: str,
+) -> CommandFunction:
+    def command(*_tokens: Annotated[str, Parameter(allow_leading_hyphen=True)]) -> int:
         ERR.print(
             "[red]Error:[/red]\n"
-            "Bridge command is unavailable because 'robo-ws-bridge' is not installed.\n"
+            f"{escape(message)}\n"
             "Install with:\n\n"
-            "    uv add 'pymcap-cli[bridge]'\n"
+            f"    {escape(install_command)}\n"
         )
         return 1
 
+    command.__name__ = function_name
+    command.__qualname__ = function_name
+    command.__doc__ = f"{message}\n\nInstall with:\n\n    {install_command}"
+    return command
 
-try:
-    from pymcap_cli.cmd.video_cmd import video
-except ImportError:
 
-    def video() -> int:
-        """Video command is unavailable because the 'av' and/or 'numpy' are not installed.
-
-        To enable video functionality, please install pymcap-cli with the 'video' extra:
-
-            uv add --group video pymcap-cli
-        """
-        ERR.print(
-            "[red]Error:[/red]\n"
-            "Video command is unavailable because the 'av' and/or 'numpy' are not installed.\n"
-            "To enable video functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    uv add --group video pymcap-cli\n"
+def _load_optional_command(
+    module_name: str,
+    function_name: str,
+    *,
+    expected_missing_modules: tuple[str, ...],
+    message: str,
+    install_command: str,
+) -> CommandFunction:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if not _is_expected_missing_module(exc, expected_missing_modules):
+            raise
+        return _unavailable_command(
+            function_name,
+            message=message,
+            install_command=install_command,
         )
-        return 1
+    return cast("CommandFunction", getattr(module, function_name))
 
 
-try:
-    from pymcap_cli.cmd.plot_cmd import plot
-except ImportError:
-
-    def plot() -> int:
-        """Plot command is unavailable because 'plotly' is not installed.
-
-        To enable plot functionality, please install pymcap-cli with the 'plot' extra:
-
-            uv add --group plot pymcap-cli
-        """
-        ERR.print(
-            "[red]Error:[/red]\n"
-            "Plot command is unavailable because 'plotly' is not installed.\n"
-            "To enable plot functionality, please install pymcap-cli with the 'plot' extra:\n\n"
-            "    uv add --group plot pymcap-cli\n"
-        )
-        return 1
-
-
-try:
-    from pymcap_cli.cmd.roscompress_cmd import roscompress
-except ImportError:
-
-    def roscompress() -> int:
-        """ROS compress command is unavailable because the 'av' package is not installed.
-
-        To enable roscompress functionality, please install pymcap-cli with the 'video' extra:
-
-            uv add --group video pymcap-cli
-        """
-        ERR.print(
-            "[red]Error:[/red]\n"
-            "ROS compress command is unavailable because the 'av' package is not installed.\n"
-            "To enable this functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    uv add --group video pymcap-cli\n"
-        )
-        return 1
-
-
-try:
-    from pymcap_cli.cmd.export_parquet_cmd import export_parquet
-except ImportError:
-
-    def export_parquet() -> int:
-        """Export command is unavailable because 'pyarrow' is not installed.
-
-        To enable Parquet export, install pymcap-cli with the 'parquet' extra:
-
-            uv add 'pymcap-cli[parquet]'
-        """
-        ERR.print(
-            "[red]Error:[/red]\n"
-            "Export to Parquet is unavailable because 'pyarrow' is not installed.\n"
-            "Install with:\n\n"
-            "    uv add 'pymcap-cli[parquet]'\n"
-        )
-        return 1
-
-
-try:
-    from pymcap_cli.cmd.export_pcd_cmd import export_pcd
-except ImportError:
-
-    def export_pcd() -> int:
-        """PCD export is unavailable because numpy / pointcloud2 are not installed.
-
-        Install with:
-
-            uv add 'pymcap-cli[pointcloud]'
-        """
-        ERR.print(
-            "[red]Error:[/red]\nPCD export requires numpy + pointcloud2.\n"
-            "Install with:\n\n    uv add 'pymcap-cli[pointcloud]'\n"
-        )
-        return 1
-
-
-try:
-    from pymcap_cli.cmd.export_images_cmd import export_images
-except ImportError:
-
-    def export_images() -> int:
-        """Image export is unavailable because required image deps are missing.
-
-        Install with:
-
-            uv add 'pymcap-cli[image]'
-        """
-        ERR.print(
-            "[red]Error:[/red]\nImage export requires the 'image' extra (imagecodecs).\n"
-            "Install with:\n\n    uv add 'pymcap-cli[image]'\n"
-        )
-        return 1
-
-
-try:
-    from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
-except ImportError:
-
-    def rosdecompress() -> int:
-        """ROS decompress command is unavailable because the 'av' package is not installed.
-
-        To enable rosdecompress functionality, please install pymcap-cli with the 'video' extra:
-
-            uv add --group video pymcap-cli
-        """
-        ERR.print(
-            "[red]Error:[/red]\n"
-            "ROS decompress command is unavailable because the 'av' package is not installed.\n"
-            "To enable this functionality, please install pymcap-cli with the 'video' extra:\n\n"
-            "    uv add --group video pymcap-cli\n"
-        )
-        return 1
+bridge = _load_optional_command(
+    "pymcap_cli.cmd.bridge_cmd",
+    "bridge",
+    expected_missing_modules=("robo_ws_bridge",),
+    message="Bridge command requires the 'bridge' extra.",
+    install_command="uv add 'pymcap-cli[bridge]'",
+)
+video = _load_optional_command(
+    "pymcap_cli.cmd.video_cmd",
+    "video",
+    expected_missing_modules=("av", "numpy"),
+    message="Video command requires the 'video' extra.",
+    install_command="uv add 'pymcap-cli[video]'",
+)
+plot = _load_optional_command(
+    "pymcap_cli.cmd.plot_cmd",
+    "plot",
+    expected_missing_modules=("plotly",),
+    message="Plot command requires the 'plot' extra.",
+    install_command="uv add 'pymcap-cli[plot]'",
+)
+roscompress = _load_optional_command(
+    "pymcap_cli.cmd.roscompress_cmd",
+    "roscompress",
+    expected_missing_modules=("av", "DracoPy", "numpy", "pointcloud2", "pureini"),
+    message="ROS compression requires the 'video' and 'pointcloud' extras.",
+    install_command="uv add 'pymcap-cli[video,pointcloud]'",
+)
+export_parquet = _load_optional_command(
+    "pymcap_cli.cmd.export_parquet_cmd",
+    "export_parquet",
+    expected_missing_modules=("DracoPy", "numpy", "pointcloud2", "pureini", "pyarrow"),
+    message="Parquet export requires the 'parquet' extra.",
+    install_command="uv add 'pymcap-cli[parquet]'",
+)
+export_pcd = _load_optional_command(
+    "pymcap_cli.cmd.export_pcd_cmd",
+    "export_pcd",
+    expected_missing_modules=("DracoPy", "numpy", "pointcloud2", "pureini"),
+    message="PCD export requires the 'pointcloud' extra.",
+    install_command="uv add 'pymcap-cli[pointcloud]'",
+)
+export_images = _load_optional_command(
+    "pymcap_cli.cmd.export_images_cmd",
+    "export_images",
+    expected_missing_modules=("av", "imagecodecs", "numpy"),
+    message="Image export requires the 'image' extra.",
+    install_command="uv add 'pymcap-cli[image]'",
+)
+rosdecompress = _load_optional_command(
+    "pymcap_cli.cmd.rosdecompress_cmd",
+    "rosdecompress",
+    expected_missing_modules=("av", "DracoPy", "numpy", "pointcloud2", "pureini"),
+    message="ROS decompression requires the 'video' and 'pointcloud' extras.",
+    install_command="uv add 'pymcap-cli[video,pointcloud]'",
+)
 
 
 app = App(
