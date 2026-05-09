@@ -14,9 +14,8 @@ from mcap_ros2_support_fast import ROS2EncoderFactory
 from pymcap_cli.cmd import cat_cmd as cat_cmd_module
 from pymcap_cli.cmd.cat_cmd import (
     BytesMode,
+    EnumField,
     EnumPlan,
-    FieldEnum,
-    InlineSeparateEnum,
     build_enum_plan,
     cat,
     render_message_tree,
@@ -67,12 +66,12 @@ def test_build_enum_plan_separate_enum_pattern() -> None:
     }
     plan = build_enum_plan("pkg/Wrapper", defs)
     assert plan is not None
-    assert "status" in plan.inline_separate_enum
-    entry = plan.inline_separate_enum["status"]
+    assert "status" in plan.enum_fields
+    entry = plan.enum_fields["status"]
     assert entry.inner_field == "data"
-    assert entry.enum.by_value == {0: "OK", 1: "WARN", 2: "ERROR"}
+    assert entry.by_value == {0: "OK", 1: "WARN", 2: "ERROR"}
     assert plan.skip_fields == frozenset()
-    assert plan.field_enums == {}
+    assert set(plan.enum_fields) == {"status"}
 
 
 def test_build_enum_plan_inline_annotation_single_underscore() -> None:
@@ -90,7 +89,7 @@ def test_build_enum_plan_inline_annotation_single_underscore() -> None:
     }
     plan = build_enum_plan("pkg/Wrapper", defs)
     assert plan is not None
-    assert plan.field_enums["level"].by_value == {0: "OK", 1: "WARN"}
+    assert plan.enum_fields["level"].by_value == {0: "OK", 1: "WARN"}
     assert "level_foxglove_enum" in plan.skip_fields
 
 
@@ -108,7 +107,7 @@ def test_build_enum_plan_inline_annotation_double_underscore() -> None:
     }
     plan = build_enum_plan("pkg/Wrapper", defs)
     assert plan is not None
-    assert plan.field_enums["level"].by_value == {0: "OK"}
+    assert plan.enum_fields["level"].by_value == {0: "OK"}
     assert "level__foxglove_enum" in plan.skip_fields
 
 
@@ -124,9 +123,9 @@ def test_build_enum_plan_custom_inner_field_name() -> None:
     }
     plan = build_enum_plan("pkg/Wrapper", defs)
     assert plan is not None
-    entry = plan.inline_separate_enum["color"]
+    entry = plan.enum_fields["color"]
     assert entry.inner_field == "value"
-    assert entry.enum.by_value == {1: "RED", 2: "BLUE"}
+    assert entry.by_value == {1: "RED", 2: "BLUE"}
 
 
 def test_build_enum_plan_no_constants_returns_none() -> None:
@@ -159,7 +158,7 @@ def test_build_enum_plan_recurses_into_nested() -> None:
     plan = build_enum_plan("pkg/Outer", defs)
     assert plan is not None
     inner_plan = plan.nested_plans["inner"]
-    assert "status" in inner_plan.inline_separate_enum
+    assert "status" in inner_plan.enum_fields
 
 
 def test_build_enum_plan_same_message_constants() -> None:
@@ -178,10 +177,10 @@ def test_build_enum_plan_same_message_constants() -> None:
     }
     plan = build_enum_plan("diagnostic_msgs/DiagnosticStatus", defs)
     assert plan is not None
-    assert plan.field_enums["level"].by_value == {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
+    assert plan.enum_fields["level"].by_value == {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
     # String fields next to byte constants must NOT get decorated.
-    assert "name" not in plan.field_enums
-    assert "message" not in plan.field_enums
+    assert "name" not in plan.enum_fields
+    assert "message" not in plan.enum_fields
 
 
 def test_build_enum_plan_skips_string_constants_in_same_message() -> None:
@@ -208,7 +207,7 @@ def test_build_enum_plan_handles_msg_path_in_schema_name() -> None:
     # Schema name in MCAP is the full ROS2 path; resolver should fall back to short form.
     plan = build_enum_plan("pkg/msg/Wrapper", defs)
     assert plan is not None
-    assert "status" in plan.inline_separate_enum
+    assert "status" in plan.enum_fields
 
 
 def _make_msg_class(class_name: str, slots: list[str]) -> type:
@@ -225,11 +224,9 @@ def test_render_inline_annotation_skips_annotation_field() -> None:
     annotation_cls = _make_msg_class("Annotation", [])
     wrapper_cls = _make_msg_class("Wrapper", ["level", "level_foxglove_enum", "note"])
     plan = EnumPlan(
-        schema_name="pkg/Wrapper",
         skip_fields=frozenset({"level_foxglove_enum"}),
-        field_enums={"level": FieldEnum(by_value={0: "OK", 1: "WARN"})},
+        enum_fields={"level": EnumField(by_value={0: "OK", 1: "WARN"})},
         nested_plans={},
-        inline_separate_enum={},
     )
     obj = wrapper_cls(level=1, level_foxglove_enum=annotation_cls(), note="hi")
     out = _capture(
@@ -247,16 +244,14 @@ def test_render_separate_enum_collapses() -> None:
     status_cls = _make_msg_class("Status", ["data"])
     wrapper_cls = _make_msg_class("Wrapper", ["status"])
     plan = EnumPlan(
-        schema_name="pkg/Wrapper",
         skip_fields=frozenset(),
-        field_enums={},
-        nested_plans={},
-        inline_separate_enum={
-            "status": InlineSeparateEnum(
+        enum_fields={
+            "status": EnumField(
+                by_value={0: "OK", 1: "WARN", 2: "ERROR"},
                 inner_field="data",
-                enum=FieldEnum(by_value={0: "OK", 1: "WARN", 2: "ERROR"}),
             )
         },
+        nested_plans={},
     )
     obj = wrapper_cls(status=status_cls(data=2))
     out = _capture(
@@ -271,11 +266,9 @@ def test_render_separate_enum_collapses() -> None:
 def test_render_unknown_enum_value_keeps_raw() -> None:
     wrapper_cls = _make_msg_class("Wrapper", ["level"])
     plan = EnumPlan(
-        schema_name=None,
         skip_fields=frozenset(),
-        field_enums={"level": FieldEnum(by_value={0: "OK", 1: "WARN"})},
+        enum_fields={"level": EnumField(by_value={0: "OK", 1: "WARN"})},
         nested_plans={},
-        inline_separate_enum={},
     )
     obj = wrapper_cls(level=42)
     out = _capture(
@@ -286,6 +279,22 @@ def test_render_unknown_enum_value_keeps_raw() -> None:
     assert "level: 42" in out
     assert "[OK]" not in out
     assert "[WARN]" not in out
+
+
+def test_render_enum_array_values() -> None:
+    wrapper_cls = _make_msg_class("Wrapper", ["levels"])
+    plan = EnumPlan(
+        skip_fields=frozenset(),
+        enum_fields={"levels": EnumField(by_value={0: "OK", 1: "WARN"})},
+        nested_plans={},
+    )
+    obj = wrapper_cls(levels=[0, 1, 42])
+    out = _capture(
+        render_message_tree(
+            obj, plan, title=Text("/topic"), bytes_mode=BytesMode.SMART, truncate_bytes=0
+        )
+    )
+    assert "levels: [0 [OK], 1 [WARN], 42]" in out
 
 
 def test_render_without_plan_works() -> None:
@@ -302,11 +311,9 @@ def test_render_without_plan_works() -> None:
 
 def test_render_dict_input() -> None:
     plan = EnumPlan(
-        schema_name=None,
         skip_fields=frozenset(),
-        field_enums={"level": FieldEnum(by_value={1: "WARN"})},
+        enum_fields={"level": EnumField(by_value={1: "WARN"})},
         nested_plans={},
-        inline_separate_enum={},
     )
     out = _capture(
         render_message_tree(

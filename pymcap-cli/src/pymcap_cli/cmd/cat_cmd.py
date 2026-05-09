@@ -69,11 +69,7 @@ def message_matches_grep(obj: Any, pattern: re.Pattern[str]) -> bool:
         return False
 
     if _is_message_obj(obj):
-        return any(
-            message_matches_grep(getattr(obj, f.name), pattern)
-            for f in dataclasses.fields(obj)
-            if not f.name.startswith("_")
-        )
+        return any(message_matches_grep(value, pattern) for _, value in _message_items(obj))
 
     if isinstance(obj, (list, tuple)):
         return any(message_matches_grep(item, pattern) for item in obj)
@@ -101,11 +97,7 @@ def message_to_dict(
     recurse = lambda v: message_to_dict(v, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)  # noqa: E731
 
     if _is_message_obj(obj):
-        return {
-            f.name: recurse(getattr(obj, f.name))
-            for f in dataclasses.fields(obj)
-            if not f.name.startswith("_")
-        }
+        return {name: recurse(value) for name, value in _message_items(obj)}
 
     if isinstance(obj, (list, tuple)):
         return [recurse(item) for item in obj]
@@ -154,29 +146,41 @@ _TREE_COMPLEX_ARRAY_LIMIT = 16
 
 
 @dataclass(frozen=True)
-class FieldEnum:
-    """Maps primitive enum values to their constant names for one field."""
+class EnumField:
+    """Enum labels for one rendered field, optionally read from a wrapper member."""
 
     by_value: dict[bool | int | float | str, str]
-
-
-@dataclass(frozen=True)
-class InlineSeparateEnum:
-    """Wrapper-field hint: render `<wrapper_field>: <inner_value> [LABEL]` instead of nesting."""
-
-    inner_field: str
-    enum: FieldEnum
+    inner_field: str | None = None
 
 
 @dataclass(frozen=True)
 class EnumPlan:
     """Per-MessageDefinition rendering hints used by the TTY tree renderer."""
 
-    schema_name: str | None
     skip_fields: frozenset[str]
-    field_enums: dict[str, FieldEnum]
+    enum_fields: dict[str, EnumField]
     nested_plans: dict[str, "EnumPlan"]
-    inline_separate_enum: dict[str, InlineSeparateEnum]
+
+
+@dataclass(frozen=True)
+class RenderContext:
+    bytes_mode: BytesMode
+    truncate_bytes: int
+
+    def format(self, value: Any) -> str:
+        return _format_scalar(value, bytes_mode=self.bytes_mode, truncate_bytes=self.truncate_bytes)
+
+
+def _message_items(obj: Any) -> list[tuple[str, Any]]:
+    return [
+        (f.name, getattr(obj, f.name))
+        for f in dataclasses.fields(obj)
+        if not f.name.startswith("_")
+    ]
+
+
+def _is_tree_obj(obj: Any) -> bool:
+    return isinstance(obj, dict) or _is_message_obj(obj)
 
 
 def _annotated_target_name(field_name: str) -> str | None:
@@ -226,8 +230,10 @@ def _resolve_msgdef_by_name(
 def _constants_to_field_enum(
     constants: list[Constant],
     target_type_name: str,
-) -> FieldEnum | None:
-    """Build a FieldEnum from constants whose primitive type matches `target_type_name`."""
+    *,
+    inner_field: str | None = None,
+) -> EnumField | None:
+    """Build an EnumField from constants whose primitive type matches `target_type_name`."""
     by_value: dict[bool | int | float | str, str] = {}
     for c in constants:
         if c.type.type_name != target_type_name:
@@ -236,7 +242,21 @@ def _constants_to_field_enum(
         by_value.setdefault(c.value, c.name)
     if not by_value:
         return None
-    return FieldEnum(by_value=by_value)
+    return EnumField(by_value=by_value, inner_field=inner_field)
+
+
+def _separate_enum_field(msgdef: MessageDefinition) -> EnumField | None:
+    """Return a collapsible enum field for messages shaped as constants + one value field."""
+    if not msgdef.constants or len(msgdef.fields) != 1:
+        return None
+    inner = msgdef.fields[0]
+    if not inner.type.is_primitive or inner.type.is_array:
+        return None
+    return _constants_to_field_enum(
+        msgdef.constants,
+        inner.type.type_name,
+        inner_field=inner.name,
+    )
 
 
 def build_enum_plan(
@@ -262,9 +282,8 @@ def build_enum_plan(
     _visited[schema_name] = None
 
     skip_fields: set[str] = set()
-    field_enums: dict[str, FieldEnum] = {}
+    enum_fields: dict[str, EnumField] = {}
     nested_plans: dict[str, EnumPlan] = {}
-    inline_separate_enum: dict[str, InlineSeparateEnum] = {}
 
     fields_by_name = {f.name: f for f in msgdef.fields}
 
@@ -281,14 +300,14 @@ def build_enum_plan(
         field_enum = _constants_to_field_enum(ann_msgdef.constants, target_field.type.type_name)
         if field_enum is None:
             continue
-        field_enums[target] = field_enum
+        enum_fields[target] = field_enum
         skip_fields.add(f.name)
 
     for f in msgdef.fields:
         if (
             f.name in skip_fields
             or _annotated_target_name(f.name) is not None
-            or f.name in field_enums
+            or f.name in enum_fields
         ):
             continue
 
@@ -299,7 +318,7 @@ def build_enum_plan(
             if msgdef.constants and f.type.type_name in _ENUM_PRIMITIVE_TYPES:
                 same_msg_enum = _constants_to_field_enum(msgdef.constants, f.type.type_name)
                 if same_msg_enum is not None:
-                    field_enums[f.name] = same_msg_enum
+                    enum_fields[f.name] = same_msg_enum
             continue
 
         nested_msgdef = _resolve_msgdef(f.type, all_definitions)
@@ -309,13 +328,11 @@ def build_enum_plan(
         # "Separate enum message" pattern: constants + a single primitive non-array field,
         # consumed only when accessed via a non-array field (the array case is rare and the
         # collapse semantics are unclear there).
-        if nested_msgdef.constants and len(nested_msgdef.fields) == 1 and not f.type.is_array:
-            inner = nested_msgdef.fields[0]
-            if inner.type.is_primitive and not inner.type.is_array:
-                field_enum = _constants_to_field_enum(nested_msgdef.constants, inner.type.type_name)
-                if field_enum is not None:
-                    inline_separate_enum[f.name] = InlineSeparateEnum(inner.name, field_enum)
-                    continue
+        if not f.type.is_array:
+            separate_enum = _separate_enum_field(nested_msgdef)
+            if separate_enum is not None:
+                enum_fields[f.name] = separate_enum
+                continue
 
         nested_key = (
             f"{f.type.package_name}/{f.type.type_name}" if f.type.package_name else f.type.type_name
@@ -324,16 +341,14 @@ def build_enum_plan(
         if sub_plan is not None:
             nested_plans[f.name] = sub_plan
 
-    if not (skip_fields or field_enums or nested_plans or inline_separate_enum):
+    if not (skip_fields or enum_fields or nested_plans):
         _visited[schema_name] = None
         return None
 
     plan = EnumPlan(
-        schema_name=msgdef.name,
         skip_fields=frozenset(skip_fields),
-        field_enums=dict(field_enums),
+        enum_fields=dict(enum_fields),
         nested_plans=dict(nested_plans),
-        inline_separate_enum=dict(inline_separate_enum),
     )
     _visited[schema_name] = plan
     return plan
@@ -376,8 +391,8 @@ def _format_scalar(value: Any, *, bytes_mode: BytesMode, truncate_bytes: int) ->
     return str(value)
 
 
-def _enum_label(value: Any, field_enum: FieldEnum) -> Text:
-    name = field_enum.by_value.get(value)
+def _enum_label(value: Any, enum_field: EnumField) -> Text:
+    name = enum_field.by_value.get(value)
     text = Text()
     text.append(str(value))
     if name is not None:
@@ -394,90 +409,97 @@ def _key_label(name: str) -> Text:
     return text
 
 
+def _wrapper_value(value: Any, inner_field: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(inner_field)
+    return getattr(value, inner_field, None)
+
+
+def _add_sequence(
+    parent: Tree,
+    name: str,
+    value: list[Any] | tuple[Any, ...],
+    enum_field: EnumField | None,
+    ctx: RenderContext,
+) -> None:
+    label = _key_label(name)
+    label.append("[", style="dim")
+    shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
+    for i, item in enumerate(shown):
+        if i:
+            label.append(", ", style="dim")
+        if enum_field is None:
+            label.append(ctx.format(item))
+        else:
+            label.append_text(_enum_label(item, enum_field))
+    if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT:
+        label.append(f", … ({len(value)} total)", style="dim")
+    label.append("]", style="dim")
+    parent.add(label)
+
+
+def _render_child(
+    parent: Tree,
+    label: Text,
+    obj: Any,
+    plan: EnumPlan | None,
+    ctx: RenderContext,
+) -> None:
+    _render_into(parent.add(label), obj, plan, ctx)
+
+
 def _render_into(
     parent: Tree,
     obj: Any,
     plan: EnumPlan | None,
-    *,
-    bytes_mode: BytesMode,
-    truncate_bytes: int,
+    ctx: RenderContext,
 ) -> None:
     """Populate `parent` with one node per (name, value) pair on `obj`."""
-    items: list[tuple[str, Any]]
     if isinstance(obj, dict):
         items = [(str(k), v) for k, v in obj.items()]
     elif _is_message_obj(obj):
-        items = [
-            (f.name, getattr(obj, f.name, None))
-            for f in dataclasses.fields(obj)
-            if not f.name.startswith("_")
-        ]
+        items = _message_items(obj)
     else:
-        parent.add(_format_scalar(obj, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes))
+        parent.add(ctx.format(obj))
         return
 
     skip = plan.skip_fields if plan else frozenset()
-    field_enums = plan.field_enums if plan else {}
+    enum_fields = plan.enum_fields if plan else {}
     nested_plans = plan.nested_plans if plan else {}
-    inline_separate = plan.inline_separate_enum if plan else {}
 
     for name, value in items:
         if name in skip:
             continue
 
-        if name in inline_separate:
-            entry = inline_separate[name]
-            inner_value = getattr(value, entry.inner_field, None) if value is not None else None
-            label = _key_label(name)
-            label.append_text(_enum_label(inner_value, entry.enum))
-            parent.add(label)
-            continue
-
-        if name in field_enums and not isinstance(value, (list, tuple)):
-            label = _key_label(name)
-            label.append_text(_enum_label(value, field_enums[name]))
-            parent.add(label)
-            continue
-
-        if name in field_enums and isinstance(value, (list, tuple)):
-            field_enum = field_enums[name]
-            label = _key_label(name)
-            label.append("[", style="dim")
-            shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
-            for i, item in enumerate(shown):
-                if i:
-                    label.append(", ", style="dim")
-                label.append_text(_enum_label(item, field_enum))
-            if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT:
-                label.append(f", … ({len(value)} total)", style="dim")
-            label.append("]", style="dim")
-            parent.add(label)
-            continue
-
-        if _is_message_obj(value):
-            child = parent.add(Text(name, style="bold cyan"))
-            _render_into(
-                child,
-                value,
-                nested_plans.get(name),
-                bytes_mode=bytes_mode,
-                truncate_bytes=truncate_bytes,
+        enum_field = enum_fields.get(name)
+        if enum_field is not None:
+            enum_value = (
+                _wrapper_value(value, enum_field.inner_field)
+                if enum_field.inner_field is not None
+                else value
             )
+            if isinstance(enum_value, (list, tuple)):
+                _add_sequence(parent, name, enum_value, enum_field, ctx)
+            else:
+                label = _key_label(name)
+                label.append_text(_enum_label(enum_value, enum_field))
+                parent.add(label)
             continue
 
-        if isinstance(value, dict):
-            child = parent.add(Text(name, style="bold cyan"))
-            _render_into(
-                child,
+        if _is_tree_obj(value):
+            _render_child(
+                parent,
+                Text(name, style="bold cyan"),
                 value,
                 nested_plans.get(name),
-                bytes_mode=bytes_mode,
-                truncate_bytes=truncate_bytes,
+                ctx,
             )
             continue
 
         if isinstance(value, (list, tuple)):
-            if value and (_is_message_obj(value[0]) or isinstance(value[0], dict)):
+            if value and _is_tree_obj(value[0]):
                 header = Text()
                 header.append(name, style="bold cyan")
                 header.append(f"  ({len(value)})", style="dim")
@@ -485,14 +507,7 @@ def _render_into(
                 inner_plan = nested_plans.get(name)
                 shown_items = list(value)[:_TREE_COMPLEX_ARRAY_LIMIT]
                 for i, item in enumerate(shown_items):
-                    sub = child.add(Text(f"[{i}]", style="dim"))
-                    _render_into(
-                        sub,
-                        item,
-                        inner_plan,
-                        bytes_mode=bytes_mode,
-                        truncate_bytes=truncate_bytes,
-                    )
+                    _render_child(child, Text(f"[{i}]", style="dim"), item, inner_plan, ctx)
                 if len(value) > _TREE_COMPLEX_ARRAY_LIMIT:
                     child.add(
                         Text(
@@ -502,19 +517,11 @@ def _render_into(
                     )
                 continue
 
-            label = _key_label(name)
-            shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
-            shown_str = ", ".join(
-                _format_scalar(v, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)
-                for v in shown
-            )
-            suffix = f", … ({len(value)} total)" if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT else ""
-            label.append(f"[{shown_str}{suffix}]")
-            parent.add(label)
+            _add_sequence(parent, name, value, None, ctx)
             continue
 
         label = _key_label(name)
-        label.append(_format_scalar(value, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes))
+        label.append(ctx.format(value))
         parent.add(label)
 
 
@@ -528,7 +535,7 @@ def render_message_tree(
 ) -> Tree:
     """Render a decoded message as a Rich Tree, decorating known enum fields with names."""
     tree = Tree(title)
-    _render_into(tree, obj, plan, bytes_mode=bytes_mode, truncate_bytes=truncate_bytes)
+    _render_into(tree, obj, plan, RenderContext(bytes_mode, truncate_bytes))
     return tree
 
 
@@ -673,11 +680,8 @@ def cat(
 
     start_time_ns = parse_timestamp_args(start, 0, start_secs) or 0
     end_time_ns = parse_timestamp_args(end, 0, end_secs)
-    # Default end time to max if not specified
-    if end_time_ns is None:
-        end_time_ns = MAX_INT64
+    end_time_ns = MAX_INT64 if end_time_ns is None else end_time_ns
 
-    # Parse message path query if provided
     parsed_query = None
     if query:
         try:
@@ -703,7 +707,6 @@ def cat(
         logger.exception("Invalid topic regex")
         return 1
 
-    # Determine output mode
     writing_to_file = output is not None
     is_tty = not writing_to_file and sys.stdout.isatty()
 
@@ -716,19 +719,18 @@ def cat(
         channel: Channel,
         _schema: Schema | None,
     ) -> bool:
-        """Check if a message should be included based on filters."""
         topic = channel.topic
 
         if parsed_query:
-            if topic != parsed_query.topic:
-                return False
-        elif topic_patterns and not any(p.search(topic) for p in topic_patterns):
+            return topic == parsed_query.topic and not any(
+                p.search(topic) for p in exclude_topic_patterns
+            )
+        if topic_patterns and not any(p.search(topic) for p in topic_patterns):
             return False
 
         return not any(p.search(topic) for p in exclude_topic_patterns)
 
     def _get_parsed_schema(schema: Schema) -> dict[str, MessageDefinition] | None:
-        """Parse and cache schema definitions per schema id."""
         if schema.id in parsed_schemas:
             return parsed_schemas[schema.id]
         try:
@@ -740,7 +742,6 @@ def cat(
         return parsed
 
     def _get_enum_plan(schema: Schema) -> EnumPlan | None:
-        """Build and cache the EnumPlan for a schema."""
         if schema.id in enum_plans:
             return enum_plans[schema.id]
         parsed = _get_parsed_schema(schema)
@@ -766,7 +767,6 @@ def cat(
         return None
 
     def _to_jsonl(msg: "DecodedMessage", data: Any) -> str:
-        """Serialize a decoded message to a compact JSON line."""
         entry: dict[str, Any] = {
             "topic": msg.channel.topic,
             "sequence": msg.message.sequence,
@@ -809,10 +809,8 @@ def cat(
                             f"Cannot validate query for topic '{msg.channel.topic}' "
                             "(no schema available)"
                         )
-                    else:
-                        err = _validate_query(parsed_query, msg.schema, msg.channel.topic)
-                        if err:
-                            return err
+                    elif _validate_query(parsed_query, msg.schema, msg.channel.topic):
+                        return 1
 
                 # Apply query filter
                 if parsed_query:
@@ -832,20 +830,16 @@ def cat(
                 message_count += 1
 
                 if is_tty:
+                    schema = msg.schema
                     header = Text()
                     header.append(msg.channel.topic, style="bold cyan")
                     header.append(" @ ", style="dim")
                     header.append(str(msg.message.log_time), style="green")
                     header.append(" [", style="dim")
-                    header.append(msg.schema.name if msg.schema else "unknown", style="yellow")
+                    header.append(schema.name if schema else "unknown", style="yellow")
                     header.append("]", style="dim")
 
-                    # Post-query data has lost its schema context, so skip enum decoration.
-                    plan = (
-                        None
-                        if parsed_query
-                        else (_get_enum_plan(msg.schema) if msg.schema else None)
-                    )
+                    plan = None if parsed_query or schema is None else _get_enum_plan(schema)
 
                     tree = render_message_tree(
                         data,
@@ -855,13 +849,7 @@ def cat(
                         truncate_bytes=_TTY_BYTES_TRUNCATE,
                     )
 
-                    console_out.print(
-                        Panel(
-                            tree,
-                            border_style="blue",
-                            expand=False,
-                        )
-                    )
+                    console_out.print(Panel(tree, border_style="blue", expand=False))
                 else:
                     line = _to_jsonl(msg, data)
                     if out_file is not None:
