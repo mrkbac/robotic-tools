@@ -324,6 +324,22 @@ pymcap-cli list attachments data.mcap
 pymcap-cli list metadata data.mcap
 ```
 
+### `get` — Extract Attachments and Metadata
+
+Extract a single attachment's bytes or a metadata record's key/value map.
+
+```bash
+# Write attachment bytes to a file (or pipe stdout)
+pymcap-cli get attachment --name calib.bin --output calib.bin data.mcap
+pymcap-cli get attachment -n calib.bin data.mcap > calib.bin
+
+# Disambiguate when multiple attachments share a name
+pymcap-cli get attachment --name notes.txt --offset 1234 -o notes.txt data.mcap
+
+# Print a metadata record as JSON (records sharing a name are merged)
+pymcap-cli get metadata --name session data.mcap
+```
+
 ### `diff` — Compare Files
 
 Compare MCAP files using summary and message-index timestamps. Reads through the

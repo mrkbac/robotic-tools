@@ -18,6 +18,7 @@ from pymcap_cli.cmd import (
     export_geo_cmd,
     export_json_cmd,
     filter_cmd,
+    get_cmd,
     info_cmd,
     info_json_cmd,
     list_cmd,
@@ -188,6 +189,8 @@ app.command(name="diff", group=inspect_group)(diff_cmd.diff_cmd)
 app.command(name="duplicates", group=inspect_group)(duplicates_cmd.duplicates)
 app.command(name="info", group=inspect_group)(info_cmd.info)
 app.command(name="info-json", group=inspect_group)(info_json_cmd.info_json)
+get_cmd.get_app.group = (inspect_group,)
+app.command(get_cmd.get_app, name="get")
 list_cmd.list_app.group = (inspect_group,)
 app.command(list_cmd.list_app, name="list")
 app.command(name="records", group=inspect_group)(records_cmd.records)
