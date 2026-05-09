@@ -33,18 +33,40 @@ from small_mcap.records import (
 )
 
 if TYPE_CHECKING:
-    import zstandard
     from lz4.frame import compress as lz4_compress
 else:
-    try:
-        import zstandard
-    except ImportError:
-        zstandard = None
-
     try:
         from lz4.frame import compress as lz4_compress
     except ImportError:
         lz4_compress = None
+
+# zstd backend dispatch — Python 3.14 ships `compression.zstd` in the stdlib;
+# older interpreters use the third-party `zstandard` package. Either may be
+# absent (zstd is an optional extra).
+_zstd_compress: Callable[[bytes | memoryview], bytes] | None
+
+if TYPE_CHECKING:
+    _zstd_compress = None
+else:
+    try:
+        from compression.zstd import compress as _zstd_compress
+    except ImportError:
+        try:
+            from zstandard import ZstdCompressor
+
+            # Per-thread compressor cache — `_compress_chunk_data` runs on a
+            # `ThreadPoolExecutor` worker pool, and `ZstdCompressor()` is
+            # expensive to construct relative to a single chunk encode.
+            _zstd_tls = threading.local()
+
+            def _zstd_compress(data: bytes | memoryview) -> bytes:
+                compressor = getattr(_zstd_tls, "compressor", None)
+                if compressor is None:
+                    compressor = ZstdCompressor()
+                    _zstd_tls.compressor = compressor
+                return compressor.compress(data)
+        except ImportError:
+            _zstd_compress = None
 
 # Module-level constants for hot-path message serialization (avoid per-call attribute lookups)
 _MSG_RECORD_STRUCT = struct.Struct(
@@ -54,12 +76,6 @@ _MSG_HEADER_SIZE = _MSG_RECORD_STRUCT.size  # 31
 _MSG_OPCODE = Opcode.MESSAGE
 _MSG_FIXED_LEN = 22  # channel_id(2) + sequence(4) + log_time(8) + publish_time(8)
 
-
-class _ThreadLocal(threading.local):
-    zstd_compressor: "zstandard.ZstdCompressor | None" = None
-
-
-_thread_local = _ThreadLocal()
 
 # Fixed size of SummaryOffset record (opcode 1 + length 8 + content 17 = 26 bytes)
 SUMMARY_OFFSET_RECORD_SIZE = 26
@@ -648,13 +664,11 @@ def _compress_chunk_data(
 
     # Try compression
     if compression == CompressionType.ZSTD:
-        if zstandard is None:
-            raise ImportError("zstandard module not available")
-        compressor = _thread_local.zstd_compressor
-        if compressor is None:
-            compressor = zstandard.ZstdCompressor()
-            _thread_local.zstd_compressor = compressor
-        compressed = compressor.compress(data)
+        if _zstd_compress is None:
+            raise ImportError(
+                "zstd compression requires Python 3.14 compression.zstd or the zstandard package"
+            )
+        compressed = _zstd_compress(data)
     elif compression == CompressionType.LZ4:
         if lz4_compress is None:
             raise ImportError("lz4 module not available")

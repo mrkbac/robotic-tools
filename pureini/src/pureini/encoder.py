@@ -9,12 +9,22 @@ import struct
 
 import lz4.block
 import numpy as np
-import zstandard as zstd
 
 from .encoding_utils import BufferView, build_field_metadata
 from .header import HeaderEncoding, encode_header
 from .jit_codec import encode_chunk_jit
 from .types import POINTS_PER_CHUNK, CompressionOption, EncodingInfo, EncodingOptions
+
+# Python 3.14 promoted zstd into the stdlib; older interpreters use the
+# third-party `zstandard` package (declared in pyproject as a 3.13-only dep).
+try:
+    from compression import zstd
+
+    _ZSTD_IS_STDLIB = True
+except ImportError:
+    import zstandard as zstd
+
+    _ZSTD_IS_STDLIB = False
 
 
 def _zstd_compress_bound(src_size: int) -> int:
@@ -159,7 +169,16 @@ class PointcloudEncoder:
         if self.info.compression_opt == CompressionOption.LZ4:
             payload = lz4.block.compress(chunk_data, store_size=False)
         elif self.info.compression_opt == CompressionOption.ZSTD:
-            payload = self._zstd_cctx.compress(chunk_data)
+            if _ZSTD_IS_STDLIB:
+                # compression.zstd's streaming ZstdCompressor needs an explicit
+                # frame terminator; ty resolves zstd to the third-party class on
+                # the 3.10 target, hence the ignore.
+                payload = self._zstd_cctx.compress(
+                    chunk_data,
+                    self._zstd_cctx.FLUSH_FRAME,  # type: ignore[unresolved-attribute, too-many-positional-arguments]
+                )
+            else:
+                payload = self._zstd_cctx.compress(chunk_data)
         elif self.info.compression_opt == CompressionOption.NONE:
             payload = chunk_data
         else:

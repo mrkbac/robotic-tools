@@ -53,24 +53,42 @@ from small_mcap.remapper import Remapper
 
 if TYPE_CHECKING:
     from lz4.frame import decompress as lz4_decompress
-    from zstandard import ZstdDecompressor
 else:
-    try:
-        from zstandard import ZstdDecompressor
-    except ImportError:
-        ZstdDecompressor = None
-
     try:
         from lz4.frame import decompress as lz4_decompress
     except ImportError:
         lz4_decompress = None
 
+# zstd backend dispatch — Python 3.14 ships `compression.zstd` in the stdlib;
+# older interpreters use the third-party `zstandard` package. Either may be
+# absent (zstd is an optional extra).
+_zstd_decompress: Callable[[bytes | memoryview, int], bytes] | None
 
-class _ThreadLocal(threading.local):
-    zstd_decompressor = None
+if TYPE_CHECKING:
+    _zstd_decompress = None
+else:
+    try:
+        from compression import zstd as _stdlib_zstd
 
+        def _zstd_decompress(data: bytes | memoryview, _expected_size: int) -> bytes:
+            return _stdlib_zstd.decompress(data)
+    except ImportError:
+        try:
+            from zstandard import ZstdDecompressor
 
-_thread_local = _ThreadLocal()
+            # Per-thread decompressor cache — `_decompress_data_threadsafe` runs on
+            # a `ThreadPoolExecutor` worker pool, and `ZstdDecompressor()` is
+            # expensive to construct relative to a single chunk decode.
+            _zstd_tls = threading.local()
+
+            def _zstd_decompress(data: bytes | memoryview, expected_size: int) -> bytes:
+                decompressor = getattr(_zstd_tls, "decompressor", None)
+                if decompressor is None:
+                    decompressor = ZstdDecompressor()
+                    _zstd_tls.decompressor = decompressor
+                return decompressor.decompress(data, max_output_size=max(expected_size, 1))
+        except ImportError:
+            _zstd_decompress = None
 
 
 _OPCODE_SIZE = 1
@@ -567,15 +585,11 @@ def _filter_message_indices_by_time(
 def _decompress_data_threadsafe(chunk: Chunk) -> bytes | memoryview:
     """Decompress chunk data using a thread-local decompressor (thread-safe)."""
     if chunk.compression == "zstd":
-        if ZstdDecompressor is None:
+        if _zstd_decompress is None:
             raise UnsupportedCompressionError(
-                "zstd compression used but zstandard module is not installed."
+                "zstd compression used but neither compression.zstd nor zstandard is installed."
             )
-        decompressor = _thread_local.zstd_decompressor
-        if decompressor is None:
-            decompressor = ZstdDecompressor()
-            _thread_local.zstd_decompressor = decompressor
-        return decompressor.decompress(chunk.data, max_output_size=chunk.uncompressed_size)
+        return _zstd_decompress(chunk.data, chunk.uncompressed_size)
     if chunk.compression == "lz4":
         if lz4_decompress is None:
             raise UnsupportedCompressionError(
@@ -1024,6 +1038,7 @@ def read_message(
         )
 
     if isinstance(stream, Iterable):
+        streams = cast("Iterable[IO[bytes] | _ReaderReturnType]", stream)
         remapper = Remapper()
 
         def remap_schema_channel(
@@ -1044,7 +1059,7 @@ def read_message(
             *(
                 remap_schema_channel(
                     read_message(
-                        s,
+                        cast("IO[bytes]", s),
                         should_include,
                         start_time_ns,
                         end_time_ns,
@@ -1056,7 +1071,7 @@ def read_message(
                     else cast("_ReaderReturnType", s),
                     stream_id=i,
                 )
-                for i, s in enumerate(stream)
+                for i, s in enumerate(streams)
             ),
             key=lambda x: x[2].log_time,
             reverse=reverse,
@@ -1129,9 +1144,9 @@ def read_message_decoded(
     schema_factories: list[DecoderFactoryProtocol] = []
     for f in decoder_factories:
         if getattr(f, "channel_aware", False):
-            channel_factories.append(f)  # type: ignore[arg-type]
+            channel_factories.append(f)  # ty: ignore[invalid-argument-type]
         else:
-            schema_factories.append(f)  # type: ignore[arg-type]
+            schema_factories.append(f)  # ty: ignore[invalid-argument-type]
 
     def _resolve(
         message_encoding: str, schema: Schema | None, channel: Channel

@@ -5,11 +5,41 @@ import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
 from lz4.frame import decompress as lz4_decompress
 from small_mcap.records import MAGIC, MAGIC_SIZE, Opcode
-from zstandard import ZstdDecompressor, ZstdError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+# zstd backend dispatch — Python 3.14 ships `compression.zstd` in the stdlib;
+# older interpreters use the third-party `zstandard` package. Either may be
+# absent (zstd is an optional extra of small-mcap).
+_zstd_decompress: Callable[[bytes | memoryview, int], bytes] | None
+_ZstdError: type[Exception]
+
+if TYPE_CHECKING:
+    _zstd_decompress = None
+    _ZstdError = Exception
+else:
+    try:
+        from compression import zstd as _stdlib_zstd
+
+        _ZstdError = _stdlib_zstd.ZstdError
+
+        def _zstd_decompress(data: bytes | memoryview, _expected_size: int) -> bytes:
+            return _stdlib_zstd.decompress(data)
+    except ImportError:
+        try:
+            from zstandard import ZstdDecompressor
+            from zstandard import ZstdError as _ZstdError
+
+            def _zstd_decompress(data: bytes | memoryview, expected_size: int) -> bytes:
+                return ZstdDecompressor().decompress(data, max_output_size=max(expected_size, 1))
+        except ImportError:
+            _zstd_decompress = None
+            _ZstdError = Exception
 
 
 class Severity(str, Enum):
@@ -516,7 +546,6 @@ class McapDoctor:
         self.frames: list[Frame] = []
         self._file_size = 0
         self._data_end_checksum: int | None = None
-        self._zstd_decompressor = ZstdDecompressor()
         self.strict_message_order = strict_message_order
         self._severity: dict[FindingCode, Severity] = {
             code: default_severity(code) for code in FindingCode
@@ -1132,12 +1161,18 @@ class McapDoctor:
         if chunk.compression == "":
             uncompressed = chunk.records
         elif chunk.compression == "zstd":
-            try:
-                uncompressed = self._zstd_decompressor.decompress(
-                    chunk.records,
-                    max_output_size=chunk.uncompressed_size,
+            if _zstd_decompress is None:
+                self._emit(
+                    FindingCode.CHUNK_DECOMPRESSION_FAILED,
+                    "zstd compression used but neither compression.zstd nor zstandard is installed",
+                    offset=record_offset,
+                    section=section,
+                    record=record_name,
                 )
-            except ZstdError as exc:
+                return
+            try:
+                uncompressed = _zstd_decompress(chunk.records, chunk.uncompressed_size)
+            except _ZstdError as exc:
                 self._emit(
                     FindingCode.CHUNK_DECOMPRESSION_FAILED,
                     f"zstd decompression failed: {exc}",

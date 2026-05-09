@@ -7,7 +7,6 @@ Licensed under the Apache License, Version 2.0
 
 import lz4.block
 import numpy as np
-import zstandard as zstd
 
 from .encoding_utils import BufferView, build_field_metadata, decode
 from .header import decode_header
@@ -18,6 +17,13 @@ from .types import (
     EncodingInfo,
     EncodingOptions,
 )
+
+# Python 3.14 promoted zstd into the stdlib; older interpreters use the
+# third-party `zstandard` package (declared in pyproject as a 3.13-only dep).
+try:
+    from compression import zstd
+except ImportError:
+    import zstandard as zstd
 
 
 class PointcloudDecoder:
@@ -143,8 +149,7 @@ class PointcloudDecoder:
 
         elif info.compression_opt == CompressionOption.ZSTD:
             try:
-                dctx = zstd.ZstdDecompressor()
-                return dctx.decompress(chunk_data)
+                return zstd.decompress(chunk_data)
             except (ValueError, RuntimeError, zstd.ZstdError) as e:
                 raise RuntimeError(f"ZSTD decompression failed: {e}") from e
 

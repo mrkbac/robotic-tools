@@ -336,7 +336,7 @@ def test_get_summary_oserror():
 
 def test_zstd_not_installed(monkeypatch):
     """Test UnsupportedCompressionError when zstd module not installed."""
-    monkeypatch.setattr(reader_module, "ZstdDecompressor", None)
+    monkeypatch.setattr(reader_module, "_zstd_decompress", None)
 
     chunk = Chunk(
         message_start_time=0,
@@ -347,7 +347,7 @@ def test_zstd_not_installed(monkeypatch):
         data=b"",
     )
 
-    with pytest.raises(UnsupportedCompressionError, match=r"zstd.*not installed"):
+    with pytest.raises(UnsupportedCompressionError, match=r"zstd.*installed"):
         _get_chunk_data_stream(chunk)
 
 

@@ -43,7 +43,17 @@ exclude = [
 ]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["lz4", "lz4.frame", "lz4.block", "av", "foxglove", "DracoPy"]
+# `compression.zstd` is the Python 3.14 stdlib zstd module; on the 3.10 target it's
+# unresolvable, but runtime falls back to the `zstandard` package via try/except.
+allowed-unresolved-imports = [
+    "lz4",
+    "lz4.frame",
+    "lz4.block",
+    "av",
+    "foxglove",
+    "DracoPy",
+    "compression",
+]
 
 [tool.ty.terminal]
 error-on-warning = true

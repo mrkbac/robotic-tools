@@ -1998,7 +1998,7 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyyaml" },
-    { name = "zstandard" },
+    { name = "zstandard", marker = "python_full_version < '3.14'" },
 ]
 
 [package.metadata]
@@ -2007,7 +2007,7 @@ requires-dist = [
     { name = "numba", specifier = ">=0.62.1" },
     { name = "numpy", specifier = ">=2.2.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "zstandard", specifier = ">=0.25.0" },
+    { name = "zstandard", marker = "python_full_version < '3.14'", specifier = ">=0.25.0" },
 ]
 
 [[package]]
@@ -2713,7 +2713,7 @@ source = { editable = "small-mcap" }
 [package.optional-dependencies]
 compression = [
     { name = "lz4" },
-    { name = "zstandard" },
+    { name = "zstandard", marker = "python_full_version < '3.14'" },
 ]
 dev = [
     { name = "mcap" },
@@ -2724,7 +2724,7 @@ lz4 = [
     { name = "lz4" },
 ]
 zstd = [
-    { name = "zstandard" },
+    { name = "zstandard", marker = "python_full_version < '3.14'" },
 ]
 
 [package.dev-dependencies]
@@ -2740,7 +2740,7 @@ requires-dist = [
     { name = "rosbags", marker = "extra == 'dev'", specifier = ">=0.11.0" },
     { name = "small-mcap", extras = ["lz4"], marker = "extra == 'compression'" },
     { name = "small-mcap", extras = ["zstd"], marker = "extra == 'compression'" },
-    { name = "zstandard", marker = "extra == 'zstd'", specifier = ">=0.23.0" },
+    { name = "zstandard", marker = "python_full_version < '3.14' and extra == 'zstd'", specifier = ">=0.23.0" },
 ]
 provides-extras = ["zstd", "lz4", "compression", "dev"]
 

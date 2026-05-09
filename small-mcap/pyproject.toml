@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
     "Topic :: System :: Logging",
     "Typing :: Typed",
@@ -32,7 +33,7 @@ Repository = "https://github.com/mrkbac/robotic-tools"
 Issues = "https://github.com/mrkbac/robotic-tools/issues"
 
 [project.optional-dependencies]
-zstd = ["zstandard>=0.23.0"]
+zstd = ["zstandard>=0.23.0 ; python_version < '3.14'"]
 lz4 = ["lz4>=4.3.3"]
 compression = ["small-mcap[zstd]", "small-mcap[lz4]"]
 dev = [
