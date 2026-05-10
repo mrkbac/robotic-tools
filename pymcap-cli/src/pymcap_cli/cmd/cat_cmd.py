@@ -265,11 +265,10 @@ def cat(
         enum_plans[schema.id] = plan
         return plan
 
-    def _validate_query(query_path: MessagePath, schema: Schema, topic: str) -> int | None:
-        """Validate query against schema. Returns 1 on error, None on success."""
+    def _validate_query(query_path: MessagePath, schema: Schema, topic: str) -> bool:
         all_definitions = _get_parsed_schema(schema)
         if all_definitions is None:
-            return None
+            return True
         try:
             root_msgdef = resolve_msgdef_by_name(schema.name, all_definitions)
             if root_msgdef is None:
@@ -279,8 +278,8 @@ def cat(
         except ValidationError:
             logger.exception(f"Query validation error for topic '{topic}'")
             logger.exception(f"Query: {query}  Schema: {schema.name}")
-            return 1
-        return None
+            return False
+        return True
 
     def _to_jsonl(msg: "DecodedMessage", data: Any) -> str:
         entry: dict[str, Any] = {
@@ -325,7 +324,7 @@ def cat(
                             f"Cannot validate query for topic '{msg.channel.topic}' "
                             "(no schema available)"
                         )
-                    elif _validate_query(parsed_query, msg.schema, msg.channel.topic):
+                    elif not _validate_query(parsed_query, msg.schema, msg.channel.topic):
                         return 1
 
                 # Apply query filter

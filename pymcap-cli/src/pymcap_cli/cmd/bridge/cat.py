@@ -150,35 +150,28 @@ async def _cat_async(
             schemas_by_channel[cid] = schema
         return decoder
 
-    def _get_parsed_schema(cid: int) -> dict[str, MessageDefinition] | None:
-        if cid in parsed_schemas:
-            return parsed_schemas[cid]
-        schema = schemas_by_channel.get(cid)
-        if schema is None:
-            return None
+    def _get_parsed_schema(schema: _BridgeSchema) -> dict[str, MessageDefinition] | None:
+        if schema.id in parsed_schemas:
+            return parsed_schemas[schema.id]
         try:
             parsed = parse_schema_to_definitions(schema.name, schema.data)
         except Exception:
             logger.exception(f"Failed to parse schema '{schema.name}'")
             parsed = None
-        parsed_schemas[cid] = parsed
+        parsed_schemas[schema.id] = parsed
         return parsed
 
-    def _get_enum_plan(cid: int) -> EnumPlan | None:
-        if cid in enum_plans:
-            return enum_plans[cid]
-        parsed = _get_parsed_schema(cid)
-        schema = schemas_by_channel.get(cid)
-        plan = build_enum_plan(schema.name, parsed) if parsed and schema else None
-        enum_plans[cid] = plan
+    def _get_enum_plan(schema: _BridgeSchema) -> EnumPlan | None:
+        if schema.id in enum_plans:
+            return enum_plans[schema.id]
+        parsed = _get_parsed_schema(schema)
+        plan = build_enum_plan(schema.name, parsed) if parsed else None
+        enum_plans[schema.id] = plan
         return plan
 
-    def _validate_query(query_path: MessagePath, cid: int, topic: str) -> bool:
-        all_definitions = _get_parsed_schema(cid)
+    def _validate_query(query_path: MessagePath, schema: _BridgeSchema, topic: str) -> bool:
+        all_definitions = _get_parsed_schema(schema)
         if all_definitions is None:
-            return True
-        schema = schemas_by_channel.get(cid)
-        if schema is None:
             return True
         try:
             root_msgdef = resolve_msgdef_by_name(schema.name, all_definitions)
@@ -213,7 +206,8 @@ async def _cat_async(
         header.append(" [", style="dim")
         header.append(schema_name, style="yellow")
         header.append("]", style="dim")
-        plan = None if parsed_query is not None else _get_enum_plan(channel["id"])
+        schema = schemas_by_channel.get(channel["id"])
+        plan = None if parsed_query is not None or schema is None else _get_enum_plan(schema)
         tree = render_message_tree(
             data,
             plan,
@@ -247,7 +241,8 @@ async def _cat_async(
         topic = channel["topic"]
         if parsed_query is not None and topic not in validated_topics:
             validated_topics.add(topic)
-            if not _validate_query(parsed_query, channel["id"], topic):
+            schema = schemas_by_channel.get(channel["id"])
+            if schema is not None and not _validate_query(parsed_query, schema, topic):
                 return_code = 1
                 done.set()
                 return
