@@ -10,11 +10,12 @@ from ros_parser.message_path import MessagePathError
 
 from pymcap_cli.cmd._run_processor import finalize_delete_source, resolve_overwrite_policy
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
-from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, NS_TO_MS, NS_TO_SEC
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
+from pymcap_cli.types.duration import parse_duration_ns
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
     CompressionOption,
@@ -32,25 +33,6 @@ SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
 
 
-def _parse_duration(value: str) -> int:
-    """Parse duration string to nanoseconds. Supports s, m, h suffixes or raw ns."""
-    value = value.strip().lower()
-    if value.endswith("ns"):
-        return int(value[:-2])
-    if value.endswith("us"):
-        return int(value[:-2]) * 1_000
-    if value.endswith("ms"):
-        return int(value[:-2]) * NS_TO_MS
-    if value.endswith("s"):
-        return int(value[:-1]) * NS_TO_SEC
-    if value.endswith("m"):
-        return int(value[:-1]) * 60 * NS_TO_SEC
-    if value.endswith("h"):
-        return int(value[:-1]) * 3600 * NS_TO_SEC
-    # Plain integer = nanoseconds
-    return int(value)
-
-
 def split(
     file: str,
     *,
@@ -59,7 +41,7 @@ def split(
         Parameter(
             name=["--duration"],
             group=SPLIT_GROUP,
-            help="Split every N time units (e.g. 60s, 5m, 1h) or nanoseconds",
+            help="Split every N time units (e.g. 60s, 1.5m, 1h); bare numbers are seconds",
         ),
     ] = None,
     split_at: Annotated[
@@ -110,7 +92,7 @@ def split(
     file
         Path to the MCAP file to split (local file or HTTP/HTTPS URL).
     duration
-        Split interval, e.g. "60s", "5m", "1h", or raw nanoseconds.
+        Split interval, e.g. "60s", "1.5m", "1h"; bare numbers are seconds.
     split_at
         Timestamps at which to split (ns integer or RFC3339 format).
     expression
@@ -179,7 +161,7 @@ def split(
     processors = []
     if duration:
         try:
-            duration_ns = _parse_duration(duration)
+            duration_ns = parse_duration_ns(duration)
         except ValueError:
             logger.exception(f"Error parsing duration '{duration}'")
             return 1
