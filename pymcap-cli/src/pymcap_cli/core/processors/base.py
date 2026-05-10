@@ -107,6 +107,16 @@ class Processor:
     def route_message(self, message: Message) -> int | str | None:
         return None
 
+    def also_route_to(self, message: Message) -> Iterable[OutputKey]:
+        """Yield additional output keys to write this message into.
+
+        ``route_message`` returns the *primary* destination; this hook lets a
+        processor duplicate the message into one or more *extra* segments
+        (used by ``split`` trailing-context to copy target-topic messages
+        into the segment that just ended).
+        """
+        return ()
+
     def output_keys(self) -> list[int | str] | None:
         return None
 

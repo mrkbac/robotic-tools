@@ -913,7 +913,7 @@ class McapProcessor:
 
         input_opts = self._get_input(stream_id)
 
-        route_key = self._get_message_route(message)
+        route_key, routed_processors = self._get_message_routes(message)
         if route_key is None:
             route_key = 0
 
@@ -959,6 +959,29 @@ class McapProcessor:
                 data=message.data,
                 publish_time=message.publish_time,
             )
+
+        # Trailing-context (split): also duplicate into any extra segments
+        # the output processors request via also_route_to. Skips rechunking
+        # mode for now — that path is not used by ExpressionSplitProcessor.
+        if not self.options.output_options.is_rechunking:
+            for processor in self.options.output_options.processors:
+                for requested_extra_key in processor.also_route_to(message):
+                    extra_key = self._compose_extra_message_route(
+                        processor,
+                        requested_extra_key,
+                        routed_processors,
+                    )
+                    if extra_key == route_key:
+                        continue
+                    self._replay_segment_open(extra_key)
+                    self.output_manager.ensure_channel_written(message.channel_id, extra_key)
+                    extra_writer = self.output_manager.get_writer(extra_key)
+                    extra_writer.add_message(
+                        channel_id=message.channel_id,
+                        log_time=message.log_time,
+                        data=message.data,
+                        publish_time=message.publish_time,
+                    )
 
     def _handle_schema_record(self, schema: Schema, stream_id: int) -> None:
         remapped_schema = self.remapper.remap_schema(stream_id, schema)
@@ -1139,7 +1162,7 @@ class McapProcessor:
         # Pre-compute statically known output segments and expose them to input
         # processors before record processing starts.
         known_segments = list(self._iter_known_output_segments())
-        if not known_segments:
+        if not known_segments and not output_opts.is_splitting:
             known_segments = [(0, 0, 0)]
         self._prepare_input_processors(summaries, known_segments)
 
@@ -1373,16 +1396,43 @@ class McapProcessor:
 
     def _get_message_route(self, message: Message) -> OutputKey | None:
         """Get output key for a message from output processors."""
+        route, _routed_processors = self._get_message_routes(message)
+        return route
+
+    def _get_message_routes(
+        self,
+        message: Message,
+    ) -> tuple[OutputKey | None, list[tuple[Processor, int | str]]]:
+        """Get the output key and the per-processor route components."""
         routes: list[int | str] = []
+        routed_processors: list[tuple[Processor, int | str]] = []
         for proc in self.options.output_options.processors:
             route = proc.route_message(message)
             if route is not None:
                 routes.append(route)
+                routed_processors.append((proc, route))
         if not routes:
-            return None
+            return None, routed_processors
         if len(routes) == 1:
-            return routes[0]
-        return tuple(routes)
+            return routes[0], routed_processors
+        return tuple(routes), routed_processors
+
+    def _compose_extra_message_route(
+        self,
+        processor: Processor,
+        extra_key: OutputKey,
+        routed_processors: list[tuple[Processor, int | str]],
+    ) -> OutputKey:
+        if len(routed_processors) <= 1 or isinstance(extra_key, tuple):
+            return extra_key
+
+        for index, (routed_processor, _route) in enumerate(routed_processors):
+            if routed_processor is processor:
+                routes = [route for _processor, route in routed_processors]
+                routes[index] = extra_key
+                return tuple(routes)
+
+        return extra_key
 
     def _run_chunk_pipeline(self, chunks: Iterator[PendingChunk]) -> None:
         """Consume chunks from the merged iterator, decompressing DECODE chunks ahead.

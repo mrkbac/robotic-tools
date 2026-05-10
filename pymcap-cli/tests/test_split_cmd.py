@@ -1,3 +1,5 @@
+import pytest
+from pymcap_cli.cli import app
 from pymcap_cli.cmd import split_cmd
 from pymcap_cli.core.mcap_processor import OverwriteCollisionPolicy
 
@@ -40,6 +42,40 @@ def test_split_rejects_force_and_no_clobber():
     exit_code = split_cmd.split(file="input.mcap", duration="1s", force=True, no_clobber=True)
 
     assert exit_code == 1
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["--hysteresis", "0s"],
+        ["--hysteresis-count", "0"],
+        ["--keep-trailing-context", "0s"],
+        ["--keep-trailing-count", "0"],
+    ],
+)
+def test_split_rejects_zero_expression_options_before_command_runs(
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+    tokens: list[str],
+):
+    called = False
+
+    def fake_run_processor_multi(*, files: list[str], output_options, input_options=None):
+        nonlocal called
+        _ = files, output_options, input_options
+        called = True
+        return empty_processor_result(segments={})
+
+    monkeypatch.setattr(split_cmd, "run_processor_multi", fake_run_processor_multi)
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(["split", "input.mcap", "--expression", "/state.msg", *tokens])
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert exc_info.value.code == 1
+    assert "Must be > 0" in output
+    assert not called
 
 
 def test_split_returns_one_when_processor_raises(monkeypatch):

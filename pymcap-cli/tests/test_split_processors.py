@@ -391,3 +391,176 @@ class TestExpressionSplitProcessor:
             )
             == ChunkDecision.DECODE
         )
+
+
+def _make_hysteresis_proc(
+    *,
+    hysteresis_ns: int | None = None,
+    hysteresis_count: int | None = None,
+    trailing_context_ns: int | None = None,
+    trailing_context_count: int | None = None,
+) -> ExpressionSplitProcessor:
+    proc = ExpressionSplitProcessor(
+        "/t.field",
+        hysteresis_ns=hysteresis_ns,
+        hysteresis_count=hysteresis_count,
+        trailing_context_ns=trailing_context_ns,
+        trailing_context_count=trailing_context_count,
+    )
+    proc.channels[1] = Channel(id=1, schema_id=1, topic="/t", message_encoding="json", metadata={})
+    proc._decoders[1] = lambda data: type("M", (), {"field": bytes(data).decode()})()
+    return proc
+
+
+# ---------------------------------------------------------------------------
+# ExpressionSplitProcessor — hysteresis
+# ---------------------------------------------------------------------------
+
+
+class TestExpressionSplitHysteresis:
+    def test_count_hysteresis_holds_segment(self):
+        # Need 3 sustained reads of "beta" before transition fires.
+        proc = _make_hysteresis_proc(hysteresis_count=3)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        # First "beta" is just a candidate; segment stays at 0.
+        assert proc.route_message(_message(1, data=b"beta")) == 0
+        assert proc.route_message(_message(2, data=b"beta")) == 0
+        # Third "beta" hits the threshold → commit, segment becomes 1.
+        assert proc.route_message(_message(3, data=b"beta")) == 1
+
+    def test_count_hysteresis_resets_on_flap(self):
+        proc = _make_hysteresis_proc(hysteresis_count=3)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        assert proc.route_message(_message(1, data=b"beta")) == 0
+        assert proc.route_message(_message(2, data=b"beta")) == 0
+        # Flap back to alpha: candidate cleared.
+        assert proc.route_message(_message(3, data=b"alpha")) == 0
+        # Next beta starts fresh.
+        assert proc.route_message(_message(4, data=b"beta")) == 0
+        assert proc.route_message(_message(5, data=b"beta")) == 0
+        assert proc.route_message(_message(6, data=b"beta")) == 1
+
+    def test_time_hysteresis_holds_segment(self):
+        # 500ms time threshold.
+        proc = _make_hysteresis_proc(hysteresis_ns=500)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        assert proc.route_message(_message(100, data=b"beta")) == 0
+        assert proc.route_message(_message(400, data=b"beta")) == 0
+        assert proc.route_message(_message(600, data=b"beta")) == 1  # 600 - 100 >= 500
+
+    def test_time_and_count_both_required(self):
+        # Both must be satisfied.
+        proc = _make_hysteresis_proc(hysteresis_ns=500, hysteresis_count=2)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        # First "beta": candidate count=1 (need 2), time=0 (need 500). Neither.
+        assert proc.route_message(_message(200, data=b"beta")) == 0
+        # Second beta: count=2 OK, but time=600-200=400 < 500 → still hold.
+        assert proc.route_message(_message(600, data=b"beta")) == 0
+        # Third beta: count=3, time=700-200=500 → both OK, commit.
+        assert proc.route_message(_message(700, data=b"beta")) == 1
+
+    def test_no_hysteresis_commits_immediately(self):
+        proc = _make_hysteresis_proc()
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        assert proc.route_message(_message(1, data=b"beta")) == 1
+
+
+# ---------------------------------------------------------------------------
+# ExpressionSplitProcessor — trailing context
+# ---------------------------------------------------------------------------
+
+
+class TestExpressionSplitTrailingContext:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"hysteresis_ns": 0},
+            {"hysteresis_count": 0},
+            {"trailing_context_ns": 0},
+            {"trailing_context_count": 0},
+        ],
+    )
+    def test_rejects_non_positive_thresholds(self, kwargs: dict[str, int]):
+        with pytest.raises(ValueError, match="positive"):
+            _make_hysteresis_proc(**kwargs)
+
+    def test_trailing_count_duplicates_into_previous_segment(self):
+        proc = _make_hysteresis_proc(trailing_context_count=2)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        # Transition at t=10: now in segment 1.
+        assert proc.route_message(_message(10, data=b"beta")) == 1
+        # Next 2 target-topic messages also go to segment 0 via also_route_to.
+        msg1 = _message(11, data=b"beta")
+        assert proc.route_message(msg1) == 1
+        assert list(proc.also_route_to(msg1)) == [0]
+        msg2 = _message(12, data=b"beta")
+        assert proc.route_message(msg2) == 1
+        assert list(proc.also_route_to(msg2)) == [0]
+        # Window exhausted.
+        msg3 = _message(13, data=b"beta")
+        assert proc.route_message(msg3) == 1
+        assert list(proc.also_route_to(msg3)) == []
+
+    def test_trailing_time_duplicates_until_window_closes(self):
+        proc = _make_hysteresis_proc(trailing_context_ns=100)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+        # Transition at t=10: tail until 110.
+        assert proc.route_message(_message(10, data=b"beta")) == 1
+        msg = _message(50, data=b"beta")
+        proc.route_message(msg)
+        assert list(proc.also_route_to(msg)) == [0]
+        # 110 is the cutoff (>110 closes).
+        msg = _message(120, data=b"beta")
+        proc.route_message(msg)
+        assert list(proc.also_route_to(msg)) == []
+
+    def test_trailing_only_target_topic_duplicates(self):
+        proc = _make_hysteresis_proc(trailing_context_count=5)
+        proc.channels[2] = Channel(
+            id=2, schema_id=1, topic="/other", message_encoding="json", metadata={}
+        )
+        proc.route_message(_message(0, data=b"alpha"))
+        proc.route_message(_message(10, data=b"beta"))  # enter seg 1
+        # Non-target message: no duplication.
+        other = _message(11, channel_id=2)
+        assert list(proc.also_route_to(other)) == []
+        # Target message: duplicates into seg 0.
+        target = _message(12, channel_id=1, data=b"beta")
+        proc.route_message(target)
+        assert list(proc.also_route_to(target)) == [0]
+
+    def test_overlapping_trailing_windows_keep_each_previous_segment(self):
+        proc = _make_hysteresis_proc(trailing_context_count=2)
+        assert proc.route_message(_message(0, data=b"alpha")) == 0
+
+        first_transition = _message(10, data=b"beta")
+        assert proc.route_message(first_transition) == 1
+        assert list(proc.also_route_to(first_transition)) == [0]
+
+        second_transition = _message(20, data=b"gamma")
+        assert proc.route_message(second_transition) == 2
+        assert list(proc.also_route_to(second_transition)) == [0, 1]
+
+        followup = _message(30, data=b"gamma")
+        assert proc.route_message(followup) == 2
+        assert list(proc.also_route_to(followup)) == [1]
+
+        exhausted = _message(40, data=b"gamma")
+        assert proc.route_message(exhausted) == 2
+        assert list(proc.also_route_to(exhausted)) == []
+
+    def test_no_trailing_when_disabled(self):
+        proc = _make_hysteresis_proc()
+        proc.route_message(_message(0, data=b"alpha"))
+        proc.route_message(_message(10, data=b"beta"))
+        msg = _message(11, data=b"beta")
+        assert list(proc.also_route_to(msg)) == []
+
+    def test_no_trailing_for_first_segment_commit(self):
+        # The very first commit (UNSET → first value) should not arm a tail
+        # because there is no previous segment.
+        proc = _make_hysteresis_proc(trailing_context_count=10)
+        proc.route_message(_message(0, data=b"alpha"))  # first commit
+        msg = _message(1, data=b"alpha")
+        proc.route_message(msg)
+        assert list(proc.also_route_to(msg)) == []

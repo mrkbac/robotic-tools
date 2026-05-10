@@ -282,6 +282,190 @@ class TestExpressionSplit:
         )
         assert total == stats.writer_statistics.message_count
 
+    def _write_noisy_bool_mcap(self, path: Path, *, samples: list[tuple[int, str]]) -> int:
+        """Write a tiny JSON MCAP at ``path`` with one ``/state`` topic.
+
+        ``samples`` is a list of ``(log_time_ns, value)`` tuples where ``value``
+        is the string written into the ``msg`` field.
+        Returns the file size in bytes.
+        """
+        import io  # noqa: PLC0415
+
+        from small_mcap import CompressionType, McapWriter  # noqa: PLC0415
+
+        buf = io.BytesIO()
+        writer = McapWriter(buf, compression=CompressionType.NONE)
+        writer.start()
+        writer.add_schema(schema_id=1, name="t", encoding="json", data=b"{}")
+        writer.add_channel(channel_id=1, topic="/state", message_encoding="json", schema_id=1)
+        for log_time_ns, value in samples:
+            payload = f'{{"msg": "{value}"}}'.encode()
+            writer.add_message(
+                channel_id=1, log_time=log_time_ns, publish_time=log_time_ns, data=payload
+            )
+        writer.finish()
+        path.write_bytes(buf.getvalue())
+        return path.stat().st_size
+
+    def test_hysteresis_count_suppresses_flapping(self, tmp_path: Path):
+        """A flapping signal under the count threshold produces a single segment."""
+        src = tmp_path / "in.mcap"
+        # 3-count threshold; the value flaps A→B→A→B→A so no run of 3 betas.
+        size = self._write_noisy_bool_mcap(
+            src,
+            samples=[
+                (0, "alpha"),
+                (1, "beta"),
+                (2, "alpha"),
+                (3, "beta"),
+                (4, "alpha"),
+            ],
+        )
+
+        with src.open("rb") as input_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(stream=input_stream, size=size, options=InputOptions.from_args())
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    processors=[ExpressionSplitProcessor("/state.msg", hysteresis_count=3)],
+                    output_template=str(tmp_path / "seg_{index:03d}.mcap"),
+                    compression="zstd",
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                ),
+            )
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream=None)
+
+        # All 5 messages collapse into a single segment.
+        assert len(processor.output_manager.segments) == 1
+        assert stats.writer_statistics.message_count == 5
+
+    def test_hysteresis_count_commits_after_threshold(self, tmp_path: Path):
+        """A sustained value run beyond the threshold creates a new segment."""
+        src = tmp_path / "in.mcap"
+        size = self._write_noisy_bool_mcap(
+            src,
+            samples=[
+                (0, "alpha"),
+                (1, "beta"),
+                (2, "beta"),
+                (3, "beta"),  # threshold met → segment 1
+                (4, "beta"),
+            ],
+        )
+
+        with src.open("rb") as input_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(stream=input_stream, size=size, options=InputOptions.from_args())
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    processors=[ExpressionSplitProcessor("/state.msg", hysteresis_count=3)],
+                    output_template=str(tmp_path / "seg_{index:03d}.mcap"),
+                    compression="zstd",
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                ),
+            )
+            McapProcessor(options).process(output_stream=None)
+
+        assert len(list(tmp_path.glob("seg_*.mcap"))) == 2
+
+    def test_trailing_context_duplicates_target_messages(self, tmp_path: Path):
+        """``trailing_context_count`` duplicates target msgs into the prev segment."""
+        from small_mcap import read_message  # noqa: PLC0415
+
+        src = tmp_path / "in.mcap"
+        # Transition at t=2 (first beta) → segment 1. The next two beta
+        # messages (t=2 and t=3 themselves, not subsequent ones) duplicate
+        # back into segment 0 via also_route_to.
+        size = self._write_noisy_bool_mcap(
+            src,
+            samples=[
+                (0, "alpha"),
+                (1, "alpha"),
+                (2, "beta"),
+                (3, "beta"),
+                (4, "beta"),
+                (5, "beta"),
+                (6, "beta"),
+            ],
+        )
+
+        with src.open("rb") as input_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(stream=input_stream, size=size, options=InputOptions.from_args())
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    processors=[ExpressionSplitProcessor("/state.msg", trailing_context_count=2)],
+                    output_template=str(tmp_path / "seg_{index:03d}.mcap"),
+                    compression="zstd",
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                ),
+            )
+            McapProcessor(options).process(output_stream=None)
+
+        seg_paths = sorted(tmp_path.glob("seg_*.mcap"))
+        assert len(seg_paths) == 2
+
+        def times(p: Path) -> list[int]:
+            with p.open("rb") as f:
+                return [m.log_time for _s, _c, m in read_message(f)]
+
+        # Segment 0: alphas 0, 1 + the first two betas duplicated as context.
+        assert times(seg_paths[0]) == [0, 1, 2, 3]
+        # Segment 1: all betas land naturally in the new segment.
+        assert times(seg_paths[1]) == [2, 3, 4, 5, 6]
+
+    def test_trailing_context_combines_with_duration_split_key(self, tmp_path: Path):
+        """Trailing context replaces only the expression component of tuple keys."""
+        from small_mcap import read_message  # noqa: PLC0415
+
+        src = tmp_path / "in.mcap"
+        size = self._write_noisy_bool_mcap(
+            src,
+            samples=[
+                (0, "alpha"),
+                (1, "alpha"),
+                (2, "beta"),
+                (3, "beta"),
+                (4, "beta"),
+            ],
+        )
+
+        with src.open("rb") as input_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(stream=input_stream, size=size, options=InputOptions.from_args())
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    processors=[
+                        DurationSplitProcessor(duration_ns=10),
+                        ExpressionSplitProcessor("/state.msg", trailing_context_count=2),
+                    ],
+                    output_template=str(tmp_path / "seg_{key}.mcap"),
+                    compression="zstd",
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                ),
+            )
+            processor = McapProcessor(options)
+            processor.process(output_stream=None)
+
+        assert processor.output_manager is not None
+        assert set(processor.output_manager.segments) == {(0, 0), (0, 1)}
+
+        def times(key: tuple[int, int]) -> list[int]:
+            with Path(processor.output_manager.segments[key].path).open("rb") as f:
+                return [m.log_time for _s, _c, m in read_message(f)]
+
+        assert times((0, 0)) == [0, 1, 2, 3]
+        assert times((0, 1)) == [2, 3, 4]
+
 
 @pytest.mark.e2e
 class TestSplitWithRechunking:

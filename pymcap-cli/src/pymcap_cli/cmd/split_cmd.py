@@ -1,10 +1,12 @@
 """Split command - divide MCAP files into multiple output segments."""
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
 
-from cyclopts import Group, Parameter
+from cyclopts import Group, Parameter, validators
+from cyclopts.token import Token
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
@@ -32,6 +34,19 @@ console = Console()
 SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
 LATCHING_GROUP = Group("Latching")
+EXPRESSION_GROUP = Group("Expression Options")
+
+
+def _duration_ns_converter(_type: type, tokens: Sequence[Token]) -> int:
+    if len(tokens) != 1:
+        raise ValueError("Expected exactly one duration.")
+    return parse_duration_ns(tokens[0].value)
+
+
+def _coerce_duration_ns(value: int | str | None) -> int | None:
+    if isinstance(value, str):
+        return parse_duration_ns(value)
+    return value
 
 
 def split(
@@ -77,6 +92,60 @@ def split(
             help="Output file naming template (e.g. 'output_{index:03d}.mcap')",
         ),
     ] = "output_{index:03d}.mcap",
+    hysteresis: Annotated[
+        int | None,
+        Parameter(
+            name=["--hysteresis"],
+            group=EXPRESSION_GROUP,
+            converter=_duration_ns_converter,
+            validator=validators.Number(gt=0),
+            help=(
+                "Time hysteresis for --expression: a new value must persist "
+                "for at least this duration before a segment cut fires "
+                "(e.g. '500ms', '2s'). Combines with --hysteresis-count."
+            ),
+        ),
+    ] = None,
+    hysteresis_count: Annotated[
+        int | None,
+        Parameter(
+            name=["--hysteresis-count"],
+            group=EXPRESSION_GROUP,
+            validator=validators.Number(gt=0),
+            help=(
+                "Count hysteresis for --expression: a new value must appear "
+                "this many times before a segment cut fires. Combines with "
+                "--hysteresis."
+            ),
+        ),
+    ] = None,
+    keep_trailing_context: Annotated[
+        int | None,
+        Parameter(
+            name=["--keep-trailing-context"],
+            group=EXPRESSION_GROUP,
+            converter=_duration_ns_converter,
+            validator=validators.Number(gt=0),
+            help=(
+                "After a transition, also write target-topic messages from "
+                "this duration (e.g. '500ms') into the previous segment "
+                "for context. Combines with --keep-trailing-count."
+            ),
+        ),
+    ] = None,
+    keep_trailing_count: Annotated[
+        int | None,
+        Parameter(
+            name=["--keep-trailing-count"],
+            group=EXPRESSION_GROUP,
+            validator=validators.Number(gt=0),
+            help=(
+                "After a transition, also write up to this many "
+                "target-topic messages into the previous segment for "
+                "context. Combines with --keep-trailing-context."
+            ),
+        ),
+    ] = None,
     latch: Annotated[
         list[str] | None,
         Parameter(
@@ -200,12 +269,41 @@ def split(
         logger.info(f"Timestamp split: {len(split_points)} point(s)")
 
     if expression:
+        # Hysteresis / trailing-context only apply to expression splits.
         try:
-            processors.append(ExpressionSplitProcessor(expression))
+            hysteresis_ns = _coerce_duration_ns(hysteresis)
+            trailing_ns = _coerce_duration_ns(keep_trailing_context)
+        except ValueError:
+            logger.exception("Error parsing hysteresis/trailing-context duration")
+            return 1
+        try:
+            processors.append(
+                ExpressionSplitProcessor(
+                    expression,
+                    hysteresis_ns=hysteresis_ns,
+                    hysteresis_count=hysteresis_count,
+                    trailing_context_ns=trailing_ns,
+                    trailing_context_count=keep_trailing_count,
+                )
+            )
         except MessagePathError:
             logger.exception(f"Error parsing expression '{expression}'")
             return 1
+        except ValueError:
+            logger.exception("Invalid expression split option")
+            return 1
         logger.info(f"Expression split: {expression}")
+    elif (
+        hysteresis
+        or hysteresis_count is not None
+        or keep_trailing_context
+        or keep_trailing_count is not None
+    ):
+        logger.error(
+            "--hysteresis, --hysteresis-count, --keep-trailing-context and "
+            "--keep-trailing-count require --expression."
+        )
+        return 1
 
     # Display split mode
     modes = []

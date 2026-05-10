@@ -1,8 +1,82 @@
 # Changelog
 
-User-facing notes for releases since the 2026-03-01 wave. Each section lists
-the workspace-package versions tagged together; within a section, items are
-grouped by package.
+User-facing notes for releases.
+
+---
+
+## Unreleased
+
+### pymcap-cli
+
+- New `doctor` command validates MCAP container structure and indexes.
+  Findings are grouped by code by default, `--show-all` prints every
+  finding, and `--strict-message-order` can promote non-monotonic message
+  timestamps to errors.
+- New `bridge` command group for live Foxglove WebSocket bridges,
+  available through the `bridge` extra. The default command inspects
+  server metadata, channels, services, status messages, and connection
+  graph data, with table or JSON output, optional compressed JSON,
+  sorting, and `--watch`.
+- New `bridge record` captures live bridge topics into an MCAP file.
+  Topic selection mirrors `ros2 bag record`: exact topic lists, `--all`,
+  regex includes, exact / regex excludes, `--duration`,
+  `--message-limit`, compression/chunk options, and live progress.
+- New `bridge cat` streams decoded live bridge messages to Rich TTY
+  panels or JSONL. It shares the `cat` renderer and supports topic
+  filters, MessagePath `--query`, `--grep`, case-insensitive grep,
+  limits, duration, and byte-rendering modes.
+- New `get attachment` and `get metadata` commands extract
+  summary-indexed attachment bytes and metadata JSON by name. Attachments
+  can be disambiguated with `--offset`; metadata records with the same
+  name are merged with later values winning.
+- `cat` adds `--grep` / `--grep-ignore-case` for decoded scalar-value
+  searches. Byte arrays are skipped during grep so image and point-cloud
+  payloads do not dominate the search cost.
+- `cat` TTY output now renders decoded messages as a tree that annotates
+  ROS constants and Foxglove enum wrapper fields with enum names while
+  leaving JSON output stable.
+- `filter` adds shell-style topic globs (`--topic-glob`,
+  `--exclude-topic-glob`), topic inversion (`--invert-topics`),
+  time-window inversion (`--invert-time`), and relative start/end anchors
+  such as `@5s`, `start+5s`, and `end-30s`.
+- `filter` and `split` add `--latch` and `--latch-from-metadata` so
+  transient-local topics such as `/tf_static` are preserved through
+  trimming and replayed into split outputs.
+- `bag2mcap` and `convert` now exit successfully without creating an
+  output file when the ROS 1 bag or ROS 2 DB3 input contains no
+  connections/topics.
+- Invalid `--compression` values are rejected at CLI parse time across
+  transform commands before any input paths are opened.
+- Progress bars no longer overshoot when a command rereads stream data
+  after scanning summaries or indexes.
+- Optional commands now report targeted install hints for missing extras;
+  `pymcap-cli[all]` includes the new `bridge` extra.
+
+### small-mcap
+
+- zstd compression/decompression can use Python 3.14's
+  `compression.zstd` module, with the existing third-party `zstandard`
+  backend retained for older interpreters. Missing-backend errors now
+  name both accepted zstd providers.
+
+### robo-ws-bridge
+
+- `WebSocketBridgeClient` now tracks advertised services, remove-status
+  events, and connection-graph updates. It exposes `services` and
+  `connection_graph`, supports connection-graph subscribe/unsubscribe
+  callbacks, and restores the graph subscription after reconnects.
+
+### pureini
+
+- Point-cloud zstd encode/decode paths support Python 3.14's stdlib
+  `compression.zstd` module and keep the existing `zstandard` fallback
+  for older Python versions.
+
+### mcap-codec-support
+
+- The point-cloud package exposes `is_compressed_codec_available()` so
+  callers can detect whether a compressed point-cloud backend is
+  importable before selecting that path.
 
 ---
 
@@ -205,7 +279,7 @@ diagnostics, `plot` for time-series, `rosdecompress` to undo
   `CompressedPointCloud2` back to `PointCloud2`. Supports both PyAV and
   ffmpeg-CLI backends.
 - `cat` gains `-o/--output` (with progress bar), `--bytes
-  ints/base64/skip` for binary-field serialization, auto-truncation of
+ints/base64/skip` for binary-field serialization, auto-truncation of
   bytes in TTY display, and a message-count summary on file write.
 - New `all` extra combining `video`, `pointcloud`, and `plot`.
 
