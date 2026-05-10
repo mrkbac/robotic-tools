@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters._common import prepare_output_file
 from pymcap_cli.exporters.geo_common import (
     GeoMode,
@@ -113,21 +112,6 @@ class GeoJsonExporter(GeoRos2Exporter):
     """Per-topic GeoJSON ``FeatureCollection`` files."""
 
     name: ClassVar[str] = "geojson"
-
-    def __init__(
-        self,
-        *,
-        mode: GeoMode = "track+points",
-        max_gap_ns: int = 30 * NS_TO_SEC,
-        stride_n: int = 1,
-        include_no_fix: bool = False,
-    ) -> None:
-        super().__init__(
-            mode=mode,
-            max_gap_ns=max_gap_ns,
-            stride_n=stride_n,
-            include_no_fix=include_no_fix,
-        )
 
     def open_topic(self, ctx: TopicContext) -> _GeoJsonTopicWriter:
         path = prepare_output_file(

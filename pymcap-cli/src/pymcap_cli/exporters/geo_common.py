@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters._common import normalize_schema_name
@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 
 GeoMode = Literal["points", "track", "track+points"]
+
+DEFAULT_MAX_GAP_NS: Final = 30 * NS_TO_SEC
 
 
 # Canonical (short) schema names — compare via :func:`normalize_schema_name`.
@@ -243,7 +245,7 @@ class GeoRos2Exporter(Ros2Exporter):
         self,
         *,
         mode: GeoMode = "track+points",
-        max_gap_ns: int = 30 * NS_TO_SEC,
+        max_gap_ns: int = DEFAULT_MAX_GAP_NS,
         stride_n: int = 1,
         include_no_fix: bool = False,
     ) -> None:
@@ -263,7 +265,7 @@ class SingleFileGeoExporter(GeoRos2Exporter):
         self,
         *,
         mode: GeoMode = "track+points",
-        max_gap_ns: int = 30 * NS_TO_SEC,
+        max_gap_ns: int = DEFAULT_MAX_GAP_NS,
         stride_n: int = 1,
         include_no_fix: bool = False,
     ) -> None:
