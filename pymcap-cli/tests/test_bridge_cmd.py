@@ -8,6 +8,7 @@ import socket
 from typing import TYPE_CHECKING
 
 import pytest
+from pymcap_cli.cmd import bridge_cmd
 from pymcap_cli.cmd.bridge_cmd import (
     BridgeInfo,
     BridgeRecorder,
@@ -16,6 +17,7 @@ from pymcap_cli.cmd.bridge_cmd import (
     TopicSelector,
     _append_status,
     _build_connection_graph_tree,
+    _build_record_status,
     _record_async,
     _remove_statuses,
     _sort_channels,
@@ -23,7 +25,7 @@ from pymcap_cli.cmd.bridge_cmd import (
     to_ws_url,
 )
 from pymcap_cli.utils import compile_topic_patterns
-from rich.console import Console
+from rich.console import Console, RenderableType
 from robo_ws_bridge import ConnectionGraph
 from robo_ws_bridge.server import Channel as ServerChannel
 from robo_ws_bridge.server import WebSocketBridgeServer
@@ -32,13 +34,12 @@ from small_mcap import JSONDecoderFactory, McapWriter, read_message_decoded
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from rich.tree import Tree
     from robo_ws_bridge.ws_types import ChannelInfo
 
 
-def _render(tree: Tree) -> str:
+def _render(renderable: RenderableType) -> str:
     console = Console(record=True, width=120, color_system=None)
-    console.print(tree)
+    console.print(renderable)
     return console.export_text()
 
 
@@ -332,6 +333,56 @@ def test_topic_selector_combines_includes_and_excludes() -> None:
     assert selector.matches("/imu/data") is False
 
 
+def test_record_all_topics_skips_invalid_include_regex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_selectors: list[TopicSelector] = []
+
+    async def fake_record_async(**kwargs) -> int:
+        selector = kwargs["selector"]
+        assert isinstance(selector, TopicSelector)
+        seen_selectors.append(selector)
+        return 0
+
+    monkeypatch.setattr(bridge_cmd, "_record_async", fake_record_async)
+
+    rc = bridge_cmd.record(
+        target="localhost",
+        output=tmp_path / "capture.mcap",
+        all_topics=True,
+        regex="[",
+    )
+
+    assert rc == 0
+    assert seen_selectors == [
+        TopicSelector(
+            all_topics=True,
+            exact_topics=frozenset(),
+            include_patterns=(),
+            exclude_topics=frozenset(),
+            exclude_patterns=(),
+        )
+    ]
+
+
+def test_record_all_topics_still_validates_exclude_regex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_record_async(**_kwargs) -> int:
+        raise AssertionError("recording should not start with an invalid exclude regex")
+
+    monkeypatch.setattr(bridge_cmd, "_record_async", fake_record_async)
+
+    rc = bridge_cmd.record(
+        target="localhost",
+        output=tmp_path / "capture.mcap",
+        all_topics=True,
+        exclude_regex="[",
+    )
+
+    assert rc == 1
+
+
 def test_recorder_dedups_schemas_and_channels() -> None:
     recorder, writer, _ = _make_recorder()
     channel: ChannelInfo = {
@@ -392,7 +443,7 @@ def test_recorder_on_message_writes_records_and_respects_limit(tmp_path: Path) -
 
     assert recorder.total_messages == 2
     assert recorder.message_counts == {"/foo": 2}
-    assert recorder.bytes_written == len(b'{"v":1}') + len(b'{"v":2}')
+    assert recorder.payload_bytes == len(b'{"v":1}') + len(b'{"v":2}')
 
     out = tmp_path / "rec.mcap"
     out.write_bytes(buf.getvalue())
@@ -420,6 +471,28 @@ def test_recorder_skips_messages_for_topics_not_matching_filter() -> None:
     writer.finish()
     assert recorder.total_messages == 0
     assert recorder.message_counts == {}
+
+
+def test_record_status_waiting_message_renders_without_markup(tmp_path: Path) -> None:
+    recorder, writer, _ = _make_recorder()
+    try:
+        rendered = _render(
+            _build_record_status(
+                url="ws://example:8765",
+                output=tmp_path / "capture.mcap",
+                recorder=recorder,
+                elapsed=1.5,
+                duration=None,
+                message_limit=None,
+            )
+        )
+    finally:
+        writer.finish()
+
+    assert "Payload:" in rendered
+    assert "Written:" not in rendered
+    assert "Waiting for messages..." in rendered
+    assert "[dim]" not in rendered
 
 
 def _free_port() -> int:

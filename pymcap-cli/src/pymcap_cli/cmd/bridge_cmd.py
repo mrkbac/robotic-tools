@@ -613,7 +613,7 @@ class BridgeRecorder:
     schema_ids: dict[tuple[str, str, bytes], int] = field(default_factory=dict)
     channel_ids: dict[_RecorderChannelKey, int] = field(default_factory=dict)
     message_counts: dict[str, int] = field(default_factory=dict)
-    bytes_written: int = 0
+    payload_bytes: int = 0
     total_messages: int = 0
     _next_schema_id: int = 1
     _next_channel_id: int = 1
@@ -678,7 +678,7 @@ class BridgeRecorder:
             publish_time=timestamp,
         )
         self.total_messages += 1
-        self.bytes_written += len(payload)
+        self.payload_bytes += len(payload)
         self.message_counts[channel["topic"]] = self.message_counts.get(channel["topic"], 0) + 1
         if (
             self.done_event is not None
@@ -720,7 +720,7 @@ def _build_record_status(
     if message_limit is not None:
         counter = f"{counter} / {message_limit:,}"
     summary.add_row("Messages:", counter)
-    summary.add_row("Written:", _format_byte_size(recorder.bytes_written))
+    summary.add_row("Payload:", _format_byte_size(recorder.payload_bytes))
 
     table = Table(title="Per-topic", title_justify="left", title_style="bold cyan")
     table.add_column("Topic")
@@ -730,14 +730,26 @@ def _build_record_status(
         table.add_row(_format_parts_with_colors(topic), f"{count:,}")
 
     if not recorder.message_counts:
-        return Group(summary, Text("\n[dim]Waiting for messages...[/]", end=""))
+        return Group(summary, Text(""), Text("Waiting for messages...", style="dim"))
     return Group(summary, Text(""), table)
 
 
-async def _subscribe_matching(client: WebSocketBridgeClient, recorder: BridgeRecorder) -> None:
-    for ch in list(client.channels.values()):
-        if recorder.matches_topic(ch["topic"]):
-            await client.subscribe(ch["topic"])
+async def _subscribe_if_matching(
+    client: WebSocketBridgeClient, recorder: BridgeRecorder, channel: ChannelInfo
+) -> None:
+    if recorder.matches_topic(channel["topic"]):
+        await client.subscribe(channel["topic"])
+
+
+async def _subscribe_matching_channels(
+    client: WebSocketBridgeClient, recorder: BridgeRecorder
+) -> None:
+    async def _on_advertise(channel: ChannelInfo) -> None:
+        await _subscribe_if_matching(client, recorder, channel)
+
+    client.on_advertised_channel(_on_advertise)
+    for channel in list(client.channels.values()):
+        await _subscribe_if_matching(client, recorder, channel)
 
 
 async def _record_async(
@@ -766,68 +778,67 @@ async def _record_async(
             return 1
 
         compression_type = str_to_compression_type(compression_choice)
-        with output.open("wb") as out:
-            writer = McapWriter(out, chunk_size=chunk_size, compression=compression_type)
-            writer.start(profile="", library="pymcap-cli bridge record")
+        try:
+            with output.open("wb") as out:
+                writer = McapWriter(out, chunk_size=chunk_size, compression=compression_type)
+                writer.start(profile="", library="pymcap-cli bridge record")
 
-            done = asyncio.Event()
-            recorder = BridgeRecorder(
-                writer=writer,
-                selector=selector,
-                message_limit=message_limit,
-                done_event=done,
-            )
+                done = asyncio.Event()
+                recorder = BridgeRecorder(
+                    writer=writer,
+                    selector=selector,
+                    message_limit=message_limit,
+                    done_event=done,
+                )
 
-            async def _on_advertise(channel: ChannelInfo) -> None:
-                if recorder.matches_topic(channel["topic"]):
-                    await client.subscribe(channel["topic"])
+                client.on_message(recorder.on_message)
+                await _subscribe_matching_channels(client, recorder)
 
-            client.on_advertised_channel(_on_advertise)
-            client.on_message(recorder.on_message)
-            await _subscribe_matching(client, recorder)
+                start = time.monotonic()
+                background: list[asyncio.Task[None]] = []
+                if duration is not None:
 
-            start = time.monotonic()
-            background: list[asyncio.Task[None]] = []
-            if duration is not None:
+                    async def _stop_after_duration() -> None:
+                        await asyncio.sleep(duration)
+                        done.set()
 
-                async def _stop_after_duration() -> None:
-                    await asyncio.sleep(duration)
-                    done.set()
+                    background.append(asyncio.create_task(_stop_after_duration()))
 
-                background.append(asyncio.create_task(_stop_after_duration()))
-
-            async def _wait_for_done_with_status() -> None:
-                if not show_status:
-                    await done.wait()
-                    return
-                with Live(console=console, refresh_per_second=4) as live:
-                    while not done.is_set():
-                        elapsed = time.monotonic() - start
-                        live.update(
-                            _build_record_status(
-                                url=url,
-                                output=output,
-                                recorder=recorder,
-                                elapsed=elapsed,
-                                duration=duration,
-                                message_limit=message_limit,
+                async def _wait_for_done_with_status() -> None:
+                    if not show_status:
+                        await done.wait()
+                        return
+                    with Live(console=console, refresh_per_second=4) as live:
+                        while not done.is_set():
+                            elapsed = time.monotonic() - start
+                            live.update(
+                                _build_record_status(
+                                    url=url,
+                                    output=output,
+                                    recorder=recorder,
+                                    elapsed=elapsed,
+                                    duration=duration,
+                                    message_limit=message_limit,
+                                )
                             )
-                        )
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.shield(done.wait()), timeout=refresh_interval
-                            )
-                        except asyncio.TimeoutError:
-                            continue
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(done.wait()), timeout=refresh_interval
+                                )
+                            except asyncio.TimeoutError:
+                                continue
 
-            try:
-                await _wait_for_done_with_status()
-            finally:
-                for task in background:
-                    task.cancel()
-                if background:
-                    await asyncio.gather(*background, return_exceptions=True)
-                writer.finish()
+                try:
+                    await _wait_for_done_with_status()
+                finally:
+                    for task in background:
+                        task.cancel()
+                    if background:
+                        await asyncio.gather(*background, return_exceptions=True)
+                    writer.finish()
+        except OSError as exc:
+            ERR.print(f"[red]Error:[/] Failed to write to {output}: {exc}")
+            return 1
 
         console.print(f"[green]Wrote {recorder.total_messages:,} messages to[/] [bold]{output}[/]")
         return 0
@@ -980,7 +991,9 @@ def record(
     confirm_output_overwrite(output_path, force)
 
     try:
-        include_patterns = tuple(compile_topic_patterns([regex])) if regex is not None else ()
+        include_patterns = (
+            tuple(compile_topic_patterns([regex])) if regex is not None and not all_topics else ()
+        )
         exclude_patterns = (
             tuple(compile_topic_patterns([exclude_regex])) if exclude_regex is not None else ()
         )
@@ -1018,7 +1031,7 @@ def record(
         console.print("\n[dim]Recording stopped.[/]")
         return 0
     except OSError as exc:
-        ERR.print(f"[red]Error:[/] Failed to connect to {url}: {exc}")
+        ERR.print(f"[red]Error:[/] Recording failed for {url}: {exc}")
         return 1
 
 
