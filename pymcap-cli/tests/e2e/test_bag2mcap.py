@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.cmd.bag2mcap_cmd import Bag2McapOptions, convert_bag_to_mcap
 from pymcap_cli.rosbag_reader import read_bag_messages
+from pymcap_cli.utils import NS_TO_SEC
 from small_mcap import read_message
 
 if TYPE_CHECKING:
@@ -18,8 +19,6 @@ from ..fixtures.bag_generator import (
     generate_multi_topic_bag,
     generate_simple_bag,
 )
-
-_NSEC_PER_SEC = 1_000_000_000
 
 # Real bag fixtures from data/mcap/ (written by actual ROS tooling)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -153,7 +152,7 @@ class TestBag2McapTimestamps:
 
         mcap_messages = _read_mcap_messages(output)
         for i, (_schema, _channel, msg) in enumerate(mcap_messages):
-            expected_ns = 1000 * _NSEC_PER_SEC + i * 100_000_000
+            expected_ns = 1000 * NS_TO_SEC + i * 100_000_000
             assert msg.log_time == expected_ns
             assert msg.publish_time == expected_ns
 

@@ -12,6 +12,7 @@ import struct
 from typing import TYPE_CHECKING, BinaryIO
 
 from pymcap_cli.rosbag_reader._types import BagConnection, BagInfo, BagMessage
+from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -27,9 +28,6 @@ _OP_CHUNK = 0x05
 _OP_CHUNK_INFO = 0x06
 _OP_CONNECTION = 0x07
 
-_NSEC_PER_SEC = 1_000_000_000
-
-
 def _read_uint32(f: BinaryIO) -> int:
     """Read a little-endian uint32."""
     data = f.read(4)
@@ -41,7 +39,7 @@ def _read_uint32(f: BinaryIO) -> int:
 def _parse_time(raw: bytes, offset: int = 0) -> int:
     """Parse a ROS time (4-byte secs + 4-byte nsecs) into nanoseconds."""
     secs, nsecs = struct.unpack_from("<II", raw, offset)
-    return secs * _NSEC_PER_SEC + nsecs
+    return secs * NS_TO_SEC + nsecs
 
 
 def _read_header_fields(data: bytes) -> dict[str, bytes]:

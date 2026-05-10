@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.cmd.cat_cmd import cat
 from pymcap_cli.display.message_render import message_matches_grep
+from pymcap_cli.utils import NS_TO_MS
 from small_mcap import CompressionType, McapWriter
 
 if TYPE_CHECKING:
@@ -35,9 +36,9 @@ def _build_grep_fixture(path: Path) -> Path:
     for i, (channel_id, payload) in enumerate(payloads):
         writer.add_message(
             channel_id=channel_id,
-            log_time=i * 1_000_000,
+            log_time=i * NS_TO_MS,
             data=json.dumps(payload).encode(),
-            publish_time=i * 1_000_000,
+            publish_time=i * NS_TO_MS,
         )
 
     writer.finish()

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.cmd import compress_cmd, duplicates_cmd
 from pymcap_cli.core.mcap_compare import discover_mcap_candidates
+from pymcap_cli.utils import NS_TO_MS
 from rich.console import Console
 from small_mcap import CompressionType, IndexType, McapWriter, rebuild_summary
 from typing_extensions import Self
@@ -53,7 +54,7 @@ def _write_custom_mcap(
     index_types: IndexType = IndexType.ALL,
 ) -> None:
     message_times = (
-        [index * 1_000_000 for index in range(messages)] if timestamps is None else timestamps
+        [index * NS_TO_MS for index in range(messages)] if timestamps is None else timestamps
     )
     with path.open("wb") as stream:
         writer = McapWriter(
@@ -101,7 +102,7 @@ def _write_channels_mcap(
                 schema_id=1,
             )
         for index in range(messages_per_topic):
-            log_time = index * 1_000_000
+            log_time = index * NS_TO_MS
             for channel_id in range(1, len(topics) + 1):
                 writer.add_message(
                     channel_id=channel_id,
@@ -274,8 +275,8 @@ def test_duplicates_reports_cutout_inside_larger_mcap(
 ) -> None:
     full = tmp_path / "full.mcap"
     cutout = tmp_path / "cutout.mcap"
-    _write_custom_mcap(full, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(cutout, timestamps=[index * 1_000_000 for index in range(3, 7)])
+    _write_custom_mcap(full, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(cutout, timestamps=[index * NS_TO_MS for index in range(3, 7)])
 
     exit_code, output = _run_duplicates([full, cutout], monkeypatch)
 
@@ -298,9 +299,9 @@ def test_duplicates_groups_multiple_partial_relations_under_anchor(
     full = tmp_path / "full.mcap"
     cutout_a = tmp_path / "cutout_a.mcap"
     cutout_b = tmp_path / "cutout_b.mcap"
-    _write_custom_mcap(full, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(cutout_a, timestamps=[index * 1_000_000 for index in range(5)])
-    _write_custom_mcap(cutout_b, timestamps=[index * 1_000_000 for index in range(5, 10)])
+    _write_custom_mcap(full, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(cutout_a, timestamps=[index * NS_TO_MS for index in range(5)])
+    _write_custom_mcap(cutout_b, timestamps=[index * NS_TO_MS for index in range(5, 10)])
 
     exit_code, output = _run_duplicates([full, cutout_a, cutout_b], monkeypatch)
 
@@ -340,8 +341,8 @@ def test_duplicates_reports_edge_overlap_between_mcaps(
 ) -> None:
     left = tmp_path / "left.mcap"
     right = tmp_path / "right.mcap"
-    _write_custom_mcap(left, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(right, timestamps=[index * 1_000_000 for index in range(7, 15)])
+    _write_custom_mcap(left, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(right, timestamps=[index * NS_TO_MS for index in range(7, 15)])
 
     exit_code, output = _run_duplicates([left, right], monkeypatch)
 
@@ -358,8 +359,8 @@ def test_duplicates_ignores_same_channel_without_approximate_time_overlap(
 ) -> None:
     first = tmp_path / "first.mcap"
     second = tmp_path / "second.mcap"
-    _write_custom_mcap(first, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(second, timestamps=[index * 1_000_000 for index in range(20, 30)])
+    _write_custom_mcap(first, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(second, timestamps=[index * NS_TO_MS for index in range(20, 30)])
 
     exit_code, output = _run_duplicates([first, second], monkeypatch)
 

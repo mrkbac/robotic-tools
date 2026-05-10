@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from pymcap_cli.types.info_types import ChannelInfo, McapInfoOutput, SchemaInfo
-from pymcap_cli.utils import bytes_to_human
+from pymcap_cli.utils import NS_TO_SEC, bytes_to_human
 
 
 def _build_schema_map(schemas: list[SchemaInfo]) -> dict[int, str]:
@@ -30,7 +30,7 @@ def _hz_channel(ch: ChannelInfo) -> float | None:
     """Compute Hz from per-channel duration."""
     dur = ch.get("duration_ns")
     if dur is not None and dur > 0:
-        return ch["message_count"] / (dur / 1_000_000_000)
+        return ch["message_count"] / (dur / NS_TO_SEC)
     return None
 
 
@@ -499,7 +499,7 @@ def display_channels_table(
         )
 
     # Compute global duration for derived values
-    global_dur_sec = data["statistics"]["duration_ns"] / 1_000_000_000
+    global_dur_sec = data["statistics"]["duration_ns"] / NS_TO_SEC
 
     # Schema lookup map
     schema_map = _build_schema_map(data["schemas"])

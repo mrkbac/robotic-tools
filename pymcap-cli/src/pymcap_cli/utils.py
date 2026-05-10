@@ -36,7 +36,8 @@ from small_mcap import (
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR
 
-_NS_TO_SEC = 1_000_000_000
+NS_TO_SEC = 1_000_000_000
+NS_TO_MS = 1_000_000
 
 
 def bytes_to_human(size_bytes: float | None) -> str:
@@ -48,7 +49,7 @@ def bytes_to_human(size_bytes: float | None) -> str:
 
 
 def format_ts_short(time_ns: int) -> str:
-    return datetime.fromtimestamp(time_ns / _NS_TO_SEC).strftime("%H:%M:%S.%f")[:-3]
+    return datetime.fromtimestamp(time_ns / NS_TO_SEC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def file_progress(title: str, console: Console | None = None) -> Progress:
@@ -338,7 +339,7 @@ def parse_time_arg(time_str: str) -> int:
     # Try parsing as RFC3339 date
     try:
         dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-        return int(dt.timestamp() * 1_000_000_000)
+        return int(dt.timestamp() * NS_TO_SEC)
     except ValueError:
         raise ValueError(
             f"Invalid time format: {time_str}. Use nanoseconds or RFC3339 format"
@@ -365,7 +366,7 @@ def parse_timestamp_args(date_or_nanos: str, seconds: int, nanoseconds: int) -> 
     if date_or_nanos:
         return parse_time_arg(date_or_nanos)
     if seconds != 0:
-        return seconds * 1_000_000_000
+        return seconds * NS_TO_SEC
     if nanoseconds != 0:
         return nanoseconds
     return None

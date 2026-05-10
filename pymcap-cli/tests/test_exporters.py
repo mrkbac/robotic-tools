@@ -23,6 +23,7 @@ from pymcap_cli.exporters.image_exporter import (
     _supported_image_formats,
 )
 from pymcap_cli.exporters.json_exporter import JsonExporter
+from pymcap_cli.utils import NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -53,7 +54,7 @@ float64 z
     # CDR encapsulation header (4 bytes: little-endian, no options) + 3 x float64.
     cdr_header = b"\x00\x01\x00\x00"
     for i in range(num_messages):
-        timestamp = i * 1_000_000_000 if log_time_ns is None else log_time_ns
+        timestamp = i * NS_TO_SEC if log_time_ns is None else log_time_ns
         payload = cdr_header + struct.pack("<ddd", float(i), float(i + 1), float(i + 2))
         writer.add_message(
             channel_id=1,

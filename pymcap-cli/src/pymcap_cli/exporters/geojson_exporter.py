@@ -26,6 +26,7 @@ from pymcap_cli.exporters.geo_common import (
     split_on_gaps,
     stride,
 )
+from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -130,7 +131,7 @@ class GeoJsonExporter(Ros2Exporter):
         self,
         *,
         mode: GeoMode = "track+points",
-        max_gap_ns: int = 30 * 1_000_000_000,
+        max_gap_ns: int = 30 * NS_TO_SEC,
         stride_n: int = 1,
         include_no_fix: bool = False,
     ) -> None:

@@ -5,6 +5,8 @@ from pathlib import Path
 
 from small_mcap import CompressionType, McapWriter
 
+from pymcap_cli.utils import NS_TO_MS
+
 
 def create_simple_mcap(
     num_messages: int = 200,
@@ -22,9 +24,9 @@ def create_simple_mcap(
     for i in range(num_messages):
         writer.add_message(
             channel_id=1,
-            log_time=i * 1_000_000,
+            log_time=i * NS_TO_MS,
             data=f'{{"i": {i}}}'.encode(),
-            publish_time=i * 1_000_000,
+            publish_time=i * NS_TO_MS,
         )
 
     writer.finish()
@@ -51,7 +53,7 @@ def create_multi_topic_mcap(
     # Interleave messages from different topics
     for msg_idx in range(messages_per_topic):
         for channel_id in range(1, len(topics) + 1):
-            log_time = (msg_idx * len(topics) + channel_id - 1) * 1_000_000
+            log_time = (msg_idx * len(topics) + channel_id - 1) * NS_TO_MS
             writer.add_message(
                 channel_id=channel_id,
                 log_time=log_time,
@@ -80,9 +82,9 @@ def create_corrupt_mcap(corruption_type: str = "truncated") -> bytes:
     for i in range(100):
         writer.add_message(
             channel_id=1,
-            log_time=i * 1_000_000,
+            log_time=i * NS_TO_MS,
             data=f'{{"i": {i}, "data": "{large_data.decode()}"}}'.encode(),
-            publish_time=i * 1_000_000,
+            publish_time=i * NS_TO_MS,
         )
 
     writer.finish()

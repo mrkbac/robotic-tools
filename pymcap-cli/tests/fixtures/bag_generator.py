@@ -20,7 +20,6 @@ _OP_CHUNK_INFO = 0x06
 _OP_CONNECTION = 0x07
 
 _MAGIC = b"#ROSBAG V2.0\n"
-_NSEC_PER_SEC = 1_000_000_000
 
 
 @dataclass

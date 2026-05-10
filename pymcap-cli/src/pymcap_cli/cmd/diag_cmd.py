@@ -20,6 +20,7 @@ from small_mcap import include_topics, read_message_decoded
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.sparkline import sparkline
 from pymcap_cli.log_setup import ERR
+from pymcap_cli.utils import NS_TO_SEC
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -143,12 +144,12 @@ def _level_text(level: int) -> Text:
 
 
 def _format_timestamp(timestamp_ns: int) -> str:
-    return datetime.fromtimestamp(timestamp_ns / 1_000_000_000).strftime("%H:%M:%S.%f")[:-3]
+    return datetime.fromtimestamp(timestamp_ns / NS_TO_SEC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def _format_duration_ns(ns: int) -> str:
     """Format nanoseconds as human-readable duration."""
-    total_s = ns / 1_000_000_000
+    total_s = ns / NS_TO_SEC
     if total_s < 1:
         return f"{total_s:.1f}s"
     total_s = int(total_s)

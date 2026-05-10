@@ -22,6 +22,7 @@ from pymcap_cli.exporters.geo_common import (
 from pymcap_cli.exporters.geojson_exporter import GeoJsonExporter
 from pymcap_cli.exporters.gpx_exporter import GpxExporter
 from pymcap_cli.exporters.kml_exporter import KmlExporter
+from pymcap_cli.utils import NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
 
 if TYPE_CHECKING:
@@ -126,8 +127,8 @@ def _make_navsatfix_mcap(path: Path, samples: list[tuple[int, float, float, floa
     )
     writer.add_channel(channel_id=1, topic="/gps/fix", message_encoding="cdr", schema_id=1)
     for log_time_ns, lat, lon, alt, status in samples:
-        sec = log_time_ns // 1_000_000_000
-        nanosec = log_time_ns % 1_000_000_000
+        sec = log_time_ns // NS_TO_SEC
+        nanosec = log_time_ns % NS_TO_SEC
         writer.add_message(
             channel_id=1,
             log_time=log_time_ns,
@@ -147,7 +148,7 @@ _BASE_TIME_NS = 1_700_000_000_000_000_000
 def _walking_samples(n: int = 5, status: int = 0) -> list[tuple[int, float, float, float, int]]:
     return [
         (
-            _BASE_TIME_NS + i * 1_000_000_000,
+            _BASE_TIME_NS + i * NS_TO_SEC,
             47.5 + i * 0.0001,
             8.5 + i * 0.0001,
             500.0 + i,
@@ -201,15 +202,15 @@ def test_extract_drops_nan_coords():
 
 
 def test_split_on_gaps():
-    base = 1_000_000_000
+    base = NS_TO_SEC
     samples = [
         Sample(base, 0, 0, None, {}),
-        Sample(base + 1_000_000_000, 0, 0, None, {}),
+        Sample(base + NS_TO_SEC, 0, 0, None, {}),
         # 60-second gap
-        Sample(base + 61_000_000_000, 0, 0, None, {}),
-        Sample(base + 62_000_000_000, 0, 0, None, {}),
+        Sample(base + 61 * NS_TO_SEC, 0, 0, None, {}),
+        Sample(base + 62 * NS_TO_SEC, 0, 0, None, {}),
     ]
-    segments = split_on_gaps(samples, max_gap_ns=30 * 1_000_000_000)
+    segments = split_on_gaps(samples, max_gap_ns=30 * NS_TO_SEC)
     assert len(segments) == 2
     assert len(segments[0]) == 2
     assert len(segments[1]) == 2
@@ -321,8 +322,8 @@ def test_geojson_max_gap_produces_multilinestring(tmp_path):
     src = tmp_path / "src.mcap"
     samples = [
         *_walking_samples(2),
-        (_BASE_TIME_NS + 100_000_000_000, 47.6, 8.6, 510.0, 0),  # 99s gap
-        (_BASE_TIME_NS + 101_000_000_000, 47.6001, 8.6001, 511.0, 0),
+        (_BASE_TIME_NS + 100 * NS_TO_SEC, 47.6, 8.6, 510.0, 0),  # 99s gap
+        (_BASE_TIME_NS + 101 * NS_TO_SEC, 47.6001, 8.6001, 511.0, 0),
     ]
     _make_navsatfix_mcap(src, samples)
 
@@ -330,7 +331,7 @@ def test_geojson_max_gap_produces_multilinestring(tmp_path):
     rc = run_export(
         file=str(src),
         output=out,
-        exporter=GeoJsonExporter(mode="track", max_gap_ns=30 * 1_000_000_000),
+        exporter=GeoJsonExporter(mode="track", max_gap_ns=30 * NS_TO_SEC),
     )
     assert rc == 0
     fc = json.loads(next(out.glob("*.geojson")).read_text())

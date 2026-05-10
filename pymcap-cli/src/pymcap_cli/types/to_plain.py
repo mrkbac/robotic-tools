@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pymcap_cli.utils import NS_TO_SEC
+
 _TIME_FIELDS: frozenset[str] = frozenset({"sec", "nanosec"})
 
 
@@ -30,18 +32,18 @@ def to_plain(obj: Any) -> Any:
         return obj.tolist()
     if isinstance(obj, dict):
         if obj.keys() == _TIME_FIELDS:
-            return int(obj["sec"]) * 1_000_000_000 + int(obj["nanosec"])
+            return int(obj["sec"]) * NS_TO_SEC + int(obj["nanosec"])
         return {k: to_plain(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [to_plain(v) for v in obj]
     slots = getattr(type(obj), "__slots__", None)
     if slots:
         if set(slots) == _TIME_FIELDS:
-            return int(obj.sec) * 1_000_000_000 + int(obj.nanosec)
+            return int(obj.sec) * NS_TO_SEC + int(obj.nanosec)
         return {k: to_plain(getattr(obj, k)) for k in slots}
     dct = getattr(obj, "__dict__", None)
     if dct is not None:
         if dct.keys() == _TIME_FIELDS:
-            return int(obj.sec) * 1_000_000_000 + int(obj.nanosec)
+            return int(obj.sec) * NS_TO_SEC + int(obj.nanosec)
         return {k: to_plain(v) for k, v in dct.items()}
     return str(obj)

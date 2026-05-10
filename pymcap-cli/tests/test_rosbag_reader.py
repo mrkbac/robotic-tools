@@ -7,6 +7,7 @@ import struct
 
 import pytest
 from pymcap_cli.rosbag_reader import read_bag_info, read_bag_messages
+from pymcap_cli.utils import NS_TO_SEC
 
 from .fixtures.bag_generator import (
     generate_bag,
@@ -16,8 +17,6 @@ from .fixtures.bag_generator import (
     make_string_connection,
     make_string_message,
 )
-
-_NSEC_PER_SEC = 1_000_000_000
 
 
 class TestMagicValidation:
@@ -58,8 +57,8 @@ class TestReadBagInfo:
         bag_data = generate_simple_bag()
         info = read_bag_info(io.BytesIO(bag_data))
 
-        assert info.start_time_ns == 1000 * _NSEC_PER_SEC + 0
-        assert info.end_time_ns == 1000 * _NSEC_PER_SEC + 4 * 100_000_000
+        assert info.start_time_ns == 1000 * NS_TO_SEC + 0
+        assert info.end_time_ns == 1000 * NS_TO_SEC + 4 * 100_000_000
 
     def test_multi_topic_connections(self) -> None:
         bag_data = generate_multi_topic_bag()
@@ -122,7 +121,7 @@ class TestReadBagMessages:
         messages = list(read_bag_messages(io.BytesIO(bag_data)))
 
         for i, msg in enumerate(messages):
-            expected_ns = 1000 * _NSEC_PER_SEC + i * 100_000_000
+            expected_ns = 1000 * NS_TO_SEC + i * 100_000_000
             assert msg.time_ns == expected_ns
 
     def test_timestamps_monotonic(self) -> None:

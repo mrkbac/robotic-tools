@@ -6,6 +6,8 @@ from pathlib import Path
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from small_mcap import CompressionType, McapWriter
 
+from pymcap_cli.utils import NS_TO_SEC
+
 # ROS2 message schema for diagnostic_msgs/msg/DiagnosticArray
 DIAGNOSTIC_ARRAY_SCHEMA = """std_msgs/Header header
 diagnostic_msgs/DiagnosticStatus[] status
@@ -231,8 +233,8 @@ def _status(
 
 
 def _add_diag(writer: McapWriter, channel_id: int, log_time: int, statuses: list[dict]) -> None:
-    sec = log_time // 1_000_000_000
-    nanosec = log_time % 1_000_000_000
+    sec = log_time // NS_TO_SEC
+    nanosec = log_time % NS_TO_SEC
     msg = {
         "header": {
             "stamp": {"sec": sec, "nanosec": nanosec},

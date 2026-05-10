@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import re
 
+from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC
+
 _DURATION_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ns|us|ms|s|m|h)?\s*$")
 _FACTORS_NS: dict[str | None, int] = {
     "ns": 1,
     "us": 1_000,
-    "ms": 1_000_000,
-    "s": 1_000_000_000,
-    "m": 60 * 1_000_000_000,
-    "h": 3600 * 1_000_000_000,
-    None: 1_000_000_000,  # Bare number = seconds.
+    "ms": NS_TO_MS,
+    "s": NS_TO_SEC,
+    "m": 60 * NS_TO_SEC,
+    "h": 3600 * NS_TO_SEC,
+    None: NS_TO_SEC,  # Bare number = seconds.
 }
 
 

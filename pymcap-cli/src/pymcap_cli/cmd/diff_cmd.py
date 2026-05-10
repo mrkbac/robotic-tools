@@ -27,24 +27,21 @@ from pymcap_cli.core.mcap_compare import (
     split_timestamps_into_segments,
 )
 from pymcap_cli.rihs01 import compute_rihs01
-from pymcap_cli.utils import bytes_to_human, format_ts_short
+from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, bytes_to_human, format_ts_short
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-_NS_TO_MS = 1_000_000
-_NS_TO_SEC = 1_000_000_000
 
 
 def time_str(time_ns: int) -> str:
     if time_ns == 0:
         return "N/A"
-    dt = datetime.fromtimestamp(time_ns / _NS_TO_SEC)
+    dt = datetime.fromtimestamp(time_ns / NS_TO_SEC)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def duration_human(duration_ns: int) -> str:
-    duration = timedelta(milliseconds=duration_ns / _NS_TO_MS)
+    duration = timedelta(milliseconds=duration_ns / NS_TO_MS)
     total_seconds = duration.total_seconds()
     if total_seconds < 1:
         return f"{total_seconds * 1000:.0f} ms"

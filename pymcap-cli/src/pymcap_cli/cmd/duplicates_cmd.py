@@ -44,12 +44,11 @@ from pymcap_cli.core.mcap_compare import (
     read_message_index_identity_file,
 )
 from pymcap_cli.log_setup import ERR
-from pymcap_cli.utils import format_ts_short
+from pymcap_cli.utils import NS_TO_SEC, format_ts_short
 
 logger = logging.getLogger(__name__)
 console = Console()
 
-_NS_TO_SEC = 1_000_000_000
 _MAX_SKIPPED_DETAILS = 10
 _PROGRESS_PAIR_UPDATE_INTERVAL = 128
 _PROGRESS_INDEX_PERCENT_STEPS = 100
@@ -174,7 +173,7 @@ def _read_index_identity(
 def _format_time(time_ns: int) -> str:
     if time_ns == 0:
         return "N/A"
-    return datetime.fromtimestamp(time_ns / _NS_TO_SEC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return datetime.fromtimestamp(time_ns / NS_TO_SEC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def _time_range(identity: MessageIndexIdentity) -> str:

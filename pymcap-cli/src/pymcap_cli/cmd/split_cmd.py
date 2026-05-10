@@ -23,7 +23,7 @@ from pymcap_cli.types.types_manual import (
     ForceOverwriteOption,
     NoClobberOption,
 )
-from pymcap_cli.utils import parse_time_arg
+from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, parse_time_arg
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -41,13 +41,13 @@ def _parse_duration(value: str) -> int:
     if value.endswith("us"):
         return int(value[:-2]) * 1_000
     if value.endswith("ms"):
-        return int(value[:-2]) * 1_000_000
+        return int(value[:-2]) * NS_TO_MS
     if value.endswith("s"):
-        return int(value[:-1]) * 1_000_000_000
+        return int(value[:-1]) * NS_TO_SEC
     if value.endswith("m"):
-        return int(value[:-1]) * 60 * 1_000_000_000
+        return int(value[:-1]) * 60 * NS_TO_SEC
     if value.endswith("h"):
-        return int(value[:-1]) * 3600 * 1_000_000_000
+        return int(value[:-1]) * 3600 * NS_TO_SEC
     # Plain integer = nanoseconds
     return int(value)
 

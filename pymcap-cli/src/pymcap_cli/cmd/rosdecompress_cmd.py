@@ -42,7 +42,7 @@ from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclo
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import confirm_output_overwrite
+from pymcap_cli.utils import NS_TO_SEC, confirm_output_overwrite
 
 console = Console()
 
@@ -56,8 +56,8 @@ def _build_header(msg: DecodedMessage) -> dict[str, Any]:
     if decoded is not None and isinstance(decoded, dict):
         return decoded.get("header", {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": ""})
     # Fallback: use message timestamps.
-    sec = msg.message.log_time // 1_000_000_000
-    nanosec = msg.message.log_time % 1_000_000_000
+    sec = msg.message.log_time // NS_TO_SEC
+    nanosec = msg.message.log_time % NS_TO_SEC
     return {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": ""}
 
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pymcap_cli.exporters._common import normalize_schema_name
+from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -249,8 +250,8 @@ def log_time_ns_to_rfc3339(ns: int) -> str:
     """
     from datetime import datetime, timezone  # noqa: PLC0415
 
-    seconds = ns // 1_000_000_000
-    micros = (ns // 1_000) % 1_000_000
+    seconds = ns // NS_TO_SEC
+    micros = (ns % NS_TO_SEC) // 1_000
     dt = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=micros)
     if micros:
         return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")

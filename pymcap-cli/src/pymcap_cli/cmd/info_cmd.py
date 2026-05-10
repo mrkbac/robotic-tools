@@ -28,7 +28,7 @@ from pymcap_cli.display.display_utils import (
 from pymcap_cli.types.info_data import info_to_dict
 from pymcap_cli.types.info_link import ScanMode, generate_link
 from pymcap_cli.types.info_types import McapInfoOutput
-from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
+from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, bytes_to_human, read_or_rebuild_info
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -36,8 +36,6 @@ console = Console()
 # Parameter groups
 PROCESSING_GROUP = CycloptsGroup("Processing Options")
 DISPLAY_GROUP = CycloptsGroup("Display Options")
-_NS_TO_MS = 1_000_000
-_NS_TO_SEC = 1_000_000_000
 
 
 class SortChoice(str, Enum):
@@ -64,7 +62,7 @@ def _build_message_distribution(data: McapInfoOutput) -> RenderableType | None:
 
     # Format bucket duration using timedelta
     bucket_duration_ns = distribution["bucket_duration_ns"]
-    bucket_duration = timedelta(milliseconds=bucket_duration_ns / _NS_TO_MS)
+    bucket_duration = timedelta(milliseconds=bucket_duration_ns / NS_TO_MS)
 
     # Format timedelta for display
     total_seconds = bucket_duration.total_seconds()
@@ -92,16 +90,16 @@ def _build_file_info_and_summary(data: McapInfoOutput) -> Table:
     """Build file information and summary statistics renderable."""
     stats = data["statistics"]
     duration_ns = stats["duration_ns"]
-    duration_human = timedelta(milliseconds=duration_ns / _NS_TO_MS)
-    date_start = datetime.fromtimestamp(stats["message_start_time"] / _NS_TO_SEC)
-    date_end = datetime.fromtimestamp(stats["message_end_time"] / _NS_TO_SEC)
+    duration_human = timedelta(milliseconds=duration_ns / NS_TO_MS)
+    date_start = datetime.fromtimestamp(stats["message_start_time"] / NS_TO_SEC)
+    date_end = datetime.fromtimestamp(stats["message_end_time"] / NS_TO_SEC)
 
     info_table = Table.grid(padding=(0, 1))
     info_table.add_column(style="bold blue")
     info_table.add_column()
     info_table.add_row("File:", f"[green]{data['file']['path']}[/]")
 
-    bytes_per_sec = data["file"]["size_bytes"] / (duration_ns / _NS_TO_SEC)
+    bytes_per_sec = data["file"]["size_bytes"] / (duration_ns / NS_TO_SEC)
     bytes_per_hour = bytes_per_sec * 3600
     info_table.add_row(
         "Size:",
@@ -115,15 +113,15 @@ def _build_file_info_and_summary(data: McapInfoOutput) -> Table:
     info_table.add_row("Chunks:", f"[cyan]{stats['chunk_count']:,}[/]")
     info_table.add_row(
         "Duration:",
-        f"[yellow]{duration_ns / 1_000_000:.2f} ms[/] [cyan]({duration_human})[/]",
+        f"[yellow]{duration_ns / NS_TO_MS:.2f} ms[/] [cyan]({duration_human})[/]",
     )
     info_table.add_row(
         "Start:",
-        f"[cyan]{date_start}[/] [dim]({stats['message_start_time'] / _NS_TO_SEC:.9f})[/]",
+        f"[cyan]{date_start}[/] [dim]({stats['message_start_time'] / NS_TO_SEC:.9f})[/]",
     )
     info_table.add_row(
         "End:",
-        f"[cyan]{date_end}[/] [dim]({stats['message_end_time'] / _NS_TO_SEC:.9f})[/]",
+        f"[cyan]{date_end}[/] [dim]({stats['message_end_time'] / NS_TO_SEC:.9f})[/]",
     )
     info_table.add_row("Channels:", f"[green]{stats['channel_count']:,}[/]")
     info_table.add_row("Attachments:", f"[yellow]{stats['attachment_count']:,}[/]")
@@ -163,9 +161,9 @@ def _build_compression_table(data: McapInfoOutput, has_chunk_info: bool) -> Rend
             bytes_to_human(size_stats["minimum"]),
             bytes_to_human(int(size_stats["average"])),
             bytes_to_human(size_stats["maximum"]),
-            f"{duration_stats['minimum'] / _NS_TO_MS:.2f} ms",
-            f"{duration_stats['average'] / _NS_TO_MS:.2f} ms",
-            f"{duration_stats['maximum'] / _NS_TO_MS:.2f} ms",
+            f"{duration_stats['minimum'] / NS_TO_MS:.2f} ms",
+            f"{duration_stats['average'] / NS_TO_MS:.2f} ms",
+            f"{duration_stats['maximum'] / NS_TO_MS:.2f} ms",
         ]
         if has_chunk_info:
             row.append(f"{chunk_stats['message_count']}")

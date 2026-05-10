@@ -14,7 +14,7 @@ from small_mcap import RebuildInfo
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.display_utils import _create_ros_docs_url
-from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
+from pymcap_cli.utils import NS_TO_SEC, bytes_to_human, read_or_rebuild_info
 
 console = Console()
 
@@ -98,10 +98,10 @@ def chunks(
 
     for chunk in summary.chunk_indexes:
         # Convert timestamps to human readable format (time only, not date)
-        start_time = datetime.fromtimestamp(chunk.message_start_time / 1_000_000_000).strftime(
+        start_time = datetime.fromtimestamp(chunk.message_start_time / NS_TO_SEC).strftime(
             "%H:%M:%S.%f"
         )[:-3]  # Trim to milliseconds
-        end_time = datetime.fromtimestamp(chunk.message_end_time / 1_000_000_000).strftime(
+        end_time = datetime.fromtimestamp(chunk.message_end_time / NS_TO_SEC).strftime(
             "%H:%M:%S.%f"
         )[:-3]
 
@@ -211,12 +211,12 @@ def attachments(
 
     for attachment in summary.attachment_indexes:
         log_time = (
-            datetime.fromtimestamp(attachment.log_time / 1_000_000_000).isoformat()
+            datetime.fromtimestamp(attachment.log_time / NS_TO_SEC).isoformat()
             if attachment.log_time
             else ""
         )
         create_time = (
-            datetime.fromtimestamp(attachment.create_time / 1_000_000_000).isoformat()
+            datetime.fromtimestamp(attachment.create_time / NS_TO_SEC).isoformat()
             if attachment.create_time
             else ""
         )

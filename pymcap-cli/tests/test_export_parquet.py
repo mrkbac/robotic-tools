@@ -10,6 +10,7 @@ from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pointcloud2 import PointField, create_cloud
 from pymcap_cli.cmd.export_parquet_cmd import export_parquet
 from pymcap_cli.exporters._common import unique_topic_filename as _unique_topic_filename
+from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC
 from small_mcap import McapWriter
 
 _POINTCLOUD2_SCHEMA = """\
@@ -102,8 +103,8 @@ def pointcloud_mcap(tmp_path: Path) -> Path:
         for i in range(3):
             writer.add_message_encode(
                 channel_id=cid,
-                log_time=i * 1_000_000,
-                publish_time=i * 1_000_000,
+                log_time=i * NS_TO_MS,
+                publish_time=i * NS_TO_MS,
                 data=_make_cloud_dict(n=4),
             )
         writer.finish()
@@ -138,8 +139,8 @@ def fixed_array_mcap(tmp_path: Path) -> Path:
         for i in range(3):
             writer.add_message_encode(
                 channel_id=1,
-                log_time=i * 1_000_000,
-                publish_time=i * 1_000_000,
+                log_time=i * NS_TO_MS,
+                publish_time=i * NS_TO_MS,
                 data={
                     "header": {"stamp": {"sec": i, "nanosec": 0}, "frame_id": "imu"},
                     "covariance": [float(i * 10 + j) for j in range(9)],
@@ -179,7 +180,7 @@ def test_export_fixed_size_float_array_keeps_exact_length(
 
     # Values round-trip: sec=i, nanosec=0 → i seconds past epoch.
     stamps_ns = [s.value for s in table.column("header").combine_chunks().field("stamp")]
-    assert stamps_ns == [0, 1_000_000_000, 2_000_000_000]
+    assert stamps_ns == [0, NS_TO_SEC, 2 * NS_TO_SEC]
 
 
 def test_export_expands_pointcloud_to_list_struct(pointcloud_mcap: Path, tmp_path: Path) -> None:
@@ -205,7 +206,7 @@ def test_export_expands_pointcloud_to_list_struct(pointcloud_mcap: Path, tmp_pat
     # _log_time_ns is timestamp(ns).
     assert table.schema.field("_log_time_ns").type == pa.timestamp("ns")
     times_ns = [s.value for s in table.column("_log_time_ns")]
-    assert times_ns == [0, 1_000_000, 2_000_000]
+    assert times_ns == [0, NS_TO_MS, 2 * NS_TO_MS]
 
 
 def test_export_writes_topics_index(pointcloud_mcap: Path, tmp_path: Path) -> None:

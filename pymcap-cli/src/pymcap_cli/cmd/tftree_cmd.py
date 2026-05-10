@@ -15,6 +15,7 @@ from rich.table import Table
 from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.utils import NS_TO_SEC
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -79,7 +80,7 @@ def _build_tree_and_find_roots(
 
 def _format_timestamp(timestamp_ns: int) -> str:
     """Format timestamp in nanoseconds to a readable string."""
-    return datetime.fromtimestamp(timestamp_ns / 1_000_000_000).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(timestamp_ns / NS_TO_SEC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _quaternion_to_euler(x: float, y: float, z: float, w: float) -> tuple[float, float, float]:

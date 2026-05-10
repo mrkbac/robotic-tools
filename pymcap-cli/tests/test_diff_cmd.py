@@ -4,6 +4,7 @@ import io
 from typing import TYPE_CHECKING
 
 from pymcap_cli.cmd import diff_cmd
+from pymcap_cli.utils import NS_TO_MS
 from rich.console import Console
 from small_mcap import CompressionType, McapWriter
 
@@ -72,8 +73,8 @@ def test_diff_same_basename_uses_unique_labels(
 def test_diff_reports_cutout_smart_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     full = tmp_path / "full.mcap"
     cutout = tmp_path / "cutout.mcap"
-    _write_custom_mcap(full, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(cutout, timestamps=[index * 1_000_000 for index in range(3, 7)])
+    _write_custom_mcap(full, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(cutout, timestamps=[index * NS_TO_MS for index in range(3, 7)])
 
     exit_code, rendered = _run_diff([full, cutout], monkeypatch)
 
@@ -91,8 +92,8 @@ def test_diff_reports_edge_overlap_smart_verdict(
 ) -> None:
     left = tmp_path / "left.mcap"
     right = tmp_path / "right.mcap"
-    _write_custom_mcap(left, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(right, timestamps=[index * 1_000_000 for index in range(7, 15)])
+    _write_custom_mcap(left, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(right, timestamps=[index * NS_TO_MS for index in range(7, 15)])
 
     exit_code, rendered = _run_diff([left, right], monkeypatch)
 
@@ -109,9 +110,9 @@ def test_diff_compares_three_files_pairwise_to_first(
     full = tmp_path / "full.mcap"
     cutout_a = tmp_path / "cutout_a.mcap"
     cutout_b = tmp_path / "cutout_b.mcap"
-    _write_custom_mcap(full, timestamps=[index * 1_000_000 for index in range(10)])
-    _write_custom_mcap(cutout_a, timestamps=[index * 1_000_000 for index in range(5)])
-    _write_custom_mcap(cutout_b, timestamps=[index * 1_000_000 for index in range(5, 10)])
+    _write_custom_mcap(full, timestamps=[index * NS_TO_MS for index in range(10)])
+    _write_custom_mcap(cutout_a, timestamps=[index * NS_TO_MS for index in range(5)])
+    _write_custom_mcap(cutout_b, timestamps=[index * NS_TO_MS for index in range(5, 10)])
 
     exit_code, rendered = _run_diff([full, cutout_a, cutout_b], monkeypatch)
 

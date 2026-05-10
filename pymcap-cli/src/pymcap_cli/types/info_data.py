@@ -23,6 +23,7 @@ from pymcap_cli.types.info_types import (
     SchemaInfo,
     Stats,
 )
+from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC
 
 
 @dataclass(slots=True)
@@ -213,7 +214,7 @@ def _calculate_interval_stats(
             continue
 
         # Convert intervals to Hz values (no sorting needed)
-        hz_values = [1_000_000_000 / interval for interval in intervals]
+        hz_values = [NS_TO_SEC / interval for interval in intervals]
 
         # Calculate Hz statistics (min/max/median only — average is derived)
         hz_stats: IntervalStats = {
@@ -244,30 +245,29 @@ def _calculate_optimal_bucket_count(duration_ns: int) -> int:
     Returns:
         Optimal bucket count between 20 and 80
     """
-    # Target "round" durations in nanoseconds
     round_durations = [
-        1_000_000,  # 1ms
-        2_000_000,  # 2ms
-        5_000_000,  # 5ms
-        10_000_000,  # 10ms
-        20_000_000,  # 20ms
-        50_000_000,  # 50ms
-        100_000_000,  # 100ms
-        200_000_000,  # 200ms
-        500_000_000,  # 500ms
-        1_000_000_000,  # 1s
-        2_000_000_000,  # 2s
-        5_000_000_000,  # 5s
-        10_000_000_000,  # 10s
-        20_000_000_000,  # 20s
-        30_000_000_000,  # 30s
-        60_000_000_000,  # 1min
-        120_000_000_000,  # 2min
-        300_000_000_000,  # 5min
-        600_000_000_000,  # 10min
-        1_200_000_000_000,  # 20min
-        1_800_000_000_000,  # 30min
-        3_600_000_000_000,  # 1hr
+        1 * NS_TO_MS,
+        2 * NS_TO_MS,
+        5 * NS_TO_MS,
+        10 * NS_TO_MS,
+        20 * NS_TO_MS,
+        50 * NS_TO_MS,
+        100 * NS_TO_MS,
+        200 * NS_TO_MS,
+        500 * NS_TO_MS,
+        1 * NS_TO_SEC,
+        2 * NS_TO_SEC,
+        5 * NS_TO_SEC,
+        10 * NS_TO_SEC,
+        20 * NS_TO_SEC,
+        30 * NS_TO_SEC,
+        60 * NS_TO_SEC,
+        120 * NS_TO_SEC,
+        300 * NS_TO_SEC,
+        600 * NS_TO_SEC,
+        1200 * NS_TO_SEC,
+        1800 * NS_TO_SEC,
+        3600 * NS_TO_SEC,
     ]
 
     min_buckets = 20
