@@ -195,27 +195,12 @@ class IndexedComparison:
         return self.overlap.topics
 
     @property
-    def left_extra_channels(self) -> int:
-        return len(self.left.identity.indexed_channels) - self.shared_channels
-
-    @property
-    def right_extra_channels(self) -> int:
-        return len(self.right.identity.indexed_channels) - self.shared_channels
-
-    @property
     def left_extra_messages(self) -> int:
         return self.left.identity.message_count - self.shared_messages
 
     @property
     def right_extra_messages(self) -> int:
         return self.right.identity.message_count - self.shared_messages
-
-    @property
-    def is_duplicate(self) -> bool:
-        return self.kind in {
-            IndexedCompareKind.EXACT,
-            IndexedCompareKind.FULL_OVERLAP,
-        }
 
     @property
     def has_overlap(self) -> bool:

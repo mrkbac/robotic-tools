@@ -138,48 +138,6 @@ def read_topics(db_path: Path) -> list[TopicRecord]:
         conn.close()
 
 
-def read_messages_for_topic(
-    db_path: Path,
-    topic_id: int,
-) -> Iterator[MessageRecord]:
-    """Read all messages for a specific topic from DB3 file.
-
-    This is a lazy iterator that yields messages one at a time without loading
-    the entire dataset into memory, making it suitable for large bag files.
-
-    Args:
-        db_path: Path to the DB3 file
-        topic_id: Topic ID to read messages for
-
-    Yields:
-        Message records ordered by timestamp
-
-    """
-    conn = sqlite3.connect(db_path)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT topic_id, timestamp, data
-            FROM messages
-            WHERE topic_id = ?
-            ORDER BY timestamp ASC
-            """,
-            (topic_id,),
-        )
-
-        # Iterate over cursor directly - SQLite will fetch rows lazily
-        for row in cursor:
-            topic_id_val, timestamp, data = row
-            yield MessageRecord(
-                topic_id=topic_id_val,
-                timestamp=timestamp,
-                data=data,
-            )
-    finally:
-        conn.close()
-
-
 def iter_all_messages(db_path: Path) -> Iterator[MessageRecord]:
     """Read all messages from DB3 file ordered by timestamp.
 

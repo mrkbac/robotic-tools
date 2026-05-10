@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from typing import Final
 
-MIN_CHUNK_SIZE: Final = 1024
 DEFAULT_CHUNK_SIZE: Final = 4 * 1024 * 1024
 DEFAULT_COMPRESSION: Final = "zstd"
 

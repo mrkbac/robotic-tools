@@ -4,9 +4,6 @@ from bisect import bisect_right
 
 from rich.text import Text
 
-# Unicode block characters ordered by height
-BLOCKS = " ▁▂▃▄▅▆▇█"
-
 
 def sparkline(
     changes: list[tuple[int, int]],

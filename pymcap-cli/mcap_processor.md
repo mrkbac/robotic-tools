@@ -15,7 +15,7 @@ The `McapProcessor` is a unified processor for MCAP files that handles recovery,
 | `PendingChunk`      | Chunk wrapper with timestamp ordering for `heapq.merge` (lazy chunk loading)   |
 | `Processor`         | Base class for composable filter/routing pipeline (see [Processor Pipeline])   |
 | `ChunkDecision`     | Enum: CONTINUE / SKIP / DECODE (drives the three processing paths)             |
-| `Action`            | IntFlag: CONTINUE / SKIP / STOP (per-message/channel filter result)            |
+| `Action`            | IntFlag: CONTINUE / SKIP / KEEP (per-message/channel filter result)            |
 | `OutputManager`     | Manages multiple writers for multi-output splitting                            |
 | `OutputSegment`     | One output file in a multi-output split, with its own writer and tracking      |
 

@@ -1,7 +1,6 @@
 """Unified process command combining recovery and filtering capabilities."""
 
 import logging
-from enum import Enum
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -38,13 +37,6 @@ RECOVERY_GROUP = Group("Recovery Options")
 FILTERING_GROUP = Group("Topic Filtering")
 TIME_FILTERING_GROUP = Group("Time Filtering")
 CONTENT_FILTERING_GROUP = Group("Content Filtering")
-
-
-class RecoveryMode(str, Enum):
-    """Recovery mode choices."""
-
-    ENABLED = "enabled"
-    DISABLED = "disabled"
 
 
 def process(

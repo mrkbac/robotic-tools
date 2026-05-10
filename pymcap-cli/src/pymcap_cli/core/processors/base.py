@@ -57,7 +57,6 @@ class Action(IntFlag):
 
     CONTINUE = 0
     SKIP = auto()
-    STOP = auto()
     KEEP = auto()
 
 

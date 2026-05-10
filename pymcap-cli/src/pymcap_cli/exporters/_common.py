@@ -24,11 +24,6 @@ logger = logging.getLogger(__name__)
 _TABLE_NAME_RE = re.compile(r"[^0-9a-zA-Z_]+")
 
 
-def normalize_schema_names(names: Iterable[str]) -> frozenset[str]:
-    """Canonicalise a collection of schema names for membership checks."""
-    return frozenset(normalize_schema_name(name) for name in names)
-
-
 def schema_name_in(schema: Schema | None, names: frozenset[str]) -> bool:
     """Return True when *schema* is present and canonical name is in *names*."""
     return schema is not None and normalize_schema_name(schema.name) in names
