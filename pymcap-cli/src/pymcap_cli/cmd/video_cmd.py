@@ -4,8 +4,6 @@
 Wraps :class:`pymcap_cli.exporters.video_exporter.VideoExporter`.
 """
 
-from __future__ import annotations
-
 import logging
 from enum import Enum
 from pathlib import Path

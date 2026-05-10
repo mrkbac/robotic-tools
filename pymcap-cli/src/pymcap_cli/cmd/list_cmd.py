@@ -12,9 +12,10 @@ from ros_parser import parse_schema_to_definitions
 from ros_parser.models import Constant, MessageDefinition
 from small_mcap import RebuildInfo
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.display_utils import _create_ros_docs_url
-from pymcap_cli.utils import NS_TO_SEC, bytes_to_human, read_or_rebuild_info
+from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
 console = Console()
 

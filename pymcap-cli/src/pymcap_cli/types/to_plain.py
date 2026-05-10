@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pymcap_cli.utils import NS_TO_SEC
+from pymcap_cli.constants import NS_TO_SEC
 
 _TIME_FIELDS: frozenset[str] = frozenset({"sec", "nanosec"})
 

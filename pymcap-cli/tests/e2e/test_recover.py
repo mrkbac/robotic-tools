@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from pymcap_cli.cmd.recover_inplace_cmd import recover_inplace
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE
 from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
@@ -32,7 +33,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -74,7 +75,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -132,7 +133,7 @@ class TestRecover:
                     ),
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -158,7 +159,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -183,7 +184,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -208,7 +209,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -239,7 +240,7 @@ class TestRecover:
                     ],
                     input_options=InputOptions.from_args(),
                     output_options=OutputOptions(
-                        compression=compression, chunk_size=4 * 1024 * 1024
+                        compression=compression, chunk_size=DEFAULT_CHUNK_SIZE
                     ),
                 )
 
@@ -264,7 +265,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -288,7 +289,7 @@ class TestRecover:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -304,7 +305,7 @@ class TestRecover:
         [
             512 * 1024,  # 512KB
             1 * 1024 * 1024,  # 1MB
-            4 * 1024 * 1024,  # 4MB
+            DEFAULT_CHUNK_SIZE,  # 4MB
             8 * 1024 * 1024,  # 8MB
         ],
     )

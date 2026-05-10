@@ -1,11 +1,10 @@
 """Command to compress image and point cloud topics in MCAP files."""
 
-from __future__ import annotations
-
 import logging
 from collections import deque
+from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 from cyclopts import Group, Parameter
 from mcap_codec_support.pointcloud import (
@@ -37,7 +36,8 @@ from mcap_codec_support.video import (
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
-from small_mcap import McapWriter, read_message_decoded
+from rich.progress import Progress
+from small_mcap import DecodedMessage, McapWriter, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_transform import (
@@ -49,18 +49,8 @@ from pymcap_cli.core.mcap_transform import (
     print_size_comparison,
 )
 from pymcap_cli.exporters._common import normalize_schema_name
-from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
-    ForceOverwriteOption,
-    OutputPathOption,
-)
+from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 from pymcap_cli.utils import confirm_output_overwrite
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
-
-    from rich.progress import Progress
-    from small_mcap import DecodedMessage
-
 
 logger = logging.getLogger(__name__)
 console = Console()

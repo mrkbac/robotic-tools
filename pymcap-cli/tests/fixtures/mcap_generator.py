@@ -3,9 +3,8 @@
 import io
 from pathlib import Path
 
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, NS_TO_MS
 from small_mcap import CompressionType, McapWriter
-
-from pymcap_cli.utils import NS_TO_MS
 
 
 def create_simple_mcap(
@@ -103,7 +102,7 @@ def create_corrupt_mcap(corruption_type: str = "truncated") -> bytes:
 
 def create_large_mcap(
     target_size_mb: int = 10,
-    chunk_size: int = 4 * 1024 * 1024,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
     compression: CompressionType = CompressionType.ZSTD,
 ) -> bytes:
     """Create a large MCAP file for performance testing."""

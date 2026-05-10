@@ -27,6 +27,7 @@ from ros_parser.message_path import (
 from ros_parser.models import MessageDefinition
 from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
+from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
@@ -39,7 +40,7 @@ from pymcap_cli.display.message_render import (
     render_message_tree,
     resolve_msgdef_by_name,
 )
-from pymcap_cli.utils import MAX_INT64, ProgressTrackingIO, file_progress, parse_timestamp_args
+from pymcap_cli.utils import ProgressTrackingIO, file_progress, parse_timestamp_args
 
 logger = logging.getLogger(__name__)
 console_out = Console()

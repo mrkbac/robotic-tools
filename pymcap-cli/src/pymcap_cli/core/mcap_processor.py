@@ -46,6 +46,7 @@ from small_mcap import (
 from small_mcap.reader import _predecompress_chunk
 from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor
 from pymcap_cli.core.processors.attachment_filter import AttachmentFilterProcessor
 from pymcap_cli.core.processors.base import SPLIT_REQUIRED, Action, ChunkDecision, Processor
@@ -53,8 +54,6 @@ from pymcap_cli.core.processors.metadata_filter import MetadataFilterProcessor
 from pymcap_cli.core.processors.time_filter import TimeFilterProcessor
 from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     CompressionName,
     str_to_compression_type,
 )

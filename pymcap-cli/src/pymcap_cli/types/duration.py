@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC
+from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 
 _DURATION_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ns|us|ms|s|m|h)?\s*$")
 _FACTORS_NS: dict[str | None, int] = {

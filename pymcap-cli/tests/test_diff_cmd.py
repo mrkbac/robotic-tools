@@ -4,7 +4,7 @@ import io
 from typing import TYPE_CHECKING
 
 from pymcap_cli.cmd import diff_cmd
-from pymcap_cli.utils import NS_TO_MS
+from pymcap_cli.constants import NS_TO_MS
 from rich.console import Console
 from small_mcap import CompressionType, McapWriter
 

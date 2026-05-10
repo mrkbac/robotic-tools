@@ -1,7 +1,5 @@
 """Bridge command - inspect or record from a live Foxglove WebSocket bridge."""
 
-from __future__ import annotations
-
 import asyncio
 import base64
 import gzip
@@ -10,12 +8,14 @@ import logging
 import re
 import sys
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from ipaddress import ip_address
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from re import Pattern
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from cyclopts import App, Parameter
@@ -28,7 +28,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeClient
-from robo_ws_bridge.ws_types import ServerCapabilities
+from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities, ServerInfoMessage, ServiceInfo
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
     MessagePath,
@@ -36,8 +36,10 @@ from ros_parser.message_path import (
     ValidationError,
     parse_message_path,
 )
+from ros_parser.models import MessageDefinition
 from small_mcap import JSONDecoderFactory, McapWriter
 
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.display.display_utils import _format_parts_with_colors, _format_schema_with_link
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
@@ -52,8 +54,6 @@ from pymcap_cli.display.message_render import (
 )
 from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionName,
     CompressionOption,
@@ -66,13 +66,6 @@ from pymcap_cli.utils import (
     confirm_output_overwrite,
     create_mcap_writer,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
-    from re import Pattern
-
-    from robo_ws_bridge.ws_types import ChannelInfo, ServerInfoMessage, ServiceInfo
-    from ros_parser.models import MessageDefinition
 
 logger = logging.getLogger(__name__)
 console = Console()

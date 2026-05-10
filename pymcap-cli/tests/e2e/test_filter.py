@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE
 from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
@@ -30,7 +31,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -55,7 +56,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -81,7 +82,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -108,7 +109,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -136,7 +137,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -161,7 +162,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -184,7 +185,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -207,7 +208,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -231,7 +232,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)
@@ -263,7 +264,7 @@ class TestFilter:
                     ],
                     input_options=InputOptions.from_args(),
                     output_options=OutputOptions(
-                        compression=compression, chunk_size=4 * 1024 * 1024
+                        compression=compression, chunk_size=DEFAULT_CHUNK_SIZE
                     ),
                 )
 
@@ -287,7 +288,7 @@ class TestFilter:
                     )
                 ],
                 input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=4 * 1024 * 1024),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
             )
 
             processor = McapProcessor(options)

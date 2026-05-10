@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE
 from pymcap_cli.core.mcap_processor import (
     Header,
     OutputManager,
@@ -34,7 +35,7 @@ def output_options(tmp_path: Path):
     return OutputOptions(
         output_template=str(tmp_path / "output_{index:03d}.mcap"),
         compression="zstd",
-        chunk_size=4 * 1024 * 1024,
+        chunk_size=DEFAULT_CHUNK_SIZE,
     )
 
 

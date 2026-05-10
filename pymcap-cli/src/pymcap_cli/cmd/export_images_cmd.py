@@ -1,17 +1,12 @@
 """Export image topics from an MCAP file to a folder of image files."""
 
-from __future__ import annotations
-
 from typing import Annotated
 
 from cyclopts import Parameter
 
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.image_exporter import ImageExporter
-from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
-    ForceOverwriteOption,
-    OutputPathOption,
-)
+from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 
 def export_images(

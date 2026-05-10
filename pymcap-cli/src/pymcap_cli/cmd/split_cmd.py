@@ -10,20 +10,19 @@ from ros_parser.message_path import MessagePathError
 
 from pymcap_cli.cmd._run_processor import finalize_delete_source, resolve_overwrite_policy
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, NS_TO_MS, NS_TO_SEC
 from pymcap_cli.core.mcap_processor import OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     DeleteSourceOption,
     ForceOverwriteOption,
     NoClobberOption,
 )
-from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, parse_time_arg
+from pymcap_cli.utils import parse_time_arg
 
 logger = logging.getLogger(__name__)
 console = Console()

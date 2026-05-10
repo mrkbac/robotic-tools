@@ -9,8 +9,8 @@ import pytest
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pointcloud2 import PointField, create_cloud
 from pymcap_cli.cmd.export_parquet_cmd import export_parquet
+from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.exporters._common import unique_topic_filename
-from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC
 from small_mcap import McapWriter
 
 _POINTCLOUD2_SCHEMA = """\

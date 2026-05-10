@@ -3,8 +3,6 @@
 Wraps :class:`pymcap_cli.exporters.plot_exporter.PlotExporter`.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -12,9 +10,10 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from ros_parser.message_path import ValidationError
 
+from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.plot_exporter import PlotExporter
-from pymcap_cli.utils import MAX_INT64, parse_timestamp_args
+from pymcap_cli.utils import parse_timestamp_args
 
 logger = logging.getLogger(__name__)
 

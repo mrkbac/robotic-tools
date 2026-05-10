@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters._common import prepare_output_file
 from pymcap_cli.exporters.geo_common import (
     GeoMode,
@@ -24,7 +25,6 @@ from pymcap_cli.exporters.geo_common import (
     split_on_gaps,
     stride,
 )
-from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from pathlib import Path

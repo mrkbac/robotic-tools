@@ -1,7 +1,5 @@
 """Export geographic content (NavSatFix / geographic_msgs) to GeoJSON / KML / GPX."""
 
-from __future__ import annotations
-
 import logging
 from typing import Annotated, Literal
 
@@ -13,10 +11,7 @@ from pymcap_cli.exporters.geojson_exporter import GeoJsonExporter
 from pymcap_cli.exporters.gpx_exporter import GpxExporter
 from pymcap_cli.exporters.kml_exporter import KmlExporter
 from pymcap_cli.types.duration import parse_duration_ns
-from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
-    ForceOverwriteOption,
-    OutputPathOption,
-)
+from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 logger = logging.getLogger(__name__)
 console = Console()

@@ -1,7 +1,5 @@
 """Convert ROS1 bag files to MCAP format (ros1 profile)."""
 
-from __future__ import annotations
-
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,10 +16,9 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
@@ -36,7 +33,7 @@ logger = logging.getLogger(__name__)
 class Bag2McapOptions:
     """Options for bag to MCAP conversion."""
 
-    chunk_size: int = 1024 * 1024 * 8  # 8MB default
+    chunk_size: int = DEFAULT_CHUNK_SIZE
     compression: WriterCompression = DEFAULT_COMPRESSION
     enable_crcs: bool = True
     use_chunking: bool = True

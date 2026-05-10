@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd import compress_cmd, duplicates_cmd
+from pymcap_cli.constants import NS_TO_MS
 from pymcap_cli.core.mcap_compare import discover_mcap_candidates
-from pymcap_cli.utils import NS_TO_MS
 from rich.console import Console
 from small_mcap import CompressionType, IndexType, McapWriter, rebuild_summary
 from typing_extensions import Self

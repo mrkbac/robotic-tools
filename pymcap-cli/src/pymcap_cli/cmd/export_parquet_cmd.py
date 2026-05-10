@@ -19,8 +19,6 @@ pandas, Arrow, Spark, …::
     pl.read_parquet("out/sensor_lidar_front_points.parquet")
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Annotated
 
@@ -28,10 +26,7 @@ from cyclopts import Parameter
 
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.parquet_exporter import ParquetExporter
-from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
-    ForceOverwriteOption,
-    OutputPathOption,
-)
+from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 logger = logging.getLogger(__name__)
 

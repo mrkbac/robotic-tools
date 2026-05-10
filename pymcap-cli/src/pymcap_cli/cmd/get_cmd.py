@@ -1,7 +1,5 @@
 """Get command for pymcap-cli — extract attachments and metadata records."""
 
-from __future__ import annotations
-
 import json
 import logging
 import sys

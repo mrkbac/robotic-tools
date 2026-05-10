@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
 import pytest
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.geo_common import (
     Sample,
@@ -22,7 +23,6 @@ from pymcap_cli.exporters.geo_common import (
 from pymcap_cli.exporters.geojson_exporter import GeoJsonExporter
 from pymcap_cli.exporters.gpx_exporter import GpxExporter
 from pymcap_cli.exporters.kml_exporter import KmlExporter
-from pymcap_cli.utils import NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
 
 if TYPE_CHECKING:

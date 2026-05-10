@@ -1,4 +1,4 @@
-"""Manual type definitions for MCAP CLI (enums, constants, and CLI parameters)."""
+"""Manual type definitions for MCAP CLI parameter annotations."""
 
 from __future__ import annotations
 
@@ -22,11 +22,6 @@ def str_to_compression_type(compression: str) -> SmallMcapCompressionType:
         return SmallMcapCompressionType.ZSTD
     raise ValueError(f"Unknown compression type: {compression}")
 
-
-# MCAP processing constants
-MIN_CHUNK_SIZE = 1024  # 1 KiB minimum chunk size
-DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB default chunk size
-DEFAULT_COMPRESSION: CompressionName = "zstd"  # Default compression algorithm
 
 # Parameter groups
 OUTPUT_OPTIONS_GROUP = Group("Output Options")

@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.csv_exporter import CsvExporter
 from pymcap_cli.exporters.image_exporter import (
@@ -23,7 +24,6 @@ from pymcap_cli.exporters.image_exporter import (
     _supported_image_formats,
 )
 from pymcap_cli.exporters.json_exporter import JsonExporter
-from pymcap_cli.utils import NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"

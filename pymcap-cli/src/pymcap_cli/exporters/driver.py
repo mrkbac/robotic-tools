@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from small_mcap import read_message_decoded
 
+from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_transform import create_progress, get_total_message_count
 from pymcap_cli.exporters._common import (
@@ -19,7 +20,6 @@ from pymcap_cli.exporters._common import (
     unique_topic_filename,
 )
 from pymcap_cli.exporters.base import TopicContext
-from pymcap_cli.utils import MAX_INT64
 
 if TYPE_CHECKING:
     from pathlib import Path

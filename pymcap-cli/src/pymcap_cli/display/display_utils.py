@@ -12,8 +12,9 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.types.info_types import ChannelInfo, McapInfoOutput, SchemaInfo
-from pymcap_cli.utils import NS_TO_SEC, bytes_to_human
+from pymcap_cli.utils import bytes_to_human
 
 
 def _build_schema_map(schemas: list[SchemaInfo]) -> dict[int, str]:

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE
 from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
@@ -58,7 +59,7 @@ class TestDurationSplit:
                     processors=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "output_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -91,7 +92,7 @@ class TestDurationSplit:
                     processors=[DurationSplitProcessor(duration_ns=50_000_000)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -126,7 +127,7 @@ class TestDurationSplit:
                     processors=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "output_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -163,7 +164,7 @@ class TestTimestampSplit:
                     processors=[TimestampSplitProcessor(split_points=[50_000_000, 100_000_000])],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -197,7 +198,7 @@ class TestTimestampSplit:
                     ],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -238,7 +239,7 @@ class TestExpressionSplit:
                     processors=[ExpressionSplitProcessor("/camera/front.msg")],
                     output_template=str(tmp_path / "msg_{key}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -269,7 +270,7 @@ class TestExpressionSplit:
                     processors=[ExpressionSplitProcessor("/camera/front.msg")],
                     output_template=str(tmp_path / "ch_{key}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 
@@ -306,7 +307,7 @@ class TestSplitWithRechunking:
                     processors=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                     rechunk_strategy="all",
                 ),
             )
@@ -343,7 +344,7 @@ class TestSplitWithFiltering:
                     processors=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "camera_{index:03d}.mcap"),
                     compression="zstd",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
 

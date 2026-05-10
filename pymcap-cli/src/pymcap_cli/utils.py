@@ -38,17 +38,14 @@ from small_mcap import (
     rebuild_summary,
 )
 
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, NS_TO_SEC
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     CompressionName,
     str_to_compression_type,
 )
 
-NS_TO_SEC = 1_000_000_000
-NS_TO_MS = 1_000_000
 WriterCompression = SmallMcapCompressionType | CompressionName
 
 
@@ -354,10 +351,6 @@ def read_or_rebuild_info(
     except (InvalidMagicError, McapError, AssertionError):
         f.seek(0)
         return rebuild_info(f, file_size, exact_sizes=exact_sizes, console=console)
-
-
-# Maximum value for a signed 64-bit integer (used for unbounded time range)
-MAX_INT64 = 2**63 - 1
 
 
 class MetadataMode(str, Enum):

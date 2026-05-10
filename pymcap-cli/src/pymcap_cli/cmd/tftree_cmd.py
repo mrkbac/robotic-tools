@@ -14,8 +14,8 @@ from rich.live import Live
 from rich.table import Table
 from small_mcap import include_topics, read_message_decoded
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.utils import NS_TO_SEC
 
 logger = logging.getLogger(__name__)
 console = Console()

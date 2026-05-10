@@ -1,17 +1,12 @@
 """Export ``sensor_msgs/PointCloud2`` topics from an MCAP file to PCD files."""
 
-from __future__ import annotations
-
 from typing import Annotated
 
 from cyclopts import Parameter
 
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.pcd_exporter import PcdExporter
-from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
-    ForceOverwriteOption,
-    OutputPathOption,
-)
+from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 
 def export_pcd(

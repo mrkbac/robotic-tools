@@ -12,9 +12,9 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters._common import normalize_schema_name
 from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
-from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator

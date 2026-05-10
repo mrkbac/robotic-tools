@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 from small_mcap import McapError, rebuild_summary
 
+from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.display_utils import (
     ChannelTableColumn,
@@ -28,7 +29,7 @@ from pymcap_cli.display.display_utils import (
 from pymcap_cli.types.info_data import info_to_dict
 from pymcap_cli.types.info_link import ScanMode, generate_link
 from pymcap_cli.types.info_types import McapInfoOutput
-from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, bytes_to_human, read_or_rebuild_info
+from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
 logger = logging.getLogger(__name__)
 console = Console()

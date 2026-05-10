@@ -19,11 +19,10 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.msg_resolver import ROS2Distro, get_message_definition
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
@@ -40,7 +39,7 @@ class ConvertOptions:
 
     distro: ROS2Distro = ROS2Distro.HUMBLE
     extra_paths: list[Path] | None = None
-    chunk_size: int = 1024 * 1024 * 8  # 8MB default
+    chunk_size: int = DEFAULT_CHUNK_SIZE
     compression: WriterCompression = DEFAULT_COMPRESSION
     enable_crcs: bool = True
     use_chunking: bool = True

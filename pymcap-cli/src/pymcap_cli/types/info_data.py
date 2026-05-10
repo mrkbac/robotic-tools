@@ -6,12 +6,12 @@ Extracted from info_json_cmd.py — no CLI or Rich dependencies.
 import heapq
 import math
 import statistics
-import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 from small_mcap import Channel, ChunkIndex, RebuildInfo, Schema
 
+from pymcap_cli.constants import MAX_INT64, NS_TO_MS, NS_TO_SEC
 from pymcap_cli.types.info_types import (
     AttachmentInfo,
     ChannelInfo,
@@ -23,7 +23,6 @@ from pymcap_cli.types.info_types import (
     SchemaInfo,
     Stats,
 )
-from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC
 
 
 @dataclass(slots=True)
@@ -43,7 +42,7 @@ class ChannelStatistics:
     """Collected statistics for a single channel from a single-pass iteration."""
 
     channel_id: int
-    first_time: int = sys.maxsize
+    first_time: int = MAX_INT64
     last_time: int = 0
     message_count: int = 0
     # For interval calculation: track last timestamp and collect intervals directly
@@ -157,7 +156,7 @@ def _collect_channel_statistics(
     channel_durations = {
         channel_id: int(stats.last_time - stats.first_time)
         for channel_id, stats in channel_stats.items()
-        if stats.first_time != sys.maxsize
+        if stats.first_time != MAX_INT64
     }
 
     # Collect intervals (already computed on-the-fly)
@@ -171,7 +170,7 @@ def _collect_channel_statistics(
     message_start_time = {
         channel_id: stats.first_time
         for channel_id, stats in channel_stats.items()
-        if stats.first_time != sys.maxsize
+        if stats.first_time != MAX_INT64
     }
     message_end_time = {
         channel_id: stats.last_time

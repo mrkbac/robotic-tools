@@ -10,13 +10,12 @@ from pymcap_cli.cmd._run_processor import (
     resolve_overwrite_policy,
     run_processor,
 )
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
 )
 from pymcap_cli.types.types_manual import (
-    DEFAULT_CHUNK_SIZE,
-    DEFAULT_COMPRESSION,
     ChunkSizeOption,
     CompressionOption,
     DeleteSourceOption,

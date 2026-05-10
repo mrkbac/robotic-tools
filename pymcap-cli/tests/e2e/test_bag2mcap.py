@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd.bag2mcap_cmd import Bag2McapOptions, convert_bag_to_mcap
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.rosbag_reader import read_bag_messages
-from pymcap_cli.utils import NS_TO_SEC
 from small_mcap import read_message
 
 if TYPE_CHECKING:

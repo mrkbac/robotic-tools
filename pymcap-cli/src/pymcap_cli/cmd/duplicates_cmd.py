@@ -1,7 +1,5 @@
 """Find likely duplicate MCAP recordings with a two-stage compare."""
 
-from __future__ import annotations
-
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -27,6 +25,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.tree import Tree
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.mcap_compare import (
     IdentityReadResult,
     IndexedCompareKind,
@@ -48,7 +47,6 @@ from pymcap_cli.display.time_ranges import (
     format_range_summary,
 )
 from pymcap_cli.log_setup import ERR
-from pymcap_cli.utils import NS_TO_SEC
 
 logger = logging.getLogger(__name__)
 console = Console()

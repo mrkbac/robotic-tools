@@ -4,9 +4,8 @@ import io
 from pathlib import Path
 
 from mcap_ros2_support_fast import ROS2EncoderFactory
+from pymcap_cli.constants import NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
-
-from pymcap_cli.utils import NS_TO_SEC
 
 # ROS2 message schema for diagnostic_msgs/msg/DiagnosticArray
 DIAGNOSTIC_ARRAY_SCHEMA = """std_msgs/Header header

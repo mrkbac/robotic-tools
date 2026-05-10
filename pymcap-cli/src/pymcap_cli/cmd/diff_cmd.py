@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.tree import Tree
 from small_mcap import RebuildInfo, Schema, Statistics, Summary
 
+from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.core.mcap_compare import (
     IndexedCompareKind,
     IndexedComparison,
@@ -31,7 +32,7 @@ from pymcap_cli.display.time_ranges import (
     format_range_summary,
 )
 from pymcap_cli.rihs01 import compute_rihs01
-from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, bytes_to_human, format_ts_short
+from pymcap_cli.utils import bytes_to_human, format_ts_short
 
 logger = logging.getLogger(__name__)
 console = Console()

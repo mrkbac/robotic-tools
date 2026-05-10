@@ -6,8 +6,8 @@ import io
 import struct
 
 import pytest
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.rosbag_reader import read_bag_info, read_bag_messages
-from pymcap_cli.utils import NS_TO_SEC
 
 from .fixtures.bag_generator import (
     generate_bag,

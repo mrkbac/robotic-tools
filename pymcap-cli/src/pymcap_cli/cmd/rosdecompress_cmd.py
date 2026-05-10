@@ -1,12 +1,7 @@
 """Command to decompress CompressedVideo and CompressedPointCloud2 topics in MCAP files."""
 
-from __future__ import annotations
-
 from collections import deque
-from typing import TYPE_CHECKING, Annotated, Any, Literal
-
-if TYPE_CHECKING:
-    from small_mcap import DecodedMessage
+from typing import Annotated, Any, Literal
 
 from cyclopts import Group, Parameter
 from mcap_codec_support.pointcloud import (
@@ -24,11 +19,12 @@ from mcap_codec_support.video import (
 )
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from rich.console import Console
-from small_mcap import McapWriter, read_message_decoded
+from small_mcap import DecodedMessage, McapWriter, read_message_decoded
 
 # NOPDecoderFactory is not re-exported from the small_mcap top level.
 from small_mcap.nop_decoder import NOPDecoderFactory
 
+from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_transform import (
     copy_message,
@@ -38,11 +34,8 @@ from pymcap_cli.core.mcap_transform import (
     get_total_message_count,
     print_size_comparison,
 )
-from pymcap_cli.types.types_manual import (  # noqa: TC001 — runtime for cyclopts
-    ForceOverwriteOption,
-    OutputPathOption,
-)
-from pymcap_cli.utils import NS_TO_SEC, confirm_output_overwrite
+from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
+from pymcap_cli.utils import confirm_output_overwrite
 
 console = Console()
 

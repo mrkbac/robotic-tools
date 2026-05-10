@@ -23,6 +23,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE
 from pymcap_cli.core.mcap_processor import (
     InputFile,
     InputOptions,
@@ -69,7 +70,7 @@ def _run_pymcap(
             input_options=InputOptions.from_args(),
             output_options=OutputOptions(
                 compression=output_compression,
-                chunk_size=4 * 1024 * 1024,
+                chunk_size=DEFAULT_CHUNK_SIZE,
             ),
         )
         McapProcessor(options).process(output_stream)
@@ -268,7 +269,7 @@ def nuscenes_uncompressed(nuscenes_mcap: Path, tmp_path_factory) -> Path:
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
                     compression="none",
-                    chunk_size=4 * 1024 * 1024,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
                 ),
             )
             McapProcessor(options).process(output_stream)
