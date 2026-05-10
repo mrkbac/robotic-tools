@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import pytest
+from pymcap_cli.constants import MAX_INT64, NS_TO_MS, NS_TO_SEC
 from pymcap_cli.utils import (
+    RelativeTime,
     bytes_to_human,
     compile_topic_patterns,
     parse_time_arg,
     parse_timestamp_args,
+    parse_timestamp_args_absolute,
+    parse_timestamp_bounds_absolute,
 )
 
 # ---------------------------------------------------------------------------
@@ -81,6 +85,41 @@ class TestParseTimeArg:
         with pytest.raises(ValueError, match="Invalid time format"):
             parse_time_arg("not-a-time")
 
+    def test_relative_anchor_rejected_by_default(self):
+        with pytest.raises(ValueError, match="Invalid time format"):
+            parse_time_arg("@5s")
+
+    def test_at_anchor_seconds(self):
+        result = parse_time_arg("@5s", allow_relative=True)
+        assert result == RelativeTime(anchor="start", offset_ns=5 * NS_TO_SEC)
+
+    def test_at_anchor_milliseconds(self):
+        result = parse_time_arg("@500ms", allow_relative=True)
+        assert result == RelativeTime(anchor="start", offset_ns=500 * NS_TO_MS)
+
+    def test_start_plus(self):
+        assert parse_time_arg("start+5s", allow_relative=True) == RelativeTime(
+            "start", 5 * NS_TO_SEC
+        )
+
+    def test_start_minus(self):
+        assert parse_time_arg("start-1s", allow_relative=True) == RelativeTime("start", -NS_TO_SEC)
+
+    def test_end_minus(self):
+        assert parse_time_arg("end-30s", allow_relative=True) == RelativeTime(
+            "end", -30 * NS_TO_SEC
+        )
+
+    def test_end_plus_zero_via_bare_end(self):
+        assert parse_time_arg("end", allow_relative=True) == RelativeTime("end", 0)
+        assert parse_time_arg("start", allow_relative=True) == RelativeTime("start", 0)
+
+    def test_relative_resolves_against_summary_bounds(self):
+        rt = RelativeTime("start", 5 * NS_TO_SEC)
+        assert rt.resolve(start_ns=1_000, end_ns=2_000) == 1_000 + 5 * NS_TO_SEC
+        rt = RelativeTime("end", -NS_TO_SEC)
+        assert rt.resolve(start_ns=1_000, end_ns=10 * NS_TO_SEC) == 9 * NS_TO_SEC
+
 
 # ---------------------------------------------------------------------------
 # compile_topic_patterns
@@ -138,3 +177,38 @@ class TestParseTimestampArgs:
     def test_rfc3339_date(self):
         result = parse_timestamp_args("2024-01-01T00:00:00Z", 0, 0)
         assert result == 1_704_067_200_000_000_000
+
+    def test_relative_rejected_by_default(self):
+        with pytest.raises(ValueError, match="Invalid time format"):
+            parse_timestamp_args("@5s", 0, 0)
+
+    def test_relative_allowed_when_requested(self):
+        result = parse_timestamp_args("@5s", 0, 0, allow_relative=True)
+        assert result == RelativeTime("start", 5 * NS_TO_SEC)
+
+    def test_absolute_wrapper_rejects_relative(self):
+        with pytest.raises(ValueError, match="Invalid time format"):
+            parse_timestamp_args_absolute("@5s", 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# parse_timestamp_bounds_absolute
+# ---------------------------------------------------------------------------
+
+
+class TestParseTimestampBoundsAbsolute:
+    def test_defaults(self):
+        assert parse_timestamp_bounds_absolute("", 0, "", 0) == (0, MAX_INT64)
+
+    def test_seconds(self):
+        assert parse_timestamp_bounds_absolute("", 2, "", 3) == (
+            2 * NS_TO_SEC,
+            3 * NS_TO_SEC,
+        )
+
+    def test_explicit_zero_end_is_preserved(self):
+        assert parse_timestamp_bounds_absolute("", 0, "0", 0) == (0, 0)
+
+    def test_relative_rejected(self):
+        with pytest.raises(ValueError, match="Invalid time format"):
+            parse_timestamp_bounds_absolute("@5s", 0, "", 0)

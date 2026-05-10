@@ -67,6 +67,7 @@ from pymcap_cli.types.types_manual import (
 from pymcap_cli.utils import (
     McapWriterOptions,
     ProgressTrackingIO,
+    RelativeTime,
     confirm_output_overwrite,
     create_mcap_writer,
     file_progress,
@@ -151,14 +152,16 @@ class InputOptions:
     """
 
     always_decode_chunk: bool
-    start_time_ns: int | None
-    end_time_ns: int | None
+    start_time_ns: int | RelativeTime | None
+    end_time_ns: int | RelativeTime | None
     include_topics: list[str]
     exclude_topics: list[str]
     include_metadata: bool
     include_attachments: bool
     latch_topics: list[str] = field(default_factory=list)
     latch_from_metadata: bool = False
+    invert_topics: bool = False
+    invert_time: bool = False
 
     @classmethod
     def from_args(
@@ -174,23 +177,38 @@ class InputOptions:
         # Raw CLI args for topics (regex strings, not compiled)
         include_topic_regex: list[str] | None = None,
         exclude_topic_regex: list[str] | None = None,
+        # Topic globs (shell-style patterns, converted to regex)
+        include_topic_glob: list[str] | None = None,
+        exclude_topic_glob: list[str] | None = None,
         # Content filtering
         include_metadata: bool = True,
         include_attachments: bool = True,
         # Latching
         latch_topics: list[str] | None = None,
         latch_from_metadata: bool = False,
+        # Inversion
+        invert_topics: bool = False,
+        invert_time: bool = False,
     ) -> "InputOptions":
+        import fnmatch  # noqa: PLC0415
+
+        include_topics = list(include_topic_regex or [])
+        include_topics.extend(r"\A" + fnmatch.translate(glob) for glob in include_topic_glob or [])
+        exclude_topics = list(exclude_topic_regex or [])
+        exclude_topics.extend(r"\A" + fnmatch.translate(glob) for glob in exclude_topic_glob or [])
+
         return cls(
             always_decode_chunk=always_decode_chunk,
-            start_time_ns=parse_timestamp_args(start, start_secs, start_nsecs),
-            end_time_ns=parse_timestamp_args(end, end_secs, end_nsecs),
-            include_topics=include_topic_regex or [],
-            exclude_topics=exclude_topic_regex or [],
+            start_time_ns=parse_timestamp_args(start, start_secs, start_nsecs, allow_relative=True),
+            end_time_ns=parse_timestamp_args(end, end_secs, end_nsecs, allow_relative=True),
+            include_topics=include_topics,
+            exclude_topics=exclude_topics,
             include_metadata=include_metadata,
             include_attachments=include_attachments,
             latch_topics=latch_topics or [],
             latch_from_metadata=latch_from_metadata,
+            invert_topics=invert_topics,
+            invert_time=invert_time,
         )
 
     @cached_property
@@ -215,10 +233,22 @@ class InputOptions:
             procs.append(AlwaysDecodeProcessor())
 
         if self.start_time_ns is not None or self.end_time_ns is not None:
-            procs.append(TimeFilterProcessor(self.start_time_ns, self.end_time_ns))
+            procs.append(
+                TimeFilterProcessor(
+                    self.start_time_ns,
+                    self.end_time_ns,
+                    invert=self.invert_time,
+                )
+            )
 
         if self.include_topics or self.exclude_topics:
-            procs.append(TopicFilterProcessor(self.include_topics, self.exclude_topics))
+            procs.append(
+                TopicFilterProcessor(
+                    self.include_topics,
+                    self.exclude_topics,
+                    invert=self.invert_topics,
+                )
+            )
 
         if not self.include_metadata:
             procs.append(MetadataFilterProcessor(include=False))
@@ -242,6 +272,8 @@ class InputOptions:
             include_attachments=self.include_attachments and other.include_attachments,
             latch_topics=other.latch_topics or self.latch_topics,
             latch_from_metadata=self.latch_from_metadata or other.latch_from_metadata,
+            invert_topics=self.invert_topics or other.invert_topics,
+            invert_time=self.invert_time or other.invert_time,
         )
 
 

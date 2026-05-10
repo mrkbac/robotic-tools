@@ -300,3 +300,99 @@ class TestFilter:
         assert stats.writer_statistics.schema_count == 1
         assert stats.writer_statistics.channel_count == 2
         assert stats.chunks_processed > 0
+
+    def test_filter_invert_topics(self, multi_topic_mcap: Path, output_file: Path):
+        """--invert-topics flips include into exclude."""
+        file_size = multi_topic_mcap.stat().st_size
+
+        with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(
+                        stream=input_stream,
+                        size=file_size,
+                        options=InputOptions.from_args(
+                            include_topic_regex=["/camera/.*"],
+                            invert_topics=True,
+                        ),
+                    )
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
+            )
+
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream)
+
+        # Camera topics now excluded — lidar + debug remain (2 channels)
+        assert stats.writer_statistics.channel_count == 2
+
+    def test_filter_invert_time_keeps_outside_window(
+        self, multi_topic_mcap: Path, output_file: Path
+    ):
+        """--invert-time skips messages INSIDE the window."""
+        file_size = multi_topic_mcap.stat().st_size
+
+        with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
+            inside = ProcessingOptions(
+                inputs=[
+                    InputFile(
+                        stream=input_stream,
+                        size=file_size,
+                        options=InputOptions.from_args(
+                            start_nsecs=0, end_nsecs=50_000_000, invert_time=True
+                        ),
+                    )
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
+            )
+            stats = McapProcessor(inside).process(output_stream)
+
+        # 200 total - whatever was inside the 0..50ms window
+        assert stats.writer_statistics.message_count > 0
+        assert stats.writer_statistics.message_count < 200
+
+    def test_filter_topic_glob(self, multi_topic_mcap: Path, output_file: Path):
+        """--topic-glob translates shell patterns into the include list."""
+        file_size = multi_topic_mcap.stat().st_size
+
+        with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(
+                        stream=input_stream,
+                        size=file_size,
+                        options=InputOptions.from_args(include_topic_glob=["/camera/*"]),
+                    )
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
+            )
+
+            stats = McapProcessor(options).process(output_stream)
+
+        # /camera/front and /camera/back match
+        assert stats.writer_statistics.channel_count == 2
+
+    def test_filter_relative_time_anchor(self, multi_topic_mcap: Path, output_file: Path):
+        """``@5ms`` resolves against the file's first message timestamp."""
+        file_size = multi_topic_mcap.stat().st_size
+
+        with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(
+                        stream=input_stream,
+                        size=file_size,
+                        options=InputOptions.from_args(start="@5ms"),
+                    )
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
+            )
+
+            stats = McapProcessor(options).process(output_stream)
+
+        # Some messages dropped (those before file_start + 5ms)
+        assert 0 < stats.writer_statistics.message_count < stats.messages_processed

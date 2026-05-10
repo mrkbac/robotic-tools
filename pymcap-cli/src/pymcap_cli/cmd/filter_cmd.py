@@ -57,6 +57,33 @@ def filter_cmd(
             group=TOPIC_FILTERING_GROUP,
         ),
     ] = None,
+    include_topic_glob: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--topic-glob"],
+            group=TOPIC_FILTERING_GROUP,
+            help=(
+                "Include topics matching this shell-style glob "
+                "(repeatable, combines with --topics)."
+            ),
+        ),
+    ] = None,
+    exclude_topic_glob: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--exclude-topic-glob"],
+            group=TOPIC_FILTERING_GROUP,
+            help="Exclude topics matching this shell-style glob (repeatable).",
+        ),
+    ] = None,
+    invert_topics: Annotated[
+        bool,
+        Parameter(
+            name=["--invert-topics"],
+            group=TOPIC_FILTERING_GROUP,
+            help="Invert the include/exclude topic decision.",
+        ),
+    ] = False,
     start: Annotated[
         str,
         Parameter(
@@ -99,6 +126,14 @@ def filter_cmd(
             group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
+    invert_time: Annotated[
+        bool,
+        Parameter(
+            name=["--invert-time"],
+            group=TIME_FILTERING_GROUP,
+            help="Invert the time-window decision (drop messages INSIDE [start, end]).",
+        ),
+    ] = False,
     latch: Annotated[
         list[str] | None,
         Parameter(
@@ -201,6 +236,8 @@ def filter_cmd(
         input_options = InputOptions.from_args(
             include_topic_regex=include_topic_regex,
             exclude_topic_regex=exclude_topic_regex,
+            include_topic_glob=include_topic_glob,
+            exclude_topic_glob=exclude_topic_glob,
             start=start,
             start_nsecs=start_nsecs,
             start_secs=start_secs,
@@ -211,6 +248,8 @@ def filter_cmd(
             include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
             latch_topics=latch,
             latch_from_metadata=latch_from_metadata,
+            invert_topics=invert_topics,
+            invert_time=invert_time,
         )
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400

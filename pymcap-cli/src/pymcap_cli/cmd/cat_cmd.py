@@ -27,7 +27,6 @@ from ros_parser.message_path import (
 from ros_parser.models import MessageDefinition
 from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
-from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
@@ -40,7 +39,7 @@ from pymcap_cli.display.message_render import (
     render_message_tree,
     resolve_msgdef_by_name,
 )
-from pymcap_cli.utils import ProgressTrackingIO, file_progress, parse_timestamp_args
+from pymcap_cli.utils import ProgressTrackingIO, file_progress, parse_timestamp_bounds_absolute
 
 logger = logging.getLogger(__name__)
 console_out = Console()
@@ -188,9 +187,16 @@ def cat(
       pymcap-cli cat recording.mcap --bytes base64
     """
 
-    start_time_ns = parse_timestamp_args(start, 0, start_secs) or 0
-    end_time_ns = parse_timestamp_args(end, 0, end_secs)
-    end_time_ns = MAX_INT64 if end_time_ns is None else end_time_ns
+    try:
+        start_time_ns, end_time_ns = parse_timestamp_bounds_absolute(
+            start,
+            start_secs,
+            end,
+            end_secs,
+        )
+    except ValueError as e:
+        logger.error(str(e))  # noqa: TRY400
+        return 1
 
     parsed_query = None
     if query:

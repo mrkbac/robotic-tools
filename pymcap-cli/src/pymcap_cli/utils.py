@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import IO, TYPE_CHECKING, BinaryIO, Protocol
+from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, overload
 
 if TYPE_CHECKING:
     from _typeshed import WriteableBuffer
@@ -38,7 +38,7 @@ from small_mcap import (
     rebuild_summary,
 )
 
-from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, NS_TO_SEC
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, MAX_INT64, NS_TO_SEC
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.types_manual import (
@@ -367,24 +367,84 @@ class AttachmentsMode(str, Enum):
     EXCLUDE = "exclude"
 
 
-def parse_time_arg(time_str: str) -> int:
-    """Parse time argument that can be nanoseconds or RFC3339 date."""
+@dataclass(frozen=True, slots=True)
+class RelativeTime:
+    """A time anchored to the file's start or end with a signed offset.
+
+    Resolved against the input MCAP's summary statistics by
+    ``TimeFilterProcessor.initialize`` once the global time range is known.
+    """
+
+    anchor: Literal["start", "end"]
+    offset_ns: int
+
+    def resolve(self, start_ns: int, end_ns: int) -> int:
+        anchor_ns = start_ns if self.anchor == "start" else end_ns
+        return anchor_ns + self.offset_ns
+
+
+@overload
+def parse_time_arg(time_str: str, *, allow_relative: Literal[False] = False) -> int: ...
+
+
+@overload
+def parse_time_arg(time_str: str, *, allow_relative: Literal[True]) -> int | RelativeTime: ...
+
+
+def parse_time_arg(time_str: str, *, allow_relative: bool = False) -> int | RelativeTime:
+    """Parse time argument: nanoseconds, RFC3339 date, or optionally relative anchor.
+
+    Relative anchors:
+      ``@5s``        — 5 s after file start (sugar for ``start+5s``)
+      ``start+5s``   — 5 s after file start
+      ``start-1s``   — 1 s before file start (rarely useful but accepted)
+      ``end-30s``    — 30 s before file end
+      ``end+0``      — file end exactly
+
+    The offset accepts the same suffixes as ``parse_duration_ns``
+    (``ns``/``us``/``ms``/``s``/``m``/``h`` plus bare seconds).
+    """
+    from pymcap_cli.types.duration import parse_duration_ns  # noqa: PLC0415
+
     if not time_str:
         return 0
 
+    stripped = time_str.strip()
+
+    if allow_relative:
+        # Relative-anchor sugar: leading @ -> start+
+        if stripped.startswith("@"):
+            offset = parse_duration_ns(stripped[1:])
+            return RelativeTime(anchor="start", offset_ns=offset)
+
+        for prefix in ("start", "end"):
+            if stripped.startswith(prefix):
+                rest = stripped[len(prefix) :].strip()
+                if not rest:
+                    return RelativeTime(anchor=prefix, offset_ns=0)
+                sign_char = rest[0]
+                if sign_char in ("+", "-"):
+                    offset = parse_duration_ns(rest[1:].strip())
+                    if sign_char == "-":
+                        offset = -offset
+                    return RelativeTime(anchor=prefix, offset_ns=offset)
+
     # Try parsing as integer nanoseconds first
     try:
-        return int(time_str)
+        return int(stripped)
     except ValueError:
         pass
 
     # Try parsing as RFC3339 date
     try:
-        dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         return int(dt.timestamp() * NS_TO_SEC)
     except ValueError:
+        relative_help = " or a relative anchor like '@5s' / 'start+5s' / 'end-30s'"
+        if not allow_relative:
+            relative_help = ""
         raise ValueError(
-            f"Invalid time format: {time_str}. Use nanoseconds or RFC3339 format"
+            f"Invalid time format: {time_str}. Use nanoseconds, RFC3339{relative_help}."
         ) from None
 
 
@@ -400,18 +460,74 @@ def compile_topic_patterns(patterns: list[str]) -> list[Pattern[str]]:
     return compiled
 
 
-def parse_timestamp_args(date_or_nanos: str, seconds: int, nanoseconds: int) -> int | None:
+@overload
+def parse_timestamp_args(
+    date_or_nanos: str,
+    seconds: int,
+    nanoseconds: int,
+    *,
+    allow_relative: Literal[False] = False,
+) -> int | None: ...
+
+
+@overload
+def parse_timestamp_args(
+    date_or_nanos: str,
+    seconds: int,
+    nanoseconds: int,
+    *,
+    allow_relative: Literal[True],
+) -> int | RelativeTime | None: ...
+
+
+def parse_timestamp_args(
+    date_or_nanos: str,
+    seconds: int,
+    nanoseconds: int,
+    *,
+    allow_relative: bool = False,
+) -> int | RelativeTime | None:
     """Parse timestamp with precedence: date_or_nanos > seconds > nanoseconds.
 
-    Returns None if no time filter is specified (all args are empty/zero).
+    Returns ``None`` if no time filter is specified (all args are empty/zero).
+    The string form may be a relative anchor (``@5s``, ``start+5s``,
+    ``end-30s``) when ``allow_relative`` is true; the integer/seconds forms
+    always produce an absolute nanosecond timestamp.
     """
     if date_or_nanos:
-        return parse_time_arg(date_or_nanos)
+        return parse_time_arg(date_or_nanos, allow_relative=allow_relative)
     if seconds != 0:
         return seconds * NS_TO_SEC
     if nanoseconds != 0:
         return nanoseconds
     return None
+
+
+def parse_timestamp_args_absolute(date_or_nanos: str, seconds: int, nanoseconds: int) -> int | None:
+    """Parse timestamp args, rejecting relative anchors.
+
+    Use this from commands that resolve times before any input file is open
+    (e.g. ``cat``, ``plot``) and so cannot yet resolve ``@5s`` / ``end-30s``
+    against the file's summary. Filter uses :py:func:`parse_timestamp_args`
+    with ``allow_relative=True`` and resolves relative bounds in
+    :py:meth:`TimeFilterProcessor.initialize`.
+    """
+    return parse_timestamp_args(date_or_nanos, seconds, nanoseconds)
+
+
+def parse_timestamp_bounds_absolute(
+    start: str,
+    start_secs: int,
+    end: str,
+    end_secs: int,
+) -> tuple[int, int]:
+    """Parse absolute start/end CLI bounds with command defaults applied."""
+    start_ns = parse_timestamp_args_absolute(start, start_secs, 0)
+    end_ns = parse_timestamp_args_absolute(end, end_secs, 0)
+    return (
+        0 if start_ns is None else start_ns,
+        MAX_INT64 if end_ns is None else end_ns,
+    )
 
 
 def confirm_output_overwrite(output: Path, force: bool) -> None:

@@ -171,7 +171,7 @@ def split(
         logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
-    # Parse split-at timestamps
+    # Parse split-at timestamps. Relative anchors are not supported here.
     split_points: list[int] = []
     if split_at:
         for ts in split_at:

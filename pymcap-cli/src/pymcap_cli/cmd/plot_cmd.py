@@ -10,10 +10,9 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from ros_parser.message_path import ValidationError
 
-from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.plot_exporter import PlotExporter
-from pymcap_cli.utils import parse_timestamp_args
+from pymcap_cli.utils import parse_timestamp_bounds_absolute
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +101,16 @@ def plot(
         logger.exception(f"Invalid path syntax in {paths!r}")
         return 1
 
-    start_time_ns = parse_timestamp_args(start, 0, start_secs) or 0
-    end_time_ns = parse_timestamp_args(end, 0, end_secs)
-    if end_time_ns is None:
-        end_time_ns = MAX_INT64
+    try:
+        start_time_ns, end_time_ns = parse_timestamp_bounds_absolute(
+            start,
+            start_secs,
+            end,
+            end_secs,
+        )
+    except ValueError as e:
+        logger.error(str(e))  # noqa: TRY400
+        return 1
 
     return run_export(
         file=file,

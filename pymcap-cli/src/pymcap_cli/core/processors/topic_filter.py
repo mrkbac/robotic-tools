@@ -14,23 +14,36 @@ class TopicFilterProcessor(Processor):
     """Filter channels by topic regex patterns.
 
     Compiles patterns internally. Uses search() for flexible matching.
+
+    When ``invert`` is True, the include/exclude decision is flipped: a
+    matching include topic becomes SKIP, and a matching exclude topic
+    becomes CONTINUE. This is what users expect from ``--invert-topics``.
     """
 
     def __init__(
         self,
         include: list[str] | None = None,
         exclude: list[str] | None = None,
+        *,
+        invert: bool = False,
     ) -> None:
         self.include = compile_topic_patterns(include or [])
         self.exclude = compile_topic_patterns(exclude or [])
+        self._invert = invert
 
-    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
+    def _decide(self, topic: str) -> Action:
         if self.include:
-            if any(pattern.search(channel.topic) for pattern in self.include):
+            if any(pattern.search(topic) for pattern in self.include):
                 return Action.CONTINUE
             return Action.SKIP
 
-        if self.exclude and any(pattern.search(channel.topic) for pattern in self.exclude):
+        if self.exclude and any(pattern.search(topic) for pattern in self.exclude):
             return Action.SKIP
 
         return Action.CONTINUE
+
+    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
+        decision = self._decide(channel.topic)
+        if self._invert:
+            return Action.SKIP if decision == Action.CONTINUE else Action.CONTINUE
+        return decision
