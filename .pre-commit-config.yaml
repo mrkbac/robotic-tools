@@ -75,6 +75,13 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: import-linter
+        name: import-linter
+        entry: uv run --frozen --all-groups --all-extras --all-packages lint-imports
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: oxlint
         name: oxlint (mcap-web-inspector)
         entry: bun run --cwd mcap-web-inspector oxlint src/

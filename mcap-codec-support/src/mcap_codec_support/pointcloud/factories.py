@@ -21,11 +21,11 @@ if TYPE_CHECKING:
 
     import numpy as np
     from pointcloud2 import HeaderMsg, PointFieldDict, PointFieldMsg
-    from pointcloud2.messages import Stamp
     from pureini import PointcloudDecoder
     from small_mcap import Schema
 
-    from mcap_codec_support._messages import Header, Pointcloud2Dict
+    from mcap_codec_support._messages import Header, Stamp
+    from mcap_codec_support.pointcloud._messages import Pointcloud2Dict
 
 
 class _RosCompressedPointcloud2Msg(Protocol):
@@ -43,10 +43,15 @@ class _RosCompressedPointcloud2Msg(Protocol):
     compressed_data: bytes
 
 
+class _StampMsg(Protocol):
+    sec: int
+    nanosec: int
+
+
 class _FoxgloveCompressedPointcloudMsg(Protocol):
     """foxglove_msgs/msg/CompressedPointCloud — flattened header."""
 
-    timestamp: Stamp
+    timestamp: _StampMsg
     frame_id: str
     format: str | bytes
     data: bytes
@@ -56,6 +61,21 @@ _COMPRESSED_POINTCLOUD_SCHEMAS = {
     COMPRESSED_POINTCLOUD2_SCHEMA,
     FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
 }
+
+
+def is_compressed_codec_available() -> bool:
+    """True if any compressed point-cloud codec backend (cloudini or draco) is importable."""
+    try:
+        import pureini  # noqa: F401, PLC0415
+    except ImportError:
+        pass
+    else:
+        return True
+    try:
+        import DracoPy  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    return True
 
 
 def _pointcloud_dict_to_array(cloud_dict: Pointcloud2Dict) -> np.ndarray:
@@ -75,17 +95,20 @@ def _as_bytes(payload: bytes | bytearray | memoryview) -> bytes:
     return payload if isinstance(payload, bytes) else bytes(payload)
 
 
+def _stamp_from_msg(stamp: _StampMsg) -> Stamp:
+    return {"sec": stamp.sec, "nanosec": stamp.nanosec}
+
+
 def _header_from_ros_msg(msg: _RosCompressedPointcloud2Msg) -> Header:
-    stamp = msg.header.stamp
     return {
-        "stamp": {"sec": stamp.sec, "nanosec": stamp.nanosec},
+        "stamp": _stamp_from_msg(msg.header.stamp),
         "frame_id": msg.header.frame_id,
     }
 
 
 def _header_from_foxglove_msg(msg: _FoxgloveCompressedPointcloudMsg) -> Header:
     return {
-        "stamp": {"sec": msg.timestamp.sec, "nanosec": msg.timestamp.nanosec},
+        "stamp": _stamp_from_msg(msg.timestamp),
         "frame_id": msg.frame_id,
     }
 

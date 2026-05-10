@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
-    from pointcloud2.messages import Pointcloud2Msg, PointFieldMsg
+    from pointcloud2 import Pointcloud2Msg, PointFieldMsg
     from pureini import CompressionOption, EncodingInfo, EncodingOptions
 
 DRACO_MAX_QUANTIZATION_BITS = 30

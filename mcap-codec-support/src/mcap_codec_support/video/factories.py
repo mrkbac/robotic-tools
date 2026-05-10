@@ -16,8 +16,9 @@ if TYPE_CHECKING:
 
     from small_mcap import Channel, Schema
 
-    from mcap_codec_support._messages import CompressedImageDict, Header, ImageDict
+    from mcap_codec_support._messages import Header
     from mcap_codec_support._protocols import VideoDecompressorProtocol
+    from mcap_codec_support.video._messages import CompressedImageDict, ImageDict
     from mcap_codec_support.video.common import DecompressedFrame
 
 

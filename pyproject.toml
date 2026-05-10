@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.11",
     "jsonschema-gentypes>=2.13.0",
     "portable-ffmpeg>=0.2.0",
     "pyinstrument>=5.1.2",
@@ -93,6 +94,123 @@ omit = [
     "ros-parser/src/ros_parser/_lark_standalone_runtime.py",
     # Auto-generated TypedDicts from JSON schema
     "pymcap-cli/src/pymcap_cli/types/info_types.py",
+]
+
+[tool.importlinter]
+root_packages = [
+    "digitalis",
+    "mcap_codec_support",
+    "mcap_ros2_support_fast",
+    "pointcloud2",
+    "pureini",
+    "pymcap_cli",
+    "robo_ws_bridge",
+    "ros_parser",
+    "small_mcap",
+    "websocket_proxy",
+]
+
+[[tool.importlinter.contracts]]
+name = "Workspace boundaries"
+type = "independence"
+modules = [
+    "digitalis",
+    "mcap_codec_support",
+    "mcap_ros2_support_fast",
+    "pointcloud2",
+    "pureini",
+    "pymcap_cli",
+    "robo_ws_bridge",
+    "ros_parser",
+    "small_mcap",
+    "websocket_proxy",
+]
+unmatched_ignore_imports_alerting = "none"
+# `**` matches one+ components, so each allowed edge needs both bare and `.**` forms.
+ignore_imports = [
+    # ros_parser is whitelisted at the submodule level — `ros1_msg` and the
+    # private `_utils` / `_lark_standalone_runtime` stay off-limits.
+    "mcap_ros2_support_fast.** -> ros_parser",
+    "mcap_ros2_support_fast.** -> ros_parser.models",
+    "mcap_ros2_support_fast.** -> ros_parser.ros2_msg",
+    "mcap_codec_support.** -> mcap_ros2_support_fast",
+    "mcap_codec_support.** -> mcap_ros2_support_fast.**",
+    "mcap_codec_support.** -> small_mcap",
+    "mcap_codec_support.** -> small_mcap.**",
+    "mcap_codec_support.pointcloud.** -> pureini",
+    "mcap_codec_support.pointcloud.** -> pureini.**",
+    "mcap_codec_support.pointcloud.** -> pointcloud2",
+    "pymcap_cli.** -> small_mcap",
+    "pymcap_cli.** -> small_mcap.**",
+    "pymcap_cli.** -> mcap_codec_support",
+    "pymcap_cli.** -> mcap_codec_support.**",
+    "pymcap_cli.** -> mcap_ros2_support_fast",
+    "pymcap_cli.** -> mcap_ros2_support_fast.**",
+    "pymcap_cli.** -> ros_parser",
+    "pymcap_cli.** -> ros_parser.models",
+    "pymcap_cli.** -> ros_parser.message_path",
+    "pymcap_cli.** -> ros_parser.ros2_msg",
+    "pymcap_cli.** -> robo_ws_bridge",
+    "pymcap_cli.** -> robo_ws_bridge.**",
+    "digitalis.** -> small_mcap",
+    "digitalis.** -> small_mcap.**",
+    "digitalis.** -> mcap_ros2_support_fast",
+    "digitalis.** -> mcap_ros2_support_fast.**",
+    "digitalis.** -> ros_parser.message_path",
+    "digitalis.** -> pointcloud2",
+    "digitalis.** -> robo_ws_bridge",
+    "digitalis.** -> robo_ws_bridge.**",
+    "websocket_proxy.** -> mcap_codec_support",
+    "websocket_proxy.** -> mcap_codec_support.**",
+    "websocket_proxy.** -> mcap_ros2_support_fast",
+    "websocket_proxy.** -> mcap_ros2_support_fast.**",
+    "websocket_proxy.** -> robo_ws_bridge",
+    "websocket_proxy.** -> robo_ws_bridge.**",
+]
+
+[[tool.importlinter.contracts]]
+name = "pymcap_cli layers"
+type = "layers"
+containers = ["pymcap_cli"]
+layers = [
+    "cli",
+    "cmd",
+    "exporters",
+    "core",
+    "display",
+    "encoding | types | rosbag_reader",
+]
+
+[[tool.importlinter.contracts]]
+name = "mcap_codec_support features independent"
+type = "independence"
+modules = [
+    "mcap_codec_support.video",
+    "mcap_codec_support.pointcloud",
+]
+
+[[tool.importlinter.contracts]]
+name = "ros_parser features independent"
+type = "independence"
+modules = [
+    "ros_parser.ros1_msg",
+    "ros_parser.ros2_msg",
+    "ros_parser.message_path",
+]
+# Auto-generated lark runtime does `from . import __version__`, which transitively
+# pulls every subpackage via ros_parser/__init__.py re-exports. Break that chain.
+ignore_imports = [
+    "ros_parser._lark_standalone_runtime -> ros_parser",
+]
+
+[[tool.importlinter.contracts]]
+name = "digitalis layers"
+type = "layers"
+containers = ["digitalis"]
+layers = [
+    "screens",
+    "ui",
+    "reader",
 ]
 
 [tool.ruff]

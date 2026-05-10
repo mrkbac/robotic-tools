@@ -15,6 +15,7 @@ from mcap_codec_support.pointcloud import (
     FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
     CompressedPointCloudDecoderFactory,
     Pointcloud2DecoderFactory,
+    is_compressed_codec_available,
 )
 from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 
@@ -100,21 +101,6 @@ _POINTCLOUD_SCHEMAS: frozenset[str] = frozenset(
 )
 
 
-def _compressed_pointcloud_codec_available() -> bool:
-    try:
-        import pureini  # noqa: F401, PLC0415
-    except ImportError:
-        pass
-    else:
-        return True
-    try:
-        import DracoPy  # noqa: F401, PLC0415
-    except ImportError:
-        return False
-    else:
-        return True
-
-
 class _PcdTopicWriter(TopicWriter):
     def __init__(self, dir_path: Path) -> None:
         self.dir_path = dir_path
@@ -136,7 +122,7 @@ class PcdExporter(Exporter):
 
     def __init__(self) -> None:
         self._factories: list[Any] = [Pointcloud2DecoderFactory()]
-        self._compressed_supported = _compressed_pointcloud_codec_available()
+        self._compressed_supported = is_compressed_codec_available()
         if self._compressed_supported:
             self._factories.append(CompressedPointCloudDecoderFactory())
         self._factories.append(Ros2DecoderFactory())

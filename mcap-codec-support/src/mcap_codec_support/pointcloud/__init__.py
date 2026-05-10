@@ -13,6 +13,7 @@ from mcap_codec_support.pointcloud.factories import (
     CompressedPointCloudDecompressFactory,
     Pointcloud2DecoderFactory,
     PointCloudDecompressFactory,
+    is_compressed_codec_available,
 )
 from mcap_codec_support.pointcloud.schemas import (
     CLOUDINI_COMPRESSED_POINTCLOUD2,
@@ -42,4 +43,5 @@ __all__ = [
     "Pointcloud2DecoderFactory",
     "build_compressed_pointcloud2_message",
     "build_foxglove_compressed_pointcloud_message",
+    "is_compressed_codec_available",
 ]
