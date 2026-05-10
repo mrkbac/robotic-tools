@@ -31,4 +31,3 @@ class TimestampSplitProcessor(BoundarySplitProcessor):
         global_start_ns, global_end_ns = time_range
         valid = [point for point in self.split_points if global_start_ns < point <= global_end_ns]
         self.boundaries = [global_start_ns, *valid, global_end_ns + 1]
-        self.n_segments = len(self.boundaries) - 1

@@ -25,7 +25,7 @@ from pymcap_cli.types.types_manual import (
     ForceOverwriteOption,
     NoClobberOption,
 )
-from pymcap_cli.utils import parse_time_arg
+from pymcap_cli.utils import bytes_to_human, parse_time_arg
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -368,13 +368,3 @@ def split(
         return finalize_delete_source(sources=[file], outputs=outputs)
 
     return 0
-
-
-def bytes_to_human(size_bytes: int) -> str:
-    """Convert bytes to human-readable string."""
-    value = float(size_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(value) < 1024:
-            return f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} PB"

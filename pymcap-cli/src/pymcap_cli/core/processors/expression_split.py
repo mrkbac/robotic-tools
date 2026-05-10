@@ -102,17 +102,9 @@ class ExpressionSplitProcessor(Processor):
         self._validated_schema_ids: set[int] = set()
         self._segment_index: int = 0
         self._prev_value: object = _UNSET
-        # Hysteresis: a new value must persist for ``hysteresis_ns`` AND/OR
-        # appear ``hysteresis_count`` times before a segment transition fires.
-        # Each None means "not required". Both None means commit immediately
-        # (original behaviour).
         self._hysteresis_ns = hysteresis_ns
         self._hysteresis_count = hysteresis_count
         self._candidate: _Candidate | None = None
-        # Trailing context: after a transition, target-topic messages are
-        # also written into the previous segment for up to
-        # ``trailing_context_ns`` time and/or ``trailing_context_count``
-        # messages, whichever stops it first.
         self._trailing_ns = trailing_context_ns
         self._trailing_count = trailing_context_count
         self._tail_windows: list[_TailWindow] = []
@@ -204,9 +196,6 @@ class ExpressionSplitProcessor(Processor):
             )
         )
 
-    def _hysteresis_active(self) -> bool:
-        return self._hysteresis_ns is not None or self._hysteresis_count is not None
-
     def route_message(self, message: Message) -> int:
         dec = self._decoders.get(message.channel_id)
         ch = self.channels.get(message.channel_id)
@@ -230,18 +219,15 @@ class ExpressionSplitProcessor(Processor):
             self._commit_transition(value, message.log_time)
             return self._segment_index
 
-        if not self._hysteresis_active():
+        if self._hysteresis_ns is None and self._hysteresis_count is None:
             self._commit_transition(value, message.log_time)
             return self._segment_index
 
-        # Track candidate: same value as candidate? bump count. Otherwise
-        # restart with this new value.
         if self._candidate is None or self._candidate.value != value:
             self._candidate = _Candidate(value=value, first_seen_ns=message.log_time, count=1)
         else:
             self._candidate.count += 1
 
-        # Check both thresholds — each None means "not required".
         time_ok = self._hysteresis_ns is None or (
             message.log_time - self._candidate.first_seen_ns >= self._hysteresis_ns
         )

@@ -6,9 +6,6 @@ stay focused on their own UX concerns.
 """
 
 import asyncio
-import base64
-import gzip
-import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -190,25 +187,6 @@ def bridge_to_dict(info: BridgeInfo) -> dict[str, object]:
             "advertisedServices": [dict(s) for s in graph.advertised_services],
         }
     return payload
-
-
-def _output_json(info: BridgeInfo, compress: bool) -> None:
-    payload = json.dumps(bridge_to_dict(info))
-    if compress:
-        compressed = gzip.compress(payload.encode("utf-8"))
-        print(base64.b64encode(compressed).decode("ascii"))  # noqa: T201
-    else:
-        print(payload)  # noqa: T201
-
-
-def _format_byte_size(num_bytes: int) -> str:
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    size = float(num_bytes)
-    for unit in units:
-        if size < 1024.0 or unit == units[-1]:
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{num_bytes} B"
 
 
 def _sort_channels(

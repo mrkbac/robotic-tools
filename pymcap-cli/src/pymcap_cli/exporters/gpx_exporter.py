@@ -58,7 +58,7 @@ class GpxExporter(SingleFileGeoExporter):
 
         if self._mode in ("points", "track+points"):
             for sample in samples:
-                self._write_wpt(fh, sample, topic)
+                self._write_pt(fh, sample, "wpt", indent="  ", source_topic=topic)
 
         if self._mode in ("track", "track+points"):
             line_segments = [seg for seg in segments if len(seg) >= 2]
@@ -71,9 +71,6 @@ class GpxExporter(SingleFileGeoExporter):
                         self._write_pt(fh, sample, "trkpt", indent="      ")
                     fh.write("    </trkseg>\n")
                 fh.write("  </trk>\n")
-
-    def _write_wpt(self, fh: TextIO, sample: Sample, topic: str) -> None:
-        self._write_pt(fh, sample, "wpt", indent="  ", source_topic=topic)
 
     def _write_pt(
         self,

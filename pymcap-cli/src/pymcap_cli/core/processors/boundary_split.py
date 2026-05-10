@@ -20,7 +20,10 @@ class BoundarySplitProcessor(Processor):
 
     def __init__(self) -> None:
         self.boundaries: list[int] = []
-        self.n_segments: int = 0
+
+    @property
+    def n_segments(self) -> int:
+        return max(0, len(self.boundaries) - 1)
 
     def _segment_index(self, timestamp_ns: int) -> int:
         index = bisect.bisect_right(self.boundaries, timestamp_ns) - 1

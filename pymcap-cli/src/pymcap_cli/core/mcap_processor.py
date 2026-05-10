@@ -331,15 +331,12 @@ class ProcessingOptions:
 
     def __init__(
         self,
-        # stream, size, input_options
         inputs: list[InputFile],
         input_options: InputOptions,
         output_options: OutputOptions,
     ) -> None:
-        # self.input_options = input_options
         self.output_options = output_options
 
-        # merge input_options with local options
         self.inputs: list[InputFile] = []
         for input_file in inputs:
             merged_opts = input_options | input_file.options
@@ -1046,13 +1043,12 @@ class McapProcessor:
             indexes: list[MessageIndex] = []
 
             for record in records:
-                # Yield pending chunk when we see a non-MessageIndex record
                 if not isinstance(record, MessageIndex) and pending:
                     yield pending
                     pending = None
 
                 if isinstance(record, Header):
-                    pass  # Header handled separately
+                    pass
                 elif isinstance(record, (Chunk, LazyChunk)):
                     self.stats.chunks_processed += 1
                     pending = PendingChunk(
@@ -1382,7 +1378,6 @@ class McapProcessor:
             yield key, start_time, end_time
 
     def _build_single_output_opener(self, output_stream: BinaryIO) -> OutputStreamOpener:
-        """Create an opener for single-output processing."""
         opened = False
 
         def open_output(
@@ -1397,11 +1392,6 @@ class McapProcessor:
             return path, output_stream
 
         return open_output
-
-    def _get_message_route(self, message: Message) -> OutputKey | None:
-        """Get output key for a message from output processors."""
-        route, _routed_processors = self._get_message_routes(message)
-        return route
 
     def _get_message_routes(
         self,

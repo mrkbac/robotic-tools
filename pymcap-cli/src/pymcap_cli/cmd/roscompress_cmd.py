@@ -330,7 +330,7 @@ def roscompress(
     topics_converted: set[str] = set()
     pointcloud_topics_converted: set[str] = set()
     last_video_times: dict[str, tuple[int, int]] = {}
-    pending_messages: dict[str, deque[Any]] = {}
+    pending_messages: dict[str, deque[DecodedMessage]] = {}
 
     with (
         open_input(file) as (input_stream, input_size),
@@ -629,7 +629,7 @@ def _run_compress_loop(
     topics_converted: set[str],
     pointcloud_topics_converted: set[str],
     last_video_times: dict[str, tuple[int, int]],
-    pending_messages: dict[str, deque[Any]],
+    pending_messages: dict[str, deque[DecodedMessage]],
     progress: Progress,
     task_id: int,
     counters: dict[str, int],

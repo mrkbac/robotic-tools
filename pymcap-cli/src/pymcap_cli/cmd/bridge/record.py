@@ -21,7 +21,6 @@ from small_mcap import McapWriter
 from pymcap_cli.cmd.bridge._shared import (
     CONNECTION_GROUP,
     DISPLAY_GROUP,
-    _format_byte_size,
     console,
     to_ws_url,
 )
@@ -37,6 +36,7 @@ from pymcap_cli.types.types_manual import (
 )
 from pymcap_cli.utils import (
     McapWriterOptions,
+    bytes_to_human,
     compile_topic_patterns,
     confirm_output_overwrite,
     create_mcap_writer,
@@ -186,7 +186,7 @@ def _build_record_status(
     if message_limit is not None:
         counter = f"{counter} / {message_limit:,}"
     summary.add_row("Messages:", counter)
-    summary.add_row("Payload:", _format_byte_size(recorder.payload_bytes))
+    summary.add_row("Payload:", bytes_to_human(recorder.payload_bytes))
 
     table = Table(title="Per-topic", title_justify="left", title_style="bold cyan")
     table.add_column("Topic")

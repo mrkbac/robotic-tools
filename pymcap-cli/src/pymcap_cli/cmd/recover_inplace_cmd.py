@@ -3,7 +3,7 @@
 import io
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
 
 from rich.prompt import Confirm
 from small_mcap import MAGIC, Footer, McapError, Opcode, Summary, SummaryOffset, get_summary
@@ -32,11 +32,16 @@ def _summaries_equal(a: Summary, b: Summary) -> bool:
     )
 
 
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+_T = TypeVar("_T")
+
+
 def _describe_summary_diff(existing: Summary, rebuilt: Summary) -> list[str]:
     """Generate human-readable differences between two summaries."""
     diffs: list[str] = []
 
-    def compare_dict(name: str, before: dict[Any, Any], after: dict[Any, Any]) -> None:
+    def compare_dict(name: str, before: dict[_K, _V], after: dict[_K, _V]) -> None:
         if before == after:
             return
         missing = sorted(set(before) - set(after))
@@ -53,7 +58,7 @@ def _describe_summary_diff(existing: Summary, rebuilt: Summary) -> list[str]:
             parts.append("contents differ")
         diffs.append(f"{name}: " + "; ".join(parts))
 
-    def compare_list(name: str, before: list[Any], after: list[Any]) -> None:
+    def compare_list(name: str, before: list[_T], after: list[_T]) -> None:
         if before == after:
             return
         if len(before) != len(after):

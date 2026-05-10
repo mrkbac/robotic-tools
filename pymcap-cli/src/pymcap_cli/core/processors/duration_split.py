@@ -34,4 +34,3 @@ class DurationSplitProcessor(BoundarySplitProcessor):
             timestamp += self.duration_ns
         if not self.boundaries or self.boundaries[-1] <= global_end_ns:
             self.boundaries.append(global_end_ns + 1)
-        self.n_segments = len(self.boundaries) - 1

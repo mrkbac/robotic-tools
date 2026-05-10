@@ -1,6 +1,9 @@
 """`pymcap-cli bridge inspect` — server snapshot and live `--watch`."""
 
 import asyncio
+import base64
+import gzip
+import json
 import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -25,9 +28,9 @@ from pymcap_cli.cmd.bridge._shared import (
     BridgeStatus,
     SortChoice,
     _append_status,
-    _output_json,
     _remove_statuses,
     _sort_channels,
+    bridge_to_dict,
     console,
     fetch_bridge_info,
     to_ws_url,
@@ -36,6 +39,15 @@ from pymcap_cli.display.display_utils import _format_parts_with_colors, _format_
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
+
+
+def _output_json(info: BridgeInfo, compress: bool) -> None:
+    payload = json.dumps(bridge_to_dict(info))
+    if compress:
+        compressed = gzip.compress(payload.encode("utf-8"))
+        print(base64.b64encode(compressed).decode("ascii"))  # noqa: T201
+    else:
+        print(payload)  # noqa: T201
 
 
 def _build_summary(info: BridgeInfo) -> Table:
