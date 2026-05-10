@@ -8,7 +8,8 @@ import re
 from typing import TYPE_CHECKING
 
 import pytest
-from pymcap_cli.cmd.cat_cmd import cat, message_matches_grep
+from pymcap_cli.cmd.cat_cmd import cat
+from pymcap_cli.display.message_render import message_matches_grep
 from small_mcap import CompressionType, McapWriter
 
 if TYPE_CHECKING:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import socket
 from typing import TYPE_CHECKING
 
@@ -18,12 +19,15 @@ from pymcap_cli.cmd.bridge_cmd import (
     _append_status,
     _build_connection_graph_tree,
     _build_record_status,
+    _cat_async,
     _record_async,
     _remove_statuses,
     _sort_channels,
     bridge_to_dict,
+    cat,
     to_ws_url,
 )
+from pymcap_cli.display.message_render import BytesMode
 from pymcap_cli.utils import compile_topic_patterns
 from rich.console import Console, RenderableType
 from robo_ws_bridge import ConnectionGraph
@@ -565,3 +569,212 @@ def test_record_async_captures_messages_into_mcap(tmp_path: Path) -> None:
     assert all(d.channel.topic == "/chatter" for d in decoded)
     assert decoded[0].schema is not None
     assert decoded[0].schema.name == "std_msgs/String"
+
+
+_JSON_STRING_SCHEMA = '{"type":"object","properties":{"data":{"type":"string"}}}'
+
+
+def _json_string_channel(channel_id: int, topic: str) -> ServerChannel:
+    return ServerChannel(
+        id=channel_id,
+        topic=topic,
+        encoding="json",
+        schema_name="std_msgs/String",
+        schema=_JSON_STRING_SCHEMA,
+        schema_encoding="jsonschema",
+    )
+
+
+def _run_cat_against_server(
+    *,
+    register: list[ServerChannel],
+    publish: list[tuple[int, bytes, int]],
+    cat_kwargs: dict,
+) -> int:
+    port = _free_port()
+
+    async def run() -> int:
+        server = WebSocketBridgeServer(host="127.0.0.1", port=port, name="test-bridge")
+        for channel in register:
+            server.register_channel(channel)
+        await server.start()
+
+        subscribed = asyncio.Event()
+        server.on_subscribe(lambda *_args: subscribed.set())
+
+        async def publisher_task() -> None:
+            await subscribed.wait()
+            for channel_id, payload, ts in publish:
+                await server.publish_message(channel_id, payload, timestamp_ns=ts)
+                await asyncio.sleep(0.01)
+
+        publisher = asyncio.create_task(publisher_task())
+        try:
+            return await _cat_async(url=f"ws://127.0.0.1:{port}", **cat_kwargs)
+        finally:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
+            await server.stop()
+
+    return asyncio.run(run())
+
+
+def _default_cat_kwargs(**overrides: object) -> dict:
+    base: dict = {
+        "topics": [],
+        "exclude_topics": [],
+        "query": None,
+        "grep": None,
+        "grep_ignore_case": False,
+        "limit": None,
+        "duration": None,
+        "bytes_mode": BytesMode.SMART,
+        "connect_timeout": 5.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_cat_async_streams_decoded_jsonl_when_piped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _run_cat_against_server(
+        register=[_json_string_channel(1, "/chatter")],
+        publish=[
+            (1, b'{"data":"hello-0"}', 1_000_000_000),
+            (1, b'{"data":"hello-1"}', 1_000_000_001),
+            (1, b'{"data":"hello-2"}', 1_000_000_002),
+        ],
+        cat_kwargs=_default_cat_kwargs(topics=[".*"], limit=3),
+    )
+    assert rc == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert [entry["message"] for entry in lines] == [
+        {"data": "hello-0"},
+        {"data": "hello-1"},
+        {"data": "hello-2"},
+    ]
+    assert all(entry["topic"] == "/chatter" for entry in lines)
+    assert all(entry["schema"] == "std_msgs/String" for entry in lines)
+    assert [entry["log_time"] for entry in lines] == [1_000_000_000, 1_000_000_001, 1_000_000_002]
+
+
+def test_cat_async_filters_topics_by_regex(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = _run_cat_against_server(
+        register=[
+            _json_string_channel(1, "/included/topic"),
+            _json_string_channel(2, "/excluded/topic"),
+        ],
+        publish=[
+            (1, b'{"data":"in-0"}', 1),
+            (2, b'{"data":"out-0"}', 2),
+            (1, b'{"data":"in-1"}', 3),
+        ],
+        cat_kwargs=_default_cat_kwargs(topics=["^/included"], limit=2),
+    )
+    assert rc == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert all(entry["topic"] == "/included/topic" for entry in lines)
+    assert [entry["message"]["data"] for entry in lines] == ["in-0", "in-1"]
+
+
+def test_cat_async_grep_drops_non_matching_messages(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _run_cat_against_server(
+        register=[_json_string_channel(1, "/log")],
+        publish=[
+            (1, b'{"data":"info: started"}', 1),
+            (1, b'{"data":"ERROR: boom"}', 2),
+            (1, b'{"data":"info: finished"}', 3),
+        ],
+        cat_kwargs=_default_cat_kwargs(
+            topics=[".*"],
+            grep="error",
+            grep_ignore_case=True,
+            limit=1,
+        ),
+    )
+    assert rc == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert len(lines) == 1
+    assert lines[0]["message"]["data"] == "ERROR: boom"
+
+
+def test_cat_async_skips_channel_with_unknown_encoding(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A channel whose encoding has no matching decoder is silently skipped at subscribe time."""
+    rc = _run_cat_against_server(
+        register=[
+            ServerChannel(
+                id=1,
+                topic="/weird",
+                encoding="protobuf",  # neither json nor cdr/ros2msg
+                schema_name="some.Schema",
+                schema="",
+                schema_encoding="protobuf",
+            ),
+            _json_string_channel(2, "/ok"),
+        ],
+        publish=[
+            (2, b'{"data":"first"}', 1),
+        ],
+        cat_kwargs=_default_cat_kwargs(topics=[".*"], limit=1),
+    )
+    assert rc == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert [entry["topic"] for entry in lines] == ["/ok"]
+    assert lines[0]["message"]["data"] == "first"
+
+
+def test_cat_async_swallows_malformed_schema_for_one_channel(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A channel whose schema fails to parse must not abort cat for sibling channels."""
+    rc = _run_cat_against_server(
+        register=[
+            ServerChannel(
+                id=1,
+                topic="/broken",
+                encoding="cdr",
+                schema_name="bogus/Msg",
+                schema="this is not valid ros2msg !!!",
+                schema_encoding="ros2msg",
+            ),
+            _json_string_channel(2, "/ok"),
+        ],
+        publish=[
+            (2, b'{"data":"survives"}', 1),
+        ],
+        cat_kwargs=_default_cat_kwargs(topics=[".*"], limit=1),
+    )
+    assert rc == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert [entry["topic"] for entry in lines] == ["/ok"]
+    assert lines[0]["message"]["data"] == "survives"
+
+
+def test_cat_command_unreachable_port_returns_one() -> None:
+    port = _free_port()
+    rc = cat(
+        target=f"ws://127.0.0.1:{port}",
+        topics=[".*"],
+        connect_timeout=0.3,
+        limit=1,
+    )
+    assert rc == 1
+
+
+def test_cat_command_rejects_non_positive_limit() -> None:
+    rc = cat(target="ws://127.0.0.1:1", topics=[".*"], limit=0)
+    assert rc == 1
+
+
+def test_cat_command_rejects_non_positive_duration() -> None:
+    rc = cat(target="ws://127.0.0.1:1", topics=[".*"], duration=0.0)
+    assert rc == 1
