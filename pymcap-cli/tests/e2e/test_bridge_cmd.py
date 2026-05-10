@@ -9,7 +9,7 @@ import threading
 from typing import TYPE_CHECKING
 
 import pytest
-from pymcap_cli.cmd.bridge_cmd import bridge, fetch_bridge_info
+from pymcap_cli.cmd.bridge_cmd import fetch_bridge_info, inspect
 from robo_ws_bridge import WebSocketBridgeServer
 from robo_ws_bridge.server import Channel
 
@@ -118,7 +118,7 @@ def test_fetch_bridge_info_against_real_server(bridge_server: _ServerThread) -> 
 def test_bridge_cmd_json_output(
     bridge_server: _ServerThread, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rc = bridge(
+    rc = inspect(
         target=f"ws://127.0.0.1:{bridge_server.port}",
         json_output=True,
         connect_timeout=5.0,
@@ -136,7 +136,7 @@ def test_bridge_cmd_json_output(
 
 @pytest.mark.e2e
 def test_bridge_cmd_rich_output_does_not_crash(bridge_server: _ServerThread) -> None:
-    rc = bridge(
+    rc = inspect(
         target=f"127.0.0.1:{bridge_server.port}",
         connect_timeout=5.0,
         discover_seconds=1.0,

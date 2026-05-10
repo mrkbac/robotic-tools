@@ -94,9 +94,34 @@ def _load_optional_command(
     return cast("CommandFunction", getattr(module, function_name))
 
 
-bridge = _load_optional_command(
+def _load_optional_app(
+    module_name: str,
+    app_name: str,
+    *,
+    expected_missing_modules: tuple[str, ...],
+    message: str,
+    install_command: str,
+) -> App:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if not _is_expected_missing_module(exc, expected_missing_modules):
+            raise
+        stub = App()
+        stub.default(
+            _unavailable_command(
+                app_name,
+                message=message,
+                install_command=install_command,
+            )
+        )
+        return stub
+    return cast("App", getattr(module, app_name))
+
+
+bridge_app = _load_optional_app(
     "pymcap_cli.cmd.bridge_cmd",
-    "bridge",
+    "bridge_app",
     expected_missing_modules=("robo_ws_bridge",),
     message="Bridge command requires the 'bridge' extra.",
     install_command="uv add 'pymcap-cli[bridge]'",
@@ -163,7 +188,8 @@ inspect_group = Group("Inspect", sort_key=0)
 transform_group = Group("Transform", sort_key=1)
 
 # Inspect commands — read-only, extract information
-app.command(name="bridge", group=inspect_group)(bridge)
+bridge_app.group = (inspect_group,)
+app.command(bridge_app, name="bridge")
 app.command(name="cat", group=inspect_group)(cat_cmd.cat)
 app.command(name="diag", group=inspect_group)(diag_cmd.diag)
 app.command(name="doctor", group=inspect_group)(doctor_cmd.doctor)

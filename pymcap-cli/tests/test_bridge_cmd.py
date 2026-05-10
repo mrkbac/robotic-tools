@@ -2,24 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+import socket
 from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd.bridge_cmd import (
     BridgeInfo,
+    BridgeRecorder,
     BridgeStatus,
     SortChoice,
+    TopicSelector,
     _append_status,
     _build_connection_graph_tree,
+    _record_async,
     _remove_statuses,
     _sort_channels,
     bridge_to_dict,
     to_ws_url,
 )
+from pymcap_cli.utils import compile_topic_patterns
 from rich.console import Console
 from robo_ws_bridge import ConnectionGraph
+from robo_ws_bridge.server import Channel as ServerChannel
+from robo_ws_bridge.server import WebSocketBridgeServer
+from small_mcap import JSONDecoderFactory, McapWriter, read_message_decoded
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from rich.tree import Tree
     from robo_ws_bridge.ws_types import ChannelInfo
 
@@ -249,3 +261,234 @@ def test_status_cache_replaces_and_removes_id_statuses() -> None:
     _remove_statuses(statuses, ["boot"])
 
     assert statuses == [BridgeStatus(level=0, message="anonymous")]
+
+
+def _make_recorder(
+    *, selector: TopicSelector | None = None, message_limit: int | None = None
+) -> tuple[BridgeRecorder, McapWriter, io.BytesIO]:
+    buf = io.BytesIO()
+    writer = McapWriter(buf, use_chunking=False)
+    writer.start(profile="", library="test")
+    recorder = BridgeRecorder(
+        writer=writer,
+        selector=selector if selector is not None else TopicSelector(all_topics=True),
+        message_limit=message_limit,
+    )
+    return recorder, writer, buf
+
+
+def test_topic_selector_all_topics_overrides_other_includes() -> None:
+    selector = TopicSelector(all_topics=True)
+    assert selector.matches("/anything") is True
+
+
+def test_topic_selector_exact_topics_match_strictly() -> None:
+    selector = TopicSelector(exact_topics=frozenset({"/chatter"}))
+    assert selector.matches("/chatter") is True
+    assert selector.matches("/chatter/sub") is False
+
+
+def test_topic_selector_include_patterns_use_regex_search() -> None:
+    selector = TopicSelector(
+        include_patterns=tuple(compile_topic_patterns(["^/camera/", r"\bimu\b"])),
+    )
+    assert selector.matches("/camera/front") is True
+    assert selector.matches("/sensor/imu/data") is True
+    assert selector.matches("/lidar/points") is False
+
+
+def test_topic_selector_exclude_wins_over_include() -> None:
+    selector = TopicSelector(
+        all_topics=True,
+        exclude_patterns=tuple(compile_topic_patterns(["^/debug/"])),
+    )
+    assert selector.matches("/debug/log") is False
+    assert selector.matches("/sensor/data") is True
+
+
+def test_topic_selector_without_any_match_rule_rejects_everything() -> None:
+    selector = TopicSelector()
+    assert selector.matches("/anything") is False
+
+
+def test_topic_selector_exclude_topics_strict_match() -> None:
+    selector = TopicSelector(
+        all_topics=True,
+        exclude_topics=frozenset({"/debug"}),
+    )
+    assert selector.matches("/debug") is False
+    assert selector.matches("/debug/sub") is True
+
+
+def test_topic_selector_combines_includes_and_excludes() -> None:
+    selector = TopicSelector(
+        exact_topics=frozenset({"/chatter"}),
+        include_patterns=tuple(compile_topic_patterns(["^/cam/"])),
+        exclude_patterns=tuple(compile_topic_patterns(["debug"])),
+    )
+    assert selector.matches("/chatter") is True
+    assert selector.matches("/cam/front") is True
+    assert selector.matches("/cam/debug") is False
+    assert selector.matches("/imu/data") is False
+
+
+def test_recorder_dedups_schemas_and_channels() -> None:
+    recorder, writer, _ = _make_recorder()
+    channel: ChannelInfo = {
+        "id": 1,
+        "topic": "/foo",
+        "encoding": "json",
+        "schemaName": "Pkg/Msg",
+        "schema": '{"type":"object"}',
+        "schemaEncoding": "jsonschema",
+    }
+
+    sid_a = recorder.schema_id_for(channel)
+    sid_b = recorder.schema_id_for(dict(channel) | {"id": 99})
+    assert sid_a == sid_b == 1
+
+    other_schema = dict(channel) | {"schemaName": "Pkg/Other", "id": 2}
+    sid_c = recorder.schema_id_for(other_schema)
+    assert sid_c == 2
+
+    cid_a = recorder.channel_id_for(channel)
+    cid_b = recorder.channel_id_for(dict(channel) | {"id": 7})
+    assert cid_a == cid_b == 1
+    writer.finish()
+
+
+def test_recorder_returns_zero_schema_id_when_schemaless() -> None:
+    recorder, writer, _ = _make_recorder()
+    schemaless: ChannelInfo = {
+        "id": 1,
+        "topic": "/raw",
+        "encoding": "raw",
+        "schemaName": "",
+        "schema": "",
+    }
+    assert recorder.schema_id_for(schemaless) == 0
+    writer.finish()
+
+
+def test_recorder_on_message_writes_records_and_respects_limit(tmp_path: Path) -> None:
+    recorder, writer, buf = _make_recorder(message_limit=2)
+    channel: ChannelInfo = {
+        "id": 1,
+        "topic": "/foo",
+        "encoding": "json",
+        "schemaName": "Pkg/Msg",
+        "schema": '{"type":"object","properties":{"v":{"type":"integer"}}}',
+        "schemaEncoding": "jsonschema",
+    }
+    recorder.on_message(channel, 1_000_000_000, b'{"v":1}')
+    recorder.on_message(channel, 2_000_000_000, b'{"v":2}')
+    recorder.on_message(channel, 3_000_000_000, b'{"v":3}')  # over limit, ignored
+    recorder.on_message(
+        {**channel, "topic": "/skipped"},
+        4_000_000_000,
+        b'{"v":4}',
+    )  # over limit
+    writer.finish()
+
+    assert recorder.total_messages == 2
+    assert recorder.message_counts == {"/foo": 2}
+    assert recorder.bytes_written == len(b'{"v":1}') + len(b'{"v":2}')
+
+    out = tmp_path / "rec.mcap"
+    out.write_bytes(buf.getvalue())
+    with out.open("rb") as f:
+        decoded = list(read_message_decoded(f, decoder_factories=[JSONDecoderFactory()]))
+    payloads = [d.decoded_message for d in decoded]
+    assert payloads == [{"v": 1}, {"v": 2}]
+    assert {d.message.log_time for d in decoded} == {1_000_000_000, 2_000_000_000}
+
+
+def test_recorder_skips_messages_for_topics_not_matching_filter() -> None:
+    recorder, writer, _ = _make_recorder(
+        selector=TopicSelector(
+            include_patterns=tuple(compile_topic_patterns(["^/keep"])),
+        )
+    )
+    channel: ChannelInfo = {
+        "id": 1,
+        "topic": "/skip",
+        "encoding": "json",
+        "schemaName": "",
+        "schema": "",
+    }
+    recorder.on_message(channel, 1, b"{}")
+    writer.finish()
+    assert recorder.total_messages == 0
+    assert recorder.message_counts == {}
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_record_async_captures_messages_into_mcap(tmp_path: Path) -> None:
+    port = _free_port()
+    output = tmp_path / "capture.mcap"
+
+    async def run() -> int:
+        server = WebSocketBridgeServer(host="127.0.0.1", port=port, name="test-bridge")
+        server.register_channel(
+            ServerChannel(
+                id=1,
+                topic="/chatter",
+                encoding="json",
+                schema_name="std_msgs/String",
+                schema='{"type":"object","properties":{"data":{"type":"string"}}}',
+                schema_encoding="jsonschema",
+            )
+        )
+        await server.start()
+
+        subscribed = asyncio.Event()
+        server.on_subscribe(lambda *_args: subscribed.set())
+
+        async def publish_until_done() -> None:
+            await subscribed.wait()
+            for i in range(3):
+                await server.publish_message(
+                    1,
+                    f'{{"data":"hello-{i}"}}'.encode(),
+                    timestamp_ns=1_000_000_000 + i,
+                )
+                await asyncio.sleep(0.02)
+
+        publisher = asyncio.create_task(publish_until_done())
+        try:
+            return await _record_async(
+                url=f"ws://127.0.0.1:{port}",
+                output=output,
+                selector=TopicSelector(include_patterns=tuple(compile_topic_patterns(["chatter"]))),
+                duration=None,
+                message_limit=3,
+                chunk_size=1024,
+                compression_choice="none",
+                connect_timeout=5.0,
+                refresh_interval=0.05,
+                show_status=False,
+            )
+        finally:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
+            await server.stop()
+
+    rc = asyncio.run(run())
+    assert rc == 0
+    assert output.exists()
+
+    with output.open("rb") as f:
+        decoded = list(read_message_decoded(f, decoder_factories=[JSONDecoderFactory()]))
+    assert [d.decoded_message for d in decoded] == [
+        {"data": "hello-0"},
+        {"data": "hello-1"},
+        {"data": "hello-2"},
+    ]
+    assert all(d.channel.topic == "/chatter" for d in decoded)
+    assert decoded[0].schema is not None
+    assert decoded[0].schema.name == "std_msgs/String"
