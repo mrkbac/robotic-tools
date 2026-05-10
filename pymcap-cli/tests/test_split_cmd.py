@@ -5,7 +5,8 @@ from tests.helpers import empty_processor_result
 
 
 def _fake_run_processor_multi(seen: list[OverwriteCollisionPolicy]):
-    def fake_run_processor_multi(*, files: list[str], output_options):
+    def fake_run_processor_multi(*, files: list[str], output_options, input_options=None):
+        _ = input_options
         assert files == ["input.mcap"]
         seen.append(output_options.overwrite_policy)
         return empty_processor_result(segments={})
@@ -42,8 +43,8 @@ def test_split_rejects_force_and_no_clobber():
 
 
 def test_split_returns_one_when_processor_raises(monkeypatch):
-    def fake_run_processor_multi(*, files: list[str], output_options) -> None:
-        _ = files, output_options
+    def fake_run_processor_multi(*, files: list[str], output_options, input_options=None) -> None:
+        _ = files, output_options, input_options
         raise RuntimeError("boom")
 
     monkeypatch.setattr(split_cmd, "run_processor_multi", fake_run_processor_multi)

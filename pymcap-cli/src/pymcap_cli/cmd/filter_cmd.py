@@ -36,6 +36,7 @@ console = Console()
 TOPIC_FILTERING_GROUP = Group("Topic Filtering")
 TIME_FILTERING_GROUP = Group("Time Filtering")
 CONTENT_FILTERING_GROUP = Group("Content Filtering")
+LATCHING_GROUP = Group("Latching")
 
 
 def filter_cmd(
@@ -98,6 +99,29 @@ def filter_cmd(
             group=TIME_FILTERING_GROUP,
         ),
     ] = 0,
+    latch: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--latch"],
+            group=LATCHING_GROUP,
+            help=(
+                "Topic regex (repeatable) whose latest message should be replayed "
+                "into the output even if --topics or --start would otherwise drop "
+                "it. Useful for /tf_static and other transient-local topics."
+            ),
+        ),
+    ] = None,
+    latch_from_metadata: Annotated[
+        bool,
+        Parameter(
+            name=["--latch-from-metadata"],
+            group=LATCHING_GROUP,
+            help=(
+                "Also auto-detect latched channels by reading the MCAP "
+                "'offered_qos_profiles' metadata for durability=transient_local."
+            ),
+        ),
+    ] = False,
     metadata_mode: Annotated[
         MetadataMode,
         Parameter(
@@ -185,6 +209,8 @@ def filter_cmd(
             end_secs=end_secs,
             include_metadata=metadata_mode == MetadataMode.INCLUDE,
             include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+            latch_topics=latch,
+            latch_from_metadata=latch_from_metadata,
         )
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400

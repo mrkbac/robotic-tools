@@ -3,7 +3,7 @@
 import io
 from pathlib import Path
 
-from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, NS_TO_MS
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, NS_TO_MS, NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
 
 
@@ -59,6 +59,72 @@ def create_multi_topic_mcap(
                 data=f'{{"msg": {msg_idx}}}'.encode(),
                 publish_time=log_time,
             )
+
+    writer.finish()
+    return output.getvalue()
+
+
+_TRANSIENT_LOCAL_QOS_YAML = """\
+- history: 3
+  depth: 0
+  reliability: 1
+  durability: transient_local
+  deadline:
+    sec: 0
+    nsec: 0
+"""
+
+
+def create_latched_topic_mcap(
+    *,
+    latched_topic: str = "/tf_static",
+    latched_log_time: int = 0,
+    latched_update_times: list[int] | None = None,
+    other_topic: str = "/scan",
+    other_messages: int = 10,
+    other_step_ns: int = NS_TO_SEC,
+    chunk_size: int = 1024,
+    compression: CompressionType = CompressionType.NONE,
+) -> bytes:
+    """MCAP with a latched topic published once at ``latched_log_time`` and a
+    second non-latched topic publishing ``other_messages`` messages at fixed
+    intervals starting at ``latched_log_time`` (one message per step).
+
+    The latched channel carries the standard ROS 2 ``offered_qos_profiles``
+    metadata blob with ``durability: transient_local`` so opt-in
+    ``--latch-from-metadata`` autodetection picks it up.
+    """
+    output = io.BytesIO()
+    writer = McapWriter(output, chunk_size=chunk_size, compression=compression)
+    writer.start()
+
+    writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+    writer.add_channel(
+        channel_id=1,
+        topic=latched_topic,
+        message_encoding="json",
+        schema_id=1,
+        metadata={"offered_qos_profiles": _TRANSIENT_LOCAL_QOS_YAML},
+    )
+    writer.add_channel(channel_id=2, topic=other_topic, message_encoding="json", schema_id=1)
+
+    events: list[tuple[int, int, bytes]] = [
+        (latched_log_time, 1, b'{"latched": true}'),
+    ]
+    for i, ts in enumerate(latched_update_times or []):
+        events.append((ts, 1, f'{{"latched": true, "update": {i}}}'.encode()))
+
+    for i in range(other_messages):
+        ts = latched_log_time + (i + 1) * other_step_ns
+        events.append((ts, 2, f'{{"i": {i}}}'.encode()))
+
+    for ts, channel_id, data in sorted(events, key=lambda event: event[0]):
+        writer.add_message(
+            channel_id=channel_id,
+            log_time=ts,
+            publish_time=ts,
+            data=data,
+        )
 
     writer.finish()
     return output.getvalue()

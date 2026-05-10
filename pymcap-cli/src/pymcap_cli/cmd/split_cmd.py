@@ -11,7 +11,7 @@ from ros_parser.message_path import MessagePathError
 from pymcap_cli.cmd._run_processor import finalize_delete_source, resolve_overwrite_policy
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
-from pymcap_cli.core.mcap_processor import OutputOptions
+from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
@@ -31,6 +31,7 @@ console = Console()
 # Parameter groups
 SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
+LATCHING_GROUP = Group("Latching")
 
 
 def split(
@@ -76,6 +77,29 @@ def split(
             help="Output file naming template (e.g. 'output_{index:03d}.mcap')",
         ),
     ] = "output_{index:03d}.mcap",
+    latch: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--latch"],
+            group=LATCHING_GROUP,
+            help=(
+                "Topic regex (repeatable) whose latest message is replayed into "
+                "every output segment. Use for /tf_static and other transient-local "
+                "topics that consumers need at the start of each segment."
+            ),
+        ),
+    ] = None,
+    latch_from_metadata: Annotated[
+        bool,
+        Parameter(
+            name=["--latch-from-metadata"],
+            group=LATCHING_GROUP,
+            help=(
+                "Also auto-detect latched channels by reading the MCAP "
+                "'offered_qos_profiles' metadata for durability=transient_local."
+            ),
+        ),
+    ] = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
@@ -193,9 +217,15 @@ def split(
         modes.append("Expression")
     logger.info(f"Mode: {' + '.join(modes)} split")
 
+    input_options = InputOptions.from_args(
+        latch_topics=latch,
+        latch_from_metadata=latch_from_metadata,
+    )
+
     try:
         result = run_processor_multi(
             files=[file],
+            input_options=input_options,
             output_options=OutputOptions(
                 processors=processors,
                 output_template=output_template,

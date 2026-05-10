@@ -1,10 +1,13 @@
 # ruff: noqa: ARG002
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, IntFlag, auto
-from typing import TYPE_CHECKING, Final
+from typing import IO, TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from small_mcap import (
         Attachment,
         Channel,
@@ -17,6 +20,25 @@ if TYPE_CHECKING:
         Summary,
     )
 
+OutputKey = int | str | tuple[int | str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSegmentInfo:
+    key: OutputKey
+    start_time: int
+    end_time: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessorInputContext:
+    stream_id: int
+    stream: IO[bytes]
+    summary: Summary | None
+    output_segments: tuple[OutputSegmentInfo, ...]
+    remap_channel: Callable[[Channel], Channel]
+    remap_message: Callable[[Message], Message]
+
 
 class _SplitRequiredSentinel:
     __slots__ = ()
@@ -26,11 +48,17 @@ SPLIT_REQUIRED: Final = _SplitRequiredSentinel()
 
 
 class Action(IntFlag):
-    """Result actions - combinable flags."""
+    """Result actions - combinable flags.
+
+    ``KEEP`` is a positive vote: when any processor returns ``KEEP`` for a
+    channel or message, ``SKIP`` from other processors is ignored for that
+    record.
+    """
 
     CONTINUE = 0
     SKIP = auto()
     STOP = auto()
+    KEEP = auto()
 
 
 class ChunkDecision(Enum):
@@ -50,6 +78,9 @@ class Processor:
 
     def initialize(self, summaries: list[Summary | None]) -> None:
         """Called before processing with summaries from all input files."""
+
+    def prepare_input(self, context: ProcessorInputContext) -> None:
+        """Called once per input stream after summaries/channels are known."""
 
     def on_chunk(
         self,
@@ -78,3 +109,11 @@ class Processor:
 
     def output_keys(self) -> list[int | str] | None:
         return None
+
+    def on_segment_open(self, key: OutputKey) -> Iterable[tuple[int, Message]]:
+        """Yield ``(channel_id, message)`` pairs to inject into a freshly-opened
+        output segment before any normal writes.
+
+        Called lazily the first time a segment is actually written to.
+        """
+        return ()

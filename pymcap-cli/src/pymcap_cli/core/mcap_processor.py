@@ -49,7 +49,14 @@ from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor
 from pymcap_cli.core.processors.attachment_filter import AttachmentFilterProcessor
-from pymcap_cli.core.processors.base import SPLIT_REQUIRED, Action, ChunkDecision, Processor
+from pymcap_cli.core.processors.base import (
+    SPLIT_REQUIRED,
+    Action,
+    ChunkDecision,
+    OutputSegmentInfo,
+    Processor,
+    ProcessorInputContext,
+)
 from pymcap_cli.core.processors.metadata_filter import MetadataFilterProcessor
 from pymcap_cli.core.processors.time_filter import TimeFilterProcessor
 from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
@@ -150,6 +157,8 @@ class InputOptions:
     exclude_topics: list[str]
     include_metadata: bool
     include_attachments: bool
+    latch_topics: list[str] = field(default_factory=list)
+    latch_from_metadata: bool = False
 
     @classmethod
     def from_args(
@@ -168,6 +177,9 @@ class InputOptions:
         # Content filtering
         include_metadata: bool = True,
         include_attachments: bool = True,
+        # Latching
+        latch_topics: list[str] | None = None,
+        latch_from_metadata: bool = False,
     ) -> "InputOptions":
         return cls(
             always_decode_chunk=always_decode_chunk,
@@ -177,12 +189,27 @@ class InputOptions:
             exclude_topics=exclude_topic_regex or [],
             include_metadata=include_metadata,
             include_attachments=include_attachments,
+            latch_topics=latch_topics or [],
+            latch_from_metadata=latch_from_metadata,
         )
 
     @cached_property
     def processors(self) -> list[Processor]:
         """Build processor list from options. Cached on first access."""
+        from pymcap_cli.core.processors.latching import LatchingProcessor  # noqa: PLC0415
+        from pymcap_cli.utils import compile_topic_patterns  # noqa: PLC0415
+
         procs: list[Processor] = []
+
+        # Positive-vote processors must run before filters so they can observe
+        # records before downstream SKIPs are applied.
+        if self.latch_topics or self.latch_from_metadata:
+            procs.append(
+                LatchingProcessor(
+                    patterns=compile_topic_patterns(self.latch_topics),
+                    from_metadata=self.latch_from_metadata,
+                )
+            )
 
         if self.always_decode_chunk:
             procs.append(AlwaysDecodeProcessor())
@@ -213,6 +240,8 @@ class InputOptions:
             exclude_topics=other.exclude_topics or self.exclude_topics,
             include_metadata=self.include_metadata and other.include_metadata,
             include_attachments=self.include_attachments and other.include_attachments,
+            latch_topics=other.latch_topics or self.latch_topics,
+            latch_from_metadata=self.latch_from_metadata or other.latch_from_metadata,
         )
 
 
@@ -433,6 +462,9 @@ class OutputSegment:
     start_time: int = 0
     end_time: int = 0
     pattern_groups: dict[int, MessageGroup] = field(default_factory=dict)
+    # on_segment_open fires lazily on the segment's first write so processors
+    # can inject records using state observed during processing.
+    replayed: bool = False
 
 
 class OutputManager:
@@ -660,12 +692,19 @@ class McapProcessor:
         input_opts = self._get_input(stream_id)
         if not input_opts.processors:
             return True
+        # Action.KEEP from any processor wins regardless of later SKIPs.
+        skip = False
+        schema = self.schemas.get(channel.schema_id)
         for p in input_opts.processors:
-            if p.on_channel(channel, self.schemas.get(channel.schema_id)) == Action.SKIP:
-                self.channel_filter_cache[cache_key] = False
-                return False
-        self.channel_filter_cache[cache_key] = True
-        return True
+            action = p.on_channel(channel, schema)
+            if action & Action.KEEP:
+                self.channel_filter_cache[cache_key] = True
+                return True
+            if action & Action.SKIP:
+                skip = True
+        included = not skip
+        self.channel_filter_cache[cache_key] = included
+        return included
 
     def _analyze_for_auto_grouping(self, input_streams: Sequence[IO[bytes]]) -> None:
         """Pre-analyze files to identify large channels (>15% of total uncompressed size)."""
@@ -792,6 +831,45 @@ class McapProcessor:
         segment.rechunk_groups.append(group)
         return group
 
+    def _replay_segment_open(self, route_key: OutputKey) -> None:
+        """Fire ``on_segment_open`` once per segment, on its first write.
+
+        Iterates processors from every input stream plus every output processor
+        and writes any records they choose to inject ahead of normal flow.
+        """
+        assert self.output_manager is not None
+        segment = self.output_manager.get_or_create_segment(route_key)
+        if segment.replayed:
+            return
+        segment.replayed = True
+
+        seen: set[int] = set()
+        for input_file in self.options.inputs:
+            for processor in input_file.options.processors:
+                if id(processor) in seen:
+                    continue
+                seen.add(id(processor))
+                self._replay_from_processor(processor, route_key, segment)
+        for processor in self.options.output_options.processors:
+            if id(processor) in seen:
+                continue
+            seen.add(id(processor))
+            self._replay_from_processor(processor, route_key, segment)
+
+    def _replay_from_processor(
+        self, processor: Processor, route_key: OutputKey, segment: OutputSegment
+    ) -> None:
+        for channel_id, injected in processor.on_segment_open(route_key):
+            assert self.output_manager is not None
+            self.output_manager.ensure_channel_written(channel_id, route_key)
+            segment.writer.add_message(
+                channel_id=channel_id,
+                log_time=injected.log_time,
+                data=injected.data,
+                publish_time=injected.publish_time,
+                sequence=injected.sequence,
+            )
+
     def process_message(self, message: Message, stream_id: int) -> None:
         self.stats.messages_processed += 1
         assert self.output_manager is not None
@@ -801,15 +879,29 @@ class McapProcessor:
             self.stats.filter_rejections += 1
             return
 
-        # Time filtering and other message processors
         input_opts = self._get_input(stream_id)
-        if any(p.on_message(message) == Action.SKIP for p in input_opts.processors):
-            self.stats.filter_rejections += 1
-            return
 
         route_key = self._get_message_route(message)
         if route_key is None:
             route_key = 0
+
+        # Segment-open injections run before message processors see the current
+        # record, so injected state represents records observed before this one.
+        self._replay_segment_open(route_key)
+
+        # Action.KEEP from any processor wins regardless of later SKIPs.
+        skip = False
+        for p in input_opts.processors:
+            action = p.on_message(message)
+            if action & Action.KEEP:
+                skip = False
+                break
+            if action & Action.SKIP:
+                skip = True
+        if skip:
+            self.stats.filter_rejections += 1
+            return
+
         target_writer = self.output_manager.get_writer(route_key)
         self.output_manager.ensure_channel_written(message.channel_id, route_key)
 
@@ -848,15 +940,21 @@ class McapProcessor:
             self.known_channels.add(remapped_channel.id)
             self.channels[remapped_channel.id] = remapped_channel
 
-            # Pre-compute filtering decision for this stream (cache it)
+            # Pre-compute filtering decision for this stream (cache it).
+            # Action.KEEP wins immediately; otherwise any SKIP excludes.
             input_opts = self._get_input(stream_id)
             should_include = True
             if input_opts.processors:
                 schema = self.schemas.get(remapped_channel.schema_id)
+                skip = False
                 for p in input_opts.processors:
-                    if p.on_channel(remapped_channel, schema) == Action.SKIP:
-                        should_include = False
+                    action = p.on_channel(remapped_channel, schema)
+                    if action & Action.KEEP:
+                        skip = False
                         break
+                    if action & Action.SKIP:
+                        skip = True
+                should_include = not skip
             self.channel_filter_cache[(stream_id, remapped_channel.id)] = should_include
 
             if not should_include:
@@ -934,6 +1032,36 @@ class McapProcessor:
         if pending:
             yield pending
 
+    def _prepare_input_processors(
+        self,
+        summaries: list[Summary | None],
+        known_segments: list[tuple[OutputKey, int, int]],
+    ) -> None:
+        """Give input processors generic context before record processing starts."""
+        segment_infos = tuple(
+            OutputSegmentInfo(key=key, start_time=start_time, end_time=end_time)
+            for key, start_time, end_time in known_segments
+        )
+        for stream_id, input_file in enumerate(self.options.inputs):
+            summary = summaries[stream_id] if stream_id < len(summaries) else None
+
+            def remap_channel(channel: Channel, sid: int = stream_id) -> Channel:
+                return self.remapper.remap_channel(sid, channel)
+
+            def remap_message(message: Message, sid: int = stream_id) -> Message:
+                return self.remapper.remap_message(sid, message)
+
+            context = ProcessorInputContext(
+                stream_id=stream_id,
+                stream=input_file.stream,
+                summary=summary,
+                output_segments=segment_infos,
+                remap_channel=remap_channel,
+                remap_message=remap_message,
+            )
+            for processor in input_file.options.processors:
+                processor.prepare_input(context)
+
     def process(
         self,
         output_stream: BinaryIO | None = None,
@@ -942,10 +1070,9 @@ class McapProcessor:
         output_opts = self.options.output_options
         header = self._resolve_output_header()
 
-        # Pre-load schemas and channels from all files' summaries
-        # This ensures we have all metadata before processing any chunks
+        # Pass 1 — collect summaries from every input file (rewinding each).
         summaries: list[Summary | None] = []
-        for stream_id, input_opt in enumerate(self.options.inputs):
+        for input_opt in self.options.inputs:
             input_stream = input_opt.stream
             try:
                 summary = get_summary(input_stream)
@@ -953,24 +1080,36 @@ class McapProcessor:
                 # In recovery mode, if we can't get summary (e.g., truncated file),
                 # continue without it - we'll discover schemas/channels during chunk processing
                 summary = None
-
             summaries.append(summary)
-
-            if summary:
-                # Remap and store all schemas
-                for schema in summary.schemas.values():
-                    self._handle_schema_record(schema, stream_id)
-
-                # Remap and store all channels
-                for channel in summary.channels.values():
-                    self._handle_channel_record(channel, stream_id)
-
-            # Seek back to start for processing
             input_stream.seek(0)
 
-        # Initialize output processors with summaries (for split boundary computation, etc.)
+        # Initialize processors before pre-loading schemas/channels so channel
+        # handlers can consult summary-derived processor state.
         for proc in output_opts.processors:
             proc.initialize(summaries)
+        for stream_id, input_file in enumerate(self.options.inputs):
+            stream_summaries: list[Summary | None] = [
+                summaries[stream_id] if stream_id < len(summaries) else None
+            ]
+            for proc in input_file.options.processors:
+                proc.initialize(stream_summaries)
+
+        # Pass 2 — pre-load schemas / channels via the standard handlers, which
+        # also populate the channel filter cache.
+        for stream_id, summary in enumerate(summaries):
+            if summary is None:
+                continue
+            for schema in summary.schemas.values():
+                self._handle_schema_record(schema, stream_id)
+            for channel in summary.channels.values():
+                self._handle_channel_record(channel, stream_id)
+
+        # Pre-compute statically known output segments and expose them to input
+        # processors before record processing starts.
+        known_segments = list(self._iter_known_output_segments())
+        if not known_segments:
+            known_segments = [(0, 0, 0)]
+        self._prepare_input_processors(summaries, known_segments)
 
         if not output_opts.is_splitting and output_stream is None:
             raise ValueError("output_stream is required when not splitting")
@@ -988,9 +1127,6 @@ class McapProcessor:
             open_output=open_output,
         )
         # Pre-create statically-known segments. In single-output mode this creates segment 0.
-        known_segments = list(self._iter_known_output_segments())
-        if not known_segments:
-            known_segments = [(0, 0, 0)]
         for key, start_time, end_time in known_segments:
             self.output_manager.get_or_create_segment(key, start_time=start_time, end_time=end_time)
 
@@ -1314,6 +1450,7 @@ class McapProcessor:
             route_key = self._get_chunk_route(pending.chunk)
             if route_key is None:
                 route_key = 0
+            self._replay_segment_open(route_key)
             target_writer = self.output_manager.get_writer(route_key)
             for idx in pending.indexes:
                 if self._is_channel_included(pending.stream_id, idx.channel_id):
@@ -1328,6 +1465,7 @@ class McapProcessor:
         route_key = self._get_chunk_route(pending.chunk)
         if route_key is None:
             route_key = 0
+        self._replay_segment_open(route_key)
         target_writer = self.output_manager.get_writer(route_key)
         for idx in pending.indexes:
             if self._is_channel_included(pending.stream_id, idx.channel_id):

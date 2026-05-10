@@ -17,6 +17,7 @@ def run_processor_multi(
     *,
     files: list[str],
     output_options: OutputOptions,
+    input_options: InputOptions | None = None,
 ) -> ProcessorResult:
     """Open input files, build ProcessingOptions, run McapProcessor in multi-output mode.
 
@@ -25,18 +26,18 @@ def run_processor_multi(
 
     Raises any exception from McapProcessor.process() to the caller.
     """
+    if input_options is None:
+        input_options = InputOptions.from_args()
     with contextlib.ExitStack() as stack:
         input_files: list[InputFile] = []
 
         for f in files:
             stream, size = stack.enter_context(open_input(f))
-            input_files.append(
-                InputFile(stream=stream, size=size, options=InputOptions.from_args())
-            )
+            input_files.append(InputFile(stream=stream, size=size, options=input_options))
 
         processing_options = ProcessingOptions(
             inputs=input_files,
-            input_options=InputOptions.from_args(),
+            input_options=input_options,
             output_options=output_options,
         )
 
