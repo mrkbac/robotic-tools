@@ -8,20 +8,10 @@ from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.core.processors.utils import global_time_range
-from small_mcap import Channel, LazyChunk, Message, MessageIndex, Summary
+from small_mcap import Channel, Message, MessageIndex, Summary
 from small_mcap import Statistics as SummaryStatistics
 
-
-def _lazy_chunk(start: int, end: int) -> LazyChunk:
-    return LazyChunk(
-        message_start_time=start,
-        message_end_time=end,
-        uncompressed_size=0,
-        uncompressed_crc=0,
-        compression="none",
-        record_start=0,
-        data_len=0,
-    )
+from tests.helpers import lazy_chunk
 
 
 def _message(log_time: int, channel_id: int = 1, data: bytes = b"") -> Message:
@@ -152,42 +142,42 @@ class TestDurationSplitProcessorOnChunk:
     def test_no_boundaries_returns_continue(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([])
-        assert proc.on_chunk(_lazy_chunk(0, 100), []) == ChunkDecision.CONTINUE
+        assert proc.on_chunk(lazy_chunk(0, 100), []) == ChunkDecision.CONTINUE
 
     def test_chunk_within_single_segment(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([_make_summary(0, 250)])
-        assert proc.on_chunk(_lazy_chunk(10, 50), []) == ChunkDecision.CONTINUE
+        assert proc.on_chunk(lazy_chunk(10, 50), []) == ChunkDecision.CONTINUE
 
     def test_chunk_spans_boundary(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([_make_summary(0, 250)])
         # Chunk from 50 to 150 spans boundary at 100
-        assert proc.on_chunk(_lazy_chunk(50, 150), []) == ChunkDecision.DECODE
+        assert proc.on_chunk(lazy_chunk(50, 150), []) == ChunkDecision.DECODE
 
     def test_chunk_at_boundary_start(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([_make_summary(0, 250)])
         # Chunk from 100 to 199 is within segment 1
-        assert proc.on_chunk(_lazy_chunk(100, 199), []) == ChunkDecision.CONTINUE
+        assert proc.on_chunk(lazy_chunk(100, 199), []) == ChunkDecision.CONTINUE
 
 
 class TestDurationSplitProcessorRouteChunk:
     def test_no_boundaries_returns_zero(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([])
-        assert proc.route_chunk(_lazy_chunk(0, 100)) == 0
+        assert proc.route_chunk(lazy_chunk(0, 100)) == 0
 
     def test_returns_segment_key(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([_make_summary(0, 250)])
-        assert proc.route_chunk(_lazy_chunk(10, 50)) == 0
-        assert proc.route_chunk(_lazy_chunk(100, 150)) == 1
+        assert proc.route_chunk(lazy_chunk(10, 50)) == 0
+        assert proc.route_chunk(lazy_chunk(100, 150)) == 1
 
     def test_returns_split_required(self):
         proc = DurationSplitProcessor(100)
         proc.initialize([_make_summary(0, 250)])
-        assert proc.route_chunk(_lazy_chunk(50, 150)) is SPLIT_REQUIRED
+        assert proc.route_chunk(lazy_chunk(50, 150)) is SPLIT_REQUIRED
 
 
 class TestDurationSplitProcessorRouteMessage:
@@ -256,31 +246,31 @@ class TestTimestampSplitProcessorOnChunk:
     def test_no_boundaries_returns_continue(self):
         proc = TimestampSplitProcessor([100])
         proc.initialize([])
-        assert proc.on_chunk(_lazy_chunk(0, 50), []) == ChunkDecision.CONTINUE
+        assert proc.on_chunk(lazy_chunk(0, 50), []) == ChunkDecision.CONTINUE
 
     def test_chunk_within_segment(self):
         proc = TimestampSplitProcessor([100, 200])
         proc.initialize([_make_summary(0, 300)])
-        assert proc.on_chunk(_lazy_chunk(10, 50), []) == ChunkDecision.CONTINUE
+        assert proc.on_chunk(lazy_chunk(10, 50), []) == ChunkDecision.CONTINUE
 
     def test_chunk_spans_boundary(self):
         proc = TimestampSplitProcessor([100, 200])
         proc.initialize([_make_summary(0, 300)])
-        assert proc.on_chunk(_lazy_chunk(50, 150), []) == ChunkDecision.DECODE
+        assert proc.on_chunk(lazy_chunk(50, 150), []) == ChunkDecision.DECODE
 
 
 class TestTimestampSplitProcessorRouteChunk:
     def test_returns_segment_key(self):
         proc = TimestampSplitProcessor([100, 200])
         proc.initialize([_make_summary(0, 300)])
-        assert proc.route_chunk(_lazy_chunk(10, 50)) == 0
-        assert proc.route_chunk(_lazy_chunk(110, 150)) == 1
-        assert proc.route_chunk(_lazy_chunk(210, 250)) == 2
+        assert proc.route_chunk(lazy_chunk(10, 50)) == 0
+        assert proc.route_chunk(lazy_chunk(110, 150)) == 1
+        assert proc.route_chunk(lazy_chunk(210, 250)) == 2
 
     def test_returns_split_required(self):
         proc = TimestampSplitProcessor([100, 200])
         proc.initialize([_make_summary(0, 300)])
-        assert proc.route_chunk(_lazy_chunk(50, 150)) is SPLIT_REQUIRED
+        assert proc.route_chunk(lazy_chunk(50, 150)) is SPLIT_REQUIRED
 
 
 class TestTimestampSplitProcessorRouteMessage:
@@ -329,7 +319,7 @@ class TestExpressionSplitProcessor:
         proc = _make_expression_proc()
         assert (
             proc.on_chunk(
-                _lazy_chunk(0, 100),
+                lazy_chunk(0, 100),
                 [MessageIndex(channel_id=1, timestamps=[], offsets=[])],
             )
             == ChunkDecision.DECODE
@@ -342,7 +332,7 @@ class TestExpressionSplitProcessor:
         )
         assert (
             proc.on_chunk(
-                _lazy_chunk(0, 100),
+                lazy_chunk(0, 100),
                 [MessageIndex(channel_id=2, timestamps=[], offsets=[])],
             )
             == ChunkDecision.CONTINUE
@@ -350,13 +340,13 @@ class TestExpressionSplitProcessor:
 
     def test_route_chunk_returns_current_segment_index(self):
         proc = _make_expression_proc()
-        assert proc.route_chunk(_lazy_chunk(0, 100)) == 0
+        assert proc.route_chunk(lazy_chunk(0, 100)) == 0
         # Advance past the first target message (no transition yet)…
         proc.route_message(_message(0, channel_id=1, data=b"alpha"))
-        assert proc.route_chunk(_lazy_chunk(0, 100)) == 0
+        assert proc.route_chunk(lazy_chunk(0, 100)) == 0
         # …then on value change the sticky segment advances.
         proc.route_message(_message(1, channel_id=1, data=b"beta"))
-        assert proc.route_chunk(_lazy_chunk(0, 100)) == 1
+        assert proc.route_chunk(lazy_chunk(0, 100)) == 1
 
     def test_value_runs_share_one_segment(self):
         proc = _make_expression_proc()
@@ -396,7 +386,7 @@ class TestExpressionSplitProcessor:
         proc = ExpressionSplitProcessor("/t.field")
         assert (
             proc.on_chunk(
-                _lazy_chunk(0, 100),
+                lazy_chunk(0, 100),
                 [MessageIndex(channel_id=1, timestamps=[], offsets=[])],
             )
             == ChunkDecision.DECODE

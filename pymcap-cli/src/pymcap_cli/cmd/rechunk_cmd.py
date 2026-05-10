@@ -141,18 +141,22 @@ def rechunk(
         if not patterns:
             logger.warning("No patterns specified. All messages will be in one group.")
 
-    result = run_processor(
-        files=[file],
-        output=output_file,
-        input_options=InputOptions.from_args(),
-        output_options=OutputOptions(
-            rechunk_strategy=strategy,
-            rechunk_patterns=patterns,
-            compression=compression.value,
-            chunk_size=chunk_size,
-            overwrite_policy=overwrite_policy,
-        ),
-    )
+    try:
+        result = run_processor(
+            files=[file],
+            output=output_file,
+            input_options=InputOptions.from_args(),
+            output_options=OutputOptions(
+                rechunk_strategy=strategy,
+                rechunk_patterns=patterns,
+                compression=compression,
+                chunk_size=chunk_size,
+                overwrite_policy=overwrite_policy,
+            ),
+        )
+    except Exception:
+        logger.exception("Error during rechunking")
+        return 1
 
     # Report results
     logger.info("[green]✓ Rechunking completed successfully![/green]")

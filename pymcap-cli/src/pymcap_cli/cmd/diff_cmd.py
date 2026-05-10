@@ -19,12 +19,16 @@ from pymcap_cli.core.mcap_compare import (
     IndexedCompareKind,
     IndexedComparison,
     MessageIndexIdentityReadResult,
-    TimestampRangeSummary,
     collect_message_timestamps,
     compare_indexed_identities,
     message_index_identity_from_info,
     read_compare_file,
     split_timestamps_into_segments,
+)
+from pymcap_cli.display.time_ranges import (
+    format_count,
+    format_optional_time_window,
+    format_range_summary,
 )
 from pymcap_cli.rihs01 import compute_rihs01
 from pymcap_cli.utils import NS_TO_MS, NS_TO_SEC, bytes_to_human, format_ts_short
@@ -545,40 +549,6 @@ def _build_channel_schema_mismatch_table(
     return table
 
 
-def _format_count(value: int, singular: str, plural: str | None = None) -> str:
-    unit = singular if value == 1 else plural or f"{singular}s"
-    return f"{value:,} {unit}"
-
-
-def _format_optional_time_window(start_time: int | None, end_time: int | None) -> str:
-    if start_time is None or end_time is None:
-        return "N/A"
-    if start_time == end_time:
-        return format_ts_short(start_time)
-    return f"{format_ts_short(start_time)} - {format_ts_short(end_time)}"
-
-
-def _format_range_summary(summary: TimestampRangeSummary) -> str:
-    if not summary.ranges and summary.hidden_messages == 0:
-        return "-"
-
-    parts: list[str] = []
-    for segment in summary.ranges:
-        count_label = _format_count(segment.message_count, "msg")
-        if segment.start_time == segment.end_time:
-            parts.append(f"{format_ts_short(segment.start_time)} ({count_label})")
-        else:
-            parts.append(
-                f"{format_ts_short(segment.start_time)} - "
-                f"{format_ts_short(segment.end_time)} ({count_label})"
-            )
-
-    if summary.hidden_messages > 0:
-        parts.append(f"+{_format_count(summary.hidden_messages, 'msg')}")
-
-    return ", ".join(parts)
-
-
 def _verdict_text(
     comparison: IndexedComparison,
     *,
@@ -617,27 +587,27 @@ def _build_smart_diff_tree(
         node = root.add(
             f"[bold]{escape(item.left_label)} <-> {escape(item.right_label)}[/bold]: "
             f"{verdict} "
-            f"[dim]({_format_count(comparison.shared_messages, 'shared msg', 'shared msgs')}, "
-            f"{_format_count(comparison.shared_channels, 'shared channel')}; "
-            f"left-only {_format_count(comparison.left_extra_messages, 'msg')}, "
-            f"right-only {_format_count(comparison.right_extra_messages, 'msg')})[/dim]"
+            f"[dim]({format_count(comparison.shared_messages, 'shared msg', 'shared msgs')}, "
+            f"{format_count(comparison.shared_channels, 'shared channel')}; "
+            f"left-only {format_count(comparison.left_extra_messages, 'msg')}, "
+            f"right-only {format_count(comparison.right_extra_messages, 'msg')})[/dim]"
         )
 
         for topic in comparison.topics[:max_topic_rows]:
-            overlap_window = _format_optional_time_window(
+            overlap_window = format_optional_time_window(
                 topic.shared_start_time, topic.shared_end_time
             )
             topic_node = node.add(
                 f"[cyan]{escape(topic.topic)}[/cyan] "
-                f"[dim]({_format_count(topic.shared_messages, 'shared msg', 'shared msgs')}, "
-                f"left-only {_format_count(topic.left_only_messages, 'msg')}, "
-                f"right-only {_format_count(topic.right_only_messages, 'msg')}, "
+                f"[dim]({format_count(topic.shared_messages, 'shared msg', 'shared msgs')}, "
+                f"left-only {format_count(topic.left_only_messages, 'msg')}, "
+                f"right-only {format_count(topic.right_only_messages, 'msg')}, "
                 f"overlap {overlap_window})[/dim]"
             )
             if topic.left_only_messages or topic.right_only_messages:
                 topic_node.add(
-                    f"[dim]left-only: {_format_range_summary(topic.left_only_ranges)}; "
-                    f"right-only: {_format_range_summary(topic.right_only_ranges)}[/dim]"
+                    f"[dim]left-only: {format_range_summary(topic.left_only_ranges)}; "
+                    f"right-only: {format_range_summary(topic.right_only_ranges)}[/dim]"
                 )
 
         hidden_topic_count = len(comparison.topics) - max_topic_rows

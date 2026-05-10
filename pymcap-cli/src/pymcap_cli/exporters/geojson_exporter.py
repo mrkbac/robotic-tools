@@ -15,14 +15,12 @@ import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pymcap_cli.exporters._common import prepare_output_file
-from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
 from pymcap_cli.exporters.geo_common import (
     GeoMode,
+    GeoRos2Exporter,
+    GeoSampleTopicWriter,
     Sample,
-    extract_samples,
-    is_no_fix,
     log_time_ns_to_rfc3339,
-    schema_is_geographic,
     split_on_gaps,
     stride,
 )
@@ -30,8 +28,6 @@ from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from small_mcap import DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -43,7 +39,7 @@ def _coords(sample: Sample) -> list[float]:
     return [sample.lon, sample.lat, sample.alt]
 
 
-class _GeoJsonTopicWriter(TopicWriter):
+class _GeoJsonTopicWriter(GeoSampleTopicWriter):
     """Buffers samples in memory, flushes one ``FeatureCollection`` on close."""
 
     def __init__(
@@ -56,23 +52,14 @@ class _GeoJsonTopicWriter(TopicWriter):
         stride_n: int,
         include_no_fix: bool,
     ) -> None:
+        super().__init__(topic=topic, include_no_fix=include_no_fix)
         self.path = path
-        self.topic = topic
         self.mode = mode
         self.max_gap_ns = max_gap_ns
         self.stride_n = stride_n
-        self.include_no_fix = include_no_fix
-        self._samples: list[Sample] = []
-
-    def write(self, msg: DecodedMessage) -> None:
-        schema_name = msg.schema.name if msg.schema else ""
-        for sample in extract_samples(schema_name, msg.decoded_message, msg.message.log_time):
-            if not self.include_no_fix and is_no_fix(sample):
-                continue
-            self._samples.append(sample)
 
     def close(self) -> None:
-        samples = stride(self._samples, self.stride_n)
+        samples = stride(self.samples, self.stride_n)
         segments = split_on_gaps(samples, self.max_gap_ns)
         features: list[dict[str, Any]] = []
 
@@ -122,7 +109,7 @@ class _GeoJsonTopicWriter(TopicWriter):
             json.dump(fc, fh)
 
 
-class GeoJsonExporter(Ros2Exporter):
+class GeoJsonExporter(GeoRos2Exporter):
     """Per-topic GeoJSON ``FeatureCollection`` files."""
 
     name: ClassVar[str] = "geojson"
@@ -135,13 +122,12 @@ class GeoJsonExporter(Ros2Exporter):
         stride_n: int = 1,
         include_no_fix: bool = False,
     ) -> None:
-        self._mode = mode
-        self._max_gap_ns = max_gap_ns
-        self._stride_n = stride_n
-        self._include_no_fix = include_no_fix
-
-    def accepts(self, schema: Schema | None) -> bool:
-        return schema_is_geographic(schema)
+        super().__init__(
+            mode=mode,
+            max_gap_ns=max_gap_ns,
+            stride_n=stride_n,
+            include_no_fix=include_no_fix,
+        )
 
     def open_topic(self, ctx: TopicContext) -> _GeoJsonTopicWriter:
         path = prepare_output_file(

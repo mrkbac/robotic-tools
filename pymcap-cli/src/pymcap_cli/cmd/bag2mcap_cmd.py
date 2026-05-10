@@ -17,8 +17,6 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from small_mcap import CompressionType, McapWriter
-from small_mcap import CompressionType as WriterCompressionType
 
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.types.types_manual import (
@@ -29,7 +27,7 @@ from pymcap_cli.types.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import confirm_output_overwrite
+from pymcap_cli.utils import WriterCompression, confirm_output_overwrite, create_mcap_writer
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +37,7 @@ class Bag2McapOptions:
     """Options for bag to MCAP conversion."""
 
     chunk_size: int = 1024 * 1024 * 8  # 8MB default
-    compression: CompressionType = CompressionType.ZSTD
+    compression: WriterCompression = DEFAULT_COMPRESSION
     enable_crcs: bool = True
     use_chunking: bool = True
 
@@ -79,15 +77,6 @@ def convert_bag_to_mcap(
 
     if not info.connections:
         logger.warning("No connections found in bag file")
-        writer = McapWriter(
-            output,
-            chunk_size=options.chunk_size,
-            compression=options.compression,
-            enable_crcs=options.enable_crcs,
-            use_chunking=options.use_chunking,
-        )
-        writer.start(profile="ros1")
-        writer.finish()
         return Bag2McapStatistics(topic_count=0, message_count=0, schema_count=0)
 
     logger.info(f"Found {len(info.connections)} connections, {info.message_count} messages")
@@ -118,13 +107,7 @@ def convert_bag_to_mcap(
         conn_to_channel[conn.conn_id] = channel_map[key]
 
     # Create MCAP writer
-    writer = McapWriter(
-        output,
-        chunk_size=options.chunk_size,
-        compression=options.compression,
-        enable_crcs=options.enable_crcs,
-        use_chunking=options.use_chunking,
-    )
+    writer = create_mcap_writer(output, options)
     writer.start(profile="ros1")
 
     # Write schemas
@@ -252,18 +235,18 @@ def bag2mcap(
         logger.error(f"Input file '{file}' does not exist")
         return 1
 
-    confirm_output_overwrite(output, force)
+    from pymcap_cli.rosbag_reader import read_bag_info  # noqa: PLC0415
 
-    compression_map = {
-        "zstd": WriterCompressionType.ZSTD,
-        "lz4": WriterCompressionType.LZ4,
-        "none": WriterCompressionType.NONE,
-    }
-    writer_compression = compression_map[compression.value]
+    with input_path.open("rb") as bag_file:
+        if not read_bag_info(bag_file).connections:
+            logger.warning("No connections found in bag file; no output written")
+            return 0
+
+    confirm_output_overwrite(output, force)
 
     options = Bag2McapOptions(
         chunk_size=chunk_size,
-        compression=writer_compression,
+        compression=compression,
     )
 
     logger.info(f"Converting '{file}' to '{output}'")

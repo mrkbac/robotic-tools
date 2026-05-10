@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from cyclopts import Group, Parameter
 from small_mcap import CompressionType as SmallMcapCompressionType
 
-
-class CompressionType(str, Enum):
-    """Compression algorithm types."""
-
-    ZSTD = "zstd"
-    LZ4 = "lz4"
-    NONE = "none"
+CompressionName = Literal["zstd", "lz4", "none"]
 
 
 def str_to_compression_type(compression: str) -> SmallMcapCompressionType:
@@ -33,7 +26,7 @@ def str_to_compression_type(compression: str) -> SmallMcapCompressionType:
 # MCAP processing constants
 MIN_CHUNK_SIZE = 1024  # 1 KiB minimum chunk size
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB default chunk size
-DEFAULT_COMPRESSION = CompressionType.ZSTD  # Default compression algorithm
+DEFAULT_COMPRESSION: CompressionName = "zstd"  # Default compression algorithm
 
 # Parameter groups
 OUTPUT_OPTIONS_GROUP = Group("Output Options")
@@ -47,7 +40,7 @@ ChunkSizeOption = Annotated[
 ]
 
 CompressionOption = Annotated[
-    CompressionType,
+    CompressionName,
     Parameter(
         name=["--compression"],
         group=OUTPUT_OPTIONS_GROUP,

@@ -1,8 +1,8 @@
 """Shared processor pipeline for multi-output transform commands (splitting)."""
 
 import contextlib
-from dataclasses import dataclass
 
+from pymcap_cli.cmd._run_processor import ProcessorResult
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_processor import (
     InputFile,
@@ -10,16 +10,7 @@ from pymcap_cli.core.mcap_processor import (
     McapProcessor,
     OutputOptions,
     ProcessingOptions,
-    ProcessingStats,
 )
-
-
-@dataclass(slots=True)
-class ProcessorResult:
-    """Result of a processor run."""
-
-    stats: ProcessingStats
-    processor: McapProcessor
 
 
 def run_processor_multi(

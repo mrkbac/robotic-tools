@@ -92,7 +92,7 @@ def recover(
             output=output,
             input_options=InputOptions.from_args(always_decode_chunk=always_decode_chunk),
             output_options=OutputOptions(
-                compression=compression.value,
+                compression=compression,
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
             ),

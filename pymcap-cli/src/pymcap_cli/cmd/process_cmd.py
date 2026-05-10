@@ -226,7 +226,7 @@ def process(
             output=output,
             input_options=input_options,
             output_options=OutputOptions(
-                compression=compression.value,
+                compression=compression,
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
             ),

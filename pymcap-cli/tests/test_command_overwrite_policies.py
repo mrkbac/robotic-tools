@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from pymcap_cli.cmd import (
@@ -11,6 +10,18 @@ from pymcap_cli.cmd import (
     recover_cmd,
 )
 from pymcap_cli.core.mcap_processor import OverwriteCollisionPolicy
+
+from tests.helpers import empty_processor_result
+
+
+def _fake_run_processor(seen: list[OverwriteCollisionPolicy]):
+    def fake_run_processor(*, files, output, input_options, output_options):
+        _ = files, input_options
+        assert output == Path("out.mcap")
+        seen.append(output_options.overwrite_policy)
+        return empty_processor_result()
+
+    return fake_run_processor
 
 
 @pytest.mark.parametrize(
@@ -47,22 +58,7 @@ from pymcap_cli.core.mcap_processor import OverwriteCollisionPolicy
 def test_commands_pass_force_as_overwrite_policy(module, func_name: str, kwargs, monkeypatch):
     seen: list[OverwriteCollisionPolicy] = []
 
-    def fake_run_processor(*, files, output, input_options, output_options):
-        _ = files, input_options
-        assert output == Path("out.mcap")
-        seen.append(output_options.overwrite_policy)
-        return SimpleNamespace(
-            stats=SimpleNamespace(
-                messages_processed=0,
-                writer_statistics=SimpleNamespace(message_count=0),
-            ),
-            processor=SimpleNamespace(
-                large_channels=[],
-                output_manager=SimpleNamespace(segments={0: SimpleNamespace(rechunk_groups=[])}),
-            ),
-        )
-
-    monkeypatch.setattr(module, "run_processor", fake_run_processor)
+    monkeypatch.setattr(module, "run_processor", _fake_run_processor(seen))
 
     exit_code = getattr(module, func_name)(**kwargs, force=True)
 
@@ -104,22 +100,7 @@ def test_commands_pass_force_as_overwrite_policy(module, func_name: str, kwargs,
 def test_commands_pass_no_clobber_as_error_policy(module, func_name: str, kwargs, monkeypatch):
     seen: list[OverwriteCollisionPolicy] = []
 
-    def fake_run_processor(*, files, output, input_options, output_options):
-        _ = files, input_options
-        assert output == Path("out.mcap")
-        seen.append(output_options.overwrite_policy)
-        return SimpleNamespace(
-            stats=SimpleNamespace(
-                messages_processed=0,
-                writer_statistics=SimpleNamespace(message_count=0),
-            ),
-            processor=SimpleNamespace(
-                large_channels=[],
-                output_manager=SimpleNamespace(segments={0: SimpleNamespace(rechunk_groups=[])}),
-            ),
-        )
-
-    monkeypatch.setattr(module, "run_processor", fake_run_processor)
+    monkeypatch.setattr(module, "run_processor", _fake_run_processor(seen))
 
     exit_code = getattr(module, func_name)(**kwargs, no_clobber=True)
 
@@ -160,5 +141,17 @@ def test_commands_pass_no_clobber_as_error_policy(module, func_name: str, kwargs
 )
 def test_commands_reject_force_and_no_clobber(module, func_name: str, kwargs):
     exit_code = getattr(module, func_name)(**kwargs, force=True, no_clobber=True)
+
+    assert exit_code == 1
+
+
+def test_rechunk_returns_one_when_processor_raises(monkeypatch):
+    def fake_run_processor(*, files, output, input_options, output_options) -> None:
+        _ = files, output, input_options, output_options
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rechunk_cmd, "run_processor", fake_run_processor)
+
+    exit_code = rechunk_cmd.rechunk(file="input.mcap", output=Path("out.mcap"), force=True)
 
     assert exit_code == 1

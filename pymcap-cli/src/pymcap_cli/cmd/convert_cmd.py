@@ -18,8 +18,6 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from small_mcap import CompressionType, McapWriter
-from small_mcap import CompressionType as WriterCompressionType
 
 from pymcap_cli.core.msg_resolver import ROS2Distro, get_message_definition
 from pymcap_cli.display.osc_utils import OSCProgressColumn
@@ -31,7 +29,7 @@ from pymcap_cli.types.types_manual import (
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.utils import confirm_output_overwrite
+from pymcap_cli.utils import WriterCompression, confirm_output_overwrite, create_mcap_writer
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +41,7 @@ class ConvertOptions:
     distro: ROS2Distro = ROS2Distro.HUMBLE
     extra_paths: list[Path] | None = None
     chunk_size: int = 1024 * 1024 * 8  # 8MB default
-    compression: CompressionType = CompressionType.ZSTD
+    compression: WriterCompression = DEFAULT_COMPRESSION
     enable_crcs: bool = True
     use_chunking: bool = True
 
@@ -263,16 +261,6 @@ def convert_db3_to_mcap(
 
     if not topics:
         logger.warning("No topics found in DB3 file")
-        # Write empty MCAP
-        writer = McapWriter(
-            output,
-            chunk_size=options.chunk_size,
-            compression=options.compression,
-            enable_crcs=options.enable_crcs,
-            use_chunking=options.use_chunking,
-        )
-        writer.start(profile="ros2")
-        writer.finish()
         return ConversionStatistics(
             topic_count=0,
             message_count=0,
@@ -331,13 +319,7 @@ def convert_db3_to_mcap(
         )
 
     # Create MCAP writer
-    writer = McapWriter(
-        output,
-        chunk_size=options.chunk_size,
-        compression=options.compression,
-        enable_crcs=options.enable_crcs,
-        use_chunking=options.use_chunking,
-    )
+    writer = create_mcap_writer(output, options)
 
     # Start writing MCAP
     writer.start(profile="ros2")
@@ -525,23 +507,19 @@ def convert(
         logger.error(f"Input file '{file}' does not exist")
         return 1
 
+    if not read_topics(input_path):
+        logger.warning("No topics found in DB3 file; no output written")
+        return 0
+
     # Confirm overwrite if needed
     confirm_output_overwrite(output, force)
-
-    # Map compression type from CLI enum to writer enum
-    compression_map = {
-        "zstd": WriterCompressionType.ZSTD,
-        "lz4": WriterCompressionType.LZ4,
-        "none": WriterCompressionType.NONE,
-    }
-    writer_compression = compression_map[compression.value]
 
     # Build conversion options
     options = ConvertOptions(
         distro=distro,
         extra_paths=extra_path or None,
         chunk_size=chunk_size,
-        compression=writer_compression,
+        compression=compression,
         enable_crcs=True,
         use_chunking=True,
     )

@@ -55,11 +55,14 @@ from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
 from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
+    CompressionName,
     str_to_compression_type,
 )
 from pymcap_cli.utils import (
+    McapWriterOptions,
     ProgressTrackingIO,
     confirm_output_overwrite,
+    create_mcap_writer,
     file_progress,
     parse_timestamp_args,
 )
@@ -227,8 +230,10 @@ class InputFile:
 class OutputOptions:
     """Options for output file format."""
 
-    compression: str = DEFAULT_COMPRESSION
+    compression: CompressionName = DEFAULT_COMPRESSION
     chunk_size: int = DEFAULT_CHUNK_SIZE
+    enable_crcs: bool = True
+    use_chunking: bool = True
 
     # Rechunking options
     rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
@@ -243,6 +248,14 @@ class OutputOptions:
     @property
     def compression_type(self) -> CompressionType:
         return str_to_compression_type(self.compression)
+
+    def to_writer_options(self) -> McapWriterOptions:
+        return McapWriterOptions(
+            chunk_size=self.chunk_size,
+            compression=self.compression,
+            enable_crcs=self.enable_crcs,
+            use_chunking=self.use_chunking,
+        )
 
     @property
     def is_rechunking(self) -> bool:
@@ -442,7 +455,7 @@ class OutputManager:
         header: Header,
         open_output: OutputStreamOpener | None = None,
     ) -> None:
-        self.output_options = output_options
+        self.output_options: OutputOptions = output_options
         self.schemas = schemas
         self.channels = channels
         self.header = header
@@ -513,10 +526,9 @@ class OutputManager:
         # For uncompressed output the pool is pure overhead.
         compression_type = self.output_options.compression_type
         num_workers = 0 if compression_type == CompressionType.NONE else min(4, os.cpu_count() or 1)
-        writer = McapWriter(
+        writer = create_mcap_writer(
             stream,
-            chunk_size=self.output_options.chunk_size,
-            compression=compression_type,
+            self.output_options.to_writer_options(),
             num_workers=num_workers,
         )
         writer.schemas = dict(self.schemas)

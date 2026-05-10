@@ -81,7 +81,7 @@ def compress(
             # chunk-level RECOMPRESS path that avoids per-message parsing.
             input_options=InputOptions.from_args(),
             output_options=OutputOptions(
-                compression=compression.value,
+                compression=compression,
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
             ),

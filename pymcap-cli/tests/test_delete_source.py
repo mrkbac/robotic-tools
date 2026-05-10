@@ -13,7 +13,6 @@ from pymcap_cli.cmd._run_processor import (
 )
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.cmd.merge_cmd import merge
-from pymcap_cli.types.types_manual import CompressionType
 
 
 def test_validate_mcap_output_returns_true_for_valid_file(simple_mcap: Path) -> None:
@@ -132,7 +131,7 @@ def test_compress_command_deletes_source_on_success(simple_mcap_copy: Path, tmp_
     rc = compress(
         str(simple_mcap_copy),
         output,
-        compression=CompressionType.ZSTD,
+        compression="zstd",
         force=True,
         delete_source=True,
     )
@@ -152,7 +151,7 @@ def test_compress_command_keeps_source_on_validation_failure(
     rc = compress(
         str(simple_mcap_copy),
         output,
-        compression=CompressionType.ZSTD,
+        compression="zstd",
         force=True,
         delete_source=True,
     )

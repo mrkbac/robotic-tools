@@ -55,12 +55,17 @@ from pymcap_cli.types.types_manual import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_COMPRESSION,
     ChunkSizeOption,
+    CompressionName,
     CompressionOption,
     ForceOverwriteOption,
     OutputPathOption,
-    str_to_compression_type,
 )
-from pymcap_cli.utils import compile_topic_patterns, confirm_output_overwrite
+from pymcap_cli.utils import (
+    McapWriterOptions,
+    compile_topic_patterns,
+    confirm_output_overwrite,
+    create_mcap_writer,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -783,7 +788,7 @@ async def _record_async(
     duration: float | None,
     message_limit: int | None,
     chunk_size: int,
-    compression_choice: str,
+    compression_choice: CompressionName,
     connect_timeout: float,
     refresh_interval: float,
     show_status: bool,
@@ -800,10 +805,12 @@ async def _record_async(
             ERR.print(f"[red]Error:[/] Timed out connecting to {url}")
             return 1
 
-        compression_type = str_to_compression_type(compression_choice)
         try:
             with output.open("wb") as out:
-                writer = McapWriter(out, chunk_size=chunk_size, compression=compression_type)
+                writer = create_mcap_writer(
+                    out,
+                    McapWriterOptions(chunk_size=chunk_size, compression=compression_choice),
+                )
                 writer.start(profile="", library="pymcap-cli bridge record")
 
                 done = asyncio.Event()
@@ -1044,7 +1051,7 @@ def record(
                 duration=duration,
                 message_limit=message_limit,
                 chunk_size=chunk_size,
-                compression_choice=compression.value,
+                compression_choice=compression,
                 connect_timeout=connect_timeout,
                 refresh_interval=refresh_interval,
                 show_status=progress,

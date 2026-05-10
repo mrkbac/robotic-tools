@@ -13,12 +13,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pymcap_cli.exporters._common import normalize_schema_name
+from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
 from pymcap_cli.utils import NS_TO_SEC
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from small_mcap import Schema
+    from small_mcap import DecodedMessage, Schema
+
+    from pymcap_cli.exporters.base import TopicContext
 
 
 GeoMode = Literal["points", "track", "track+points"]
@@ -212,6 +215,72 @@ def extract_samples(schema_name: str, decoded: Any, log_time_ns: int) -> Iterato
 def is_no_fix(sample: Sample) -> bool:
     """True for ``NavSatFix`` samples whose ``status.status`` is ``NO_FIX``."""
     return sample.properties.get("status_code") == -1
+
+
+class GeoSampleTopicWriter(TopicWriter):
+    """Collect geographic samples for one topic."""
+
+    def __init__(self, topic: str, include_no_fix: bool) -> None:
+        self.topic = topic
+        self.include_no_fix = include_no_fix
+        self.samples: list[Sample] = []
+
+    def write(self, msg: DecodedMessage) -> None:
+        schema_name = msg.schema.name if msg.schema else ""
+        for sample in extract_samples(schema_name, msg.decoded_message, msg.message.log_time):
+            if not self.include_no_fix and is_no_fix(sample):
+                continue
+            self.samples.append(sample)
+
+    def close(self) -> None:
+        pass
+
+
+class GeoRos2Exporter(Ros2Exporter):
+    """Shared options and schema acceptance for geographic ROS2 exporters."""
+
+    def __init__(
+        self,
+        *,
+        mode: GeoMode = "track+points",
+        max_gap_ns: int = 30 * NS_TO_SEC,
+        stride_n: int = 1,
+        include_no_fix: bool = False,
+    ) -> None:
+        self._mode = mode
+        self._max_gap_ns = max_gap_ns
+        self._stride_n = stride_n
+        self._include_no_fix = include_no_fix
+
+    def accepts(self, schema: Schema | None) -> bool:
+        return schema_is_geographic(schema)
+
+
+class SingleFileGeoExporter(GeoRos2Exporter):
+    """Shared state for geographic exporters that write one aggregate file."""
+
+    def __init__(
+        self,
+        *,
+        mode: GeoMode = "track+points",
+        max_gap_ns: int = 30 * NS_TO_SEC,
+        stride_n: int = 1,
+        include_no_fix: bool = False,
+    ) -> None:
+        super().__init__(
+            mode=mode,
+            max_gap_ns=max_gap_ns,
+            stride_n=stride_n,
+            include_no_fix=include_no_fix,
+        )
+        self._writers: dict[int, GeoSampleTopicWriter] = {}
+        self._force = False
+
+    def open_topic(self, ctx: TopicContext) -> GeoSampleTopicWriter:
+        writer = GeoSampleTopicWriter(ctx.topic, self._include_no_fix)
+        self._writers[ctx.writer_key] = writer
+        self._force = ctx.force
+        return writer
 
 
 def split_on_gaps(samples: Iterable[Sample], max_gap_ns: int) -> list[list[Sample]]:

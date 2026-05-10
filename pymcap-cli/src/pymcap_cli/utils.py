@@ -1,10 +1,11 @@
 import io
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, BinaryIO, Protocol
 
 if TYPE_CHECKING:
     from _typeshed import WriteableBuffer
@@ -24,8 +25,12 @@ from rich.progress import (
 )
 from rich.text import Text
 from small_mcap import (
+    CompressionType as SmallMcapCompressionType,
+)
+from small_mcap import (
     InvalidMagicError,
     McapError,
+    McapWriter,
     RebuildInfo,
     get_header,
     get_summary,
@@ -35,9 +40,31 @@ from small_mcap import (
 
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR
+from pymcap_cli.types.types_manual import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_COMPRESSION,
+    CompressionName,
+    str_to_compression_type,
+)
 
 NS_TO_SEC = 1_000_000_000
 NS_TO_MS = 1_000_000
+WriterCompression = SmallMcapCompressionType | CompressionName
+
+
+@dataclass(slots=True)
+class McapWriterOptions:
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+    compression: WriterCompression = DEFAULT_COMPRESSION
+    enable_crcs: bool = True
+    use_chunking: bool = True
+
+
+class McapWriterOptionsLike(Protocol):
+    chunk_size: int
+    compression: WriterCompression
+    enable_crcs: bool
+    use_chunking: bool
 
 
 def bytes_to_human(size_bytes: float | None) -> str:
@@ -50,6 +77,28 @@ def bytes_to_human(size_bytes: float | None) -> str:
 
 def format_ts_short(time_ns: int) -> str:
     return datetime.fromtimestamp(time_ns / NS_TO_SEC).strftime("%H:%M:%S.%f")[:-3]
+
+
+def _writer_compression_to_small_mcap(compression: WriterCompression) -> SmallMcapCompressionType:
+    if isinstance(compression, SmallMcapCompressionType):
+        return compression
+    return str_to_compression_type(compression)
+
+
+def create_mcap_writer(
+    output: BinaryIO,
+    options: McapWriterOptionsLike,
+    *,
+    num_workers: int = 0,
+) -> McapWriter:
+    return McapWriter(
+        output,
+        chunk_size=options.chunk_size,
+        compression=_writer_compression_to_small_mcap(options.compression),
+        enable_crcs=options.enable_crcs,
+        use_chunking=options.use_chunking,
+        num_workers=num_workers,
+    )
 
 
 def file_progress(title: str, console: Console | None = None) -> Progress:

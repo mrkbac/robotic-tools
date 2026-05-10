@@ -9,7 +9,9 @@ from pymcap_cli.core.processors.base import Action, ChunkDecision
 from pymcap_cli.core.processors.metadata_filter import MetadataFilterProcessor
 from pymcap_cli.core.processors.time_filter import TimeFilterProcessor
 from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
-from small_mcap import Attachment, Channel, LazyChunk, Message, Metadata
+from small_mcap import Attachment, Channel, Message, Metadata
+
+from tests.helpers import lazy_chunk
 
 
 def _channel(topic: str) -> Channel:
@@ -26,18 +28,6 @@ def _attachment(log_time: int) -> Attachment:
 
 def _metadata() -> Metadata:
     return Metadata(name="info", metadata={})
-
-
-def _lazy_chunk(start: int, end: int) -> LazyChunk:
-    return LazyChunk(
-        message_start_time=start,
-        message_end_time=end,
-        uncompressed_size=0,
-        uncompressed_crc=0,
-        compression="none",
-        record_start=0,
-        data_len=0,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +131,7 @@ class TestAttachmentFilterProcessor:
 class TestAlwaysDecodeProcessor:
     def test_always_returns_decode(self):
         proc = AlwaysDecodeProcessor()
-        chunk = _lazy_chunk(0, 100)
+        chunk = lazy_chunk(0, 100)
         assert proc.on_chunk(chunk, []) == ChunkDecision.DECODE
 
 
@@ -234,32 +224,32 @@ class TestTimeFilterProcessorMessages:
 class TestTimeFilterProcessorChunks:
     def test_chunk_entirely_before_start(self):
         proc = TimeFilterProcessor(start_ns=500)
-        chunk = _lazy_chunk(0, 400)
+        chunk = lazy_chunk(0, 400)
         assert proc.on_chunk(chunk, []) == ChunkDecision.SKIP
 
     def test_chunk_entirely_after_end(self):
         proc = TimeFilterProcessor(end_ns=500)
-        chunk = _lazy_chunk(600, 900)
+        chunk = lazy_chunk(600, 900)
         assert proc.on_chunk(chunk, []) == ChunkDecision.SKIP
 
     def test_chunk_start_straddles_range_start(self):
         # chunk starts before range start → must decode per message
         proc = TimeFilterProcessor(start_ns=500)
-        chunk = _lazy_chunk(400, 600)
+        chunk = lazy_chunk(400, 600)
         assert proc.on_chunk(chunk, []) == ChunkDecision.DECODE
 
     def test_chunk_end_straddles_range_end(self):
         # chunk ends at or after range end → must decode per message
         proc = TimeFilterProcessor(end_ns=500)
-        chunk = _lazy_chunk(400, 600)
+        chunk = lazy_chunk(400, 600)
         assert proc.on_chunk(chunk, []) == ChunkDecision.DECODE
 
     def test_chunk_entirely_within_range(self):
         proc = TimeFilterProcessor(start_ns=100, end_ns=900)
-        chunk = _lazy_chunk(200, 800)
+        chunk = lazy_chunk(200, 800)
         assert proc.on_chunk(chunk, []) == ChunkDecision.CONTINUE
 
     def test_chunk_no_bounds_always_continue(self):
         proc = TimeFilterProcessor()
-        chunk = _lazy_chunk(0, 1_000_000)
+        chunk = lazy_chunk(0, 1_000_000)
         assert proc.on_chunk(chunk, []) == ChunkDecision.CONTINUE

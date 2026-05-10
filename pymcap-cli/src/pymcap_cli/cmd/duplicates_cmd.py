@@ -35,7 +35,6 @@ from pymcap_cli.core.mcap_compare import (
     MessageIndexIdentity,
     MessageIndexIdentityReadResult,
     SummaryChannelRange,
-    TimestampRangeSummary,
     TopicOverlapEvidence,
     compare_indexed_identities,
     discover_mcap_candidates,
@@ -43,8 +42,13 @@ from pymcap_cli.core.mcap_compare import (
     read_identity_file,
     read_message_index_identity_file,
 )
+from pymcap_cli.display.time_ranges import (
+    format_count,
+    format_optional_time_window,
+    format_range_summary,
+)
 from pymcap_cli.log_setup import ERR
-from pymcap_cli.utils import NS_TO_SEC, format_ts_short
+from pymcap_cli.utils import NS_TO_SEC
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -186,51 +190,17 @@ def _file_label(path: str) -> str:
     return f"[green]{path_basename(path)}[/green]\n[dim]{path}[/dim]"
 
 
-def _format_count(value: int, singular: str, plural: str | None = None) -> str:
-    unit = singular if value == 1 else plural or f"{singular}s"
-    return f"{value:,} {unit}"
-
-
 def _identity_summary(identity: MessageIndexIdentity) -> str:
     return (
-        f"{_format_count(identity.message_count, 'msg')}, "
-        f"{_format_count(identity.channel_count, 'channel')}, "
-        f"{_format_count(identity.schema_count, 'schema')}, "
+        f"{format_count(identity.message_count, 'msg')}, "
+        f"{format_count(identity.channel_count, 'channel')}, "
+        f"{format_count(identity.schema_count, 'schema')}, "
         f"{_time_range(identity)}"
     )
 
 
 def _format_delta(value: int) -> str:
     return f"{value:+,}" if value else "0"
-
-
-def _format_range_summary(summary: TimestampRangeSummary) -> str:
-    if not summary.ranges and summary.hidden_messages == 0:
-        return "-"
-
-    parts: list[str] = []
-    for segment in summary.ranges:
-        count_label = _format_count(segment.message_count, "msg")
-        if segment.start_time == segment.end_time:
-            parts.append(f"{format_ts_short(segment.start_time)} ({count_label})")
-        else:
-            parts.append(
-                f"{format_ts_short(segment.start_time)} - "
-                f"{format_ts_short(segment.end_time)} ({count_label})"
-            )
-
-    if summary.hidden_messages > 0:
-        parts.append(f"+{_format_count(summary.hidden_messages, 'msg')}")
-
-    return ", ".join(parts)
-
-
-def _format_optional_time_window(start_time: int | None, end_time: int | None) -> str:
-    if start_time is None or end_time is None:
-        return "N/A"
-    if start_time == end_time:
-        return format_ts_short(start_time)
-    return f"{format_ts_short(start_time)} - {format_ts_short(end_time)}"
 
 
 def _build_groups_tree(groups: list[list[MessageIndexIdentityReadResult]]) -> Tree:
@@ -319,27 +289,27 @@ def _build_partial_tree(matches: list[IndexedComparison]) -> Tree:
                 f"[green]{path_basename(relation.related.path)}[/green] "
                 f"[dim](msgs {_format_delta(relation.message_delta)}, "
                 f"channels {_format_delta(relation.channel_delta)}; "
-                f"{_format_count(relation.match.shared_messages, 'shared msg', 'shared msgs')}, "
-                f"{_format_count(relation.match.shared_channels, 'shared channel')}; "
-                f"anchor-only {_format_count(relation.anchor_extra_messages, 'msg')}, "
-                f"file-only {_format_count(relation.related_extra_messages, 'msg')})[/dim]"
+                f"{format_count(relation.match.shared_messages, 'shared msg', 'shared msgs')}, "
+                f"{format_count(relation.match.shared_channels, 'shared channel')}; "
+                f"anchor-only {format_count(relation.anchor_extra_messages, 'msg')}, "
+                f"file-only {format_count(relation.related_extra_messages, 'msg')})[/dim]"
             )
             related_node.add(f"[dim]{relation.related.path}[/dim]")
             for topic in relation.topics[:_MAX_TOPIC_EVIDENCE_ROWS]:
-                overlap_window = _format_optional_time_window(
+                overlap_window = format_optional_time_window(
                     topic.shared_start_time, topic.shared_end_time
                 )
                 topic_node = related_node.add(
                     f"[cyan]{escape(topic.topic)}[/cyan] "
-                    f"[dim]({_format_count(topic.shared_messages, 'shared msg', 'shared msgs')}, "
-                    f"anchor-only {_format_count(topic.left_only_messages, 'msg')}, "
-                    f"file-only {_format_count(topic.right_only_messages, 'msg')}, "
+                    f"[dim]({format_count(topic.shared_messages, 'shared msg', 'shared msgs')}, "
+                    f"anchor-only {format_count(topic.left_only_messages, 'msg')}, "
+                    f"file-only {format_count(topic.right_only_messages, 'msg')}, "
                     f"overlap {overlap_window})[/dim]"
                 )
                 if topic.left_only_messages or topic.right_only_messages:
                     topic_node.add(
-                        f"[dim]anchor-only: {_format_range_summary(topic.left_only_ranges)}; "
-                        f"file-only: {_format_range_summary(topic.right_only_ranges)}[/dim]"
+                        f"[dim]anchor-only: {format_range_summary(topic.left_only_ranges)}; "
+                        f"file-only: {format_range_summary(topic.right_only_ranges)}[/dim]"
                     )
             hidden_topic_count = len(relation.topics) - _MAX_TOPIC_EVIDENCE_ROWS
             if hidden_topic_count > 0:

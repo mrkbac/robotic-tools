@@ -212,16 +212,20 @@ def split(
         modes.append("Expression")
     logger.info(f"Mode: {' + '.join(modes)} split")
 
-    result = run_processor_multi(
-        files=[file],
-        output_options=OutputOptions(
-            processors=processors,
-            output_template=output_template,
-            compression=compression.value,
-            chunk_size=chunk_size,
-            overwrite_policy=overwrite_policy,
-        ),
-    )
+    try:
+        result = run_processor_multi(
+            files=[file],
+            output_options=OutputOptions(
+                processors=processors,
+                output_template=output_template,
+                compression=compression,
+                chunk_size=chunk_size,
+                overwrite_policy=overwrite_policy,
+            ),
+        )
+    except Exception:
+        logger.exception("Error during splitting")
+        return 1
 
     # Report results
     logger.info("[green]✓ Splitting completed successfully![/green]")

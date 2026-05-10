@@ -9,7 +9,7 @@ import hashlib
 import json
 
 from ros_parser.models import MessageDefinition
-from ros_parser.models import Type as _RosType
+from ros_parser.models import Type as RosType
 from ros_parser.ros2_msg import parse_schema_to_definitions
 
 _RIHS01_PREFIX = "RIHS01_"
@@ -35,7 +35,7 @@ _RIHS01_PRIMITIVE_IDS: dict[str, int] = {
 }
 
 
-def _rihs01_field_type(t: _RosType) -> dict[str, int | str]:
+def _rihs01_field_type(t: RosType) -> dict[str, int | str]:
     if t.package_name is not None:
         base_id = 1  # NESTED_TYPE
         nested_type_name = f"{t.package_name}/msg/{t.type_name}"

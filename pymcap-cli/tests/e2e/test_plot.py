@@ -4,36 +4,31 @@ from pathlib import Path
 
 import pytest
 from pymcap_cli.cmd.plot_cmd import plot
-from pymcap_cli.exporters.plot_exporter import (
-    downsample_lttb as _downsample,
-)
-from pymcap_cli.exporters.plot_exporter import (
-    parse_path_arg as _parse_path_arg,
-)
+from pymcap_cli.exporters.plot_exporter import downsample_lttb, parse_path_arg
 
 
 class TestParsePathArg:
     """Test the named extraction parser."""
 
     def test_plain_path(self):
-        label, path = _parse_path_arg("/odom.pose.position.x")
+        label, path = parse_path_arg("/odom.pose.position.x")
         assert label == "/odom.pose.position.x"
         assert path == "/odom.pose.position.x"
 
     def test_named_path(self):
-        label, path = _parse_path_arg("Vel X=/odom.twist.linear.x")
+        label, path = parse_path_arg("Vel X=/odom.twist.linear.x")
         assert label == "Vel X"
         assert path == "/odom.twist.linear.x"
 
     def test_named_path_with_equals_in_path(self):
         """The first = is the separator, rest belongs to path."""
-        label, path = _parse_path_arg("Name=/topic.field{x==5}")
+        label, path = parse_path_arg("Name=/topic.field{x==5}")
         assert label == "Name"
         assert path == "/topic.field{x==5}"
 
     def test_path_starting_with_slash_no_name(self):
         """Paths starting with / are never treated as named."""
-        label, path = _parse_path_arg("/a=b")
+        label, path = parse_path_arg("/a=b")
         assert label == "/a=b"
         assert path == "/a=b"
 
@@ -44,14 +39,14 @@ class TestDownsample:
     def test_no_downsample_when_below_threshold(self):
         times = [0.0, 1.0, 2.0]
         values: list[float | bool | str] = [1.0, 2.0, 3.0]
-        out_t, out_v = _downsample(times, values, 10)
+        out_t, out_v = downsample_lttb(times, values, 10)
         assert out_t == times
         assert out_v == values
 
     def test_exact_threshold(self):
         times = [0.0, 1.0, 2.0, 3.0, 4.0]
         values: list[float | bool | str] = [1.0, 2.0, 3.0, 4.0, 5.0]
-        out_t, out_v = _downsample(times, values, 5)
+        out_t, out_v = downsample_lttb(times, values, 5)
         assert out_t == times
         assert out_v == values
 
@@ -59,7 +54,7 @@ class TestDownsample:
         n = 100
         times = [float(i) for i in range(n)]
         values: list[float | bool | str] = [float(i * i) for i in range(n)]
-        out_t, out_v = _downsample(times, values, 10)
+        out_t, out_v = downsample_lttb(times, values, 10)
 
         assert len(out_t) == 10
         assert out_t[0] == times[0]
@@ -71,7 +66,7 @@ class TestDownsample:
         n = 1000
         times = [float(i) for i in range(n)]
         values: list[float | bool | str] = [float(i) for i in range(n)]
-        out_t, out_v = _downsample(times, values, 50)
+        out_t, out_v = downsample_lttb(times, values, 50)
 
         assert len(out_t) == 50
         assert len(out_v) == 50
@@ -83,7 +78,7 @@ class TestDownsample:
         values: list[float | bool | str] = [0.0] * n
         values[50] = 100.0  # spike
 
-        _, out_v = _downsample(times, values, 20)
+        _, out_v = downsample_lttb(times, values, 20)
 
         assert 100.0 in out_v
 
