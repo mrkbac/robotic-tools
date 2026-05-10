@@ -1281,11 +1281,18 @@ class McapProcessor:
         if output_opts.is_rechunking:
             return ChunkDecision.DECODE
 
+        # If any schema or channel id in this stream was reassigned, the chunk
+        # may embed stale in-chunk Schema/Channel records under the original
+        # ids (some writers eagerly replay the full schema/channel list in
+        # every chunk). Fast-copying would leak those stale records.
+        if self.remapper.stream_had_remap(stream_id):
+            return ChunkDecision.DECODE
+
         # Compression mismatch alone doesn't need a full decode — if nothing
         # else forces per-message work, RECOMPRESS (chunk-level) is enough.
         compression_mismatch = chunk.compression != output_opts.compression_type.value
 
-        # Single pass: check remapping, channel availability, and filtering
+        # Single pass: check channel availability and filtering.
         has_include = False
         has_exclude = False
 
@@ -1293,9 +1300,6 @@ class McapProcessor:
             ch_id = idx.channel_id
             # Check if channel metadata is available
             if not self.remapper.has_channel(stream_id, ch_id):
-                return ChunkDecision.DECODE
-            # If channel id was remapped, must decode
-            if self.remapper.was_channel_remapped(stream_id, ch_id):
                 return ChunkDecision.DECODE
 
             cache_key = (stream_id, ch_id)

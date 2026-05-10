@@ -33,6 +33,7 @@ class Remapper:
         "_channel_lookup_slow",
         "_schema_lookup_fast",
         "_schema_lookup_slow",
+        "_streams_with_remap",
         "_used_channel_ids",
         "_used_schema_ids",
     )
@@ -49,6 +50,10 @@ class Remapper:
         self._channel_lookup_slow: dict[
             tuple[str, str, int, tuple[tuple[str, str], ...]], Channel
         ] = {}
+        # Streams where at least one schema or channel id was changed.
+        # Chunks from such streams may embed stale in-chunk Schema/Channel
+        # records, so they must be decoded rather than fast-copied.
+        self._streams_with_remap: set[int] = set()
 
     @overload
     def remap_schema(self, stream_id: int, schema: None) -> None: ...
@@ -70,10 +75,14 @@ class Remapper:
         if mapped_schema:
             # Cache in fast lookup for future access
             self._schema_lookup_fast[fast_key] = mapped_schema
+            if mapped_schema.id != schema.id:
+                self._streams_with_remap.add(stream_id)
             return mapped_schema
 
         # Allocate ID, preserving original if possible
         new_id = _allocate_id(self._used_schema_ids, schema.id)
+        if new_id != schema.id:
+            self._streams_with_remap.add(stream_id)
         # Direct construction is faster than dataclass.replace
         mapped_schema = Schema(
             id=new_id, name=schema.name, encoding=schema.encoding, data=schema.data
@@ -107,10 +116,14 @@ class Remapper:
         if mapped_channel is not None:
             # Cache in fast lookup for future access
             self._channel_lookup_fast[fast_key] = mapped_channel
+            if mapped_channel.id != channel.id:
+                self._streams_with_remap.add(stream_id)
             return mapped_channel
 
         # Allocate ID, preserving original if possible
         new_id = _allocate_id(self._used_channel_ids, channel.id)
+        if new_id != channel.id:
+            self._streams_with_remap.add(stream_id)
 
         # Direct construction is faster than dataclass.replace
         mapped_channel = Channel(
@@ -137,6 +150,14 @@ class Remapper:
     def has_channel(self, stream_id: int, original_id: int) -> bool:
         """Check if a channel has been seen and mapped."""
         return (stream_id, original_id) in self._channel_lookup_fast
+
+    def stream_had_remap(self, stream_id: int) -> bool:
+        """Whether any schema or channel id changed during remapping for this stream.
+
+        When true, chunks from this stream may embed stale Schema/Channel
+        records referring to original ids, so they must not be fast-copied.
+        """
+        return stream_id in self._streams_with_remap
 
     def get_remapped_channel(self, stream_id: int, original_id: int) -> Channel | None:
         """Get the remapped channel for a given stream and original ID."""

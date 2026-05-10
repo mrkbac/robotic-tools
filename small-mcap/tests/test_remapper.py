@@ -141,6 +141,91 @@ def test_has_channel():
     assert remapper.has_channel(0, 1)
 
 
+def test_stream_had_remap_initially_false():
+    """A fresh remapper reports no remap for any stream."""
+    remapper = Remapper()
+    assert not remapper.stream_had_remap(0)
+    assert not remapper.stream_had_remap(7)
+
+
+def test_stream_had_remap_false_without_conflict():
+    """Streams whose ids are preserved never flip the flag."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    channel = Channel(id=1, schema_id=1, topic="/test", message_encoding="proto", metadata={})
+
+    remapper.remap_schema(0, schema)
+    remapper.remap_channel(0, channel)
+
+    assert not remapper.stream_had_remap(0)
+
+
+def test_stream_had_remap_true_on_schema_id_collision():
+    """Stream is flagged when a schema id has to be reassigned."""
+    remapper = Remapper()
+    schema1 = Schema(id=1, name="first", encoding="proto", data=b"data1")
+    schema2 = Schema(id=1, name="second", encoding="proto", data=b"data2")
+
+    remapper.remap_schema(0, schema1)
+    remapper.remap_schema(1, schema2)
+
+    assert not remapper.stream_had_remap(0)
+    assert remapper.stream_had_remap(1)
+
+
+def test_stream_had_remap_true_on_channel_id_collision():
+    """Stream is flagged when a channel id has to be reassigned."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)
+
+    channel1 = Channel(id=1, schema_id=1, topic="/a", message_encoding="proto", metadata={})
+    channel2 = Channel(id=1, schema_id=1, topic="/b", message_encoding="proto", metadata={})
+
+    remapper.remap_channel(0, channel1)
+    remapper.remap_channel(1, channel2)
+
+    assert not remapper.stream_had_remap(0)
+    assert remapper.stream_had_remap(1)
+
+
+def test_stream_had_remap_true_on_dedup_id_change():
+    """Content-dedup that changes the id also flips the flag."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)  # dedup, id stays 1 → no flag
+
+    channel_a = Channel(id=1, schema_id=1, topic="/t", message_encoding="proto", metadata={})
+    channel_b = Channel(id=9, schema_id=1, topic="/t", message_encoding="proto", metadata={})
+
+    remapper.remap_channel(0, channel_a)
+    mapped_b = remapper.remap_channel(1, channel_b)
+
+    # Stream 1's id=9 was deduped onto stream 0's id=1 → that's a change
+    assert mapped_b.id == 1
+    assert remapper.stream_had_remap(1)
+    assert not remapper.stream_had_remap(0)
+
+
+def test_stream_had_remap_false_on_clean_dedup():
+    """Dedup that returns the original id does not flip the flag."""
+    remapper = Remapper()
+    schema = Schema(id=1, name="test", encoding="proto", data=b"data")
+    remapper.remap_schema(0, schema)
+    remapper.remap_schema(1, schema)
+
+    channel = Channel(id=5, schema_id=1, topic="/t", message_encoding="proto", metadata={})
+
+    remapper.remap_channel(0, channel)
+    mapped_b = remapper.remap_channel(1, channel)  # dedup → same id 5
+
+    assert mapped_b.id == 5
+    assert not remapper.stream_had_remap(0)
+    assert not remapper.stream_had_remap(1)
+
+
 def test_schema_fast_path_same_stream():
     """Calling remap_schema twice with same schema returns cached result."""
     remapper = Remapper()
