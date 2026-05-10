@@ -120,7 +120,7 @@ def _load_optional_app(
 
 
 bridge_app = _load_optional_app(
-    "pymcap_cli.cmd.bridge_cmd",
+    "pymcap_cli.cmd.bridge",
     "bridge_app",
     expected_missing_modules=("robo_ws_bridge",),
     message="Bridge command requires the 'bridge' extra.",

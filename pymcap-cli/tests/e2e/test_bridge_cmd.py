@@ -9,7 +9,8 @@ import threading
 from typing import TYPE_CHECKING
 
 import pytest
-from pymcap_cli.cmd.bridge_cmd import fetch_bridge_info, inspect
+from pymcap_cli.cmd.bridge._shared import fetch_bridge_info
+from pymcap_cli.cmd.bridge.inspect import inspect
 from robo_ws_bridge import WebSocketBridgeServer
 from robo_ws_bridge.server import Channel
 

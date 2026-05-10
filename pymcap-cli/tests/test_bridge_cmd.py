@@ -9,23 +9,24 @@ import socket
 from typing import TYPE_CHECKING
 
 import pytest
-from pymcap_cli.cmd import bridge_cmd
-from pymcap_cli.cmd.bridge_cmd import (
+from pymcap_cli.cmd.bridge import record as record_module
+from pymcap_cli.cmd.bridge._shared import (
     BridgeInfo,
-    BridgeRecorder,
     BridgeStatus,
     SortChoice,
-    TopicSelector,
     _append_status,
-    _build_connection_graph_tree,
-    _build_record_status,
-    _cat_async,
-    _record_async,
     _remove_statuses,
     _sort_channels,
     bridge_to_dict,
-    cat,
     to_ws_url,
+)
+from pymcap_cli.cmd.bridge.cat import _cat_async, cat
+from pymcap_cli.cmd.bridge.inspect import _build_connection_graph_tree
+from pymcap_cli.cmd.bridge.record import (
+    BridgeRecorder,
+    TopicSelector,
+    _build_record_status,
+    _record_async,
 )
 from pymcap_cli.display.message_render import BytesMode
 from pymcap_cli.utils import compile_topic_patterns
@@ -348,9 +349,9 @@ def test_record_all_topics_skips_invalid_include_regex(
         seen_selectors.append(selector)
         return 0
 
-    monkeypatch.setattr(bridge_cmd, "_record_async", fake_record_async)
+    monkeypatch.setattr(record_module, "_record_async", fake_record_async)
 
-    rc = bridge_cmd.record(
+    rc = record_module.record(
         target="localhost",
         output=tmp_path / "capture.mcap",
         all_topics=True,
@@ -375,9 +376,9 @@ def test_record_all_topics_still_validates_exclude_regex(
     async def fake_record_async(**_kwargs) -> int:
         raise AssertionError("recording should not start with an invalid exclude regex")
 
-    monkeypatch.setattr(bridge_cmd, "_record_async", fake_record_async)
+    monkeypatch.setattr(record_module, "_record_async", fake_record_async)
 
-    rc = bridge_cmd.record(
+    rc = record_module.record(
         target="localhost",
         output=tmp_path / "capture.mcap",
         all_topics=True,
