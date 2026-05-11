@@ -29,6 +29,11 @@ User-facing notes for releases.
   summary-indexed attachment bytes and metadata JSON by name. Attachments
   can be disambiguated with `--offset`; metadata records with the same
   name are merged with later values winning.
+- New `tf-export` command reconstructs `urdf`, `sdf`, or `json` robot
+  descriptions from `/tf_static` (and optionally `/tf` at a snapshot
+  timestamp). Validates tree shape (rejects cycles, multi-parent frames
+  without `--allow-multi-parent`, and multi-root trees without
+  `--root`).
 - `cat` adds `--grep` / `--grep-ignore-case` for decoded scalar-value
   searches. Byte arrays are skipped during grep so image and point-cloud
   payloads do not dominate the search cost.

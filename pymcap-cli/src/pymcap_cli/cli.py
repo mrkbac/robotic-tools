@@ -32,6 +32,7 @@ from pymcap_cli.cmd import (
     recover_cmd,
     recover_inplace_cmd,
     split_cmd,
+    tf_export_cmd,
     tftree_cmd,
     topic_chunks_cmd,
 )
@@ -226,6 +227,7 @@ app.command(name="export-images", group=transform_group)(export_images)
 app.command(name="export-parquet", group=transform_group)(export_parquet)
 app.command(name="roscompress", group=transform_group)(roscompress)
 app.command(name="rosdecompress", group=transform_group)(rosdecompress)
+app.command(name="tf-export", group=transform_group)(tf_export_cmd.tf_export)
 app.command(name="video", group=transform_group)(video)
 
 

@@ -117,6 +117,27 @@ pymcap-cli tftree data.mcap
 pymcap-cli tftree data.mcap --static-only
 ```
 
+### `tf-export` — TF Tree to URDF / SDF / JSON
+
+Reconstruct robot description files from `/tf_static` (and optionally `/tf` at a
+snapshot timestamp). Useful when the original `.urdf` is missing — Foxglove
+Studio and rviz can render the static skeleton from the exported file.
+
+```bash
+# Write a URDF for the static tree
+pymcap-cli tf-export data.mcap -o robot.urdf
+
+# SDF or JSON instead
+pymcap-cli tf-export data.mcap --format sdf -o robot.sdf
+pymcap-cli tf-export data.mcap --format json
+
+# Capture a dynamic snapshot from /tf at a given time
+pymcap-cli tf-export data.mcap --include-dynamic-at 2024-01-01T10:00:00Z -o snapshot.urdf
+
+# Pick a subtree when the recording has multiple disconnected roots
+pymcap-cli tf-export data.mcap --root base_link -o robot.urdf
+```
+
 ### `diag` — ROS2 Diagnostics
 
 Inspect ROS2 diagnostics with per-component health overview, sparkline timelines, frequency stats, and time-in-state tracking.

@@ -3,7 +3,6 @@
 import logging
 import math
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
@@ -16,91 +15,21 @@ from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.tf_tree import (
+    TransformData,
+    build_tree_and_find_roots,
+    detect_multiple_parents,
+    quaternion_to_euler_rad,
+)
 
 logger = logging.getLogger(__name__)
 console = Console()
 
-# Parameter groups
 DISPLAY_GROUP = Group("Display")
 
 
-@dataclass
-class TransformData:
-    """Data for a single transform between two frames."""
-
-    frame_id: str
-    child_frame_id: str
-    translation: tuple[float, float, float]
-    rotation: tuple[float, float, float, float]
-    is_static: bool
-    timestamp_ns: int
-
-
-def _detect_multiple_parents(
-    transforms: dict[tuple[str, str], TransformData],
-) -> dict[str, set[str]]:
-    """Detect frames that have multiple parent frames (violates tree structure).
-
-    Args:
-        transforms: Dictionary of all transforms keyed by (parent, child)
-
-    Returns:
-        Dictionary mapping child frame names to their set of parent frames,
-        only including children with multiple parents
-    """
-    child_to_parents: dict[str, set[str]] = defaultdict(set)
-
-    for parent, child in transforms:
-        child_to_parents[child].add(parent)
-
-    # Return only frames with multiple parents
-    return {child: parents for child, parents in child_to_parents.items() if len(parents) > 1}
-
-
-def _build_tree_and_find_roots(
-    transforms: dict[tuple[str, str], TransformData],
-) -> tuple[dict[str, list[str]], list[str]]:
-    tree_dict: dict[str, list[str]] = defaultdict(list)
-    parents = set()
-    children = set()
-
-    for transform in transforms.values():
-        parent = transform.frame_id
-        child = transform.child_frame_id
-
-        tree_dict[parent].append(child)
-        parents.add(parent)
-        children.add(child)
-
-    # Root frames are parents that are not children
-    root_frames = sorted(parents - children) or sorted(parents)
-
-    return dict(tree_dict), root_frames
-
-
 def _format_timestamp(timestamp_ns: int) -> str:
-    """Format timestamp in nanoseconds to a readable string."""
     return datetime.fromtimestamp(timestamp_ns / NS_TO_SEC).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _quaternion_to_euler(x: float, y: float, z: float, w: float) -> tuple[float, float, float]:
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    # Pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    # Use 90 degrees if out of range
-    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
-
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    # Convert to degrees
-    return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
 
 
 def _build_table_rows(
@@ -111,19 +40,6 @@ def _build_table_rows(
     visited: set[str],
     prefix: str = "",
 ) -> list[tuple[str, int, str, float, float, float, float, float, float]]:
-    """Recursively build table rows with tree structure prefixes.
-
-    Args:
-        frame_id: Current frame to process
-        transforms: Dictionary of all transforms
-        transform_counts: Dictionary of update counts per transform
-        tree_dict: Dictionary mapping parents to children
-        visited: Set of already visited frames (to prevent cycles)
-        prefix: Current line prefix for tree structure
-
-    Returns:
-        List of tuples: (frame_with_prefix, count, timestamp, tx, ty, tz, roll, pitch, yaw)
-    """
     rows: list[tuple[str, int, str, float, float, float, float, float, float]] = []
 
     if frame_id in visited:
@@ -141,21 +57,20 @@ def _build_table_rows(
         is_last_child = i == len(children) - 1
         connector = "└── " if is_last_child else "├── "
 
-        # Format row data
         color = "green" if transform.is_static else "red"
         frame_with_prefix = f"{prefix}{connector}[{color}]{child_frame_id}[/]"
         count = transform_counts[key]
         timestamp = _format_timestamp(transform.timestamp_ns)
         tx, ty, tz = transform.translation
         qx, qy, qz, qw = transform.rotation
-        roll, pitch, yaw = _quaternion_to_euler(qx, qy, qz, qw)
+        roll_rad, pitch_rad, yaw_rad = quaternion_to_euler_rad(qx, qy, qz, qw)
+        roll = math.degrees(roll_rad)
+        pitch = math.degrees(pitch_rad)
+        yaw = math.degrees(yaw_rad)
 
         rows.append((frame_with_prefix, count, timestamp, tx, ty, tz, roll, pitch, yaw))
 
-        # Build prefix for children
         child_prefix = prefix + ("    " if is_last_child else "│   ")
-
-        # Recursively add children
         rows.extend(
             _build_table_rows(
                 child_frame_id, transforms, transform_counts, tree_dict, visited, child_prefix
@@ -172,13 +87,11 @@ def _build_tf_table(
     if not transforms:
         return None
 
-    # Build tree structure and find roots in one pass
-    tree_dict, root_frames = _build_tree_and_find_roots(transforms)
+    tree_dict, root_frames = build_tree_and_find_roots(transforms)
 
     if not root_frames:
         return None
 
-    # Create Rich table
     total = len(transforms)
     static = sum(1 for t in transforms.values() if t.is_static)
     title = f"TF Tree Total: {total} | Static: {static} | Dynamic: {total - static}"
@@ -195,13 +108,10 @@ def _build_tf_table(
     table.add_column("pitch", style="magenta", justify="right")
     table.add_column("yaw", style="magenta", justify="right")
 
-    # Build all rows
     visited: set[str] = set()
     for root_frame in root_frames:
-        # Add root frame row
         table.add_row(f"[bold]{root_frame}[/]", "", "", "", "", "", "", "", "", "")
 
-        # Add child rows
         rows = _build_table_rows(root_frame, transforms, transform_counts, tree_dict, visited, "")
         for (
             frame_with_prefix,
@@ -280,12 +190,10 @@ def tftree(
 
                     key = (transform_stamped.header.frame_id, transform_stamped.child_frame_id)
 
-                    # Check if this is a new frame pair
                     if key not in seen_frame_pairs:
                         seen_frame_pairs.add(key)
                         tree_changed = True
 
-                    # Track update count
                     transform_counts[key] += 1
 
                     transforms[key] = TransformData(
@@ -297,22 +205,18 @@ def tftree(
                         timestamp_ns=msg.message.log_time,
                     )
 
-                # Update display: always update if change_only is disabled,
-                # or only when tree structure changes if change_only is enabled
                 if not change_only or tree_changed:
                     table = _build_tf_table(transforms, transform_counts)
                     if table:
                         live.update(table)
 
-            # Final update
             table = _build_tf_table(transforms, transform_counts)
             if table:
                 live.update(table)
 
-        # Post-processing validation: check for multiple parents
-        multiple_parents = _detect_multiple_parents(transforms)
+        multiple_parents = detect_multiple_parents(transforms)
         if multiple_parents:
-            console.print()  # Add spacing
+            console.print()
             console.print("[yellow]⚠ Tree Structure Violations Detected:[/yellow]")
             description = "[dim]The following frames have multiple parents, "
             console.print(description)

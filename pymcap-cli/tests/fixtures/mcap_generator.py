@@ -3,6 +3,7 @@
 import io
 from pathlib import Path
 
+from mcap_ros2_support_fast import ROS2EncoderFactory
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, NS_TO_MS, NS_TO_SEC
 from small_mcap import CompressionType, McapWriter
 
@@ -125,6 +126,127 @@ def create_latched_topic_mcap(
             publish_time=ts,
             data=data,
         )
+
+    writer.finish()
+    return output.getvalue()
+
+
+_TF_MESSAGE_SCHEMA = """\
+geometry_msgs/TransformStamped[] transforms
+
+================================================================================
+MSG: geometry_msgs/TransformStamped
+std_msgs/Header header
+string child_frame_id
+geometry_msgs/Transform transform
+
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+
+================================================================================
+MSG: geometry_msgs/Transform
+geometry_msgs/Vector3 translation
+geometry_msgs/Quaternion rotation
+
+================================================================================
+MSG: geometry_msgs/Vector3
+float64 x
+float64 y
+float64 z
+
+================================================================================
+MSG: geometry_msgs/Quaternion
+float64 x
+float64 y
+float64 z
+float64 w"""
+
+
+def _tf_message(transforms: list[tuple[str, str, tuple[float, float, float]]]) -> dict:
+    return {
+        "transforms": [
+            {
+                "header": {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": parent},
+                "child_frame_id": child,
+                "transform": {
+                    "translation": {"x": tx, "y": ty, "z": tz},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                },
+            }
+            for parent, child, (tx, ty, tz) in transforms
+        ]
+    }
+
+
+def create_tf_mcap(
+    *,
+    static_edges: list[tuple[str, str, tuple[float, float, float]]] | None = None,
+    dynamic_edges: list[tuple[str, str, tuple[float, float, float]]] | None = None,
+    dynamic_samples: int = 0,
+    compression: CompressionType = CompressionType.NONE,
+) -> bytes:
+    """Write a small MCAP with /tf_static (and optionally /tf) ROS 2 messages.
+
+    `static_edges` and `dynamic_edges` each list `(parent, child, (tx, ty, tz))`
+    tuples; rotation is identity. Dynamic edges are repeated `dynamic_samples`
+    times at successive 100 ms steps.
+    """
+    static_edges = static_edges or []
+    dynamic_edges = dynamic_edges or []
+
+    output = io.BytesIO()
+    writer = McapWriter(
+        output,
+        chunk_size=1024,
+        compression=compression,
+        encoder_factory=ROS2EncoderFactory(),
+    )
+    writer.start()
+
+    writer.add_schema(
+        schema_id=1,
+        name="tf2_msgs/msg/TFMessage",
+        encoding="ros2msg",
+        data=_TF_MESSAGE_SCHEMA.encode(),
+    )
+
+    if static_edges:
+        writer.add_channel(
+            channel_id=1,
+            topic="/tf_static",
+            message_encoding="cdr",
+            schema_id=1,
+        )
+        writer.add_message_encode(
+            channel_id=1,
+            log_time=0,
+            publish_time=0,
+            data=_tf_message(static_edges),
+        )
+
+    if dynamic_edges and dynamic_samples > 0:
+        writer.add_channel(
+            channel_id=2,
+            topic="/tf",
+            message_encoding="cdr",
+            schema_id=1,
+        )
+        step_ns = 100 * NS_TO_MS
+        for i in range(dynamic_samples):
+            log_time = (i + 1) * step_ns
+            writer.add_message_encode(
+                channel_id=2,
+                log_time=log_time,
+                publish_time=log_time,
+                data=_tf_message(dynamic_edges),
+            )
 
     writer.finish()
     return output.getvalue()
