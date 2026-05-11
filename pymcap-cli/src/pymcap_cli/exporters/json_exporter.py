@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from pymcap_cli.display.message_render import format_bytes_skip
 from pymcap_cli.exporters._common import (
     SkipSchemaMixin,
     message_timestamps_ns,
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
 def _bytes_default(obj: Any) -> Any:
     if isinstance(obj, (bytes, bytearray)):
-        return f"<{len(obj)} bytes>"
+        return format_bytes_skip(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 

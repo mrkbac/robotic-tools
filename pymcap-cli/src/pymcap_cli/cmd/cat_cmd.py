@@ -17,27 +17,21 @@ from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
-    MessagePath,
     MessagePathError,
-    ValidationError,
     parse_message_path,
 )
-from ros_parser.models import MessageDefinition
 from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.display.cat_helpers import SchemaCache
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
     TTY_BYTES_TRUNCATE,
     BytesMode,
-    EnumPlan,
-    build_enum_plan,
     message_matches_grep,
     message_to_dict,
     render_message_tree,
-    resolve_msgdef_by_name,
 )
 from pymcap_cli.utils import ProgressTrackingIO, file_progress, parse_timestamp_bounds_absolute
 
@@ -228,8 +222,7 @@ def cat(
 
     message_count = 0
     validated_topics: set[str] = set()
-    parsed_schemas: dict[int, dict[str, MessageDefinition] | None] = {}
-    enum_plans: dict[int, EnumPlan | None] = {}
+    schema_cache = SchemaCache()
 
     def should_include_message(
         channel: Channel,
@@ -245,41 +238,6 @@ def cat(
             return False
 
         return not any(p.search(topic) for p in exclude_topic_patterns)
-
-    def _get_parsed_schema(schema: Schema) -> dict[str, MessageDefinition] | None:
-        if schema.id in parsed_schemas:
-            return parsed_schemas[schema.id]
-        try:
-            parsed = parse_schema_to_definitions(schema.name, schema.data)
-        except Exception:
-            logger.exception(f"Failed to parse schema '{schema.name}'")
-            parsed = None
-        parsed_schemas[schema.id] = parsed
-        return parsed
-
-    def _get_enum_plan(schema: Schema) -> EnumPlan | None:
-        if schema.id in enum_plans:
-            return enum_plans[schema.id]
-        parsed = _get_parsed_schema(schema)
-        plan = build_enum_plan(schema.name, parsed) if parsed else None
-        enum_plans[schema.id] = plan
-        return plan
-
-    def _validate_query(query_path: MessagePath, schema: Schema, topic: str) -> bool:
-        all_definitions = _get_parsed_schema(schema)
-        if all_definitions is None:
-            return True
-        try:
-            root_msgdef = resolve_msgdef_by_name(schema.name, all_definitions)
-            if root_msgdef is None:
-                logger.warning(f"Could not find message definition for schema '{schema.name}'")
-            else:
-                query_path.validate(root_msgdef, all_definitions)
-        except ValidationError:
-            logger.exception(f"Query validation error for topic '{topic}'")
-            logger.exception(f"Query: {query}  Schema: {schema.name}")
-            return False
-        return True
 
     def _to_jsonl(msg: "DecodedMessage", data: Any) -> str:
         entry: dict[str, Any] = {
@@ -324,7 +282,9 @@ def cat(
                             f"Cannot validate query for topic '{msg.channel.topic}' "
                             "(no schema available)"
                         )
-                    elif not _validate_query(parsed_query, msg.schema, msg.channel.topic):
+                    elif not schema_cache.validate_query(
+                        parsed_query, msg.schema, msg.channel.topic, query_repr=query or ""
+                    ):
                         return 1
 
                 # Apply query filter
@@ -354,7 +314,9 @@ def cat(
                     header.append(schema.name if schema else "unknown", style="yellow")
                     header.append("]", style="dim")
 
-                    plan = None if parsed_query or schema is None else _get_enum_plan(schema)
+                    plan = (
+                        None if parsed_query or schema is None else schema_cache.enum_plan(schema)
+                    )
 
                     tree = render_message_tree(
                         data,

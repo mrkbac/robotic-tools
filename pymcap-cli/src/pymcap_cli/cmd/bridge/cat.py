@@ -16,27 +16,22 @@ from rich.panel import Panel
 from rich.text import Text
 from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
-from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
     MessagePath,
     MessagePathError,
-    ValidationError,
     parse_message_path,
 )
-from ros_parser.models import MessageDefinition
 from small_mcap import JSONDecoderFactory
 
 from pymcap_cli.cmd.bridge._shared import CONNECTION_GROUP, console, to_ws_url
+from pymcap_cli.display.cat_helpers import SchemaCache
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
     TTY_BYTES_TRUNCATE,
     BytesMode,
-    EnumPlan,
-    build_enum_plan,
     message_matches_grep,
     message_to_dict,
     render_message_tree,
-    resolve_msgdef_by_name,
 )
 from pymcap_cli.log_setup import ERR
 
@@ -106,8 +101,7 @@ async def _cat_async(
 
     decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
     schemas_by_channel: dict[int, _BridgeSchema] = {}
-    parsed_schemas: dict[int, dict[str, MessageDefinition] | None] = {}
-    enum_plans: dict[int, EnumPlan | None] = {}
+    schema_cache = SchemaCache()
     validated_topics: set[str] = set()
     warned_channels: set[int] = set()
     subscribed: set[int] = set()
@@ -150,41 +144,6 @@ async def _cat_async(
             schemas_by_channel[cid] = schema
         return decoder
 
-    def _get_parsed_schema(schema: _BridgeSchema) -> dict[str, MessageDefinition] | None:
-        if schema.id in parsed_schemas:
-            return parsed_schemas[schema.id]
-        try:
-            parsed = parse_schema_to_definitions(schema.name, schema.data)
-        except Exception:
-            logger.exception(f"Failed to parse schema '{schema.name}'")
-            parsed = None
-        parsed_schemas[schema.id] = parsed
-        return parsed
-
-    def _get_enum_plan(schema: _BridgeSchema) -> EnumPlan | None:
-        if schema.id in enum_plans:
-            return enum_plans[schema.id]
-        parsed = _get_parsed_schema(schema)
-        plan = build_enum_plan(schema.name, parsed) if parsed else None
-        enum_plans[schema.id] = plan
-        return plan
-
-    def _validate_query(query_path: MessagePath, schema: _BridgeSchema, topic: str) -> bool:
-        all_definitions = _get_parsed_schema(schema)
-        if all_definitions is None:
-            return True
-        try:
-            root_msgdef = resolve_msgdef_by_name(schema.name, all_definitions)
-            if root_msgdef is None:
-                logger.warning(f"Could not find message definition for schema '{schema.name}'")
-            else:
-                query_path.validate(root_msgdef, all_definitions)
-        except ValidationError:
-            logger.exception(f"Query validation error for topic '{topic}'")
-            logger.exception(f"Query: {query}  Schema: {schema.name}")
-            return False
-        return True
-
     def _emit_jsonl(channel: ChannelInfo, log_time_ns: int, data: Any) -> None:
         entry: dict[str, Any] = {
             "topic": channel["topic"],
@@ -207,7 +166,9 @@ async def _cat_async(
         header.append(schema_name, style="yellow")
         header.append("]", style="dim")
         schema = schemas_by_channel.get(channel["id"])
-        plan = None if parsed_query is not None or schema is None else _get_enum_plan(schema)
+        plan = (
+            None if parsed_query is not None or schema is None else schema_cache.enum_plan(schema)
+        )
         tree = render_message_tree(
             data,
             plan,
@@ -242,7 +203,9 @@ async def _cat_async(
         if parsed_query is not None and topic not in validated_topics:
             validated_topics.add(topic)
             schema = schemas_by_channel.get(channel["id"])
-            if schema is not None and not _validate_query(parsed_query, schema, topic):
+            if schema is not None and not schema_cache.validate_query(
+                parsed_query, schema, topic, query_repr=query or ""
+            ):
                 return_code = 1
                 done.set()
                 return

@@ -12,6 +12,7 @@ import csv
 import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from pymcap_cli.display.message_render import format_bytes_skip
 from pymcap_cli.exporters._common import (
     SkipSchemaMixin,
     message_timestamps_ns,
@@ -39,8 +40,7 @@ def _flatten(value: Any, prefix: str = "", out: dict[str, Any] | None = None) ->
     elif isinstance(value, (list, tuple)):
         out[prefix] = json.dumps(value, default=str)
     elif isinstance(value, (bytes, bytearray)):
-        # Bytes payloads in CSV are useless — record length only.
-        out[prefix] = f"<{len(value)} bytes>"
+        out[prefix] = format_bytes_skip(value)
     else:
         out[prefix] = value
     return out

@@ -38,6 +38,10 @@ class BytesMode(str, Enum):
     SKIP = "skip"
 
 
+def format_bytes_skip(value: bytes | bytearray | memoryview) -> str:
+    return f"<{len(value)} bytes>"
+
+
 def message_matches_grep(obj: Any, pattern: re.Pattern[str]) -> bool:
     """Return True if ``pattern`` matches any scalar value reachable from ``obj``.
 
@@ -85,7 +89,7 @@ def message_to_dict(
     if isinstance(obj, (bytes, bytearray, memoryview)):
         total = len(obj)
         if bytes_mode == BytesMode.SKIP:
-            return f"<{total} bytes>"
+            return format_bytes_skip(obj)
         if bytes_mode == BytesMode.BASE64:
             return base64.b64encode(bytes(obj)).decode("ascii")
         if bytes_mode == BytesMode.SMART:
@@ -93,7 +97,7 @@ def message_to_dict(
             # collapse to a placeholder so output stays grep/jq-friendly.
             if total <= SMART_BYTES_INLINE_LIMIT:
                 return list(obj)
-            return f"<{total} bytes>"
+            return format_bytes_skip(obj)
         if truncate_bytes and total > truncate_bytes:
             return [*list(obj[:truncate_bytes]), f"... ({total} bytes total)"]
         return list(obj)
@@ -347,13 +351,13 @@ def _format_bytes_for_tree(
 ) -> str:
     total = len(value)
     if bytes_mode == BytesMode.SKIP:
-        return f"<{total} bytes>"
+        return format_bytes_skip(value)
     if bytes_mode == BytesMode.BASE64:
         return json.dumps(base64.b64encode(bytes(value)).decode("ascii"))
     if bytes_mode == BytesMode.SMART:
         if total <= SMART_BYTES_INLINE_LIMIT:
             return repr(list(value))
-        return f"<{total} bytes>"
+        return format_bytes_skip(value)
     if truncate_bytes and total > truncate_bytes:
         return f"{list(value[:truncate_bytes])} ... ({total} bytes total)"
     return repr(list(value))
