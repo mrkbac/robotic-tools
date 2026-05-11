@@ -89,6 +89,39 @@ def _decode_chunk_records(chunk: Chunk) -> list[McapRecord]:
     return list(breakup_chunk(chunk, validate_crc=True))
 
 
+def _chunk_records_match_writer_view(
+    records: list[McapRecord],
+    schemas: dict[int, Schema],
+    channels: dict[int, Channel],
+) -> bool:
+    """Check whether a chunk's in-chunk Schema/Channel records are still valid.
+
+    Returns True when every embedded Schema/Channel record in the chunk
+    matches the writer's current view — i.e. the chunk's compressed bytes
+    can be fast-copied without leaking stale records into the output.
+
+    Uses ``type(record) is X`` dispatch (faster than isinstance) and exits
+    on the first non-metadata record. MCAP writers in practice place
+    Schema and Channel records as a small prefix before any Message that
+    references them, so the first Message marks the end of metadata.
+    """
+    for record in records:
+        rtype = type(record)
+        if rtype is Schema:
+            schema = cast("Schema", record)
+            existing_schema = schemas.get(schema.id)
+            if existing_schema is None or existing_schema != schema:
+                return False
+        elif rtype is Channel:
+            channel = cast("Channel", record)
+            existing_channel = channels.get(channel.id)
+            if existing_channel is None or existing_channel != channel:
+                return False
+        else:
+            return True
+    return True
+
+
 def _recompress_chunk(chunk: Chunk, target: CompressionType) -> Chunk:
     """Worker-side: decompress + re-compress a chunk's data with a new codec.
 
@@ -354,8 +387,9 @@ class ProcessingStats:
 
     # Chunk processing strategy tracking
     chunks_processed: int = 0
-    chunks_copied: int = 0  # Fast copied chunks
+    chunks_copied: int = 0  # Fast copied chunks (includes verified chunks)
     chunks_decoded: int = 0  # Decoded chunks
+    chunks_verified: int = 0  # Decoded for verification, then fast-copied
 
     # Error and filtering tracking
     errors_encountered: int = 0
@@ -403,9 +437,13 @@ class ProcessingStats:
         lines.append(f"Channels:     {ws.channel_count} written\n")
 
         if self.chunks_processed > 0:
+            verified_note = (
+                f", {self.chunks_verified} verified" if self.chunks_verified else ""
+            )
             lines.append(
                 f"Chunks:       {self.chunks_processed} "
-                f"({self.chunks_copied} fast copied, {self.chunks_decoded} decoded)\n"
+                f"({self.chunks_copied} fast copied{verified_note}, "
+                f"{self.chunks_decoded} decoded)\n"
             )
         if self.errors_encountered > 0:
             lines.append(f"Errors:       {self.errors_encountered}\n", style="yellow")
@@ -1253,7 +1291,10 @@ class McapProcessor:
             ChunkDecision:
             - SKIP: Chunk should be skipped entirely (filtered out)
             - CONTINUE: Chunk can be fast-copied without decoding
-            - DECODE: Chunk must be decoded to change channels or filter messages
+            - RECOMPRESS: Chunk needs new compression but no per-message work
+            - DECODE_VERIFY: Stream had a remap; decode and verify in-chunk
+              records, then fast-copy if clean else fall through to DECODE
+            - DECODE: Chunk must be re-emitted (filter, rechunk, channel remap)
         """
         input_opts = self._get_input(stream_id)
         output_opts = self.options.output_options
@@ -1277,27 +1318,19 @@ class McapProcessor:
         if output_opts.is_rechunking:
             return ChunkDecision.DECODE
 
-        # If any schema or channel id in this stream was reassigned, the chunk
-        # may embed stale in-chunk Schema/Channel records under the original
-        # ids (some writers eagerly replay the full schema/channel list in
-        # every chunk). Fast-copying would leak those stale records.
-        if self.remapper.stream_had_remap(stream_id):
-            return ChunkDecision.DECODE
-
-        # Compression mismatch alone doesn't need a full decode — if nothing
-        # else forces per-message work, RECOMPRESS (chunk-level) is enough.
         compression_mismatch = chunk.compression != output_opts.compression_type.value
 
-        # Single pass: check channel availability and filtering.
+        # Single pass: check channel availability, per-channel remap, and filtering.
         has_include = False
         has_exclude = False
-
         for idx in indexes:
             ch_id = idx.channel_id
-            # Check if channel metadata is available
             if not self.remapper.has_channel(stream_id, ch_id):
                 return ChunkDecision.DECODE
-
+            # Messages reference the original channel_id; if it was reassigned
+            # the chunk's message bytes are wrong without record-level rewrite.
+            if self.remapper.was_channel_remapped(stream_id, ch_id):
+                return ChunkDecision.DECODE
             cache_key = (stream_id, ch_id)
             if cache_key not in self.channel_filter_cache:
                 return ChunkDecision.DECODE
@@ -1308,14 +1341,23 @@ class McapProcessor:
             if has_include and has_exclude:
                 return ChunkDecision.DECODE
 
-        # If chunk has ONLY excluded channels, skip it entirely
         if has_exclude and not has_include:
             return ChunkDecision.SKIP
+
+        # Stream-level remap: messages are fine (no channel was reassigned
+        # above), but in-chunk Schema/Channel records may be stale because
+        # some writers eagerly embed every channel in every chunk. Defer
+        # to a verify pass on the decoded records.
+        if self.remapper.stream_had_remap(stream_id):
+            if compression_mismatch:
+                # Verifying then fast-copying would still leave the wrong
+                # codec; fall back to full DECODE for this rare combo.
+                return ChunkDecision.DECODE
+            return ChunkDecision.DECODE_VERIFY
 
         if compression_mismatch:
             return ChunkDecision.RECOMPRESS
 
-        # No reason to decode - can fast-copy
         return ChunkDecision.CONTINUE
 
     def _get_chunk_route(self, chunk: Chunk | LazyChunk) -> OutputKey | None:
@@ -1457,7 +1499,11 @@ class McapProcessor:
                     pending.chunk, pending.indexes, pending.stream_id
                 )
                 future: Future[list[McapRecord]] | Future[Chunk] | None = None
-                if decision in (ChunkDecision.DECODE, ChunkDecision.RECOMPRESS):
+                if decision in (
+                    ChunkDecision.DECODE,
+                    ChunkDecision.DECODE_VERIFY,
+                    ChunkDecision.RECOMPRESS,
+                ):
                     try:
                         # Seek+read happens on the shared input stream (main thread).
                         # Only the CPU-bound codec work is offloaded to workers.
@@ -1469,10 +1515,10 @@ class McapProcessor:
                         )
                         self.stats.errors_encountered += 1
                         return True
-                    if decision == ChunkDecision.DECODE:
-                        future = pool.submit(_decode_chunk_records, materialized)
-                    else:
+                    if decision == ChunkDecision.RECOMPRESS:
                         future = pool.submit(_recompress_chunk, materialized, target_compression)
+                    else:
+                        future = pool.submit(_decode_chunk_records, materialized)
                 queue.append((pending, decision, future))
                 return True
 
@@ -1509,6 +1555,37 @@ class McapProcessor:
                 )
                 self.stats.errors_encountered += 1
                 return
+            self._process_decoded_records(records, pending.stream_id)
+            return
+
+        if decision == ChunkDecision.DECODE_VERIFY:
+            assert future is not None
+            try:
+                records = cast("Future[list[McapRecord]]", future).result()
+            except McapError as e:
+                console.print(
+                    f"[yellow]Warning (stream {pending.stream_id}): "
+                    f"Failed to decode chunk: {e}[/yellow]"
+                )
+                self.stats.errors_encountered += 1
+                return
+            if _chunk_records_match_writer_view(records, self.schemas, self.channels):
+                # Clean: emit the materialized chunk as-is, skipping re-emit.
+                assert isinstance(pending.chunk, Chunk)
+                route_key = self._get_chunk_route(pending.chunk)
+                if route_key is None:
+                    route_key = 0
+                self._replay_segment_open(route_key)
+                target_writer = self.output_manager.get_writer(route_key)
+                for idx in pending.indexes:
+                    if self._is_channel_included(pending.stream_id, idx.channel_id):
+                        self.output_manager.ensure_channel_written(idx.channel_id, route_key)
+                indices_by_channel = {idx.channel_id: idx for idx in pending.indexes}
+                target_writer.add_chunk(pending.chunk, indices_by_channel)
+                self.stats.chunks_copied += 1
+                self.stats.chunks_verified += 1
+                return
+            # Stale records: fall through to the existing re-emit path.
             self._process_decoded_records(records, pending.stream_id)
             return
 

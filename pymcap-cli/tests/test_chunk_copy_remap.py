@@ -20,8 +20,9 @@ from pymcap_cli.core.mcap_processor import (
     McapProcessor,
     OutputOptions,
     ProcessingOptions,
+    _chunk_records_match_writer_view,
 )
-from small_mcap import CompressionType, McapWriter, get_summary
+from small_mcap import Channel, CompressionType, McapWriter, Message, Schema, get_summary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,7 +123,8 @@ def test_single_file_passthrough_still_fast_copies(tmp_path: Path) -> None:
 def test_channel_id_collision_decodes_every_chunk_from_remapped_stream(
     tmp_path: Path,
 ) -> None:
-    """Channel-id collision must decode all chunks from the colliding stream."""
+    """Channel-id collision: every B chunk references the remapped channel,
+    so the per-channel gate forces DECODE for all of them."""
     chunk_size = 4 * 1024
     payload = b'{"x":"' + b"a" * 256 + b'"}'
 
@@ -154,15 +156,18 @@ def test_channel_id_collision_decodes_every_chunk_from_remapped_stream(
     stats = _run_merge([a, b], out)
 
     assert stats.errors_encountered == 0
-    # All B chunks were decoded; A's chunks fast-copy (no collision on A).
+    # All B chunks were decoded (per-channel was_channel_remapped on id=1).
+    # A's chunks fast-copy (no collision on A).
     assert stats.chunks_decoded >= b_chunks
     assert stats.chunks_copied >= a_chunks
 
 
-def test_schema_id_collision_decodes_every_chunk_from_remapped_stream(
+def test_schema_id_collision_verifies_then_fast_copies_remapped_stream(
     tmp_path: Path,
 ) -> None:
-    """Schema-id collision must decode all chunks from the colliding stream."""
+    """Schema-id collision without a channel-id collision routes through
+    DECODE_VERIFY: small-mcap chunks have no in-chunk metadata so verify
+    passes for every B chunk, and they fast-copy."""
     chunk_size = 4 * 1024
     payload = b'{"x":"' + b"a" * 256 + b'"}'
 
@@ -170,6 +175,8 @@ def test_schema_id_collision_decodes_every_chunk_from_remapped_stream(
     b = tmp_path / "b.mcap"
 
     # Same schema_id=1 but different content → schema gets remapped on B.
+    # Channel ids don't collide (A uses 1, B uses 2) so no per-channel
+    # remap fires for B's chunks.
     _write_mcap(
         a,
         schemas=[(1, "TypeA", b'{"k":"a"}')],
@@ -192,18 +199,22 @@ def test_schema_id_collision_decodes_every_chunk_from_remapped_stream(
     stats = _run_merge([a, b], out)
 
     assert stats.errors_encountered == 0
-    assert stats.chunks_decoded >= b_chunks
+    # Every B chunk went through verify and fast-copied (no in-chunk
+    # records to disagree with the writer's remapped view).
+    assert stats.chunks_verified >= b_chunks
+    assert stats.chunks_decoded == 0
 
 
-def test_unrelated_chunks_in_remapped_stream_are_still_decoded(tmp_path: Path) -> None:
-    """Regression: chunks whose messages don't reference the colliding channel.
+def test_unrelated_chunks_in_remapped_stream_are_verified_and_fast_copied(
+    tmp_path: Path,
+) -> None:
+    """Stream-level remap on /b doesn't propagate to chunks carrying only /c.
 
-    Before the per-stream gate, a chunk in the colliding stream that only
-    carried messages on a non-colliding channel would fast-copy. If that
-    chunk's payload embedded the colliding channel's (now stale) record,
-    it would leak into the output. The fix is to force DECODE for every
-    chunk from any stream that had any id remap, regardless of which
-    channels each chunk's messages happen to reference.
+    Before the per-stream gate, /c-only chunks fast-copied without any
+    safety check. With the gate alone they were forced through full
+    DECODE. With the verify pass they're decoded just enough to confirm
+    no in-chunk records disagree with the writer's view, then fast-copied
+    via ``add_chunk`` (no recompression).
     """
     chunk_size = 4 * 1024
     payload = b'{"x":"' + b"a" * 256 + b'"}'
@@ -221,28 +232,100 @@ def test_unrelated_chunks_in_remapped_stream_are_still_decoded(tmp_path: Path) -
     )
 
     # B has two channels:
-    #   id=1 → /b (collides with A's id=1)
-    #   id=2 → /c (no collision)
-    # We write all /c messages first (filling several chunks) and add a
-    # single /b message at the end. Most of B's chunks therefore have
-    # only /c messages — the case the old per-channel gate missed.
-    b_messages = [(2, i, payload) for i in range(100)]
+    #   id=1 → /b (collides with A's id=1; will be remapped)
+    #   id=10 → /c (no collision; preserved as 10 because 10 is unused)
+    # Most messages are on /c so most chunks contain only /c messages and
+    # avoid the per-channel remap gate — those are the ones that exercise
+    # DECODE_VERIFY.
+    b_messages = [(10, i, payload) for i in range(100)]
     b_messages.append((1, 200, payload))
     _write_mcap(
         b,
         schemas=[(1, "S", b'{"k":"v"}')],
-        channels=[(1, "/b", 1), (2, "/c", 1)],
+        channels=[(1, "/b", 1), (10, "/c", 1)],
         messages=b_messages,
         chunk_size=chunk_size,
     )
 
     b_chunks = _chunk_count(b)
-    assert b_chunks > 1  # need multiple B chunks for the regression to mean anything
+    assert b_chunks > 1
 
     out = tmp_path / "merged.mcap"
     stats = _run_merge([a, b], out)
 
     assert stats.errors_encountered == 0
-    # Per-stream gate: every B chunk must be decoded, including the many
-    # /c-only chunks that the old per-channel gate would have fast-copied.
-    assert stats.chunks_decoded >= b_chunks
+    # The /c-only chunks went through verify + fast-copy. The single chunk
+    # that contains the /b message also references the remapped channel,
+    # so it goes through full DECODE. Together they cover every B chunk.
+    assert stats.chunks_verified >= b_chunks - 1
+    assert stats.chunks_decoded >= 1
+
+
+# ---------------------------------------------------------------------------
+# Validator unit tests
+# ---------------------------------------------------------------------------
+
+
+def _msg(channel_id: int = 1) -> Message:
+    return Message(channel_id=channel_id, sequence=0, log_time=0, publish_time=0, data=b"")
+
+
+def _schema(sid: int, name: str = "S", data: bytes = b"{}") -> Schema:
+    return Schema(id=sid, name=name, encoding="json", data=data)
+
+
+def _channel(cid: int, schema_id: int = 1, topic: str = "/t") -> Channel:
+    return Channel(
+        id=cid, schema_id=schema_id, topic=topic, message_encoding="json", metadata={}
+    )
+
+
+def test_validator_empty_records_returns_true() -> None:
+    assert _chunk_records_match_writer_view([], {}, {}) is True
+
+
+def test_validator_messages_only_returns_true() -> None:
+    """Selective-replay chunks (no in-chunk metadata) early-exit on message #1."""
+    records = [_msg(), _msg(), _msg()]
+    assert _chunk_records_match_writer_view(records, {}, {}) is True
+
+
+def test_validator_matching_metadata_returns_true() -> None:
+    schema = _schema(1)
+    channel = _channel(1, 1, "/t")
+    records = [schema, channel, _msg(1)]
+    assert (
+        _chunk_records_match_writer_view(records, {1: schema}, {1: channel}) is True
+    )
+
+
+def test_validator_unknown_schema_returns_false() -> None:
+    schema = _schema(1)
+    records = [schema]
+    assert _chunk_records_match_writer_view(records, {}, {}) is False
+
+
+def test_validator_mismatched_schema_returns_false() -> None:
+    in_chunk = _schema(1, name="OldName")
+    in_writer = _schema(1, name="NewName")
+    assert (
+        _chunk_records_match_writer_view([in_chunk], {1: in_writer}, {}) is False
+    )
+
+
+def test_validator_mismatched_channel_returns_false() -> None:
+    in_chunk = _channel(1, 1, "/old")
+    in_writer = _channel(1, 1, "/new")
+    assert (
+        _chunk_records_match_writer_view([in_chunk], {}, {1: in_writer}) is False
+    )
+
+
+def test_validator_early_exits_on_first_message() -> None:
+    """A Schema record placed AFTER a Message is not inspected — by spec
+    convention metadata always appears as a small prefix. This documents
+    that assumption; if a writer ever interleaves we'd need a full scan."""
+    bad_schema = _schema(99, name="WouldNotMatch")
+    records = [_msg(), bad_schema]
+    # bad_schema is never validated because we early-exit on the first Message.
+    assert _chunk_records_match_writer_view(records, {}, {}) is True

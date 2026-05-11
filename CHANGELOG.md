@@ -49,6 +49,9 @@ User-facing notes for releases.
   transform commands before any input paths are opened.
 - Progress bars no longer overshoot when a command rereads stream data
   after scanning summaries or indexes.
+- Merging inputs that require schema or channel ID remapping now decodes
+  every chunk from the affected input stream, preventing stale in-chunk
+  Schema/Channel records from leaking into the output.
 - Optional commands now report targeted install hints for missing extras;
   `pymcap-cli[all]` includes the new `bridge` extra.
 
@@ -58,6 +61,9 @@ User-facing notes for releases.
   `compression.zstd` module, with the existing third-party `zstandard`
   backend retained for older interpreters. Missing-backend errors now
   name both accepted zstd providers.
+- `Remapper` tracks streams where schema or channel IDs were reassigned,
+  including deduplication to a different ID, so processors can avoid
+  unsafe raw chunk copies after remapping.
 
 ### robo-ws-bridge
 

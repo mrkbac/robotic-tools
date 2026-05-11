@@ -61,15 +61,29 @@ class Action(IntFlag):
 
 
 class ChunkDecision(Enum):
-    """Chunk-level processing decision."""
+    """Chunk-level processing decision.
+
+    Processors only ever return CONTINUE, SKIP, or DECODE from
+    ``on_chunk()``. The remaining variants (RECOMPRESS, DECODE_VERIFY)
+    are produced exclusively by the dispatcher in
+    ``McapProcessor._should_decode_chunk`` based on writer-side state
+    (compression target, remapper flags) that processors don't have
+    visibility into. They're kept on this enum so the whole dispatch
+    table is one type, but processors should treat them as internal.
+    """
 
     CONTINUE = auto()
     SKIP = auto()
     DECODE = auto()
     # Chunk data must be re-compressed (different target compression) but no
     # per-message work is needed — just decompress + re-compress the chunk's
-    # data bytes. Avoids parsing/re-emitting every record.
+    # data bytes. Avoids parsing/re-emitting every record. Internal only.
     RECOMPRESS = auto()
+    # Stream had an id remap, but everything else looks clean. Decode the
+    # chunk, verify its in-chunk Schema/Channel records match the writer's
+    # view, and fast-copy if so; otherwise fall through to DECODE.
+    # Internal only.
+    DECODE_VERIFY = auto()
 
 
 class Processor:
