@@ -36,7 +36,6 @@
 - Distinguish timestamps from durations. Add unit suffixes only when ambiguous.
 - Prefer `math.inf`, `pathlib.Path`, and current APIs over deprecated forms.
 - Don't silently clamp, snap, or swallow invalid values; surface them.
-- Convert numpy scalars (`np.bool_`, `np.int64`, …) to Python scalars at boundaries that promise `bool` / `int` / `float`.
 
 ## Data And Classes
 
@@ -52,6 +51,7 @@
 - `foo.py` → `test_foo.py`. Plain pytest functions, named `test_<func>_<case>` or `test_<class>_<method>_<case>`.
 - Tests must be fast and self-contained; mark slow / e2e / conformance / compat / benchmark with existing markers.
 - Add smoke tests for CLI entry points.
+- For any reported bug or issue, first write a failing test that reproduces it before changing code. The red test verifies the diagnosis and locks in regression coverage.
 - Test oracles must not come from the function under test — hand-write, take from a spec, or use a separate implementation.
 - Don't delete existing tests unless behavior is intentionally changing.
 
