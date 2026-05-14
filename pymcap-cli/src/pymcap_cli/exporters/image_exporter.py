@@ -11,9 +11,7 @@ from __future__ import annotations
 import importlib
 import io
 from functools import cache
-from typing import TYPE_CHECKING, ClassVar
-
-from mcap_codec_support.video import raw_image_to_array
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from pymcap_cli.exporters._common import (
     normalize_schema_name,
@@ -28,7 +26,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    import numpy as np
+    from PIL.Image import Image as PILImage
     from small_mcap import DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
@@ -40,6 +38,15 @@ _COMPRESSED_IMAGE_SCHEMAS: frozenset[str] = frozenset(
 )
 _RAW_IMAGE_SCHEMAS: frozenset[str] = frozenset({"sensor_msgs/Image"})
 _IMAGE_SCHEMAS: frozenset[str] = _COMPRESSED_IMAGE_SCHEMAS | _RAW_IMAGE_SCHEMAS
+
+
+class _RawImage(Protocol):
+    """Structural shape of a decoded ROS ``sensor_msgs/Image`` message."""
+
+    width: int
+    height: int
+    encoding: str
+    data: bytes
 
 _IMAGE_FORMATS: dict[str, tuple[str, str]] = {
     "jpg": ("JPEG", "jpg"),
@@ -97,7 +104,7 @@ def _supported_image_formats(pil_image: ModuleType | None = None) -> frozenset[s
 
 def _resolve_raw_encoder(
     raw_format: str, *, pil_image: ModuleType | None = None
-) -> tuple[str, Callable[[np.ndarray], bytes]]:
+) -> tuple[str, Callable[[PILImage], bytes]]:
     """Resolve the output extension and encoder callable for raw images."""
     alias = _normalize_image_format(raw_format)
     if not alias:
@@ -118,8 +125,7 @@ def _resolve_raw_encoder(
             f"Supported formats: {supported}"
         )
 
-    def encode(array: np.ndarray) -> bytes:
-        img = image.fromarray(array)
+    def encode(img: PILImage) -> bytes:
         buf = io.BytesIO()
         img.save(buf, format=pil_format)
         return buf.getvalue()
@@ -127,16 +133,28 @@ def _resolve_raw_encoder(
     return extension, encode
 
 
-def _decode_compressed_image_to_rgb(data: bytes) -> np.ndarray:
-    """Decode compressed image bytes via Pillow and return an RGB array."""
-    import numpy as np  # noqa: PLC0415
+def _decode_compressed_image(data: bytes) -> PILImage:
+    """Decode compressed image bytes via Pillow into an RGB ``PIL.Image``."""
+    return _pil_image().open(io.BytesIO(data)).convert("RGB")
 
-    image = _pil_image()
-    with image.open(io.BytesIO(data)) as img:
-        array = np.asarray(img.convert("RGB"))
-    if array.ndim == 3 and array.shape[2] >= 3:
-        return np.ascontiguousarray(array[:, :, :3])
-    raise ValueError(f"Unsupported decoded image shape: {array.shape}")
+
+def _raw_image_to_pil(message: _RawImage) -> PILImage:
+    """Build a PIL Image from a ROS ``sensor_msgs/Image`` message."""
+    width = message.width
+    height = message.height
+    encoding = str(message.encoding).lower()
+    data = bytes(message.data)
+    if not data:
+        raise ValueError("Image has no data")
+
+    pil = _pil_image()
+    if encoding in {"rgb", "rgb8"}:
+        return pil.frombytes("RGB", (width, height), data)
+    if encoding in {"bgr", "bgr8"}:
+        return pil.frombytes("RGB", (width, height), data, "raw", "BGR")
+    if encoding in {"mono", "mono8", "8uc1"}:
+        return pil.frombytes("L", (width, height), data).convert("RGB")
+    raise ValueError(f"Unsupported image encoding: {encoding}")
 
 
 def _format_to_extension(format_str: str) -> str:
@@ -154,7 +172,7 @@ class _CompressedImageWriter(TopicWriter):
     def __init__(self, dir_path: Path, *, target_format: str | None) -> None:
         self.dir_path = dir_path
         self._target_format = target_format
-        self._encode: Callable[[np.ndarray], bytes] | None = None
+        self._encode: Callable[[PILImage], bytes] | None = None
         self._extension: str | None = None
         self._used_counts: dict[int, int] = {}
 
@@ -177,7 +195,7 @@ class _CompressedImageWriter(TopicWriter):
                 with path.open("wb") as fh:
                     encode = self._encode
                     assert encode is not None
-                    fh.write(encode(_decode_compressed_image_to_rgb(data)))
+                    fh.write(encode(_decode_compressed_image(data)))
                 return
 
         path = unique_message_path(self.dir_path, int(msg.message.log_time), ext, self._used_counts)
@@ -194,7 +212,7 @@ class _RawImageWriter(TopicWriter):
     def __init__(self, dir_path: Path, *, raw_format: str) -> None:
         self.dir_path = dir_path
         self._raw_format = raw_format
-        self._encode: Callable[[np.ndarray], bytes] | None = None
+        self._encode: Callable[[PILImage], bytes] | None = None
         self._extension: str | None = None
         self._used_counts: dict[int, int] = {}
 
@@ -202,7 +220,7 @@ class _RawImageWriter(TopicWriter):
         if self._extension is None or self._encode is None:
             self._extension, self._encode = _resolve_raw_encoder(self._raw_format)
 
-        rgb = raw_image_to_array(msg.decoded_message)
+        img = _raw_image_to_pil(msg.decoded_message)
         path = unique_message_path(
             self.dir_path,
             int(msg.message.log_time),
@@ -212,7 +230,7 @@ class _RawImageWriter(TopicWriter):
         with path.open("wb") as fh:
             encode = self._encode
             assert encode is not None
-            fh.write(encode(rgb))
+            fh.write(encode(img))
 
     def close(self) -> None:
         pass

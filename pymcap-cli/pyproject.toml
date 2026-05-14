@@ -37,7 +37,6 @@ classifiers = [
 dependencies = [
     "rich>=14.1.0",
     "small-mcap[compression]",
-    "mcap-codec-support[ros2]",
     "mcap-ros2-support-fast",
     "cyclopts>=4",
     "ros-parser",
@@ -48,9 +47,10 @@ dependencies = [
 
 [project.optional-dependencies]
 all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco,bridge,xxhash]"]
+lite = ["pymcap-cli[image,draco,bridge,xxhash]"]
 bridge = ["robo-ws-bridge"]
 draco = ["mcap-codec-support[draco]"]
-image = ["mcap-codec-support[image]"]
+image = ["pillow>=10.0"]
 parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]
 plot = ["plotly>=6.0.0"]
 pointcloud = ["mcap-codec-support[pointcloud]"]

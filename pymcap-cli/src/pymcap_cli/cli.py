@@ -179,7 +179,7 @@ export_pcd = _load_optional_command(
 export_images = _load_optional_command(
     "pymcap_cli.cmd.export_images_cmd",
     "export_images",
-    expected_missing_modules=("av", "mcap_codec_support", "PIL", "numpy"),
+    expected_missing_modules=("PIL",),
     message="Image export requires the 'image' extra.",
     install_command="uv add 'pymcap-cli[image]'",
 )

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     import numpy as np
+    from PIL.Image import Image as PILImage
 
     from mcap_codec_support._protocols import RawImageMessage
 
@@ -205,6 +206,34 @@ def raw_image_to_array(message: RawImageMessage) -> np.ndarray:
     if encoding in {"mono", "mono8", "8uc1"}:
         mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
         return np.repeat(mono_array[:, :, None], 3, axis=2)
+
+    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
+
+
+def raw_image_to_pil(message: RawImageMessage) -> PILImage:
+    """Convert a ROS Image message to a PIL ``Image`` (RGB)."""
+    try:
+        from PIL import Image  # noqa: PLC0415
+    except ImportError as exc:
+        raise VideoEncoderError(
+            "Pillow is required for raw image decoding. "
+            "Install with: uv add 'mcap-codec-support[video]'"
+        ) from exc
+
+    if not message.data:
+        raise VideoEncoderError("Image has no data")
+
+    width = message.width
+    height = message.height
+    encoding = str(message.encoding).lower()
+    data = bytes(message.data)
+
+    if encoding in {"rgb", "rgb8"}:
+        return Image.frombytes("RGB", (width, height), data)
+    if encoding in {"bgr", "bgr8"}:
+        return Image.frombytes("RGB", (width, height), data, "raw", "BGR")
+    if encoding in {"mono", "mono8", "8uc1"}:
+        return Image.frombytes("L", (width, height), data).convert("RGB")
 
     raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
 

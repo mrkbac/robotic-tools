@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
@@ -13,8 +14,16 @@ from mcap_codec_support.video.common import (
     VideoEncoderError,
     calculate_downscale_dimensions,
     raw_image_to_array,
+    raw_image_to_pil,
 )
 from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS
+
+try:
+    from PIL.Image import Resampling as _Resampling
+
+    _PIL_BILINEAR = _Resampling.BILINEAR
+except ImportError:
+    _PIL_BILINEAR = None  # ``raw_image_to_pil`` raises if Pillow is missing.
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -22,7 +31,11 @@ if TYPE_CHECKING:
 
     from small_mcap import DecodedMessage
 
-    from mcap_codec_support._protocols import VideoCompressionBackend, VideoDecompressorProtocol
+    from mcap_codec_support._protocols import (
+        RawImageMessage,
+        VideoCompressionBackend,
+        VideoDecompressorProtocol,
+    )
 
 
 class _PyAVCompressionBackend:
@@ -190,34 +203,12 @@ def prefetch_image_decodes(
         yield buffer.popleft()
 
 
-def _encode_rgb_array_to_jpeg(rgb_array: Any, quality: int) -> bytes:
-    try:
-        from PIL import Image  # noqa: PLC0415
-    except ImportError as exc:
-        raise VideoEncoderError(
-            "Pillow is required for JPEG image encoding. "
-            "Install with: uv add 'mcap-codec-support[video]'"
-        ) from exc
-    import io  # noqa: PLC0415
-
-    buf = io.BytesIO()
-    Image.fromarray(rgb_array).save(buf, format="JPEG", quality=quality)
-    return buf.getvalue()
-
-
-def _resize_rgb_array(rgb_array: Any, width: int, height: int) -> Any:
-    import av  # noqa: PLC0415
-
-    frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
-    return frame.reformat(width=width, height=height, format="rgb24").to_ndarray(format="rgb24")
-
-
 def encode_raw_image_to_jpeg(
-    decoded_message: Any, *, jpeg_quality: int, scale: int | None
+    decoded_message: RawImageMessage, *, jpeg_quality: int, scale: int | None
 ) -> tuple[bytes, int, int]:
-    """Encode a raw ROS Image message to JPEG using Pillow for final encode."""
-    rgb_array = raw_image_to_array(decoded_message)
-    src_h, src_w = rgb_array.shape[:2]
+    """Encode a raw ROS Image message to JPEG using Pillow."""
+    image = raw_image_to_pil(decoded_message)
+    src_w, src_h = image.size
     if scale is not None:
         target_w, target_h = calculate_downscale_dimensions(src_w, src_h, scale)
     else:
@@ -229,9 +220,11 @@ def encode_raw_image_to_jpeg(
         raise VideoEncoderError(f"Source frame too small ({target_w}x{target_h}) for JPEG encoding")
 
     if target_w != src_w or target_h != src_h:
-        rgb_array = _resize_rgb_array(rgb_array, target_w, target_h)
+        image = image.resize((target_w, target_h), _PIL_BILINEAR)
 
-    return _encode_rgb_array_to_jpeg(rgb_array, jpeg_quality), target_w, target_h
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=jpeg_quality)
+    return buf.getvalue(), target_w, target_h
 
 
 def decode_compressed_image_to_rgb_array(data: bytes) -> Any:
