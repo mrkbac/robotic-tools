@@ -43,10 +43,41 @@ def test_schema_deduplication():
     assert remapper.was_schema_remapped(1, 2)  # ID changed from 2 to 1
 
 
+def test_schema_different_encoding_not_deduplicated():
+    remapper = Remapper()
+    schema1 = Schema(id=1, name="test", encoding="proto", data=b"data")
+    schema2 = Schema(id=2, name="test", encoding="jsonschema", data=b"data")
+
+    mapped1 = remapper.remap_schema(0, schema1)
+    mapped2 = remapper.remap_schema(1, schema2)
+
+    assert mapped1.id == 1
+    assert mapped2.id == 2
+    assert mapped1.encoding == "proto"
+    assert mapped2.encoding == "jsonschema"
+
+
 def test_schema_none_returns_none():
     """remap_schema(None) should return None."""
     remapper = Remapper()
     assert remapper.remap_schema(0, None) is None
+
+
+def test_reserve_schema_id_skips_used_ids():
+    remapper = Remapper()
+
+    assert remapper.reserve_schema_id(5) == 5
+    assert remapper.reserve_schema_id(5) == 6
+
+
+def test_reserved_schema_id_is_not_reused_by_remap_schema():
+    remapper = Remapper()
+    assert remapper.reserve_schema_id(5) == 5
+
+    mapped = remapper.remap_schema(0, Schema(id=5, name="test", encoding="proto", data=b"data"))
+
+    assert mapped.id == 6
+    assert remapper.was_schema_remapped(0, 5)
 
 
 def test_channel_preserves_original_id():
@@ -115,6 +146,26 @@ def test_channel_schemaless_preserved():
     mapped = remapper.remap_channel(0, channel)
 
     assert mapped.schema_id == 0
+
+
+def test_reserve_channel_id_skips_used_ids():
+    remapper = Remapper()
+
+    assert remapper.reserve_channel_id(5) == 5
+    assert remapper.reserve_channel_id(5) == 6
+
+
+def test_reserved_channel_id_is_not_reused_by_remap_channel():
+    remapper = Remapper()
+    assert remapper.reserve_channel_id(5) == 5
+
+    mapped = remapper.remap_channel(
+        0,
+        Channel(id=5, schema_id=0, topic="/test", message_encoding="json", metadata={}),
+    )
+
+    assert mapped.id == 6
+    assert remapper.was_channel_remapped(0, 5)
 
 
 def test_channel_with_unseen_schema_raises_error():

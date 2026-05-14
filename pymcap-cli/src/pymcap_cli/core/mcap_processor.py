@@ -1006,21 +1006,17 @@ class McapProcessor:
     def _register_extra_channel(self, stream_id: int, channel: Channel) -> Channel:
         """Register an output-only Channel allocated by a processor.
 
-        Picks a fresh id strictly above every id currently held by either the
-        writer registry or the Remapper, and *reserves* the id in the remapper
-        so a later input-channel allocation can't accidentally collide with
-        it. Marks the channel as included in the filter cache for every input
-        stream — synthetic channels bypass per-stream filters.
+        Picks a fresh id above the writer registry and *reserves* it in the
+        Remapper so a later input-channel allocation can't accidentally
+        collide with it. Marks the channel as included in the filter cache
+        for every input stream — synthetic channels bypass per-stream filters.
 
         ``stream_id`` is retained in the signature for symmetry with
         ``remap_channel`` / ``remap_message`` closures even though the
         synthetic channel is global.
         """
         _ = stream_id  # synthetic channels are not stream-scoped
-        # Reserved id pool on the Remapper — no public API for this yet, so
-        # we poke the same set the remapper uses internally to allocate ids.
-        used_ids: set[int] = self.remapper._used_channel_ids  # noqa: SLF001
-        new_id = max(max(self.known_channels, default=0), max(used_ids, default=0)) + 1
+        new_id = self.remapper.reserve_channel_id(max(self.known_channels, default=0) + 1)
         new_channel = Channel(
             id=new_id,
             schema_id=channel.schema_id,
@@ -1032,7 +1028,6 @@ class McapProcessor:
         self.channels[new_id] = new_channel
         for sid in range(len(self.options.inputs)):
             self.channel_filter_cache[(sid, new_id)] = True
-        used_ids.add(new_id)
         return new_channel
 
     def _handle_message_record(self, message: Message, stream_id: int) -> None:
