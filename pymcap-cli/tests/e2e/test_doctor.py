@@ -19,7 +19,7 @@ def test_doctor_valid_file_exits_zero(simple_mcap: Path) -> None:
     )
 
     assert result.returncode == 0
-    assert "passed MCAP doctor checks" in result.stdout
+    assert "passed MCAP doctor checks" in " ".join(result.stdout.split())
 
 
 @pytest.mark.e2e

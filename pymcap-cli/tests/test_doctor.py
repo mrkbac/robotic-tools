@@ -772,4 +772,4 @@ def test_doctor_registered_command_accepts_valid_file(
     )
 
     assert doctor_cmd.doctor(str(path)) == 0
-    assert "passed MCAP doctor checks" in output.getvalue()
+    assert "passed MCAP doctor checks" in " ".join(output.getvalue().split())
