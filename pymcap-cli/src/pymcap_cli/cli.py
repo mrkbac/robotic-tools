@@ -199,6 +199,7 @@ app = App(
     name="pymcap-cli",
     help="CLI tool for slicing and dicing MCAP files.",
     help_format="rich",
+    help_on_error=True,
     default_parameter=Parameter(negative_iterable=""),
 )
 
