@@ -20,11 +20,14 @@ from pymcap_cli.core.mcap_compare import (
     IndexedCompareKind,
     IndexedComparison,
     MessageIndexIdentityReadResult,
+    PayloadLookup,
     collect_message_timestamps,
     compare_indexed_identities,
     message_index_identity_from_info,
+    payload_lookup_from_info,
     read_compare_file,
     split_timestamps_into_segments,
+    verify_comparison_payloads,
 )
 from pymcap_cli.display.time_ranges import (
     format_count,
@@ -236,8 +239,13 @@ def _extract_summary(path: str, label: str, info: RebuildInfo, file_size: int) -
 
 
 def _process_file(
-    path: str, label: str
-) -> tuple[FileSummary, dict[int, set[int]], MessageIndexIdentityReadResult]:
+    path: str, label: str, *, compare_payloads: bool
+) -> tuple[
+    FileSummary,
+    dict[int, set[int]],
+    MessageIndexIdentityReadResult,
+    PayloadLookup | None,
+]:
     result = read_compare_file(path, rebuild_missing=True)
     indexed = MessageIndexIdentityReadResult(
         path=path,
@@ -245,10 +253,16 @@ def _process_file(
         identity=message_index_identity_from_info(result.info),
         read_mode=result.read_mode,
     )
+    payload_lookup = (
+        payload_lookup_from_info(path, result.size_bytes, result.info, result.read_mode)
+        if compare_payloads
+        else None
+    )
     return (
         _extract_summary(path, label, result.info, result.size_bytes),
         collect_message_timestamps(result.info),
         indexed,
+        payload_lookup,
     )
 
 
@@ -568,6 +582,8 @@ def _verdict_text(
         return "[yellow]edge overlap[/yellow]"
     if comparison.kind is IndexedCompareKind.PARTIAL_OVERLAP:
         return "[yellow]partial overlap[/yellow]"
+    if comparison.kind is IndexedCompareKind.PAYLOAD_MISMATCH:
+        return "[red]payload mismatch[/red] [dim](timestamps/indexes match)[/dim]"
     return "[red]no indexed message overlap[/red]"
 
 
@@ -593,6 +609,13 @@ def _build_smart_diff_tree(
             f"left-only {format_count(comparison.left_extra_messages, 'msg')}, "
             f"right-only {format_count(comparison.right_extra_messages, 'msg')})[/dim]"
         )
+        if comparison.payload_mismatch is not None:
+            mismatch = comparison.payload_mismatch
+            node.add(
+                f"[red]first mismatch[/red] [cyan]{escape(mismatch.topic)}[/cyan] "
+                f"[dim]@ {format_ts_short(mismatch.log_time)}: "
+                f"{escape(mismatch.reason)}[/dim]"
+            )
 
         for topic in comparison.topics[:max_topic_rows]:
             overlap_window = format_optional_time_window(
@@ -623,21 +646,34 @@ def _compare_to_first(
     labels: list[str],
     *,
     max_range_preview: int,
+    payload_lookups: list[PayloadLookup | None] | None = None,
 ) -> list[LabeledIndexedComparison]:
     first = indexed_results[0]
     first_label = labels[0]
-    return [
-        LabeledIndexedComparison(
-            left_label=first_label,
-            right_label=labels[index],
-            comparison=compare_indexed_identities(
-                first,
-                indexed_result,
-                max_range_preview=max_range_preview,
-            ),
+    comparisons: list[LabeledIndexedComparison] = []
+    for index, indexed_result in enumerate(indexed_results[1:], start=1):
+        comparison = compare_indexed_identities(
+            first,
+            indexed_result,
+            max_range_preview=max_range_preview,
         )
-        for index, indexed_result in enumerate(indexed_results[1:], start=1)
-    ]
+        if payload_lookups is not None:
+            left_lookup = payload_lookups[0]
+            right_lookup = payload_lookups[index]
+            if left_lookup is not None and right_lookup is not None:
+                comparison = verify_comparison_payloads(
+                    comparison,
+                    left_lookup,
+                    right_lookup,
+                )
+        comparisons.append(
+            LabeledIndexedComparison(
+                left_label=first_label,
+                right_label=labels[index],
+                comparison=comparison,
+            )
+        )
+    return comparisons
 
 
 def diff_cmd(
@@ -663,6 +699,16 @@ def diff_cmd(
             help="Maximum number of timestamp ranges to show per channel",
         ),
     ] = 3,
+    compare_payloads: Annotated[
+        bool,
+        Parameter(
+            name=["--compare-payloads"],
+            help=(
+                "After indexes match, compare raw message payload bytes and fail "
+                "fast on the first payload/header mismatch."
+            ),
+        ),
+    ] = False,
 ) -> int:
     """Compare MCAP files using summary and message index timestamps.
 
@@ -678,6 +724,8 @@ def diff_cmd(
         Hide channels where all message timestamps match exactly
     max_ranges
         Maximum timestamp ranges to display per channel (default: 3)
+    compare_payloads
+        Verify raw message payloads after the fast index comparison passes.
 
     Examples
     --------
@@ -700,12 +748,17 @@ def diff_cmd(
     all_timestamps: dict[str, dict[int, set[int]]] = {}
     all_summaries: dict[str, FileSummary] = {}
     indexed_results: list[MessageIndexIdentityReadResult] = []
+    payload_lookups: list[PayloadLookup | None] = []
     seen_labels: dict[str, int] = {}
 
     for path in files:
         label = _unique_label(path, seen_labels)
         try:
-            fs, ts, indexed = _process_file(path, label)
+            fs, ts, indexed, payload_lookup = _process_file(
+                path,
+                label,
+                compare_payloads=compare_payloads,
+            )
         except Exception:
             logger.exception(f"Error reading {path}")
             return 1
@@ -713,14 +766,20 @@ def diff_cmd(
         all_timestamps[label] = ts
         all_summaries[label] = fs
         indexed_results.append(indexed)
+        payload_lookups.append(payload_lookup)
 
     labels = [fs.label for fs in summaries]
     first_label = labels[0]
-    smart_comparisons = _compare_to_first(
-        indexed_results,
-        labels,
-        max_range_preview=max_ranges,
-    )
+    try:
+        smart_comparisons = _compare_to_first(
+            indexed_results,
+            labels,
+            max_range_preview=max_ranges,
+            payload_lookups=payload_lookups if compare_payloads else None,
+        )
+    except Exception:
+        logger.exception("Error comparing message payloads")
+        return 1
 
     channel_diffs = _compare_channels(all_timestamps, all_summaries)
     schema_diffs = _compare_schemas(all_summaries)
@@ -732,6 +791,9 @@ def diff_cmd(
     has_diffs = total_added > 0 or total_removed > 0
     has_schema_diffs = any(not d.is_identical for d in schema_diffs.values())
     has_mismatches = bool(channel_schema_mismatches)
+    has_payload_mismatches = any(
+        item.comparison.kind is IndexedCompareKind.PAYLOAD_MISMATCH for item in smart_comparisons
+    )
 
     console.print()
     console.print(_build_smart_diff_tree(smart_comparisons))
@@ -768,11 +830,19 @@ def diff_cmd(
             console.print(mismatch_table)
 
     console.print()
-    all_good = not has_diffs and not has_schema_diffs and not has_mismatches
+    all_good = (
+        not has_diffs and not has_schema_diffs and not has_mismatches and not has_payload_mismatches
+    )
     if all_good:
-        console.print(
-            f"[green]✓ All {total_common:,} messages have identical timestamps and schemas[/]"
-        )
+        if compare_payloads:
+            console.print(
+                f"[green]✓ All {total_common:,} messages have identical timestamps, "
+                "schemas and payloads[/]"
+            )
+        else:
+            console.print(
+                f"[green]✓ All {total_common:,} messages have identical timestamps and schemas[/]"
+            )
     else:
         if not has_diffs:
             console.print(f"[green]✓ All {total_common:,} messages have identical timestamps[/]")
@@ -790,5 +860,7 @@ def diff_cmd(
                 f"[red]⚠ {len(channel_schema_mismatches)} "
                 f"channel(s) use different schemas across files[/]"
             )
+        if has_payload_mismatches:
+            console.print("[red]⚠ message payloads differ across files[/]")
 
     return 0

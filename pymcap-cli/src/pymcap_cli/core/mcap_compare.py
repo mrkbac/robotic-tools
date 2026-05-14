@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import operator
-from collections import Counter, defaultdict
+import struct
+from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from functools import cache
 from pathlib import Path
-from typing import IO, Literal, Protocol
+from typing import IO, Literal, Protocol, cast
 from urllib.parse import unquote, urlparse
 
 from small_mcap import (
     Channel,
+    Chunk,
+    ChunkIndex,
     RebuildInfo,
     Schema,
     Summary,
@@ -21,15 +26,29 @@ from small_mcap import (
     read_info_approximate,
     rebuild_summary,
 )
+from small_mcap.reader import _get_chunk_data_stream
+from small_mcap.records import OPCODE_AND_LEN_STRUCT, Opcode
 
 from pymcap_cli.core.input_handler import open_input
 
+_PayloadHashFn = Callable[[bytes | bytearray | memoryview], str]
+try:
+    from xxhash import xxh3_128_hexdigest as _imported_xxh3_128_hexdigest
+except ImportError:
+    _xxh3_128_hexdigest: _PayloadHashFn | None = None
+else:
+    _xxh3_128_hexdigest = cast("_PayloadHashFn", _imported_xxh3_128_hexdigest)
+
 
 class HashSink(Protocol):
-    def update(self, data: bytes, /) -> None: ...
+    def update(self, data: bytes | bytearray | memoryview, /) -> None: ...
 
 
 ReadMode = Literal["summary", "index", "rebuild"]
+_RECORD_HEADER_SIZE = OPCODE_AND_LEN_STRUCT.size
+_MESSAGE_HEADER_STRUCT = struct.Struct("<HIQQ")
+_MESSAGE_HEADER_SIZE = _MESSAGE_HEADER_STRUCT.size
+_PAYLOAD_CHUNK_CACHE_SIZE = 8
 
 
 class IndexReadProgress(Protocol):
@@ -127,7 +146,15 @@ class IndexedCompareKind(Enum):
     RIGHT_SUBSET = "right_subset"
     EDGE_OVERLAP = "edge_overlap"
     PARTIAL_OVERLAP = "partial_overlap"
+    PAYLOAD_MISMATCH = "payload_mismatch"
     NO_OVERLAP = "no_overlap"
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadMismatch:
+    topic: str
+    log_time: int
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +208,7 @@ class IndexedComparison:
     right: MessageIndexIdentityReadResult
     kind: IndexedCompareKind
     overlap: IndexedOverlap
+    payload_mismatch: PayloadMismatch | None = None
 
     @property
     def shared_channels(self) -> int:
@@ -211,6 +239,33 @@ class IndexedComparison:
 class _IndexedChannelView:
     topic: str
     timestamps: Counter[int]
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class _PayloadLocator:
+    log_time: int
+    chunk_start_offset: int
+    offset: int
+    channel_id: int
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class _PayloadRecordKey:
+    publish_time: int
+    sequence: int
+    payload_size: int
+    payload_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadLookup:
+    path: str
+    size_bytes: int
+    identity: MessageIndexIdentity
+    read_mode: ReadMode
+    chunk_indexes: dict[int, ChunkIndex]
+    topics_by_digest: dict[str, str]
+    locators_by_digest: dict[str, tuple[_PayloadLocator, ...]]
 
 
 @dataclass(slots=True)
@@ -329,6 +384,23 @@ def _channel_fingerprint(
 
 def _unknown_channel_topic(channel_id: int) -> str:
     return f"Channel_{channel_id}"
+
+
+def _blake2b_128_hexdigest(data: bytes | bytearray | memoryview) -> str:
+    hasher = hashlib.blake2b(digest_size=16)
+    hasher.update(data)
+    return hasher.hexdigest()
+
+
+@cache
+def _payload_hash_fn() -> _PayloadHashFn:
+    if _xxh3_128_hexdigest is not None:
+        return _xxh3_128_hexdigest
+    return _blake2b_128_hexdigest
+
+
+def _payload_digest(data: bytes | bytearray | memoryview) -> str:
+    return _payload_hash_fn()(data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +634,267 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
         schema_count=summary_identity.schema_count,
         channel_count=summary_identity.channel_count,
     )
+
+
+def payload_lookup_from_info(
+    path: str,
+    size_bytes: int,
+    info: RebuildInfo,
+    read_mode: ReadMode,
+) -> PayloadLookup:
+    intermediates = _build_identity_intermediates(info)
+    identity = message_index_identity_from_info(info)
+    semantic_by_channel_id = {
+        entry.channel_id: entry.semantic_digest for entry in intermediates.channels
+    }
+    topic_by_channel_id = {
+        entry.channel_id: entry.fingerprint.topic for entry in intermediates.channels
+    }
+
+    locators_by_digest: dict[str, list[_PayloadLocator]] = defaultdict(list)
+    topics_by_digest: dict[str, str] = {}
+    chunk_indexes = {
+        chunk_index.chunk_start_offset: chunk_index for chunk_index in info.summary.chunk_indexes
+    }
+
+    for chunk_index in info.summary.chunk_indexes:
+        for message_index in (info.chunk_information or {}).get(chunk_index.chunk_start_offset, ()):
+            channel_id = message_index.channel_id
+            channel_digest = semantic_by_channel_id.get(channel_id)
+            topic = topic_by_channel_id.get(channel_id)
+            if channel_digest is None or topic is None:
+                channel_digest = _unknown_indexed_channel_digest(channel_id, 0, b"")
+                topic = _unknown_channel_topic(channel_id)
+            topics_by_digest.setdefault(channel_digest, topic)
+            for log_time, offset in zip(
+                message_index.timestamps, message_index.offsets, strict=True
+            ):
+                locators_by_digest[channel_digest].append(
+                    _PayloadLocator(
+                        log_time=log_time,
+                        chunk_start_offset=chunk_index.chunk_start_offset,
+                        offset=offset,
+                        channel_id=channel_id,
+                    )
+                )
+
+    return PayloadLookup(
+        path=path,
+        size_bytes=size_bytes,
+        identity=identity,
+        read_mode=read_mode,
+        chunk_indexes=chunk_indexes,
+        topics_by_digest=topics_by_digest,
+        locators_by_digest={
+            digest: tuple(sorted(locators)) for digest, locators in locators_by_digest.items()
+        },
+    )
+
+
+class _PayloadReader:
+    def __init__(self, stream: IO[bytes], chunk_indexes: dict[int, ChunkIndex]) -> None:
+        self._stream = stream
+        self._chunk_indexes = chunk_indexes
+        self._chunk_cache: OrderedDict[int, bytes | memoryview] = OrderedDict()
+
+    def _load_chunk_data(self, chunk_start_offset: int) -> bytes | memoryview:
+        cached = self._chunk_cache.get(chunk_start_offset)
+        if cached is not None:
+            self._chunk_cache.move_to_end(chunk_start_offset)
+            return cached
+
+        chunk_index = self._chunk_indexes[chunk_start_offset]
+        self._stream.seek(chunk_start_offset)
+        raw = self._stream.read(chunk_index.chunk_length)
+        if len(raw) != chunk_index.chunk_length:
+            raise ValueError(
+                f"short read for chunk at {chunk_start_offset}: "
+                f"expected {chunk_index.chunk_length} bytes, got {len(raw)}"
+            )
+
+        view = memoryview(raw)
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, 0)
+        if opcode != Opcode.CHUNK:
+            raise ValueError(f"expected Chunk at {chunk_start_offset}, got opcode {opcode}")
+        if length + _RECORD_HEADER_SIZE > len(view):
+            raise ValueError(f"truncated Chunk body at {chunk_start_offset}")
+
+        chunk = Chunk.read(view[_RECORD_HEADER_SIZE : _RECORD_HEADER_SIZE + length])
+        data = _get_chunk_data_stream(chunk, validate_crc=True)
+        self._chunk_cache[chunk_start_offset] = data
+        if len(self._chunk_cache) > _PAYLOAD_CHUNK_CACHE_SIZE:
+            self._chunk_cache.popitem(last=False)
+        return data
+
+    def payload_key(self, locator: _PayloadLocator) -> _PayloadRecordKey:
+        data = self._load_chunk_data(locator.chunk_start_offset)
+        view = memoryview(data)
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, locator.offset)
+        if opcode != Opcode.MESSAGE:
+            raise ValueError(
+                f"expected Message at chunk {locator.chunk_start_offset} "
+                f"offset {locator.offset}, got opcode {opcode}"
+            )
+
+        body_start = locator.offset + _RECORD_HEADER_SIZE
+        body_end = body_start + length
+        if body_end > len(view):
+            raise ValueError(
+                f"truncated Message at chunk {locator.chunk_start_offset} offset {locator.offset}"
+            )
+
+        channel_id, sequence, log_time, publish_time = _MESSAGE_HEADER_STRUCT.unpack_from(
+            view, body_start
+        )
+        if channel_id != locator.channel_id:
+            raise ValueError(
+                f"message index channel_id={locator.channel_id} points to channel_id={channel_id}"
+            )
+        if log_time != locator.log_time:
+            raise ValueError(
+                f"message index log_time={locator.log_time} points to log_time={log_time}"
+            )
+
+        payload = view[body_start + _MESSAGE_HEADER_SIZE : body_end]
+        return _PayloadRecordKey(
+            publish_time=publish_time,
+            sequence=sequence,
+            payload_size=len(payload),
+            payload_digest=_payload_digest(payload),
+        )
+
+
+def _topic_for_digest(
+    digest: str,
+    left: PayloadLookup,
+    right: PayloadLookup,
+) -> str:
+    topic = left.topics_by_digest.get(digest)
+    if topic is not None:
+        return topic
+    return right.topics_by_digest.get(digest, digest[:16])
+
+
+def _same_log_time_group(
+    locators: tuple[_PayloadLocator, ...],
+    start: int,
+) -> tuple[int, tuple[_PayloadLocator, ...], int]:
+    log_time = locators[start].log_time
+    end = start + 1
+    while end < len(locators) and locators[end].log_time == log_time:
+        end += 1
+    return log_time, locators[start:end], end
+
+
+def _compare_payload_groups(
+    *,
+    topic: str,
+    log_time: int,
+    left_group: tuple[_PayloadLocator, ...],
+    right_group: tuple[_PayloadLocator, ...],
+    left_reader: _PayloadReader,
+    right_reader: _PayloadReader,
+) -> PayloadMismatch | None:
+    if len(left_group) != len(right_group):
+        return PayloadMismatch(
+            topic=topic,
+            log_time=log_time,
+            reason=(
+                f"message count differs at timestamp: "
+                f"{len(left_group)} left vs {len(right_group)} right"
+            ),
+        )
+
+    left_payloads = Counter(left_reader.payload_key(locator) for locator in left_group)
+    for locator in right_group:
+        key = right_reader.payload_key(locator)
+        count = left_payloads.get(key, 0)
+        if count == 0:
+            return PayloadMismatch(
+                topic=topic,
+                log_time=log_time,
+                reason="payload, publish_time, or sequence differs",
+            )
+        if count == 1:
+            del left_payloads[key]
+        else:
+            left_payloads[key] = count - 1
+
+    if left_payloads:
+        return PayloadMismatch(
+            topic=topic,
+            log_time=log_time,
+            reason="payload, publish_time, or sequence differs",
+        )
+    return None
+
+
+def verify_payloads_match(left: PayloadLookup, right: PayloadLookup) -> PayloadMismatch | None:
+    if left.identity.message_count != right.identity.message_count:
+        return PayloadMismatch(
+            topic="",
+            log_time=0,
+            reason=(
+                f"message count differs: {left.identity.message_count} left vs "
+                f"{right.identity.message_count} right"
+            ),
+        )
+
+    all_digests = sorted(left.locators_by_digest.keys() | right.locators_by_digest.keys())
+    with (
+        open_input(left.path, buffering=0) as (left_stream, _left_size),
+        open_input(right.path, buffering=0) as (right_stream, _right_size),
+    ):
+        left_reader = _PayloadReader(left_stream, left.chunk_indexes)
+        right_reader = _PayloadReader(right_stream, right.chunk_indexes)
+        for digest in all_digests:
+            topic = _topic_for_digest(digest, left, right)
+            left_locators = left.locators_by_digest.get(digest, ())
+            right_locators = right.locators_by_digest.get(digest, ())
+            if not left_locators or not right_locators:
+                return PayloadMismatch(
+                    topic=topic,
+                    log_time=0,
+                    reason="channel is missing from one side",
+                )
+
+            left_index = 0
+            right_index = 0
+            while left_index < len(left_locators) and right_index < len(right_locators):
+                left_log_time, left_group, left_index = _same_log_time_group(
+                    left_locators, left_index
+                )
+                right_log_time, right_group, right_index = _same_log_time_group(
+                    right_locators, right_index
+                )
+                if left_log_time != right_log_time:
+                    return PayloadMismatch(
+                        topic=topic,
+                        log_time=min(left_log_time, right_log_time),
+                        reason=(
+                            f"log_time differs: {left_log_time} left vs {right_log_time} right"
+                        ),
+                    )
+
+                mismatch = _compare_payload_groups(
+                    topic=topic,
+                    log_time=left_log_time,
+                    left_group=left_group,
+                    right_group=right_group,
+                    left_reader=left_reader,
+                    right_reader=right_reader,
+                )
+                if mismatch is not None:
+                    return mismatch
+
+            if left_index != len(left_locators) or right_index != len(right_locators):
+                return PayloadMismatch(
+                    topic=topic,
+                    log_time=0,
+                    reason="message count differs",
+                )
+
+    return None
 
 
 def _counter_message_count(counter: Counter[int]) -> int:
@@ -900,6 +1233,26 @@ def compare_indexed_identities(
     )
 
 
+def verify_comparison_payloads(
+    comparison: IndexedComparison,
+    left: PayloadLookup,
+    right: PayloadLookup,
+) -> IndexedComparison:
+    if comparison.kind not in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
+        return comparison
+
+    mismatch = verify_payloads_match(left, right)
+    if mismatch is None:
+        return comparison
+    return IndexedComparison(
+        left=comparison.left,
+        right=comparison.right,
+        kind=IndexedCompareKind.PAYLOAD_MISMATCH,
+        overlap=comparison.overlap,
+        payload_mismatch=mismatch,
+    )
+
+
 def read_summary_info(
     stream: IO[bytes], *, rebuild_missing: bool
 ) -> tuple[RebuildInfo, ReadMode] | None:
@@ -1004,6 +1357,15 @@ def read_message_index_identity_file(
             identity=message_index_identity_from_info(info),
             read_mode=read_mode,
         )
+
+
+def read_payload_lookup_file(path: str, *, rebuild_missing: bool) -> PayloadLookup | None:
+    with open_input(path, buffering=0) as (stream, size_bytes):
+        result = read_indexed_info(stream, rebuild_missing=rebuild_missing)
+        if result is None:
+            return None
+        info, read_mode = result
+        return payload_lookup_from_info(path, size_bytes, info, read_mode)
 
 
 def read_compare_file(path: str, *, rebuild_missing: bool = True) -> CompareReadResult:

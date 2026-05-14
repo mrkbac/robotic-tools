@@ -33,6 +33,7 @@ from pymcap_cli.core.mcap_compare import (
     IndexReadProgress,
     MessageIndexIdentity,
     MessageIndexIdentityReadResult,
+    PayloadLookup,
     SummaryChannelRange,
     TopicOverlapEvidence,
     compare_indexed_identities,
@@ -40,6 +41,8 @@ from pymcap_cli.core.mcap_compare import (
     path_basename,
     read_identity_file,
     read_message_index_identity_file,
+    read_payload_lookup_file,
+    verify_comparison_payloads,
 )
 from pymcap_cli.display.time_ranges import (
     format_count,
@@ -139,6 +142,7 @@ class AnchoredPartialRelation:
 class IndexedAnalysis:
     duplicate_groups: list[list[MessageIndexIdentityReadResult]]
     partial_matches: list[IndexedComparison]
+    skipped: list[SkippedFile]
 
 
 def _read_summary_identity(path: str, *, rebuild_missing: bool) -> IdentityReadResult | SkippedFile:
@@ -164,6 +168,17 @@ def _read_index_identity(
             rebuild_missing=rebuild_missing,
             index_progress=index_progress,
         )
+        if result is None:
+            return SkippedFile(path=path, reason="no complete message indexes")
+    except Exception as exc:  # noqa: BLE001
+        return SkippedFile(path=path, reason=str(exc) or exc.__class__.__name__)
+    else:
+        return result
+
+
+def _read_payload_lookup(path: str, *, rebuild_missing: bool) -> PayloadLookup | SkippedFile:
+    try:
+        result = read_payload_lookup_file(path, rebuild_missing=rebuild_missing)
         if result is None:
             return SkippedFile(path=path, reason="no complete message indexes")
     except Exception as exc:  # noqa: BLE001
@@ -283,6 +298,11 @@ def _build_partial_tree(matches: list[IndexedComparison]) -> Tree:
         anchor_node.add(f"[dim]{anchor.path}[/dim]")
 
         for relation in relations:
+            kind_note = (
+                "; payload mismatch"
+                if relation.match.kind is IndexedCompareKind.PAYLOAD_MISMATCH
+                else ""
+            )
             related_node = anchor_node.add(
                 f"[green]{path_basename(relation.related.path)}[/green] "
                 f"[dim](msgs {_format_delta(relation.message_delta)}, "
@@ -290,9 +310,17 @@ def _build_partial_tree(matches: list[IndexedComparison]) -> Tree:
                 f"{format_count(relation.match.shared_messages, 'shared msg', 'shared msgs')}, "
                 f"{format_count(relation.match.shared_channels, 'shared channel')}; "
                 f"anchor-only {format_count(relation.anchor_extra_messages, 'msg')}, "
-                f"file-only {format_count(relation.related_extra_messages, 'msg')})[/dim]"
+                f"file-only {format_count(relation.related_extra_messages, 'msg')}"
+                f"{kind_note})[/dim]"
             )
             related_node.add(f"[dim]{relation.related.path}[/dim]")
+            if relation.match.payload_mismatch is not None:
+                mismatch = relation.match.payload_mismatch
+                related_node.add(
+                    f"[red]first mismatch[/red] [cyan]{escape(mismatch.topic)}[/cyan] "
+                    f"[dim]@ {_format_time(mismatch.log_time)}: "
+                    f"{escape(mismatch.reason)}[/dim]"
+                )
             for topic in relation.topics[:_MAX_TOPIC_EVIDENCE_ROWS]:
                 overlap_window = format_optional_time_window(
                     topic.shared_start_time, topic.shared_end_time
@@ -521,11 +549,15 @@ def _analyze_indexed_matches(
     scanned: list[MessageIndexIdentityReadResult],
     *,
     include_all: bool,
+    compare_payloads: bool,
+    rebuild_missing: bool,
     progress: Progress | None = None,
     task: TaskID | None = None,
 ) -> IndexedAnalysis:
     parent = list(range(len(scanned)))
     matches: list[IndexedComparison] = []
+    skipped: list[SkippedFile] = []
+    payload_lookup_cache: dict[str, PayloadLookup] = {}
     completed_pairs = 0
     pair_count = len(scanned) * (len(scanned) - 1) // 2
 
@@ -541,18 +573,52 @@ def _analyze_indexed_matches(
         if left_root != right_root:
             parent[right_root] = left_root
 
+    def payload_lookup(path: str) -> PayloadLookup | None:
+        lookup = payload_lookup_cache.get(path)
+        if lookup is not None:
+            return lookup
+        result = _read_payload_lookup(path, rebuild_missing=rebuild_missing)
+        if isinstance(result, PayloadLookup):
+            payload_lookup_cache[path] = result
+            return result
+        skipped.append(result)
+        return None
+
+    def verify_payloads_if_needed(comparison: IndexedComparison) -> IndexedComparison | None:
+        if not compare_payloads:
+            return comparison
+        if comparison.kind not in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
+            return comparison
+        left_lookup = payload_lookup(comparison.left.path)
+        right_lookup = payload_lookup(comparison.right.path)
+        if left_lookup is None or right_lookup is None:
+            return None
+        try:
+            return verify_comparison_payloads(comparison, left_lookup, right_lookup)
+        except Exception as exc:  # noqa: BLE001
+            skipped.append(
+                SkippedFile(
+                    path=f"{comparison.left.path} <-> {comparison.right.path}",
+                    reason=(f"payload verification failed: {str(exc) or exc.__class__.__name__}"),
+                )
+            )
+            return None
+
     first_by_digest: dict[str, int] = {}
-    for index, scanned_file in enumerate(scanned):
-        first_index = first_by_digest.get(scanned_file.identity.digest)
-        if first_index is None:
-            first_by_digest[scanned_file.identity.digest] = index
-            continue
-        union(first_index, index)
+    if not compare_payloads:
+        for index, scanned_file in enumerate(scanned):
+            first_index = first_by_digest.get(scanned_file.identity.digest)
+            if first_index is None:
+                first_by_digest[scanned_file.identity.digest] = index
+                continue
+            union(first_index, index)
 
     for left_index, left in enumerate(scanned):
         for right_index, right in enumerate(scanned[left_index + 1 :], start=left_index + 1):
             completed_pairs += 1
-            if left.identity.digest == right.identity.digest:
+            if not compare_payloads and left.identity.digest == right.identity.digest:
+                continue
+            if compare_payloads and find(left_index) == find(right_index):
                 continue
 
             _maybe_update_progress(
@@ -565,10 +631,13 @@ def _analyze_indexed_matches(
             )
 
             comparison = compare_indexed_identities(left, right)
-            if comparison.kind is IndexedCompareKind.FULL_OVERLAP:
+            verified = verify_payloads_if_needed(comparison)
+            if verified is None:
+                continue
+            if verified.kind in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
                 union(left_index, right_index)
-            elif comparison.has_overlap:
-                matches.append(comparison)
+            elif verified.has_overlap:
+                matches.append(verified)
 
     if progress is not None and task is not None:
         progress.update(task, completed=pair_count, current=f"{len(matches):,} partial match(es)")
@@ -590,6 +659,7 @@ def _analyze_indexed_matches(
                 match.right.path,
             ),
         ),
+        skipped=skipped,
     )
 
 
@@ -614,6 +684,16 @@ def duplicates(
         Parameter(
             name=["--rebuild-missing"],
             help="Scan files without usable summary data and rebuild summary in memory.",
+        ),
+    ] = False,
+    compare_payloads: Annotated[
+        bool,
+        Parameter(
+            name=["--compare-payloads"],
+            help=(
+                "After indexes match, compare raw message payload bytes before "
+                "declaring duplicates."
+            ),
         ),
     ] = False,
 ) -> int:
@@ -698,16 +778,19 @@ def duplicates(
 
         index_pair_count = len(index_scanned) * (len(index_scanned) - 1) // 2
         analysis_task = progress.add_task(
-            "Scoring indexed overlaps",
+            "Scoring payload overlaps" if compare_payloads else "Scoring indexed overlaps",
             total=index_pair_count,
             current="",
         )
         analysis = _analyze_indexed_matches(
             index_scanned,
             include_all=include_all,
+            compare_payloads=compare_payloads,
+            rebuild_missing=rebuild_missing,
             progress=progress,
             task=analysis_task,
         )
+        skipped.extend(analysis.skipped)
 
     groups = analysis.duplicate_groups
     partial_matches = analysis.partial_matches

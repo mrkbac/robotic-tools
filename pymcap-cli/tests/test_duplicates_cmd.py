@@ -9,7 +9,7 @@ from pymcap_cli.cmd import compress_cmd, duplicates_cmd
 from pymcap_cli.constants import NS_TO_MS
 from pymcap_cli.core.mcap_compare import discover_mcap_candidates
 from rich.console import Console
-from small_mcap import CompressionType, IndexType, McapWriter, rebuild_summary
+from small_mcap import CompressionType, IndexType, McapWriter, get_summary, rebuild_summary
 from typing_extensions import Self
 
 from tests.fixtures.mcap_generator import create_simple_mcap
@@ -25,6 +25,7 @@ def _run_duplicates(
     *,
     include_all: bool = False,
     rebuild_missing: bool = False,
+    compare_payloads: bool = False,
 ) -> tuple[int, str]:
     output = io.StringIO()
     monkeypatch.setattr(
@@ -36,6 +37,7 @@ def _run_duplicates(
         [str(path) for path in paths],
         include_all=include_all,
         rebuild_missing=rebuild_missing,
+        compare_payloads=compare_payloads,
     )
     return exit_code, output.getvalue()
 
@@ -49,6 +51,8 @@ def _write_custom_mcap(
     file_metadata: dict[str, str] | None = None,
     messages: int = 10,
     timestamps: list[int] | None = None,
+    payloads: list[bytes] | None = None,
+    channel_id: int = 1,
     chunk_size: int = 1024,
     compression: CompressionType = CompressionType.ZSTD,
     index_types: IndexType = IndexType.ALL,
@@ -66,18 +70,19 @@ def _write_custom_mcap(
         writer.start(profile="ros2", library="duplicates-test")
         writer.add_schema(schema_id=1, name="test", encoding="json", data=schema_data)
         writer.add_channel(
-            channel_id=1,
+            channel_id=channel_id,
             topic=topic,
             message_encoding="json",
             schema_id=1,
             metadata=metadata,
         )
         for index, log_time in enumerate(message_times):
+            payload = payloads[index] if payloads is not None else f'{{"i": {index}}}'.encode()
             writer.add_message(
-                channel_id=1,
+                channel_id=channel_id,
                 log_time=log_time,
                 publish_time=log_time,
-                data=f'{{"i": {index}}}'.encode(),
+                data=payload,
             )
         if file_metadata is not None:
             writer.add_metadata("test", file_metadata)
@@ -122,6 +127,30 @@ def _truncate_after_data_section(path: Path) -> None:
             exact_sizes=False,
         )
         stream.truncate(info.next_offset)
+
+
+def _corrupt_first_chunk_data(path: Path) -> None:
+    with path.open("rb") as stream:
+        summary = get_summary(stream)
+    assert summary is not None
+    chunk_index = summary.chunk_indexes[0]
+    data_offset = (
+        chunk_index.chunk_start_offset
+        + 9
+        + 8
+        + 8
+        + 8
+        + 4
+        + 4
+        + len(chunk_index.compression.encode())
+        + 8
+    )
+    with path.open("r+b") as stream:
+        stream.seek(data_offset)
+        original = stream.read(1)
+        assert original
+        stream.seek(data_offset)
+        stream.write(bytes([original[0] ^ 0x01]))
 
 
 def test_discover_candidates_recurses_deduplicates_and_keeps_explicit_files(
@@ -268,6 +297,64 @@ def test_duplicates_promotes_full_index_overlap_to_duplicate_group(
     assert first.name in output
     assert second.name in output
     assert "found 1 duplicate group" in output
+
+
+def test_duplicates_compare_payloads_rejects_bit_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    payloads = [f'{{"i": {index}}}'.encode() for index in range(10)]
+    changed_payloads = payloads.copy()
+    changed_payloads[5] = b'{"i": 500}'
+    _write_custom_mcap(first, payloads=payloads)
+    _write_custom_mcap(second, payloads=changed_payloads)
+
+    exit_code, output = _run_duplicates([first, second], monkeypatch)
+
+    assert exit_code == 0
+    assert "Duplicate MCAP Groups" in output
+
+    exit_code, output = _run_duplicates([first, second], monkeypatch, compare_payloads=True)
+
+    assert exit_code == 0
+    assert "Duplicate MCAP Groups" not in output
+    assert "Partial MCAP Matches" in output
+    assert "payload mismatch" in output
+    assert "found 0 duplicate group" in output
+
+
+def test_duplicates_compare_payloads_allows_different_channel_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    _write_custom_mcap(first, channel_id=1)
+    _write_custom_mcap(second, channel_id=9)
+
+    exit_code, output = _run_duplicates([first, second], monkeypatch, compare_payloads=True)
+
+    assert exit_code == 0
+    assert "Duplicate MCAP Groups" in output
+    assert "payload mismatch" not in output
+    assert "found 1 duplicate group" in output
+
+
+def test_duplicates_compare_payloads_skips_unreadable_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    _write_custom_mcap(first, compression=CompressionType.NONE)
+    _write_custom_mcap(second, compression=CompressionType.NONE)
+    _corrupt_first_chunk_data(second)
+
+    exit_code, output = _run_duplicates([first, second], monkeypatch, compare_payloads=True)
+
+    assert exit_code == 0
+    assert "No duplicate or partial MCAP matches found" in output
+    assert "Skipped 1 file(s)" in output
+    assert "payload verification failed" in output
 
 
 def test_duplicates_reports_cutout_inside_larger_mcap(
