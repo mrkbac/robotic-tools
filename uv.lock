@@ -1244,7 +1244,7 @@ wheels = [
 
 [[package]]
 name = "mcap-codec-support"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "mcap-codec-support" }
 dependencies = [
     { name = "small-mcap" },
@@ -2048,7 +2048,7 @@ wheels = [
 
 [[package]]
 name = "pureini"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "pureini" }
 dependencies = [
     { name = "lz4" },
@@ -2214,7 +2214,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2488,7 +2488,7 @@ wheels = [
 
 [[package]]
 name = "robo-ws-bridge"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "robo-ws-bridge" }
 dependencies = [
     { name = "typing-extensions" },
@@ -2783,7 +2783,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]
