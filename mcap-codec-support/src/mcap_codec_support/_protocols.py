@@ -17,6 +17,7 @@ class RawImageMessage(Protocol):
     width: int
     height: int
     encoding: str
+    step: int
     data: bytes
 
 

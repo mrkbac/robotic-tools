@@ -75,9 +75,12 @@ class _PyAVCompressionBackend:
         codec_name: str,
         quality: int,
         *,
-        input_pix_fmt: str | None = None,  # noqa: ARG002
-        scale: tuple[int, int] | None = None,  # noqa: ARG002
+        input_pix_fmt: str | None = None,
+        scale: tuple[int, int] | None = None,
     ) -> Any:
+        # PyAV reformats input frames per-frame inside VideoEncoder.encode, so
+        # the protocol's pix-fmt / scale knobs are FFmpeg-CLI-only.
+        del input_pix_fmt, scale
         from mcap_codec_support.video.pyav import VideoEncoder  # noqa: PLC0415
 
         return VideoEncoder(

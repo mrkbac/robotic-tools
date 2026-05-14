@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
     import numpy as np
 
+    from mcap_codec_support._protocols import CompressedImageMsg, RawImageMessage
+
 
 class _VideoFileStrategy(Protocol):
     config: EncoderConfig
@@ -73,7 +75,7 @@ _RAW_BYTES_PER_PIXEL: dict[str, int] = {
 }
 
 
-def _pack_raw_image_bytes(decoded: Any, *, width: int, height: int) -> bytes:
+def _pack_raw_image_bytes(decoded: RawImageMessage, *, width: int, height: int) -> bytes:
     """Pack raw ROS Image bytes to the exact frame size expected by ffmpeg."""
     encoding = str(decoded.encoding).lower()
     bytes_per_pixel = _RAW_BYTES_PER_PIXEL.get(encoding)
@@ -306,7 +308,7 @@ class _PyAVMp4Strategy:
         del data, log_time_ns
         raise VideoEncoderError("PyAV MP4 writer needs decoded RGB for raw frames")
 
-    def write_rgb(self, rgb: Any, log_time_ns: int) -> None:
+    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None:
         import av  # noqa: PLC0415
         import av.error  # noqa: PLC0415
 
@@ -375,7 +377,7 @@ class _FfmpegMp4Strategy:
         del log_time_ns
         self._encoder.write_frame(data)
 
-    def write_rgb(self, rgb: Any, log_time_ns: int) -> None:
+    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None:
         del log_time_ns
         self._encoder.write_frame(rgb.tobytes())
 
@@ -407,7 +409,12 @@ class VideoFileWriterSession:
         self._strategy: _VideoFileStrategy | None = None
         self._input_kind: str | None = None
 
-    def write_message(self, decoded: Any, schema_name: str, log_time_ns: int) -> None:
+    def write_message(
+        self,
+        decoded: RawImageMessage | CompressedImageMsg,
+        schema_name: str,
+        log_time_ns: int,
+    ) -> None:
         if schema_name not in IMAGE_SCHEMAS:
             raise VideoEncoderError(f"Unexpected image schema {schema_name!r}")
 
@@ -427,14 +434,15 @@ class VideoFileWriterSession:
             return
 
         if schema_name in RAW_SCHEMAS:
-            first_rgb = self._ensure_open_for_raw(decoded)
+            raw = cast("RawImageMessage", decoded)
+            first_rgb = self._ensure_open_for_raw(raw)
             assert self._strategy is not None
             if self._input_kind == "pyav":
-                rgb = first_rgb if first_rgb is not None else raw_image_to_array(decoded)
+                rgb = first_rgb if first_rgb is not None else raw_image_to_array(raw)
                 self._strategy.write_rgb(rgb, log_time_ns)
             else:
                 data = _pack_raw_image_bytes(
-                    decoded,
+                    raw,
                     width=self._strategy.config.width,
                     height=self._strategy.config.height,
                 )
@@ -443,13 +451,13 @@ class VideoFileWriterSession:
 
         raise VideoEncoderError(f"Unexpected image schema {schema_name!r}")
 
-    def _ensure_open_for_compressed(self, data: bytes) -> Any | None:
+    def _ensure_open_for_compressed(self, data: bytes) -> np.ndarray | None:
         return self._open_with_fallback(
             decode_pyav=lambda: decode_compressed_image_to_rgb_array(data),
             open_ffmpeg=lambda: self._open_ffmpeg_compressed(data),
         )
 
-    def _ensure_open_for_raw(self, decoded: Any) -> Any | None:
+    def _ensure_open_for_raw(self, decoded: RawImageMessage) -> np.ndarray | None:
         return self._open_with_fallback(
             decode_pyav=lambda: raw_image_to_array(decoded),
             open_ffmpeg=lambda: self._open_ffmpeg_raw(decoded),
@@ -458,9 +466,9 @@ class VideoFileWriterSession:
     def _open_with_fallback(
         self,
         *,
-        decode_pyav: Callable[[], Any],
+        decode_pyav: Callable[[], np.ndarray],
         open_ffmpeg: Callable[[], None],
-    ) -> Any | None:
+    ) -> np.ndarray | None:
         if self._strategy is not None:
             return None
 
@@ -509,7 +517,7 @@ class VideoFileWriterSession:
         )
         self._input_kind = "ffmpeg"
 
-    def _open_ffmpeg_raw(self, decoded: Any) -> None:
+    def _open_ffmpeg_raw(self, decoded: RawImageMessage) -> None:
         encoding = str(decoded.encoding).lower()
         pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)
         if not pix_fmt:

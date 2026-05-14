@@ -120,6 +120,20 @@ def _load_optional_app(
     return cast("App", getattr(module, app_name))
 
 
+# Modules that go missing together when a given extra is absent. Used by the
+# optional-command loader to suppress ImportError for the *expected* shape of
+# "extra not installed."
+_VIDEO_MODULES: tuple[str, ...] = ("av", "mcap_codec_support", "numpy")
+_POINTCLOUD_MODULES: tuple[str, ...] = (
+    "DracoPy",
+    "mcap_codec_support",
+    "numpy",
+    "pointcloud2",
+    "pureini",
+)
+_VIDEO_AND_POINTCLOUD_MODULES: tuple[str, ...] = tuple(sorted({*_VIDEO_MODULES, *_POINTCLOUD_MODULES}))
+
+
 bridge_app = _load_optional_app(
     "pymcap_cli.cmd.bridge",
     "bridge_app",
@@ -130,7 +144,7 @@ bridge_app = _load_optional_app(
 video = _load_optional_command(
     "pymcap_cli.cmd.video_cmd",
     "video",
-    expected_missing_modules=("av", "mcap_codec_support", "numpy"),
+    expected_missing_modules=_VIDEO_MODULES,
     message="Video command requires the 'video' extra.",
     install_command="uv add 'pymcap-cli[video]'",
 )
@@ -144,35 +158,21 @@ plot = _load_optional_command(
 roscompress = _load_optional_command(
     "pymcap_cli.cmd.roscompress_cmd",
     "roscompress",
-    expected_missing_modules=(
-        "av",
-        "DracoPy",
-        "mcap_codec_support",
-        "numpy",
-        "pointcloud2",
-        "pureini",
-    ),
+    expected_missing_modules=_VIDEO_AND_POINTCLOUD_MODULES,
     message="ROS compression requires the 'video' and 'pointcloud' extras.",
     install_command="uv add 'pymcap-cli[video,pointcloud]'",
 )
 export_parquet = _load_optional_command(
     "pymcap_cli.cmd.export_parquet_cmd",
     "export_parquet",
-    expected_missing_modules=(
-        "DracoPy",
-        "mcap_codec_support",
-        "numpy",
-        "pointcloud2",
-        "pureini",
-        "pyarrow",
-    ),
+    expected_missing_modules=(*_POINTCLOUD_MODULES, "pyarrow"),
     message="Parquet export requires the 'parquet' extra.",
     install_command="uv add 'pymcap-cli[parquet]'",
 )
 export_pcd = _load_optional_command(
     "pymcap_cli.cmd.export_pcd_cmd",
     "export_pcd",
-    expected_missing_modules=("DracoPy", "mcap_codec_support", "numpy", "pointcloud2", "pureini"),
+    expected_missing_modules=_POINTCLOUD_MODULES,
     message="PCD export requires the 'pointcloud' extra.",
     install_command="uv add 'pymcap-cli[pointcloud]'",
 )
@@ -186,14 +186,7 @@ export_images = _load_optional_command(
 rosdecompress = _load_optional_command(
     "pymcap_cli.cmd.rosdecompress_cmd",
     "rosdecompress",
-    expected_missing_modules=(
-        "av",
-        "DracoPy",
-        "mcap_codec_support",
-        "numpy",
-        "pointcloud2",
-        "pureini",
-    ),
+    expected_missing_modules=_VIDEO_AND_POINTCLOUD_MODULES,
     message="ROS decompression requires the 'video' and 'pointcloud' extras.",
     install_command="uv add 'pymcap-cli[video,pointcloud]'",
 )
