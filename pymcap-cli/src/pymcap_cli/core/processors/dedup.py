@@ -21,7 +21,7 @@ intra-input duplicates are then caught at the cost of full decompression.
 
 Hashing prefers ``xxhash.xxh3_64_intdigest`` when the optional ``xxhash``
 package is installed (~2x faster wall time on multi-MB payloads). Falls back
-to CPython's builtin ``hash(bytes)`` (SipHash) when it isn't.
+to ``zlib.crc32`` when it isn't.
 """
 
 from __future__ import annotations
@@ -45,7 +45,9 @@ if TYPE_CHECKING:
 try:
     from xxhash import xxh3_64_intdigest as _hash_bytes
 except ImportError:
-    _hash_bytes: Callable[[bytes | memoryview], int] = hash
+    from zlib import crc32 as _hash_bytes_fallback
+
+    _hash_bytes: Callable[[bytes | memoryview], int] = _hash_bytes_fallback
 
 
 class DedupIdenticalProcessor(InputProcessor):

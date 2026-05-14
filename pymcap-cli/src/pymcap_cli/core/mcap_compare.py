@@ -6,7 +6,8 @@ import hashlib
 import operator
 import struct
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -31,16 +32,23 @@ from small_mcap.records import OPCODE_AND_LEN_STRUCT, Opcode
 from pymcap_cli.core.input_handler import open_input
 
 _PayloadHashFn = Callable[[bytes | bytearray | memoryview], int]
+
 try:
     from xxhash import xxh3_64_intdigest as _imported_xxh3_64_intdigest
+    from xxhash import xxh3_128 as _imported_xxh3_128_streaming
 except ImportError:
-    _payload_digest: _PayloadHashFn = cast("_PayloadHashFn", hash)
+    import zlib as _zlib_for_fallback
+
+    _payload_digest: _PayloadHashFn = cast("_PayloadHashFn", _zlib_for_fallback.crc32)
+    _streaming_hasher: Callable[[], HashSink] = hashlib.sha1
 else:
     _payload_digest = cast("_PayloadHashFn", _imported_xxh3_64_intdigest)
+    _streaming_hasher = cast("Callable[[], HashSink]", _imported_xxh3_128_streaming)
 
 
 class HashSink(Protocol):
     def update(self, data: bytes | bytearray | memoryview, /) -> None: ...
+    def digest(self) -> bytes: ...
 
 
 ReadMode = Literal["summary", "index", "rebuild"]
@@ -673,7 +681,13 @@ def payload_lookup_from_info(
     )
 
 
-class _PayloadReader:
+class PayloadReader:
+    """Random-access reader for MCAP payloads with an LRU chunk cache.
+
+    Safe to reuse across pair verifications for the same file so decompressed
+    chunks are amortized over every pair that touches the file.
+    """
+
     def __init__(self, stream: IO[bytes], chunk_indexes: dict[int, ChunkIndex]) -> None:
         self._stream = stream
         self._chunk_indexes = chunk_indexes
@@ -774,8 +788,8 @@ def _compare_payload_groups(
     log_time: int,
     left_group: tuple[_PayloadLocator, ...],
     right_group: tuple[_PayloadLocator, ...],
-    left_reader: _PayloadReader,
-    right_reader: _PayloadReader,
+    left_reader: PayloadReader,
+    right_reader: PayloadReader,
 ) -> PayloadMismatch | None:
     if len(left_group) != len(right_group):
         return PayloadMismatch(
@@ -811,7 +825,58 @@ def _compare_payload_groups(
     return None
 
 
-def verify_payloads_match(left: PayloadLookup, right: PayloadLookup) -> PayloadMismatch | None:
+@contextmanager
+def open_payload_reader(path: str, chunk_indexes: dict[int, ChunkIndex]) -> Iterator[PayloadReader]:
+    """Open a long-lived ``PayloadReader`` for a file.
+
+    Callers that compare a file against multiple peers should enter this
+    once per file (e.g. via ``contextlib.ExitStack``) and pass the reader
+    to :func:`verify_payloads_match` so decompressed chunks are reused
+    across pairs.
+    """
+    with open_input(path, buffering=0) as (stream, _size):
+        yield PayloadReader(stream, chunk_indexes)
+
+
+_AGGREGATE_MESSAGE_STRUCT = struct.Struct("<QQIIQ")
+
+
+def compute_payload_aggregate_digest(lookup: PayloadLookup, reader: PayloadReader) -> int:
+    """Compute a single digest covering every payload in a file.
+
+    Hashes the sorted ``(channel_digest, log_time, publish_time, sequence,
+    payload_size, payload_digest)`` tuples for every message. Two files with
+    the same aggregate digest have byte-equivalent payloads at the same
+    ``(channel, log_time)`` coordinates — enough to satisfy
+    :func:`verify_payloads_match` for ``EXACT`` and ``FULL_OVERLAP`` pairs
+    without the per-pair Python loop over messages.
+    """
+    accumulator = _streaming_hasher()
+    pack = _AGGREGATE_MESSAGE_STRUCT.pack
+    for channel_digest in sorted(lookup.locators_by_digest):
+        accumulator.update(b"c:")
+        accumulator.update(channel_digest.encode("ascii"))
+        for locator in lookup.locators_by_digest[channel_digest]:
+            key = reader.payload_key(locator)
+            accumulator.update(
+                pack(
+                    locator.log_time,
+                    key.publish_time,
+                    key.sequence,
+                    key.payload_size,
+                    key.payload_digest,
+                )
+            )
+    return int.from_bytes(accumulator.digest()[:16], "big")
+
+
+def verify_payloads_match(
+    left: PayloadLookup,
+    right: PayloadLookup,
+    *,
+    left_reader: PayloadReader | None = None,
+    right_reader: PayloadReader | None = None,
+) -> PayloadMismatch | None:
     if left.identity.message_count != right.identity.message_count:
         return PayloadMismatch(
             topic="",
@@ -822,59 +887,65 @@ def verify_payloads_match(left: PayloadLookup, right: PayloadLookup) -> PayloadM
             ),
         )
 
-    all_digests = sorted(left.locators_by_digest.keys() | right.locators_by_digest.keys())
+    if left_reader is not None and right_reader is not None:
+        return _verify_payloads_with_readers(left, right, left_reader, right_reader)
+
     with (
-        open_input(left.path, buffering=0) as (left_stream, _left_size),
-        open_input(right.path, buffering=0) as (right_stream, _right_size),
+        open_payload_reader(left.path, left.chunk_indexes) as own_left_reader,
+        open_payload_reader(right.path, right.chunk_indexes) as own_right_reader,
     ):
-        left_reader = _PayloadReader(left_stream, left.chunk_indexes)
-        right_reader = _PayloadReader(right_stream, right.chunk_indexes)
-        for digest in all_digests:
-            topic = _topic_for_digest(digest, left, right)
-            left_locators = left.locators_by_digest.get(digest, ())
-            right_locators = right.locators_by_digest.get(digest, ())
-            if not left_locators or not right_locators:
+        return _verify_payloads_with_readers(left, right, own_left_reader, own_right_reader)
+
+
+def _verify_payloads_with_readers(
+    left: PayloadLookup,
+    right: PayloadLookup,
+    left_reader: PayloadReader,
+    right_reader: PayloadReader,
+) -> PayloadMismatch | None:
+    all_digests = sorted(left.locators_by_digest.keys() | right.locators_by_digest.keys())
+    for digest in all_digests:
+        topic = _topic_for_digest(digest, left, right)
+        left_locators = left.locators_by_digest.get(digest, ())
+        right_locators = right.locators_by_digest.get(digest, ())
+        if not left_locators or not right_locators:
+            return PayloadMismatch(
+                topic=topic,
+                log_time=0,
+                reason="channel is missing from one side",
+            )
+
+        left_index = 0
+        right_index = 0
+        while left_index < len(left_locators) and right_index < len(right_locators):
+            left_log_time, left_group, left_index = _same_log_time_group(left_locators, left_index)
+            right_log_time, right_group, right_index = _same_log_time_group(
+                right_locators, right_index
+            )
+            if left_log_time != right_log_time:
                 return PayloadMismatch(
                     topic=topic,
-                    log_time=0,
-                    reason="channel is missing from one side",
+                    log_time=min(left_log_time, right_log_time),
+                    reason=(f"log_time differs: {left_log_time} left vs {right_log_time} right"),
                 )
 
-            left_index = 0
-            right_index = 0
-            while left_index < len(left_locators) and right_index < len(right_locators):
-                left_log_time, left_group, left_index = _same_log_time_group(
-                    left_locators, left_index
-                )
-                right_log_time, right_group, right_index = _same_log_time_group(
-                    right_locators, right_index
-                )
-                if left_log_time != right_log_time:
-                    return PayloadMismatch(
-                        topic=topic,
-                        log_time=min(left_log_time, right_log_time),
-                        reason=(
-                            f"log_time differs: {left_log_time} left vs {right_log_time} right"
-                        ),
-                    )
+            mismatch = _compare_payload_groups(
+                topic=topic,
+                log_time=left_log_time,
+                left_group=left_group,
+                right_group=right_group,
+                left_reader=left_reader,
+                right_reader=right_reader,
+            )
+            if mismatch is not None:
+                return mismatch
 
-                mismatch = _compare_payload_groups(
-                    topic=topic,
-                    log_time=left_log_time,
-                    left_group=left_group,
-                    right_group=right_group,
-                    left_reader=left_reader,
-                    right_reader=right_reader,
-                )
-                if mismatch is not None:
-                    return mismatch
-
-            if left_index != len(left_locators) or right_index != len(right_locators):
-                return PayloadMismatch(
-                    topic=topic,
-                    log_time=0,
-                    reason="message count differs",
-                )
+        if left_index != len(left_locators) or right_index != len(right_locators):
+            return PayloadMismatch(
+                topic=topic,
+                log_time=0,
+                reason="message count differs",
+            )
 
     return None
 
@@ -1219,11 +1290,16 @@ def verify_comparison_payloads(
     comparison: IndexedComparison,
     left: PayloadLookup,
     right: PayloadLookup,
+    *,
+    left_reader: PayloadReader | None = None,
+    right_reader: PayloadReader | None = None,
 ) -> IndexedComparison:
     if comparison.kind not in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
         return comparison
 
-    mismatch = verify_payloads_match(left, right)
+    mismatch = verify_payloads_match(
+        left, right, left_reader=left_reader, right_reader=right_reader
+    )
     if mismatch is None:
         return comparison
     return IndexedComparison(
@@ -1348,6 +1424,38 @@ def read_payload_lookup_file(path: str, *, rebuild_missing: bool) -> PayloadLook
             return None
         info, read_mode = result
         return payload_lookup_from_info(path, size_bytes, info, read_mode)
+
+
+def read_index_identity_and_payload_lookup(
+    path: str,
+    *,
+    rebuild_missing: bool,
+    index_progress: IndexReadProgress | None = None,
+) -> tuple[MessageIndexIdentityReadResult, PayloadLookup] | None:
+    """Read message indexes once and produce both identity and payload lookup.
+
+    Equivalent to calling :func:`read_message_index_identity_file` followed by
+    :func:`read_payload_lookup_file`, but saves a second file open + index
+    parse — meaningful when both will be consumed (the duplicates pipeline
+    always does when ``--compare-payloads`` is on).
+    """
+    with open_input(path, buffering=0) as (stream, size_bytes):
+        result = read_indexed_info(
+            stream,
+            rebuild_missing=rebuild_missing,
+            index_progress=index_progress,
+        )
+        if result is None:
+            return None
+        info, read_mode = result
+        identity_result = MessageIndexIdentityReadResult(
+            path=path,
+            size_bytes=size_bytes,
+            identity=message_index_identity_from_info(info),
+            read_mode=read_mode,
+        )
+        lookup = payload_lookup_from_info(path, size_bytes, info, read_mode)
+        return identity_result, lookup
 
 
 def read_compare_file(path: str, *, rebuild_missing: bool = True) -> CompareReadResult:

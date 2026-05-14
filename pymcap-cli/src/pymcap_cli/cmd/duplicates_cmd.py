@@ -2,10 +2,9 @@
 
 import logging
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import accumulate
-from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -34,12 +33,16 @@ from pymcap_cli.core.mcap_compare import (
     MessageIndexIdentity,
     MessageIndexIdentityReadResult,
     PayloadLookup,
+    PayloadReader,
     SummaryChannelRange,
     TopicOverlapEvidence,
     compare_indexed_identities,
+    compute_payload_aggregate_digest,
     discover_mcap_candidates,
+    open_payload_reader,
     path_basename,
     read_identity_file,
+    read_index_identity_and_payload_lookup,
     read_message_index_identity_file,
     read_payload_lookup_file,
     verify_comparison_payloads,
@@ -56,7 +59,6 @@ console = Console()
 
 _MAX_SKIPPED_DETAILS = 10
 _PROGRESS_PAIR_UPDATE_INTERVAL = 128
-_PROGRESS_INDEX_PERCENT_STEPS = 100
 _MAX_TOPIC_EVIDENCE_ROWS = 3
 
 
@@ -168,6 +170,21 @@ def _read_index_identity(
             rebuild_missing=rebuild_missing,
             index_progress=index_progress,
         )
+        if result is None:
+            return SkippedFile(path=path, reason="no complete message indexes")
+    except Exception as exc:  # noqa: BLE001
+        return SkippedFile(path=path, reason=str(exc) or exc.__class__.__name__)
+    else:
+        return result
+
+
+def _read_index_identity_with_payload(
+    path: str,
+    *,
+    rebuild_missing: bool,
+) -> tuple[MessageIndexIdentityReadResult, PayloadLookup] | SkippedFile:
+    try:
+        result = read_index_identity_and_payload_lookup(path, rebuild_missing=rebuild_missing)
         if result is None:
             return SkippedFile(path=path, reason="no complete message indexes")
     except Exception as exc:  # noqa: BLE001
@@ -467,82 +484,50 @@ def _read_candidate_index_identities(
     candidate_paths: set[str],
     *,
     rebuild_missing: bool,
+    include_payload_lookups: bool = False,
     progress: Progress | None = None,
     task: TaskID | None = None,
-) -> tuple[list[MessageIndexIdentityReadResult], list[SkippedFile]]:
+) -> tuple[list[MessageIndexIdentityReadResult], dict[str, PayloadLookup], list[SkippedFile]]:
     scanned: list[MessageIndexIdentityReadResult] = []
+    payload_lookups: dict[str, PayloadLookup] = {}
     skipped: list[SkippedFile] = []
 
     sorted_paths = sorted(candidate_paths)
     file_count = len(sorted_paths)
-    weights = [_file_weight(path) for path in sorted_paths]
-    total_weight = sum(weights) or 1
-    slice_sizes = [file_count * weight / total_weight for weight in weights]
-    slice_starts = [0.0, *accumulate(slice_sizes)]
 
-    for file_index, path in enumerate(sorted_paths):
-        file_number = file_index + 1
-        progress_file = _progress_file(path)
-        slice_start = slice_starts[file_index]
-        slice_size = slice_sizes[file_index]
+    if file_count == 0:
+        return scanned, payload_lookups, skipped
+
+    for index, path in enumerate(sorted_paths, start=1):
         if progress is not None and task is not None:
             progress.update(
                 task,
-                completed=slice_start,
-                current=f"{file_number:,}/{file_count:,} {progress_file}",
+                completed=index - 1,
+                current=f"{index:,}/{file_count:,} {_progress_file(path)}",
             )
-
-        last_progress_step = -1
-
-        def index_progress(
-            completed_indexes: int,
-            total_indexes: int,
-            progress_slice_start: float = slice_start,
-            progress_slice_size: float = slice_size,
-            progress_file_number: int = file_number,
-            progress_file_name: str = progress_file,
-        ) -> None:
-            nonlocal last_progress_step
-            if progress is None or task is None or total_indexes == 0:
-                return
-            progress_step = (completed_indexes * _PROGRESS_INDEX_PERCENT_STEPS) // total_indexes
-            if progress_step == last_progress_step and completed_indexes != total_indexes:
-                return
-            last_progress_step = progress_step
-            completed = progress_slice_start + progress_slice_size * (
-                completed_indexes / total_indexes
-            )
-            current = (
-                f"{progress_file_number:,}/{file_count:,} {progress_file_name} "
-                f"({completed_indexes:,}/{total_indexes:,} index records)"
-            )
-            progress.update(task, completed=completed, current=current)
-
-        result = _read_index_identity(
-            path,
-            rebuild_missing=rebuild_missing,
-            index_progress=index_progress,
-        )
-        if isinstance(result, MessageIndexIdentityReadResult):
-            scanned.append(result)
+        if include_payload_lookups:
+            result = _read_index_identity_with_payload(path, rebuild_missing=rebuild_missing)
+            if isinstance(result, SkippedFile):
+                skipped.append(result)
+            else:
+                identity, lookup = result
+                scanned.append(identity)
+                payload_lookups[path] = lookup
         else:
-            skipped.append(result)
+            identity_or_skip = _read_index_identity(path, rebuild_missing=rebuild_missing)
+            if isinstance(identity_or_skip, MessageIndexIdentityReadResult):
+                scanned.append(identity_or_skip)
+            else:
+                skipped.append(identity_or_skip)
 
     if progress is not None and task is not None:
         progress.update(
             task,
-            completed=len(sorted_paths),
+            completed=file_count,
             current=f"{len(scanned):,} indexed file(s)",
         )
 
-    return scanned, skipped
-
-
-def _file_weight(path: str) -> int:
-    try:
-        return Path(path).stat().st_size
-    except OSError:
-        return 1
+    return scanned, payload_lookups, skipped
 
 
 def _analyze_indexed_matches(
@@ -551,13 +536,15 @@ def _analyze_indexed_matches(
     include_all: bool,
     compare_payloads: bool,
     rebuild_missing: bool,
+    prefetched_payload_lookups: dict[str, PayloadLookup] | None = None,
     progress: Progress | None = None,
     task: TaskID | None = None,
 ) -> IndexedAnalysis:
     parent = list(range(len(scanned)))
     matches: list[IndexedComparison] = []
     skipped: list[SkippedFile] = []
-    payload_lookup_cache: dict[str, PayloadLookup] = {}
+    payload_lookup_cache: dict[str, PayloadLookup] = dict(prefetched_payload_lookups or {})
+    payload_reader_cache: dict[str, PayloadReader] = {}
     completed_pairs = 0
     pair_count = len(scanned) * (len(scanned) - 1) // 2
 
@@ -584,60 +571,94 @@ def _analyze_indexed_matches(
         skipped.append(result)
         return None
 
-    def verify_payloads_if_needed(comparison: IndexedComparison) -> IndexedComparison | None:
-        if not compare_payloads:
-            return comparison
-        if comparison.kind not in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
-            return comparison
-        left_lookup = payload_lookup(comparison.left.path)
-        right_lookup = payload_lookup(comparison.right.path)
-        if left_lookup is None or right_lookup is None:
-            return None
-        try:
-            return verify_comparison_payloads(comparison, left_lookup, right_lookup)
-        except Exception as exc:  # noqa: BLE001
-            skipped.append(
-                SkippedFile(
-                    path=f"{comparison.left.path} <-> {comparison.right.path}",
-                    reason=(f"payload verification failed: {str(exc) or exc.__class__.__name__}"),
+    payload_aggregate_cache: dict[str, int] = {}
+
+    with ExitStack() as stack:
+
+        def payload_reader(lookup: PayloadLookup) -> PayloadReader:
+            reader = payload_reader_cache.get(lookup.path)
+            if reader is None:
+                reader = stack.enter_context(open_payload_reader(lookup.path, lookup.chunk_indexes))
+                payload_reader_cache[lookup.path] = reader
+            return reader
+
+        def payload_aggregate(lookup: PayloadLookup) -> int:
+            cached = payload_aggregate_cache.get(lookup.path)
+            if cached is not None:
+                return cached
+            digest = compute_payload_aggregate_digest(lookup, payload_reader(lookup))
+            payload_aggregate_cache[lookup.path] = digest
+            return digest
+
+        def verify_payloads_if_needed(
+            comparison: IndexedComparison,
+        ) -> IndexedComparison | None:
+            if not compare_payloads:
+                return comparison
+            if comparison.kind not in {
+                IndexedCompareKind.EXACT,
+                IndexedCompareKind.FULL_OVERLAP,
+            }:
+                return comparison
+            left_lookup = payload_lookup(comparison.left.path)
+            right_lookup = payload_lookup(comparison.right.path)
+            if left_lookup is None or right_lookup is None:
+                return None
+            try:
+                if payload_aggregate(left_lookup) == payload_aggregate(right_lookup):
+                    return comparison
+                return verify_comparison_payloads(
+                    comparison,
+                    left_lookup,
+                    right_lookup,
+                    left_reader=payload_reader(left_lookup),
+                    right_reader=payload_reader(right_lookup),
                 )
-            )
-            return None
+            except Exception as exc:  # noqa: BLE001
+                skipped.append(
+                    SkippedFile(
+                        path=f"{comparison.left.path} <-> {comparison.right.path}",
+                        reason=(
+                            f"payload verification failed: {str(exc) or exc.__class__.__name__}"
+                        ),
+                    )
+                )
+                return None
 
-    first_by_digest: dict[str, int] = {}
-    if not compare_payloads:
-        for index, scanned_file in enumerate(scanned):
-            first_index = first_by_digest.get(scanned_file.identity.digest)
-            if first_index is None:
-                first_by_digest[scanned_file.identity.digest] = index
-                continue
-            union(first_index, index)
+        first_by_digest: dict[str, int] = {}
+        if not compare_payloads:
+            for index, scanned_file in enumerate(scanned):
+                first_index = first_by_digest.get(scanned_file.identity.digest)
+                if first_index is None:
+                    first_by_digest[scanned_file.identity.digest] = index
+                    continue
+                union(first_index, index)
 
-    for left_index, left in enumerate(scanned):
-        for right_index, right in enumerate(scanned[left_index + 1 :], start=left_index + 1):
-            completed_pairs += 1
-            if not compare_payloads and left.identity.digest == right.identity.digest:
-                continue
-            if compare_payloads and find(left_index) == find(right_index):
-                continue
+        for left_index, left in enumerate(scanned):
+            for right_index, right in enumerate(scanned[left_index + 1 :], start=left_index + 1):
+                completed_pairs += 1
+                if not compare_payloads and left.identity.digest == right.identity.digest:
+                    continue
+                if compare_payloads and find(left_index) == find(right_index):
+                    continue
 
-            _maybe_update_progress(
-                progress,
-                task,
-                completed=completed_pairs,
-                total=pair_count,
-                interval=_PROGRESS_PAIR_UPDATE_INTERVAL,
-                current=_progress_pair(left.path, right.path),
-            )
+                _maybe_update_progress(
+                    progress,
+                    task,
+                    completed=completed_pairs,
+                    total=pair_count,
+                    interval=_PROGRESS_PAIR_UPDATE_INTERVAL,
+                    current=_progress_pair(left.path, right.path),
+                )
 
-            comparison = compare_indexed_identities(left, right)
-            verified = verify_payloads_if_needed(comparison)
-            if verified is None:
-                continue
-            if verified.kind in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
-                union(left_index, right_index)
-            elif verified.has_overlap:
-                matches.append(verified)
+                comparison = compare_indexed_identities(left, right)
+                verified = verify_payloads_if_needed(comparison)
+                if verified is None:
+                    continue
+                if verified.kind in {IndexedCompareKind.EXACT, IndexedCompareKind.FULL_OVERLAP}:
+                    union(left_index, right_index)
+                elif verified.has_overlap:
+                    matches.append(verified)
 
     if progress is not None and task is not None:
         progress.update(task, completed=pair_count, current=f"{len(matches):,} partial match(es)")
@@ -772,9 +793,10 @@ def duplicates(
             total=len(candidate_paths),
             current="",
         )
-        index_scanned, index_skipped = _read_candidate_index_identities(
+        index_scanned, prefetched_payload_lookups, index_skipped = _read_candidate_index_identities(
             candidate_paths,
             rebuild_missing=rebuild_missing,
+            include_payload_lookups=compare_payloads,
             progress=progress,
             task=index_task,
         )
@@ -791,6 +813,7 @@ def duplicates(
             include_all=include_all,
             compare_payloads=compare_payloads,
             rebuild_missing=rebuild_missing,
+            prefetched_payload_lookups=prefetched_payload_lookups,
             progress=progress,
             task=analysis_task,
         )
