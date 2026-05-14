@@ -10,11 +10,10 @@ from typing import Annotated, Literal, TypedDict
 
 from cyclopts import Group, Parameter
 
+from pymcap_cli.core.tf_findings import detect_cycles, detect_multiple_parents
 from pymcap_cli.core.tf_tree import (
     TransformData,
     build_tree_and_find_roots,
-    detect_cycles,
-    detect_multiple_parents,
     read_transforms,
 )
 from pymcap_cli.exporters.sdf_exporter import render_sdf

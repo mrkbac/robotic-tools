@@ -169,11 +169,17 @@ float64 z
 float64 w"""
 
 
-def _tf_message(transforms: list[tuple[str, str, tuple[float, float, float]]]) -> dict:
+def _tf_message(
+    transforms: list[tuple[str, str, tuple[float, float, float]]],
+    *,
+    stamp_ns: int = 0,
+) -> dict:
+    sec = stamp_ns // NS_TO_SEC
+    nanosec = stamp_ns % NS_TO_SEC
     return {
         "transforms": [
             {
-                "header": {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": parent},
+                "header": {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": parent},
                 "child_frame_id": child,
                 "transform": {
                     "translation": {"x": tx, "y": ty, "z": tz},
@@ -190,6 +196,7 @@ def create_tf_mcap(
     static_edges: list[tuple[str, str, tuple[float, float, float]]] | None = None,
     dynamic_edges: list[tuple[str, str, tuple[float, float, float]]] | None = None,
     dynamic_samples: int = 0,
+    dynamic_stamp_offset_ns: int = 0,
     compression: CompressionType = CompressionType.NONE,
 ) -> bytes:
     """Write a small MCAP with /tf_static (and optionally /tf) ROS 2 messages.
@@ -245,7 +252,10 @@ def create_tf_mcap(
                 channel_id=2,
                 log_time=log_time,
                 publish_time=log_time,
-                data=_tf_message(dynamic_edges),
+                data=_tf_message(
+                    dynamic_edges,
+                    stamp_ns=dynamic_stamp_offset_ns + log_time,
+                ),
             )
 
     writer.finish()

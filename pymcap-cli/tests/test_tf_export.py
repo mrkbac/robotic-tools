@@ -10,11 +10,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd.tf_export_cmd import tf_export
+from pymcap_cli.core.tf_findings import detect_cycles, detect_multiple_parents
 from pymcap_cli.core.tf_tree import (
     TransformData,
     build_tree_and_find_roots,
-    detect_cycles,
-    detect_multiple_parents,
     quaternion_to_euler_rad,
     read_transforms,
 )

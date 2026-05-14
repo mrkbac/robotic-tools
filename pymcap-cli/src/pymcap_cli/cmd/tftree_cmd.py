@@ -2,7 +2,6 @@
 
 import logging
 import math
-from collections import defaultdict
 from datetime import datetime
 from typing import Annotated
 
@@ -15,11 +14,18 @@ from small_mcap import include_topics, read_message_decoded
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.tf_findings import (
+    TfFinding,
+    TfSeverity,
+    collect_tf_findings,
+    has_error_findings,
+)
 from pymcap_cli.core.tf_tree import (
+    TfGraphBuilder,
     TransformData,
     build_tree_and_find_roots,
-    detect_multiple_parents,
     quaternion_to_euler_rad,
+    stamp_to_ns,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,8 +176,7 @@ def tftree(
     change_only
         Update display only when tree structure changes (new frames added).
     """
-    transforms: dict[tuple[str, str], TransformData] = {}
-    transform_counts: dict[tuple[str, str], int] = defaultdict(int)
+    builder = TfGraphBuilder()
     seen_frame_pairs: set[tuple[str, str]] = set()
 
     topics = ["/tf_static"]
@@ -196,39 +201,52 @@ def tftree(
                         seen_frame_pairs.add(key)
                         tree_changed = True
 
-                    transform_counts[key] += 1
-
-                    transforms[key] = TransformData(
-                        frame_id=transform_stamped.header.frame_id,
-                        child_frame_id=transform_stamped.child_frame_id,
+                    builder.add(
+                        static=msg.channel.topic == "/tf_static",
+                        stamp_ns=stamp_to_ns(transform_stamped.header.stamp),
+                        parent=transform_stamped.header.frame_id,
+                        child=transform_stamped.child_frame_id,
                         translation=(trans.x, trans.y, trans.z),
                         rotation=(rot.x, rot.y, rot.z, rot.w),
-                        is_static=msg.channel.topic == "/tf_static",
-                        timestamp_ns=msg.message.log_time,
                     )
 
                 if not change_only or tree_changed:
-                    table = _build_tf_table(transforms, transform_counts)
+                    graph = builder.graph()
+                    table = _build_tf_table(graph.transforms, graph.counts)
                     if table:
                         live.update(table)
 
-            table = _build_tf_table(transforms, transform_counts)
+            graph = builder.graph()
+            table = _build_tf_table(graph.transforms, graph.counts)
             if table:
                 live.update(table)
 
-        multiple_parents = detect_multiple_parents(transforms)
-        if multiple_parents:
+        graph = builder.graph()
+        findings = collect_tf_findings(graph)
+        if findings:
             console.print()
-            console.print("[yellow]⚠ Tree Structure Violations Detected:[/yellow]")
-            description = "[dim]The following frames have multiple parents, "
-            console.print(description)
-            for child, parents in sorted(multiple_parents.items()):
-                parents_str = ", ".join(f"'{p}'" for p in sorted(parents))
-                frame_msg = f"  - Frame [bold]'{child}'[/bold] has parents: {parents_str}"
-                console.print(frame_msg, style="yellow")
+            console.print(_findings_table(findings))
 
     except (OSError, ValueError, RuntimeError):
         logger.exception("Error reading MCAP file")
         return 1
 
-    return 0
+    return 1 if has_error_findings(findings) else 0
+
+
+def _findings_table(findings: list[TfFinding]) -> Table:
+    table = Table(title="TF Findings")
+    table.add_column("Severity", no_wrap=True)
+    table.add_column("Code", no_wrap=True)
+    table.add_column("Message")
+    for finding in findings:
+        table.add_row(_severity_cell(finding.severity), finding.code.value, finding.message)
+    return table
+
+
+def _severity_cell(severity: TfSeverity) -> str:
+    if severity is TfSeverity.ERROR:
+        return "[red]error[/red]"
+    if severity is TfSeverity.WARNING:
+        return "[yellow]warning[/yellow]"
+    return "[cyan]info[/cyan]"

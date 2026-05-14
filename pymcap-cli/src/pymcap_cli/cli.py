@@ -33,6 +33,7 @@ from pymcap_cli.cmd import (
     recover_inplace_cmd,
     split_cmd,
     tf_export_cmd,
+    tf_get_cmd,
     tftree_cmd,
     topic_chunks_cmd,
 )
@@ -131,7 +132,9 @@ _POINTCLOUD_MODULES: tuple[str, ...] = (
     "pointcloud2",
     "pureini",
 )
-_VIDEO_AND_POINTCLOUD_MODULES: tuple[str, ...] = tuple(sorted({*_VIDEO_MODULES, *_POINTCLOUD_MODULES}))
+_VIDEO_AND_POINTCLOUD_MODULES: tuple[str, ...] = tuple(
+    sorted({*_VIDEO_MODULES, *_POINTCLOUD_MODULES})
+)
 
 
 bridge_app = _load_optional_app(
@@ -218,6 +221,7 @@ app.command(get_cmd.get_app, name="get")
 list_cmd.list_app.group = (inspect_group,)
 app.command(list_cmd.list_app, name="list")
 app.command(name="records", group=inspect_group)(records_cmd.records)
+app.command(name="tf-get", group=inspect_group)(tf_get_cmd.tf_get)
 app.command(name="tftree", group=inspect_group)(tftree_cmd.tftree)
 app.command(name="topic-chunks", group=inspect_group)(topic_chunks_cmd.topic_chunks)
 
