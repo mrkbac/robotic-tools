@@ -75,11 +75,11 @@ unresolved-attribute = "ignore"
 include = [
     "mcap-codec-support/src/mcap_codec_support/video/compression.py",
     "mcap-codec-support/src/mcap_codec_support/video/factories.py",
-    "mcap-codec-support/src/mcap_codec_support/video/file_writer.py",
     "mcap-codec-support/src/mcap_codec_support/video/ffmpeg.py",
     "mcap-codec-support/src/mcap_codec_support/video/pyav.py",
     "pymcap-cli/src/pymcap_cli/cmd/rosdecompress_cmd.py",
     "pymcap-cli/src/pymcap_cli/cmd/roscompress_cmd.py",
+    "pymcap-cli/src/pymcap_cli/exporters/video_file_writer.py",
 ]
 
 [tool.ty.overrides.rules]

@@ -17,10 +17,6 @@ from mcap_codec_support.video.compression import (
     prefetch_image_decodes,
 )
 from mcap_codec_support.video.factories import VideoDecompressFactory
-from mcap_codec_support.video.file_writer import (
-    VideoFileWriterSession,
-    create_video_file_writer,
-)
 from mcap_codec_support.video.schemas import (
     COMPRESSED_IMAGE,
     COMPRESSED_VIDEO_SCHEMA,
@@ -44,10 +40,8 @@ __all__ = [
     "VideoCompressionBackend",
     "VideoDecompressFactory",
     "VideoEncoderError",
-    "VideoFileWriterSession",
     "calculate_downscale_dimensions",
     "create_video_compression_backend",
-    "create_video_file_writer",
     "encode_raw_image_to_jpeg",
     "get_software_encoder",
     "prefetch_image_decodes",

@@ -1,9 +1,12 @@
-"""Lazy MP4 writer helpers for decoded image messages."""
+"""Lazy MP4 writer helpers for the CLI video exporter."""
 
 from __future__ import annotations
 
+import contextlib
+import subprocess
+import threading
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mcap_codec_support.video.common import (
     EncoderBackend,
@@ -11,18 +14,38 @@ from mcap_codec_support.video.common import (
     EncoderMode,
     VideoCodec,
     VideoEncoderError,
+    build_encoder_options,
     get_encoder_options,
     raw_image_to_array,
     resolve_encoder_for_backend,
 )
 from mcap_codec_support.video.compression import decode_compressed_image_to_rgb_array
+from mcap_codec_support.video.ffmpeg import (
+    ROS_ENCODING_TO_PIX_FMT,
+    check_encoder_cli,
+    find_ffmpeg,
+    probe_image_dimensions,
+)
 from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS, IMAGE_SCHEMAS, RAW_SCHEMAS
 
 if TYPE_CHECKING:
+    import os
     from collections.abc import Callable
     from pathlib import Path
 
-    from mcap_codec_support._protocols import VideoFileStrategy
+    import numpy as np
+
+
+class _VideoFileStrategy(Protocol):
+    config: EncoderConfig
+
+    def write_compressed(self, data: bytes, log_time_ns: int) -> None: ...
+
+    def write_raw(self, data: bytes, log_time_ns: int) -> None: ...
+
+    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None: ...
+
+    def close(self) -> int: ...
 
 
 _TARGET_BITRATE_BY_QUALITY: tuple[tuple[int, int], ...] = (
@@ -88,6 +111,144 @@ def _pack_raw_image_bytes(decoded: Any, *, width: int, height: int) -> bytes:
     return bytes(packed)
 
 
+class FFmpegMp4Encoder:
+    """Encode a stream of frames to an MP4 file via an ffmpeg subprocess."""
+
+    def __init__(
+        self,
+        output_path: os.PathLike[str] | str,
+        *,
+        width: int,
+        height: int,
+        codec_name: str,
+        quality: int = 28,
+        target_fps: float = 30.0,
+        gop_size: int = 60,
+        input_pix_fmt: str | None = "rgb24",
+    ) -> None:
+        ffmpeg = find_ffmpeg()
+        if ffmpeg is None:
+            raise VideoEncoderError("ffmpeg not found on PATH")
+
+        width, height = _even_dimensions(width, height)
+        if not check_encoder_cli(codec_name):
+            raise VideoEncoderError(
+                f"ffmpeg CLI does not support encoder {codec_name!r}. "
+                "Install a fuller ffmpeg build or pick a different --encoder backend."
+            )
+
+        options, bit_rate = build_encoder_options(codec_name, quality, width, height)
+        fps_int = max(round(target_fps), 1)
+
+        cmd: list[str] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if input_pix_fmt is None:
+            cmd.extend(["-f", "image2pipe", "-r", str(fps_int), "-i", "pipe:0"])
+        else:
+            cmd.extend(
+                [
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    input_pix_fmt,
+                    "-s",
+                    f"{width}x{height}",
+                    "-r",
+                    str(fps_int),
+                    "-i",
+                    "pipe:0",
+                ]
+            )
+
+        if input_pix_fmt is None:
+            cmd.extend(["-vf", f"scale={width}:{height}"])
+
+        cmd.extend(
+            [
+                "-c:v",
+                codec_name,
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                str(gop_size),
+                "-bf",
+                "0",
+            ]
+        )
+        if bit_rate is not None:
+            cmd.extend(["-b:v", str(bit_rate)])
+        for key, value in options.items():
+            cmd.extend([f"-{key}", value])
+
+        cmd.extend(["-movflags", "+faststart", "-f", "mp4", str(output_path)])
+
+        self._cmd = cmd
+        self.output_path = output_path
+        self.config = EncoderConfig(width=width, height=height, codec_name=codec_name)
+        self._stderr_lines: list[str] = []
+        self._frames_fed = 0
+
+        self._process = subprocess.Popen(  # noqa: S603
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _read_stderr(self) -> None:
+        if self._process.stderr is None:
+            return
+        for raw in iter(self._process.stderr.readline, b""):
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                self._stderr_lines.append(line)
+        self._process.stderr.close()
+
+    def write_frame(self, frame_bytes: bytes) -> None:
+        """Write one input frame to ffmpeg stdin."""
+        if self._process.stdin is None or self._process.stdin.closed:
+            raise VideoEncoderError("ffmpeg process stdin is closed")
+        try:
+            self._process.stdin.write(frame_bytes)
+        except BrokenPipeError as exc:
+            stderr_tail = "\n".join(self._stderr_lines[-5:])
+            raise VideoEncoderError(f"ffmpeg subprocess exited mid-stream:\n{stderr_tail}") from exc
+        self._frames_fed += 1
+
+    @property
+    def frames_fed(self) -> int:
+        return self._frames_fed
+
+    def close(self) -> None:
+        if self._process.poll() is not None and self._process.stdin is None:
+            return
+        if self._process.stdin and not self._process.stdin.closed:
+            with contextlib.suppress(BrokenPipeError):
+                self._process.stdin.close()
+        try:
+            self._process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=5)
+            raise VideoEncoderError("ffmpeg subprocess did not exit cleanly; killed") from None
+        self._stderr_thread.join(timeout=5)
+        if self._process.returncode != 0:
+            stderr_tail = "\n".join(self._stderr_lines[-10:])
+            raise VideoEncoderError(
+                f"ffmpeg exited with code {self._process.returncode}:\n{stderr_tail}"
+            )
+
+    def __del__(self) -> None:
+        try:
+            if self._process and self._process.poll() is None:
+                self._process.kill()
+                self._process.wait(timeout=2)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
 class _PyAVMp4Strategy:
     """In-process PyAV MP4 writer."""
 
@@ -103,12 +264,9 @@ class _PyAVMp4Strategy:
     ) -> None:
         import av  # noqa: PLC0415
         import av.error  # noqa: PLC0415
-
         from mcap_codec_support.video.pyav import resolve_encoder_for_backend  # noqa: PLC0415
 
         self.path = path
-        self._codec = codec
-        self._quality = quality
         self._encoder_name = resolve_encoder_for_backend(codec.value, encoder_backend.value)
         self._first_timestamp_ns: int | None = None
         self._last_pts = -1
@@ -196,11 +354,6 @@ class _FfmpegMp4Strategy:
         height: int,
         input_pix_fmt: str | None,
     ) -> None:
-        from mcap_codec_support.video.ffmpeg import (  # noqa: PLC0415
-            FFmpegMp4Encoder,
-            check_encoder_cli,
-        )
-
         encoder_name = resolve_encoder_for_backend(
             codec.value, encoder_backend.value, test_fn=check_encoder_cli
         )
@@ -251,7 +404,7 @@ class VideoFileWriterSession:
         self._quality = quality
         self._mode = mode
         self._on_fallback = on_fallback
-        self._strategy: VideoFileStrategy | None = None
+        self._strategy: _VideoFileStrategy | None = None
         self._input_kind: str | None = None
 
     def write_message(self, decoded: Any, schema_name: str, log_time_ns: int) -> None:
@@ -343,8 +496,6 @@ class VideoFileWriterSession:
         self._input_kind = "pyav"
 
     def _open_ffmpeg_compressed(self, data: bytes) -> None:
-        from mcap_codec_support.video.ffmpeg import probe_image_dimensions  # noqa: PLC0415
-
         width, height = probe_image_dimensions(data)
         width, height = _even_dimensions(width, height)
         self._strategy = _FfmpegMp4Strategy(
@@ -359,8 +510,6 @@ class VideoFileWriterSession:
         self._input_kind = "ffmpeg"
 
     def _open_ffmpeg_raw(self, decoded: Any) -> None:
-        from mcap_codec_support.video.ffmpeg import ROS_ENCODING_TO_PIX_FMT  # noqa: PLC0415
-
         encoding = str(decoded.encoding).lower()
         pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)
         if not pix_fmt:

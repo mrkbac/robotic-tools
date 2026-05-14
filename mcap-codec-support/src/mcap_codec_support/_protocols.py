@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    import numpy as np
     from av import VideoFrame
     from small_mcap import DecodedMessage
 
@@ -78,17 +77,3 @@ class VideoCompressionBackend(Protocol):
     ) -> VideoEncoderProtocol: ...
 
     def get_pix_fmt(self, topic: str) -> str | None: ...
-
-
-class VideoFileStrategy(Protocol):
-    """Strategy contract used by the lazy MP4 file writer."""
-
-    config: EncoderConfig
-
-    def write_compressed(self, data: bytes, log_time_ns: int) -> None: ...
-
-    def write_raw(self, data: bytes, log_time_ns: int) -> None: ...
-
-    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None: ...
-
-    def close(self) -> int: ...

@@ -36,8 +36,6 @@ from mcap_codec_support.video import (
     EncoderMode,
     VideoCodec,
     VideoEncoderError,
-    VideoFileWriterSession,
-    create_video_file_writer,
 )
 
 from pymcap_cli.exporters._common import (
@@ -47,6 +45,10 @@ from pymcap_cli.exporters._common import (
     schema_name_in,
 )
 from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
+from pymcap_cli.exporters.video_file_writer import (
+    VideoFileWriterSession,
+    create_video_file_writer,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
