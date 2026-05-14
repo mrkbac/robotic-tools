@@ -9,7 +9,6 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from functools import cache
 from pathlib import Path
 from typing import IO, Literal, Protocol, cast
 from urllib.parse import unquote, urlparse
@@ -31,13 +30,13 @@ from small_mcap.records import OPCODE_AND_LEN_STRUCT, Opcode
 
 from pymcap_cli.core.input_handler import open_input
 
-_PayloadHashFn = Callable[[bytes | bytearray | memoryview], str]
+_PayloadHashFn = Callable[[bytes | bytearray | memoryview], int]
 try:
-    from xxhash import xxh3_128_hexdigest as _imported_xxh3_128_hexdigest
+    from xxhash import xxh3_64_intdigest as _imported_xxh3_64_intdigest
 except ImportError:
-    _xxh3_128_hexdigest: _PayloadHashFn | None = None
+    _payload_digest: _PayloadHashFn = cast("_PayloadHashFn", hash)
 else:
-    _xxh3_128_hexdigest = cast("_PayloadHashFn", _imported_xxh3_128_hexdigest)
+    _payload_digest = cast("_PayloadHashFn", _imported_xxh3_64_intdigest)
 
 
 class HashSink(Protocol):
@@ -254,7 +253,7 @@ class _PayloadRecordKey:
     publish_time: int
     sequence: int
     payload_size: int
-    payload_digest: str
+    payload_digest: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,23 +383,6 @@ def _channel_fingerprint(
 
 def _unknown_channel_topic(channel_id: int) -> str:
     return f"Channel_{channel_id}"
-
-
-def _blake2b_128_hexdigest(data: bytes | bytearray | memoryview) -> str:
-    hasher = hashlib.blake2b(digest_size=16)
-    hasher.update(data)
-    return hasher.hexdigest()
-
-
-@cache
-def _payload_hash_fn() -> _PayloadHashFn:
-    if _xxh3_128_hexdigest is not None:
-        return _xxh3_128_hexdigest
-    return _blake2b_128_hexdigest
-
-
-def _payload_digest(data: bytes | bytearray | memoryview) -> str:
-    return _payload_hash_fn()(data)
 
 
 @dataclass(frozen=True, slots=True)

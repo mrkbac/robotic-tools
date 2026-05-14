@@ -24,7 +24,7 @@ def _run_duplicates(
     monkeypatch: pytest.MonkeyPatch,
     *,
     include_all: bool = False,
-    rebuild_missing: bool = False,
+    rebuild_missing: bool = True,
     compare_payloads: bool = False,
 ) -> tuple[int, str]:
     output = io.StringIO()
@@ -456,7 +456,7 @@ def test_duplicates_ignores_same_channel_without_approximate_time_overlap(
     assert "message-index-checked 0 candidate file(s)" in output
 
 
-def test_duplicates_skips_summaryless_by_default(
+def test_duplicates_rebuilds_summaryless_by_default(
     simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     summaryless = tmp_path / "summaryless.mcap"
@@ -466,12 +466,31 @@ def test_duplicates_skips_summaryless_by_default(
     exit_code, output = _run_duplicates([simple_mcap, summaryless], monkeypatch)
 
     assert exit_code == 0
+    assert "Duplicate MCAP Groups" in output
+    assert simple_mcap.name in output
+    assert summaryless.name in output
+
+
+def test_duplicates_skips_summaryless_when_rebuild_disabled(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summaryless = tmp_path / "summaryless.mcap"
+    shutil.copyfile(simple_mcap, summaryless)
+    _truncate_after_data_section(summaryless)
+
+    exit_code, output = _run_duplicates(
+        [simple_mcap, summaryless],
+        monkeypatch,
+        rebuild_missing=False,
+    )
+
+    assert exit_code == 0
     assert "No duplicate or partial MCAP matches found" in output
     assert "Skipped 1 file(s)" in output
     assert str(summaryless) in output
 
 
-def test_duplicates_skips_summary_match_without_message_indexes(
+def test_duplicates_skips_summary_match_without_message_indexes_when_rebuild_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     indexed = tmp_path / "indexed.mcap"
@@ -479,7 +498,11 @@ def test_duplicates_skips_summary_match_without_message_indexes(
     _write_custom_mcap(indexed)
     _write_custom_mcap(no_message_indexes, index_types=IndexType.CHUNK)
 
-    exit_code, output = _run_duplicates([indexed, no_message_indexes], monkeypatch)
+    exit_code, output = _run_duplicates(
+        [indexed, no_message_indexes],
+        monkeypatch,
+        rebuild_missing=False,
+    )
 
     assert exit_code == 0
     assert "No duplicate or partial MCAP matches found" in output
