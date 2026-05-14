@@ -6,7 +6,17 @@ User-facing notes for releases.
 
 ## Unreleased
 
-### pymcap-cli
+---
+
+## pymcap-cli 0.10.0, small-mcap 0.8.0, mcap-codec-support 0.3.0, pureini 0.4.0, robo-ws-bridge 0.4.0
+
+Headline: `pymcap-cli` adds MCAP doctor checks, live Foxglove bridge
+inspection/recording/cat, `tf-export`, better split/filter/merge
+processing, and Pillow-based image export. Supporting packages add Python
+3.14 stdlib zstd support, safer MCAP ID remapping, bridge service/graph
+state, and a slimmer codec-support surface.
+
+### pymcap-cli 0.10.0
 
 - New `doctor` command validates MCAP container structure and indexes.
   Findings are grouped by code by default, `--show-all` prints every
@@ -38,6 +48,10 @@ User-facing notes for releases.
   segment when accumulated input payload exceeds the budget. Segment
   count is dynamic; segments may overshoot by up to one input chunk's
   worth, and output file size depends on output compression.
+- `split --expression` adds `--hysteresis`, `--hysteresis-count`,
+  `--keep-trailing-context`, and `--keep-trailing-count` to avoid noisy
+  value-change splits and duplicate target-topic context into the
+  previous segment after a transition.
 - `merge` adds `--dedup-identical` to drop messages whose
   ``(channel_id, log_time, payload-hash)`` was already written.
   Useful when overlapping inputs would otherwise write the same
@@ -60,6 +74,10 @@ User-facing notes for releases.
 - `filter` and `split` add `--latch` and `--latch-from-metadata` so
   transient-local topics such as `/tf_static` are preserved through
   trimming and replayed into split outputs.
+- `export-images` now uses Pillow instead of `imagecodecs` for raw image
+  messages and requested re-encoding. Native compressed-image export
+  still writes source bytes directly and preserves known source
+  extensions; `pymcap-cli[image]` now installs Pillow only.
 - `bag2mcap` and `convert` now exit successfully without creating an
   output file when the ROS 1 bag or ROS 2 DB3 input contains no
   connections/topics.
@@ -67,13 +85,17 @@ User-facing notes for releases.
   transform commands before any input paths are opened.
 - Progress bars no longer overshoot when a command rereads stream data
   after scanning summaries or indexes.
+- Transform commands now share the staged processor pipeline for
+  filtering, splitting, latching, deduplication, and ID-sensitive chunk
+  copy decisions. Chunks are fast-copied only when the active processors
+  say their message scope is safe.
 - Merging inputs that require schema or channel ID remapping now decodes
   every chunk from the affected input stream, preventing stale in-chunk
   Schema/Channel records from leaking into the output.
 - Optional commands now report targeted install hints for missing extras;
   `pymcap-cli[all]` includes the new `bridge` extra.
 
-### small-mcap
+### small-mcap 0.8.0
 
 - zstd compression/decompression can use Python 3.14's
   `compression.zstd` module, with the existing third-party `zstandard`
@@ -82,25 +104,32 @@ User-facing notes for releases.
 - `Remapper` tracks streams where schema or channel IDs were reassigned,
   including deduplication to a different ID, so processors can avoid
   unsafe raw chunk copies after remapping.
+- `Remapper` can reserve output-only schema and channel IDs without
+  colliding with incoming streams, and keeps the schema -> channel ->
+  message remap flow explicit for callers that inspect remap state.
 
-### robo-ws-bridge
+### mcap-codec-support 0.3.0
 
-- `WebSocketBridgeClient` now tracks advertised services, remove-status
-  events, and connection-graph updates. It exposes `services` and
-  `connection_graph`, supports connection-graph subscribe/unsubscribe
-  callbacks, and restores the graph subscription after reconnects.
+- The point-cloud package exposes `is_compressed_codec_available()` so
+  callers can detect whether a compressed point-cloud backend is
+  importable before selecting that path.
+- Raw-image JPEG encoding uses Pillow instead of `imagecodecs`; the
+  `video` extra now brings in Pillow alongside PyAV and NumPy.
+- MP4 file-writing helpers moved to `pymcap-cli`; `mcap-codec-support`
+  no longer owns file export concerns.
 
-### pureini
+### pureini 0.4.0
 
 - Point-cloud zstd encode/decode paths support Python 3.14's stdlib
   `compression.zstd` module and keep the existing `zstandard` fallback
   for older Python versions.
 
-### mcap-codec-support
+### robo-ws-bridge 0.4.0
 
-- The point-cloud package exposes `is_compressed_codec_available()` so
-  callers can detect whether a compressed point-cloud backend is
-  importable before selecting that path.
+- `WebSocketBridgeClient` now tracks advertised services, remove-status
+  events, and connection-graph updates. It exposes `services` and
+  `connection_graph`, supports connection-graph subscribe/unsubscribe
+  callbacks, and restores the graph subscription after reconnects.
 
 ---
 
