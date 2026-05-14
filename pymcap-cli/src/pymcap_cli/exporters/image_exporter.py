@@ -3,14 +3,14 @@
 * ``CompressedImage``: payload bytes are written verbatim unless a different
   target format is requested via ``output_format``; otherwise the ROS ``format``
   field names the file extension.
-* ``Image``: decoded to RGB and re-encoded via ``imagecodecs``. Optional
-  dependencies are lazy-imported so they are only required when raw images are
-  actually encountered.
+* ``Image``: decoded to RGB and re-encoded via Pillow.
 """
 
 from __future__ import annotations
 
 import importlib
+import io
+from functools import cache
 from typing import TYPE_CHECKING, ClassVar
 
 from mcap_codec_support.video import raw_image_to_array
@@ -41,22 +41,18 @@ _COMPRESSED_IMAGE_SCHEMAS: frozenset[str] = frozenset(
 _RAW_IMAGE_SCHEMAS: frozenset[str] = frozenset({"sensor_msgs/Image"})
 _IMAGE_SCHEMAS: frozenset[str] = _COMPRESSED_IMAGE_SCHEMAS | _RAW_IMAGE_SCHEMAS
 
-# User-facing format aliases -> (imagecodecs encoder name, file extension).
 _IMAGE_FORMATS: dict[str, tuple[str, str]] = {
-    "jpg": ("jpeg", "jpg"),
-    "jpeg": ("jpeg", "jpg"),
-    "png": ("png", "png"),
-    "webp": ("webp", "webp"),
-    "jxl": ("jpegxl", "jxl"),
-    "jpegxl": ("jpegxl", "jxl"),
-    "avif": ("avif", "avif"),
-    "heif": ("heif", "heif"),
-    "tif": ("tiff", "tif"),
-    "tiff": ("tiff", "tiff"),
-    "bmp": ("bmp", "bmp"),
-    "gif": ("gif", "gif"),
-    "qoi": ("qoi", "qoi"),
+    "jpg": ("JPEG", "jpg"),
+    "jpeg": ("JPEG", "jpg"),
+    "png": ("PNG", "png"),
+    "webp": ("WEBP", "webp"),
+    "tif": ("TIFF", "tif"),
+    "tiff": ("TIFF", "tiff"),
+    "bmp": ("BMP", "bmp"),
+    "gif": ("GIF", "gif"),
 }
+
+# Native passthrough extension detection only; this does not imply Pillow can re-encode it.
 _COMPRESSED_FORMAT_MARKERS: tuple[tuple[str, str], ...] = (
     ("jpegxl", "jxl"),
     ("jxl", "jxl"),
@@ -75,14 +71,16 @@ _COMPRESSED_FORMAT_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _supported_image_formats(imagecodecs_module: ModuleType | None = None) -> frozenset[str]:
-    """Return supported user-facing image formats for the imported module."""
-    module = imagecodecs_module or importlib.import_module("imagecodecs")
-    return frozenset(
-        alias
-        for alias, (encoder_name, _) in _IMAGE_FORMATS.items()
-        if callable(getattr(module, f"{encoder_name}_encode", None))
-    )
+@cache
+def _pil_image() -> ModuleType:
+    try:
+        image = importlib.import_module("PIL.Image")
+    except ImportError as exc:
+        raise ImportError(
+            "image export requires Pillow. Install with: uv add 'pymcap-cli[image]'"
+        ) from exc
+    image.init()
+    return image
 
 
 def _normalize_image_format(format_str: str) -> str:
@@ -90,41 +88,52 @@ def _normalize_image_format(format_str: str) -> str:
     return format_str.strip().lower().lstrip(".")
 
 
+def _supported_image_formats(pil_image: ModuleType | None = None) -> frozenset[str]:
+    """Return supported user-facing image formats for the installed Pillow build."""
+    image = pil_image or _pil_image()
+    save = image.SAVE
+    return frozenset(alias for alias, (pil_format, _) in _IMAGE_FORMATS.items() if pil_format in save)
+
+
 def _resolve_raw_encoder(
-    raw_format: str, *, imagecodecs_module: ModuleType | None = None
+    raw_format: str, *, pil_image: ModuleType | None = None
 ) -> tuple[str, Callable[[np.ndarray], bytes]]:
     """Resolve the output extension and encoder callable for raw images."""
-    format_name = _normalize_image_format(raw_format)
-    if not format_name:
+    alias = _normalize_image_format(raw_format)
+    if not alias:
         raise ValueError("image format must be non-empty")
-    module = imagecodecs_module or importlib.import_module("imagecodecs")
+    image = pil_image or _pil_image()
     try:
-        encoder_name, extension = _IMAGE_FORMATS[format_name]
+        pil_format, extension = _IMAGE_FORMATS[alias]
     except KeyError as exc:
-        supported = ", ".join(sorted(_supported_image_formats(module)))
+        supported = ", ".join(sorted(_supported_image_formats(image)))
         raise TypeError(
             f"image format {raw_format!r} is not supported. Supported formats: {supported}"
         ) from exc
 
-    encode = getattr(module, f"{encoder_name}_encode", None)
-    if not callable(encode):
-        supported = ", ".join(sorted(_supported_image_formats(module)))
+    if pil_format not in image.SAVE:
+        supported = ", ".join(sorted(_supported_image_formats(image)))
         raise TypeError(
-            f"image format {raw_format!r} is not supported by installed imagecodecs. "
+            f"image format {raw_format!r} is not supported by the installed Pillow build. "
             f"Supported formats: {supported}"
         )
+
+    def encode(array: np.ndarray) -> bytes:
+        img = image.fromarray(array)
+        buf = io.BytesIO()
+        img.save(buf, format=pil_format)
+        return buf.getvalue()
 
     return extension, encode
 
 
 def _decode_compressed_image_to_rgb(data: bytes) -> np.ndarray:
-    """Decode compressed image bytes with imagecodecs and return an RGB array."""
+    """Decode compressed image bytes via Pillow and return an RGB array."""
     import numpy as np  # noqa: PLC0415
 
-    imagecodecs = importlib.import_module("imagecodecs")
-    array = np.asarray(imagecodecs.imread(data))
-    if array.ndim == 2:
-        return np.repeat(array[:, :, None], 3, axis=2)
+    image = _pil_image()
+    with image.open(io.BytesIO(data)) as img:
+        array = np.asarray(img.convert("RGB"))
     if array.ndim == 3 and array.shape[2] >= 3:
         return np.ascontiguousarray(array[:, :, :3])
     raise ValueError(f"Unsupported decoded image shape: {array.shape}")
@@ -166,7 +175,6 @@ class _CompressedImageWriter(TopicWriter):
                     self._used_counts,
                 )
                 with path.open("wb") as fh:
-                    # ``imagecodecs`` encode functions accept RGB arrays.
                     encode = self._encode
                     assert encode is not None
                     fh.write(encode(_decode_compressed_image_to_rgb(data)))
@@ -181,7 +189,7 @@ class _CompressedImageWriter(TopicWriter):
 
 
 class _RawImageWriter(TopicWriter):
-    """Encode raw ``sensor_msgs/Image`` via ``imagecodecs``."""
+    """Encode raw ``sensor_msgs/Image`` via Pillow."""
 
     def __init__(self, dir_path: Path, *, raw_format: str) -> None:
         self.dir_path = dir_path
@@ -202,7 +210,6 @@ class _RawImageWriter(TopicWriter):
             self._used_counts,
         )
         with path.open("wb") as fh:
-            # ``imagecodecs`` encode functions accept the decoded RGB array directly.
             encode = self._encode
             assert encode is not None
             fh.write(encode(rgb))
@@ -217,7 +224,7 @@ class ImageExporter(Ros2Exporter):
     ``CompressedImage`` payloads are written with the source extension unless
     a different output format is configured via ``--format`` (default:
     ``native``). ``Image`` payloads are decoded to RGB and re-encoded via
-    ``imagecodecs`` (``image`` extra).
+    Pillow (``image`` extra).
     """
 
     name: ClassVar[str] = "images"

@@ -209,7 +209,7 @@ def test_image_exporter_passthrough_compressed(tmp_path):
     files = list(topic_dirs[0].iterdir())
     assert len(files) > 0
     # Default output format is native, so we keep original compressed extensions.
-    assert all(p.suffix in {".jpg", ".png", ".jxl", ".webp", ".bin"} for p in files)
+    assert all(p.suffix in {".jpg", ".png", ".webp", ".bin"} for p in files)
 
 
 @pytest.mark.skipif(
@@ -229,46 +229,40 @@ def test_image_exporter_converts_compressed_to_target_format(tmp_path):
     assert all(p.suffix == ".jpg" for p in files)
 
 
-def _fake_imagecodecs() -> SimpleNamespace:
-    return SimpleNamespace(
-        jpeg_encode=lambda _data: b"jpeg",
-        jpegxl_encode=lambda _data: b"jxl",
-        png_encode=lambda _data: b"png",
-        zlib_encode=lambda _data: b"zlib",
-    )
+def _fake_pillow() -> SimpleNamespace:
+    return SimpleNamespace(SAVE={"JPEG": object(), "PNG": object()})
 
 
-def test_supported_image_formats_discovers_encoder_names() -> None:
-    module = _fake_imagecodecs()
-    assert _supported_image_formats(module) == frozenset({"jpeg", "jpg", "jpegxl", "jxl", "png"})
+def test_supported_image_formats_discovers_pillow_save_keys() -> None:
+    pil = _fake_pillow()
+    assert _supported_image_formats(pil) == frozenset({"jpeg", "jpg", "png"})
 
 
-def test_resolve_raw_encoder_accepts_imagecodecs_aliases() -> None:
-    module = _fake_imagecodecs()
-    extension, encode = _resolve_raw_encoder("JPG", imagecodecs_module=module)
+def test_resolve_raw_encoder_accepts_format_aliases() -> None:
+    pil = _fake_pillow()
+    extension, encode = _resolve_raw_encoder("JPG", pil_image=pil)
     assert extension == "jpg"
-    assert encode is module.jpeg_encode
+    assert callable(encode)
 
-    extension, encode = _resolve_raw_encoder("jxl", imagecodecs_module=module)
-    assert extension == "jxl"
-    assert encode is module.jpegxl_encode
+    extension, _encode = _resolve_raw_encoder("png", pil_image=pil)
+    assert extension == "png"
 
 
-def test_resolve_raw_encoder_rejects_unsupported_formats() -> None:
-    module = _fake_imagecodecs()
+def test_resolve_raw_encoder_rejects_unknown_alias() -> None:
+    pil = _fake_pillow()
     with pytest.raises(TypeError, match="is not supported"):
-        _resolve_raw_encoder("avif", imagecodecs_module=module)
+        _resolve_raw_encoder("zlib", pil_image=pil)
 
 
-def test_resolve_raw_encoder_rejects_non_image_codecs() -> None:
-    module = _fake_imagecodecs()
-    with pytest.raises(TypeError, match="is not supported"):
-        _resolve_raw_encoder("zlib", imagecodecs_module=module)
+def test_resolve_raw_encoder_rejects_unsupported_pillow_save_key() -> None:
+    pil = _fake_pillow()
+    with pytest.raises(TypeError, match="not supported by the installed Pillow build"):
+        _resolve_raw_encoder("webp", pil_image=pil)
 
 
-def test_compressed_format_to_extension_prefers_jpegxl_over_jpeg() -> None:
-    assert _format_to_extension("jpegxl") == "jxl"
+def test_compressed_format_to_extension_recognises_jpeg() -> None:
     assert _format_to_extension("rgb8; jpeg compressed bgr8") == "jpg"
+    assert _format_to_extension("unknown") == "bin"
 
 
 def test_csv_exporter_skips_blob_schemas_by_default():

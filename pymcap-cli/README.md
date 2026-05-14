@@ -468,9 +468,9 @@ pymcap-cli rosdecompress input.mcap output.mcap --no-pointcloud
 
 Export image topics to per-topic folders of image files. `CompressedImage`
 payloads keep their original encoding by default (`--format native`); set
-`--format` to an `imagecodecs` encoder name (e.g. `jpeg`, `png`, `webp`) to
-re-encode. Raw `Image` messages always use `--raw-format` (default `png`).
-Requires the `image` extra.
+`--format` to a Pillow format (e.g. `jpeg`, `png`, `webp`) to re-encode. Raw
+`Image` messages always use `--raw-format` (default `png`). Requires the
+`image` extra.
 
 ```bash
 # Native passthrough for CompressedImage; PNG for raw Image

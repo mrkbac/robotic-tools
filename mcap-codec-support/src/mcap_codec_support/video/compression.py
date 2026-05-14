@@ -192,13 +192,17 @@ def prefetch_image_decodes(
 
 def _encode_rgb_array_to_jpeg(rgb_array: Any, quality: int) -> bytes:
     try:
-        import imagecodecs  # noqa: PLC0415
+        from PIL import Image  # noqa: PLC0415
     except ImportError as exc:
         raise VideoEncoderError(
-            "imagecodecs is required for JPEG image encoding. "
-            "Install with: uv add 'mcap-codec-support[image]'"
+            "Pillow is required for JPEG image encoding. "
+            "Install with: uv add 'mcap-codec-support[video]'"
         ) from exc
-    return bytes(imagecodecs.jpeg_encode(rgb_array, level=quality))
+    import io  # noqa: PLC0415
+
+    buf = io.BytesIO()
+    Image.fromarray(rgb_array).save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
 
 
 def _resize_rgb_array(rgb_array: Any, width: int, height: int) -> Any:
@@ -211,7 +215,7 @@ def _resize_rgb_array(rgb_array: Any, width: int, height: int) -> Any:
 def encode_raw_image_to_jpeg(
     decoded_message: Any, *, jpeg_quality: int, scale: int | None
 ) -> tuple[bytes, int, int]:
-    """Encode a raw ROS Image message to JPEG using imagecodecs for final encode."""
+    """Encode a raw ROS Image message to JPEG using Pillow for final encode."""
     rgb_array = raw_image_to_array(decoded_message)
     src_h, src_w = rgb_array.shape[:2]
     if scale is not None:

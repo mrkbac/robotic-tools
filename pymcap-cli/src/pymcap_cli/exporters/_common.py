@@ -12,7 +12,6 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mcap_codec_support._schemas import normalize_schema_name
 from small_mcap import include_topics
 
 if TYPE_CHECKING:
@@ -22,6 +21,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _TABLE_NAME_RE = re.compile(r"[^0-9a-zA-Z_]+")
+
+
+def normalize_schema_name(name: str) -> str:
+    """Canonicalise ROS1/ROS2 schema names to the short ``pkg/Type`` form.
+
+    ROS2 IDL names appear as ``pkg/msg/Type`` (or ``pkg/srv/Type``,
+    ``pkg/action/Type``); ROS1 + foxglove flatbuffer names are already
+    ``pkg/Type``. Stripping the middle segment lets schema sets carry one
+    canonical entry per type instead of two.
+    """
+    parts = name.split("/")
+    if len(parts) == 3 and parts[1] in ("msg", "srv", "action"):
+        return f"{parts[0]}/{parts[2]}"
+    return name
 
 
 def schema_name_in(schema: Schema | None, names: frozenset[str]) -> bool:

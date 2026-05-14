@@ -22,11 +22,10 @@ def export_images(
     """Export image topics to per-topic folders of image files.
 
     ``CompressedImage`` payloads keep their original extension by default
-    (``--format native``). Set ``--format`` to an ``imagecodecs`` encoder name
-    (such as ``jpeg``/``png``/``webp``) to force re-encoding compressed images.
+    (``--format native``). Set ``--format`` to a Pillow format (such as
+    ``jpeg``/``png``/``webp``) to force re-encoding compressed images.
     Raw ``Image`` messages are always encoded with ``--raw-format`` (default
-    ``png``) using an ``imagecodecs`` encoder name. Requires the ``image``
-    extra (``imagecodecs``).
+    ``png``). Requires the ``image`` extra.
     """
     return run_export(
         file=file,
