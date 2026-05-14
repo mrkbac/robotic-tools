@@ -82,7 +82,6 @@ def empty_processor_result(
             ),
         ),
         processor=SimpleNamespace(
-            large_channels=[],
             output_manager=SimpleNamespace(segments=output_segments),
         ),
     )

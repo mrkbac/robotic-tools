@@ -279,9 +279,44 @@ def process(
             name=["--rechunk-pattern"],
             group=RECHUNK_GROUP,
             help=(
-                "Regex pattern for chunk grouping (repeatable; only with "
-                "--rechunk-strategy=pattern). Topics matching the first "
-                "pattern go into chunk group 1, second → group 2, etc."
+                "Regex matched against Channel.topic (repeatable; only with "
+                "--rechunk-strategy=pattern). First match wins across topic "
+                "patterns then schema patterns."
+            ),
+        ),
+    ] = None,
+    rechunk_schema_pattern: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--rechunk-schema-pattern"],
+            group=RECHUNK_GROUP,
+            help=(
+                "Regex matched against Schema.name (e.g. "
+                "'sensor_msgs/.*Image.*'). Streaming-safe — schema is known "
+                "at channel registration time. Evaluated after topic patterns."
+            ),
+        ),
+    ] = None,
+    rechunk_max_groups: Annotated[
+        int | None,
+        Parameter(
+            name=["--rechunk-max-groups"],
+            group=RECHUNK_GROUP,
+            help=(
+                "Hard cap on concurrent chunk groups per output segment. "
+                "Overflow channels share the last-created group."
+            ),
+        ),
+    ] = None,
+    rechunk_max_memory: Annotated[
+        str | None,
+        Parameter(
+            name=["--rechunk-max-memory"],
+            group=RECHUNK_GROUP,
+            help=(
+                "Cap on total uncompressed bytes buffered across all chunk "
+                "groups in a segment (e.g. '256MB'). When exceeded, the "
+                "largest in-flight chunk is flushed prematurely."
             ),
         ),
     ] = None,
@@ -491,17 +526,39 @@ def process(
         return 1
 
     # --- Rechunking validation -------------------------------------------------
-    if rechunk_strategy == RechunkStrategy.PATTERN and not rechunk_pattern:
-        logger.error("--rechunk-strategy=pattern requires at least one --rechunk-pattern.")
+    if rechunk_strategy == RechunkStrategy.PATTERN and not (
+        rechunk_pattern or rechunk_schema_pattern
+    ):
+        logger.error(
+            "--rechunk-strategy=pattern requires at least one "
+            "--rechunk-pattern or --rechunk-schema-pattern."
+        )
+        return 1
+    if rechunk_max_groups is not None and rechunk_max_groups < 1:
+        logger.error("--rechunk-max-groups must be >= 1.")
         return 1
 
-    rechunk_patterns_compiled = []
-    if rechunk_pattern:
+    rechunk_max_memory_bytes: int | None = None
+    if rechunk_max_memory is not None:
         try:
-            rechunk_patterns_compiled = compile_topic_patterns(rechunk_pattern)
-        except ValueError as e:
-            logger.error(str(e))  # noqa: TRY400
+            rechunk_max_memory_bytes = parse_size_bytes(rechunk_max_memory)
+        except ValueError:
+            logger.exception(f"Error parsing --rechunk-max-memory {rechunk_max_memory!r}")
             return 1
+        if rechunk_max_memory_bytes < 1:
+            logger.error("--rechunk-max-memory must be >= 1 byte.")
+            return 1
+
+    rechunk_patterns_compiled = []
+    rechunk_schema_patterns_compiled = []
+    try:
+        if rechunk_pattern:
+            rechunk_patterns_compiled = compile_topic_patterns(rechunk_pattern)
+        if rechunk_schema_pattern:
+            rechunk_schema_patterns_compiled = compile_topic_patterns(rechunk_schema_pattern)
+    except ValueError as e:
+        logger.error(str(e))  # noqa: TRY400
+        return 1
 
     # --- Build KV rule maps ----------------------------------------------------
     try:
@@ -615,6 +672,9 @@ def process(
         chunk_size=chunk_size,
         rechunk_strategy=rechunk_strategy,
         rechunk_patterns=rechunk_patterns_compiled,
+        rechunk_schema_patterns=rechunk_schema_patterns_compiled,
+        rechunk_max_groups=rechunk_max_groups,
+        rechunk_max_memory=rechunk_max_memory_bytes,
         routers=routers,
         output_template=output_template if any_split else "",
         overwrite_policy=overwrite_policy,

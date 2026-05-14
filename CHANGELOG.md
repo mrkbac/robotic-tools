@@ -6,6 +6,45 @@ User-facing notes for releases.
 
 ## Unreleased
 
+### pymcap-cli
+
+- New `tf-get` command looks up the transform between two TF frames from
+  `/tf_static` and `/tf` in an MCAP file. It prints the composed
+  translation/rotation and the traversal path used to resolve the lookup.
+- `tf-get --at` resolves dynamic TF lookups at a requested RFC3339 or
+  nanosecond timestamp. Dynamic edges are interpolated between bracketing
+  samples, while static edges remain time-invariant; out-of-range requests
+  fail with an extrapolation error.
+- `diff --compare-payloads` verifies raw message payloads after the fast
+  index comparison matches, and reports the first payload/header mismatch
+  instead of treating matching timestamps as sufficient.
+- `duplicates --compare-payloads` can require byte-level payload equality
+  before grouping files as duplicates. Payload verification uses an
+  aggregate digest fast path before falling back to the first mismatching
+  message.
+- `duplicates` now rebuilds missing summaries and complete message indexes
+  in memory by default, so recordings without usable summary data are
+  checked instead of skipped. Use `--no-rebuild-missing` to keep the old
+  skip behavior.
+- `process` now covers the streaming MCAP transform pipeline in one pass:
+  recovery, topic/time filtering, metadata/attachment filtering,
+  deduplication, latching, topic rename/alias, channel merging, time
+  offsets, decimation, rechunking, and multi-output splitting.
+- `process` adds split modes for duration, explicit timestamps, message-path
+  expression changes, and maximum accumulated message bytes. Split outputs
+  use `--output-template`; single-output processing continues to use
+  `--output`.
+- `process --rechunk-strategy=pattern` and `rechunk --strategy pattern` can
+  group channels by schema name with `--rechunk-schema-pattern` /
+  `--schema-pattern`, evaluated after topic patterns.
+- `process` and `rechunk` add rechunk resource controls:
+  `--rechunk-max-groups` / `--max-groups` caps concurrent chunk groups per
+  output segment, and `--rechunk-max-memory` / `--max-memory` caps total
+  uncompressed bytes buffered across in-flight rechunk groups.
+- `rechunk` now defaults to `--strategy all`, putting each topic in its own
+  chunk group unless `none` or `pattern` is requested. The previous
+  size-analysis `auto` strategy was removed.
+
 ---
 
 ## pymcap-cli 0.10.0, small-mcap 0.8.0, mcap-codec-support 0.3.0, pureini 0.4.0, robo-ws-bridge 0.4.0

@@ -3,7 +3,7 @@
 import heapq
 import os
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,7 +38,6 @@ from small_mcap import (
     breakup_chunk,
     get_header,
     get_summary,
-    rebuild_summary,
     stream_reader,
 )
 
@@ -168,7 +167,6 @@ class RechunkStrategy(str, Enum):
     NONE = "none"  # No rechunking - use fast-copy optimization when possible
     PATTERN = "pattern"  # Group by regex patterns
     ALL = "all"  # Each topic in its own chunk group
-    AUTO = "auto"  # Auto-group based on size (>15% threshold)
 
 
 class OverwriteCollisionPolicy(str, Enum):
@@ -200,6 +198,11 @@ class OutputOptions:
     # Rechunking options
     rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
     rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
+    rechunk_schema_patterns: list[Pattern[str]] = field(default_factory=list)
+    rechunk_max_groups: int | None = None  # None = unlimited
+    # Total uncompressed bytes buffered across all rechunk groups in a segment.
+    # When exceeded, the largest in-flight chunk is flushed prematurely.
+    rechunk_max_memory: int | None = None  # None = unlimited
 
     # Output routers (split routing, etc.)
     routers: list[OutputRouter] = field(default_factory=list)
@@ -349,6 +352,10 @@ class MessageGroup:
         self.chunk_builder.add(message)
         self.message_count += 1
 
+    def buffered_bytes(self) -> int:
+        """Bytes currently held by the chunk builder (uncompressed)."""
+        return self.chunk_builder.buffer.tell()
+
     def _flush_if_full(self) -> None:
         """Finalize and write the current chunk if it has reached the target size."""
         if (
@@ -356,6 +363,19 @@ class MessageGroup:
             or self.chunk_builder.num_messages == 0
         ):
             return
+        self._finalize_and_reset()
+
+    def flush_premature(self) -> None:
+        """Finalize the current chunk now (before chunk_size) and reset the builder.
+
+        Used by the segment-level memory cap to evict the largest in-flight
+        chunk when total buffered bytes exceed ``rechunk_max_memory``.
+        """
+        if self.chunk_builder.num_messages == 0:
+            return
+        self._finalize_and_reset()
+
+    def _finalize_and_reset(self) -> None:
         if result := self.chunk_builder.finalize():
             chunk, message_indexes = result
             if chunk.compression != self.chunk_builder.compression.value:
@@ -396,6 +416,9 @@ class OutputSegment:
     start_time: int = 0
     end_time: int = 0
     pattern_groups: dict[int, MessageGroup] = field(default_factory=dict)
+    # Overflow group is lazily picked once rechunk_max_groups is reached; all
+    # further channels join it so the per-segment group count stops growing.
+    overflow_group: MessageGroup | None = None
     # on_segment_open fires lazily per processor as streams reach the segment.
     replayed_processor_ids: set[int] = field(default_factory=set)
 
@@ -614,9 +637,6 @@ class McapProcessor:
         # Track which channels we've already seen to optimize metadata extraction
         self.known_channels: set[int] = set()
 
-        # Rechunking state
-        self.large_channels: set[int] = set()  # For AUTO mode
-
         # Unified output management for both single-output and split-output modes.
         self.output_manager: OutputManager | None = None
 
@@ -704,67 +724,23 @@ class McapProcessor:
         self.channel_filter_cache[cache_key] = included
         return included
 
-    def _analyze_for_auto_grouping(self, input_streams: Sequence[IO[bytes]]) -> None:
-        """Pre-analyze files to identify large channels (>15% of total uncompressed size)."""
-        console.print("[dim]Analyzing files for auto-grouping...[/dim]")
+    def _resolve_pattern_group_key(self, topic: str, schema_name: str | None) -> int:
+        """Return the group key for a channel under PATTERN strategy.
 
-        # Aggregate channel sizes across all files (accounting for remapped IDs)
-        # Map: remapped_channel_id -> total_size
-        channel_sizes: dict[int, int] = {}
-
-        for stream_id, input_stream in enumerate(input_streams):
-            try:
-                rebuild_info = rebuild_summary(
-                    input_stream,
-                    validate_crc=False,
-                    calculate_channel_sizes=True,
-                    exact_sizes=False,  # Use fast estimation
-                )
-
-                if rebuild_info.channel_sizes:
-                    # Map original channel IDs to remapped IDs and aggregate
-                    for original_ch_id, size in rebuild_info.channel_sizes.items():
-                        # Get remapped channel ID
-                        remapped_channel = self.remapper.get_remapped_channel(
-                            stream_id, original_ch_id
-                        )
-                        # Channel not yet remapped will keep original ID
-                        remapped_id = remapped_channel.id if remapped_channel else original_ch_id
-
-                        channel_sizes[remapped_id] = channel_sizes.get(remapped_id, 0) + size
-
-                # Seek back to start for processing
-                input_stream.seek(0)
-
-            except (McapError, OSError) as e:
-                console.print(
-                    f"[yellow]Warning: Could not analyze stream {stream_id}: {e}[/yellow]"
-                )
-                input_stream.seek(0)
-
-        if not channel_sizes:
-            console.print("[yellow]Warning: Could not determine channel sizes[/yellow]")
-            return
-
-        # Calculate 15% threshold
-        total_size = sum(channel_sizes.values())
-        threshold = total_size * 0.15
-
-        # Identify large channels (using remapped IDs)
-        self.large_channels = {ch_id for ch_id, size in channel_sizes.items() if size > threshold}
-
-        if self.large_channels:
-            console.print(
-                f"[dim]Found {len(self.large_channels)} large channel(s) "
-                f"(>{threshold / 1024 / 1024:.1f}MB each)[/dim]"
-            )
-
-    def _find_matching_pattern_index(self, topic: str) -> int | None:
-        """Find first pattern that matches topic. Returns pattern index or None."""
-        for i, pattern in enumerate(self.options.output_options.rechunk_patterns):
+        Topic patterns are tried first (indices 0..len(topic)-1), then schema
+        patterns (offset by len(topic)). ``-1`` is the default bucket for any
+        channel that matches nothing.
+        """
+        topic_patterns = self.options.output_options.rechunk_patterns
+        for i, pattern in enumerate(topic_patterns):
             if pattern.search(topic):
                 return i
-        return None
+        if schema_name is not None:
+            schema_patterns = self.options.output_options.rechunk_schema_patterns
+            for i, pattern in enumerate(schema_patterns):
+                if pattern.search(schema_name):
+                    return len(topic_patterns) + i
+        return -1
 
     def _get_or_create_group_for_channel(
         self, channel_id: int, channel: Channel, writer: McapWriter
@@ -786,23 +762,15 @@ class McapProcessor:
         group: MessageGroup | None = None
 
         if strategy == RechunkStrategy.ALL:
-            group = self._create_segment_message_group(segment)
-
-        elif strategy == RechunkStrategy.AUTO:
-            if channel_id in self.large_channels:
-                group = self._create_segment_message_group(segment)
-            else:
-                for ch_id, existing in segment.channel_to_group.items():
-                    if ch_id not in self.large_channels:
-                        group = existing
-                        break
+            group = self._create_or_overflow_group(segment)
 
         elif strategy == RechunkStrategy.PATTERN:
-            pattern_idx = self._find_matching_pattern_index(channel.topic)
-            group_key = pattern_idx if pattern_idx is not None else -1
+            schema = self.schemas.get(channel.schema_id)
+            schema_name = schema.name if schema is not None else None
+            group_key = self._resolve_pattern_group_key(channel.topic, schema_name)
             group = segment.pattern_groups.get(group_key)
             if group is None:
-                group = self._create_segment_message_group(segment)
+                group = self._create_or_overflow_group(segment)
                 segment.pattern_groups[group_key] = group
 
         if group is None:
@@ -811,12 +779,50 @@ class McapProcessor:
         segment.channel_to_group[channel_id] = group
         return group
 
+    def _create_or_overflow_group(self, segment: "OutputSegment") -> MessageGroup:
+        """Create a new group, or route into the segment's overflow when the cap is hit.
+
+        With ``rechunk_max_groups=N``, the first N callers each get their own
+        new group. When the (N+1)th caller arrives, the most-recently-created
+        group is promoted to the segment's overflow pool and all further
+        callers join it. Total group count therefore never exceeds N.
+        """
+        max_groups = self.options.output_options.rechunk_max_groups
+        if max_groups is not None and len(segment.rechunk_groups) >= max_groups:
+            if segment.overflow_group is None:
+                assert segment.rechunk_groups, "max_groups must be >= 1 if set"
+                segment.overflow_group = segment.rechunk_groups[-1]
+            return segment.overflow_group
+        return self._create_segment_message_group(segment)
+
     def _create_segment_message_group(self, segment: "OutputSegment") -> MessageGroup:
         """Create a MessageGroup attached to a specific segment."""
         opts = self.options.output_options
         group = MessageGroup(segment.writer, opts.chunk_size, opts.compression_type)
         segment.rechunk_groups.append(group)
         return group
+
+    def _enforce_segment_memory_cap(self, writer: McapWriter) -> None:
+        """Flush the largest builder in this writer's segment while total buffered > cap.
+
+        Iterates because flushing the largest may still leave us over budget
+        when several groups are near-full simultaneously.
+        """
+        cap = self.options.output_options.rechunk_max_memory
+        if cap is None or self.output_manager is None:
+            return
+        segment = self.output_manager.segment_for_writer(writer)
+        if segment is None or not segment.rechunk_groups:
+            return
+        while True:
+            total = sum(g.buffered_bytes() for g in segment.rechunk_groups)
+            if total <= cap:
+                return
+            largest = max(segment.rechunk_groups, key=MessageGroup.buffered_bytes)
+            if largest.buffered_bytes() == 0:
+                # No further progress possible — every builder is empty.
+                return
+            largest.flush_premature()
 
     def _replay_segment_open(
         self,
@@ -961,6 +967,7 @@ class McapProcessor:
                     message.channel_id, channel, target_writer
                 )
                 group.add_message(message)
+                self._enforce_segment_memory_cap(target_writer)
             else:
                 target_writer.add_message(
                     channel_id=message.channel_id,
@@ -1231,11 +1238,6 @@ class McapProcessor:
             self.output_manager.get_or_create_segment(key, start_time=start_time, end_time=end_time)
 
         try:
-            # For AUTO rechunking mode, pre-analyze files to identify large channels
-            if output_opts.rechunk_strategy == RechunkStrategy.AUTO:
-                input_streams = [inp.stream for inp in self.options.inputs]
-                self._analyze_for_auto_grouping(input_streams)
-
             total_size = self.options.total_size
             with file_progress("[bold blue]Processing MCAP...", console) as progress:
                 task = progress.add_task("Processing", total=total_size)
