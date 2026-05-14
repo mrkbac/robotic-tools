@@ -48,6 +48,7 @@ class _RawImage(Protocol):
     encoding: str
     data: bytes
 
+
 _IMAGE_FORMATS: dict[str, tuple[str, str]] = {
     "jpg": ("JPEG", "jpg"),
     "jpeg": ("JPEG", "jpg"),
@@ -99,7 +100,9 @@ def _supported_image_formats(pil_image: ModuleType | None = None) -> frozenset[s
     """Return supported user-facing image formats for the installed Pillow build."""
     image = pil_image or _pil_image()
     save = image.SAVE
-    return frozenset(alias for alias, (pil_format, _) in _IMAGE_FORMATS.items() if pil_format in save)
+    return frozenset(
+        alias for alias, (pil_format, _) in _IMAGE_FORMATS.items() if pil_format in save
+    )
 
 
 def _resolve_raw_encoder(

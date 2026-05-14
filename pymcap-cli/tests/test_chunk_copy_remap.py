@@ -275,9 +275,7 @@ def _schema(sid: int, name: str = "S", data: bytes = b"{}") -> Schema:
 
 
 def _channel(cid: int, schema_id: int = 1, topic: str = "/t") -> Channel:
-    return Channel(
-        id=cid, schema_id=schema_id, topic=topic, message_encoding="json", metadata={}
-    )
+    return Channel(id=cid, schema_id=schema_id, topic=topic, message_encoding="json", metadata={})
 
 
 def test_validator_empty_records_returns_true() -> None:
@@ -294,9 +292,7 @@ def test_validator_matching_metadata_returns_true() -> None:
     schema = _schema(1)
     channel = _channel(1, 1, "/t")
     records = [schema, channel, _msg(1)]
-    assert (
-        _chunk_records_match_writer_view(records, {1: schema}, {1: channel}) is True
-    )
+    assert _chunk_records_match_writer_view(records, {1: schema}, {1: channel}) is True
 
 
 def test_validator_unknown_schema_returns_false() -> None:
@@ -308,17 +304,13 @@ def test_validator_unknown_schema_returns_false() -> None:
 def test_validator_mismatched_schema_returns_false() -> None:
     in_chunk = _schema(1, name="OldName")
     in_writer = _schema(1, name="NewName")
-    assert (
-        _chunk_records_match_writer_view([in_chunk], {1: in_writer}, {}) is False
-    )
+    assert _chunk_records_match_writer_view([in_chunk], {1: in_writer}, {}) is False
 
 
 def test_validator_mismatched_channel_returns_false() -> None:
     in_chunk = _channel(1, 1, "/old")
     in_writer = _channel(1, 1, "/new")
-    assert (
-        _chunk_records_match_writer_view([in_chunk], {}, {1: in_writer}) is False
-    )
+    assert _chunk_records_match_writer_view([in_chunk], {}, {1: in_writer}) is False
 
 
 def test_validator_early_exits_on_first_message() -> None:
