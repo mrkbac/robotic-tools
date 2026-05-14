@@ -3,14 +3,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pymcap_cli.core.processors.base import ChunkDecision, Processor
+from pymcap_cli.core.processors.base import ChunkContext, ChunkDecision, InputProcessor
 
 if TYPE_CHECKING:
-    from small_mcap import Chunk, LazyChunk, MessageIndex
+    from small_mcap import Chunk, LazyChunk
 
 
-class AlwaysDecodeProcessor(Processor):
+class AlwaysDecodeProcessor(InputProcessor):
     """Forces all chunks to be decoded."""
 
-    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
+    def on_chunk(
+        self,
+        context: ChunkContext,
+        chunk: Chunk | LazyChunk,
+    ) -> ChunkDecision:
         return ChunkDecision.DECODE

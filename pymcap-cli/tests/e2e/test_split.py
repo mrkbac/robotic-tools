@@ -13,6 +13,7 @@ from pymcap_cli.core.mcap_processor import (
 )
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from small_mcap import stream_reader
 
@@ -56,7 +57,7 @@ class TestDurationSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[DurationSplitProcessor(duration_ns=100_000_000)],
+                    routers=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "output_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -89,7 +90,7 @@ class TestDurationSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[DurationSplitProcessor(duration_ns=50_000_000)],
+                    routers=[DurationSplitProcessor(duration_ns=50_000_000)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -124,7 +125,7 @@ class TestDurationSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[DurationSplitProcessor(duration_ns=100_000_000)],
+                    routers=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "output_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -161,7 +162,7 @@ class TestTimestampSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[TimestampSplitProcessor(split_points=[50_000_000, 100_000_000])],
+                    routers=[TimestampSplitProcessor(split_points=[50_000_000, 100_000_000])],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -192,7 +193,7 @@ class TestTimestampSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[
+                    routers=[
                         DurationSplitProcessor(duration_ns=100_000_000),
                         TimestampSplitProcessor(split_points=[125_000_000]),
                     ],
@@ -216,6 +217,56 @@ class TestTimestampSplit:
 
 
 @pytest.mark.e2e
+class TestSizeSplit:
+    """Test size-budget-based splitting."""
+
+    def test_size_split_fast_copy_routes_chunks_to_multiple_segments(self, tmp_path: Path) -> None:
+        # Build a small fixture with several distinct chunks so fast-copy
+        # segment routing has something to split on.
+        from tests.fixtures.mcap_generator import create_multi_topic_mcap  # noqa: PLC0415
+
+        data = create_multi_topic_mcap(
+            topics=["/a", "/b", "/c"],
+            messages_per_topic=200,
+            chunk_size=8192,
+        )
+        source = tmp_path / "input.mcap"
+        source.write_bytes(data)
+
+        # Each input chunk uncompresses to ~8KB; a 5KB budget forces a new
+        # segment after each chunk.
+        budget = 5000
+
+        with source.open("rb") as input_stream:
+            input_files = [
+                InputFile(
+                    stream=input_stream,
+                    size=source.stat().st_size,
+                    options=InputOptions.from_args(),
+                )
+            ]
+            options = ProcessingOptions(
+                inputs=input_files,
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    routers=[SizeSplitProcessor(budget)],
+                    output_template=str(tmp_path / "shard_{index:03d}.mcap"),
+                    compression="zstd",
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                ),
+            )
+            processor = McapProcessor(options)
+            stats = processor.process(output_stream=None)
+
+        assert len(processor.output_manager.segments) > 1
+        total = sum(
+            segment.writer.statistics.message_count
+            for segment in processor.output_manager.segments.values()
+        )
+        assert total == stats.writer_statistics.message_count
+
+
+@pytest.mark.e2e
 class TestExpressionSplit:
     """Test expression-based splitting via ros-parser message paths."""
 
@@ -236,7 +287,7 @@ class TestExpressionSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor("/camera/front.msg")],
+                    routers=[ExpressionSplitProcessor("/camera/front.msg")],
                     output_template=str(tmp_path / "msg_{key}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -267,7 +318,7 @@ class TestExpressionSplit:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor("/camera/front.msg")],
+                    routers=[ExpressionSplitProcessor("/camera/front.msg")],
                     output_template=str(tmp_path / "ch_{key}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -329,7 +380,7 @@ class TestExpressionSplit:
                 ],
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor("/state.msg", hysteresis_count=3)],
+                    routers=[ExpressionSplitProcessor("/state.msg", hysteresis_count=3)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -363,7 +414,7 @@ class TestExpressionSplit:
                 ],
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor("/state.msg", hysteresis_count=3)],
+                    routers=[ExpressionSplitProcessor("/state.msg", hysteresis_count=3)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -380,7 +431,7 @@ class TestExpressionSplit:
         src = tmp_path / "in.mcap"
         # Transition at t=2 (first beta) → segment 1. The next two beta
         # messages (t=2 and t=3 themselves, not subsequent ones) duplicate
-        # back into segment 0 via also_route_to.
+        # back into segment 0 via extra output routes.
         size = self._write_noisy_bool_mcap(
             src,
             samples=[
@@ -401,7 +452,7 @@ class TestExpressionSplit:
                 ],
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[ExpressionSplitProcessor("/state.msg", trailing_context_count=2)],
+                    routers=[ExpressionSplitProcessor("/state.msg", trailing_context_count=2)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -444,7 +495,7 @@ class TestExpressionSplit:
                 ],
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[
+                    routers=[
                         DurationSplitProcessor(duration_ns=10),
                         ExpressionSplitProcessor("/state.msg", trailing_context_count=2),
                     ],
@@ -488,7 +539,7 @@ class TestSplitWithRechunking:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[DurationSplitProcessor(duration_ns=100_000_000)],
+                    routers=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
@@ -525,7 +576,7 @@ class TestSplitWithFiltering:
                 inputs=input_files,
                 input_options=InputOptions.from_args(),
                 output_options=OutputOptions(
-                    processors=[DurationSplitProcessor(duration_ns=100_000_000)],
+                    routers=[DurationSplitProcessor(duration_ns=100_000_000)],
                     output_template=str(tmp_path / "camera_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,

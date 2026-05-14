@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, IntFlag, auto
-from typing import IO, TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -12,15 +12,18 @@ if TYPE_CHECKING:
         Attachment,
         Channel,
         Chunk,
+        ChunkIndex,
         LazyChunk,
         Message,
         MessageIndex,
         Metadata,
         Schema,
+        Statistics,
         Summary,
     )
 
 OutputKey = int | str | tuple[int | str, ...]
+RouteKey = int | str
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,13 +34,50 @@ class OutputSegmentInfo:
 
 
 @dataclass(frozen=True, slots=True)
-class ProcessorInputContext:
+class InputContext:
     stream_id: int
-    stream: IO[bytes]
     summary: Summary | None
-    output_segments: tuple[OutputSegmentInfo, ...]
+    statistics: Statistics | None
+    chunk_indexes: tuple[ChunkIndex, ...] | None
     remap_channel: Callable[[Channel], Channel]
     remap_message: Callable[[Message], Message]
+    # Register a new output-only Channel (e.g. for topic aliasing). The
+    # returned Channel has a freshly-assigned id and is added to the
+    # writer's channel registry; the processor is responsible for emitting
+    # messages on the new id (typically by yielding additional messages from
+    # ``on_message``).
+    register_channel: Callable[[Channel], Channel]
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineContext:
+    inputs: tuple[InputContext, ...]
+    output_segments: tuple[OutputSegmentInfo, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelContext:
+    input: InputContext
+    input_channel_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class MessageContext:
+    input: InputContext
+    input_channel_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkContext:
+    input: InputContext
+    message_indexes: tuple[MessageIndex, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentContext:
+    key: OutputKey
+    start_time: int
+    observed_message: Message | None = None
 
 
 class _SplitRequiredSentinel:
@@ -48,28 +88,23 @@ SPLIT_REQUIRED: Final = _SplitRequiredSentinel()
 
 
 class Action(IntFlag):
-    """Result actions - combinable flags.
-
-    ``KEEP`` is a positive vote: when any processor returns ``KEEP`` for a
-    channel or message, ``SKIP`` from other processors is ignored for that
-    record.
-    """
+    """Record-level action for input processors."""
 
     CONTINUE = 0
     SKIP = auto()
-    KEEP = auto()
 
 
 class ChunkDecision(Enum):
     """Chunk-level processing decision.
 
-    Processors only ever return CONTINUE, SKIP, or DECODE from
-    ``on_chunk()``. The remaining variants (RECOMPRESS, DECODE_VERIFY)
-    are produced exclusively by the dispatcher in
-    ``McapProcessor._should_decode_chunk`` based on writer-side state
-    (compression target, remapper flags) that processors don't have
-    visibility into. They're kept on this enum so the whole dispatch
-    table is one type, but processors should treat them as internal.
+    Processors typically return CONTINUE, SKIP, or DECODE from ``on_chunk()``.
+    DECODE_VERIFY is also accepted: it asks the dispatcher to decompress the
+    chunk, check that any embedded Schema/Channel records still match the
+    writer's view, and fast-copy if clean — used by processors that mutate
+    Channel/Schema records (e.g. ``TopicRewriteProcessor``) where the chunk
+    body may or may not contain a stale embedded copy. RECOMPRESS is
+    produced exclusively by the dispatcher based on compression-target
+    state and should not be returned by processors.
     """
 
     CONTINUE = auto()
@@ -86,57 +121,143 @@ class ChunkDecision(Enum):
     DECODE_VERIFY = auto()
 
 
-class Processor:
-    """Base processor."""
+class MessageScopeKind(Enum):
+    ALL = auto()
+    NONE = auto()
+    CHANNELS = auto()
 
-    def initialize(self, summaries: list[Summary | None]) -> None:
-        """Called before processing with summaries from all input files."""
 
-    def prepare_input(self, context: ProcessorInputContext) -> None:
+@dataclass(frozen=True, slots=True)
+class MessageScope:
+    kind: MessageScopeKind
+    channel_ids: frozenset[int] = frozenset()
+
+    @classmethod
+    def all(cls) -> MessageScope:
+        return cls(MessageScopeKind.ALL)
+
+    @classmethod
+    def none(cls) -> MessageScope:
+        return cls(MessageScopeKind.NONE)
+
+    @classmethod
+    def channels(cls, channel_ids: set[int] | frozenset[int]) -> MessageScope:
+        return cls(MessageScopeKind.CHANNELS, frozenset(channel_ids))
+
+
+def chunk_decision_for_message_scope(scope: MessageScope, context: ChunkContext) -> ChunkDecision:
+    if scope.kind is MessageScopeKind.NONE:
+        return ChunkDecision.CONTINUE
+    if scope.kind is MessageScopeKind.ALL:
+        return ChunkDecision.DECODE
+
+    indexes = context.message_indexes
+    if indexes is None:
+        return ChunkDecision.DECODE
+    if any(idx.channel_id in scope.channel_ids for idx in indexes):
+        return ChunkDecision.DECODE
+    return ChunkDecision.CONTINUE
+
+
+class InputProcessor:
+    """Input-side processor.
+
+    Input processors observe, transform, drop, or fan out input records before
+    output routing happens. ``on_message`` yields zero or more messages; every
+    yielded message continues at the next processor in the chain.
+    """
+
+    def initialize(self, context: PipelineContext) -> None:
+        """Called before processing with all resources known to the pipeline."""
+
+    def prepare_input(self, context: InputContext) -> None:
         """Called once per input stream after summaries/channels are known."""
+
+    def message_scope(self, context: ChunkContext) -> MessageScope:
+        """Messages that must pass through ``on_message`` for correctness.
+
+        The default is conservative: decode every chunk so custom processors
+        that only override ``on_message`` behave correctly. Processors that do
+        not inspect messages should return ``MessageScope.none()``; processors
+        keyed to known channels should return ``MessageScope.channels(ids)``.
+        """
+        return MessageScope.all()
 
     def on_chunk(
         self,
+        context: ChunkContext,
         chunk: Chunk | LazyChunk,
-        indexes: list[MessageIndex],
     ) -> ChunkDecision:
-        return ChunkDecision.CONTINUE
+        """Default: derive the chunk decision from ``message_scope``."""
+        return chunk_decision_for_message_scope(self.message_scope(context), context)
 
-    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
+    def on_channel(
+        self, context: ChannelContext, channel: Channel, schema: Schema | None
+    ) -> Action:
         return Action.CONTINUE
 
-    def on_message(self, message: Message) -> Action:
-        return Action.CONTINUE
+    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
+        """Yield 0+ messages to forward downstream.
 
-    def on_metadata(self, metadata: Metadata) -> Action:
-        return Action.CONTINUE
-
-    def on_attachment(self, attachment: Attachment) -> Action:
-        return Action.CONTINUE
-
-    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | str | _SplitRequiredSentinel | None:
-        return None
-
-    def route_message(self, message: Message) -> int | str | None:
-        return None
-
-    def also_route_to(self, message: Message) -> Iterable[OutputKey]:
-        """Yield additional output keys to write this message into.
-
-        ``route_message`` returns the *primary* destination; this hook lets a
-        processor duplicate the message into one or more *extra* segments
-        (used by ``split`` trailing-context to copy target-topic messages
-        into the segment that just ended).
+        - Yield nothing → drop the message.
+        - Yield one message → pass through or replace the message.
+        - Yield multiple messages → fan out. Every yielded message enters the
+          chain at the next processor; this processor is not re-invoked for
+          messages it produced.
         """
+        yield message
+
+    def on_metadata(self, context: InputContext, metadata: Metadata) -> Action:
+        return Action.CONTINUE
+
+    def on_attachment(self, context: InputContext, attachment: Attachment) -> Action:
+        return Action.CONTINUE
+
+    def on_segment_open(self, context: SegmentContext) -> Iterable[tuple[int, Message]]:
         return ()
 
-    def output_keys(self) -> list[int | str] | None:
-        return None
 
-    def on_segment_open(self, key: OutputKey) -> Iterable[tuple[int, Message]]:
-        """Yield ``(channel_id, message)`` pairs to inject into a freshly-opened
-        output segment before any normal writes.
+class OutputRouter:
+    """Output-side router.
 
-        Called lazily the first time a segment is actually written to.
+    Routers decide which output segment(s) a surviving message or fast-copied
+    chunk should be written to. Yielding multiple route keys duplicates the
+    record across those segments.
+    """
+
+    def initialize(self, context: PipelineContext) -> None:
+        """Called before processing with all resources known to the pipeline."""
+
+    def on_channel(self, context: ChannelContext, channel: Channel, schema: Schema | None) -> None:
+        """Observe channels discovered without summaries."""
+
+    def message_scope(self, context: ChunkContext) -> MessageScope:
+        """Messages that must route through ``route_message`` for correctness.
+
+        The default is conservative: custom routers that only implement
+        ``route_message`` decode chunks. Routers with complete ``route_chunk``
+        handling should return ``MessageScope.none()`` or override
+        ``on_chunk`` directly for richer boundary logic.
         """
+        return MessageScope.all()
+
+    def on_chunk(
+        self,
+        context: ChunkContext,
+        chunk: Chunk | LazyChunk,
+    ) -> ChunkDecision:
+        return chunk_decision_for_message_scope(self.message_scope(context), context)
+
+    def route_chunk(
+        self,
+        context: ChunkContext,
+        chunk: Chunk | LazyChunk,
+    ) -> Iterable[RouteKey] | _SplitRequiredSentinel:
         return ()
+
+    def route_message(self, context: MessageContext, message: Message) -> Iterable[RouteKey]:
+        return ()
+
+    def output_segments(self) -> tuple[OutputSegmentInfo, ...] | None:
+        """Return statically-known output segments, or None for dynamic routing."""
+        return None

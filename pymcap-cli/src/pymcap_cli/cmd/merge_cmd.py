@@ -16,6 +16,8 @@ from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
 )
+from pymcap_cli.core.processors.base import InputProcessor  # noqa: TC001 - runtime annotation below
+from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
     CompressionOption,
@@ -54,6 +56,19 @@ def merge(
             group=CONTENT_FILTERING_GROUP,
         ),
     ] = AttachmentsMode.INCLUDE,
+    dedup_identical: Annotated[
+        bool,
+        Parameter(
+            name=["--dedup-identical"],
+            group=CONTENT_FILTERING_GROUP,
+            help=(
+                "Drop messages whose (channel, log_time, payload-hash) was "
+                "already written. Chunks whose time range doesn't overlap "
+                "any other input's chunk range still fast-copy; overlapping "
+                "chunks are decoded so the per-message hash check can run."
+            ),
+        ),
+    ] = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
@@ -103,6 +118,9 @@ def merge(
         logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
+    dedup_processor = DedupIdenticalProcessor() if dedup_identical else None
+    extra_processors: list[InputProcessor] | None = [dedup_processor] if dedup_processor else None
+
     try:
         result = run_processor(
             files=files,
@@ -110,6 +128,7 @@ def merge(
             input_options=InputOptions.from_args(
                 include_metadata=metadata_mode == MetadataMode.INCLUDE,
                 include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+                extra_processors=extra_processors,
             ),
             output_options=OutputOptions(
                 compression=compression,
@@ -119,6 +138,10 @@ def merge(
         )
         logger.info(f"[green]✓ Successfully merged {len(files)} files![/green]")
         console.print(result.stats)
+        if dedup_processor and dedup_processor.dropped_count:
+            console.print(
+                f"[dim]Dedup dropped {dedup_processor.dropped_count:,} duplicate message(s).[/dim]"
+            )
     except Exception:
         logger.exception("Error during merge")
         return 1

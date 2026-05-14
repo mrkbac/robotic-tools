@@ -3,16 +3,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from small_mcap import Summary
+    from pymcap_cli.core.processors.base import PipelineContext
 
 
-def global_time_range(summaries: list[Summary | None]) -> tuple[int, int] | None:
+def global_time_range(context: PipelineContext) -> tuple[int, int] | None:
     """Extract the global time range across all summaries."""
     start: int | None = None
     end: int | None = None
-    for summary in summaries:
-        if summary and summary.statistics:
-            stats = summary.statistics
+    for input_context in context.inputs:
+        if input_context.statistics is not None:
+            stats = input_context.statistics
             if start is None or stats.message_start_time < start:
                 start = stats.message_start_time
             if end is None or stats.message_end_time > end:

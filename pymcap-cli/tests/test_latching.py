@@ -28,6 +28,7 @@ from tests.fixtures.mcap_generator import (
     _TRANSIENT_LOCAL_QOS_YAML,
     create_latched_topic_mcap,
 )
+from tests.helpers import channel_context
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,28 +82,35 @@ class TestLatchingProcessor:
             id=ch_id, schema_id=1, topic=topic, message_encoding="json", metadata=metadata
         )
 
-    def test_pattern_match_returns_keep(self) -> None:
+    def test_pattern_match_registers_latched_channel(self) -> None:
         proc = LatchingProcessor(patterns=[re.compile(r"/tf_static")])
-        latched = proc.on_channel(self._channel(ch_id=1, topic="/tf_static"), None)
-        non_latched = proc.on_channel(self._channel(ch_id=2, topic="/scan"), None)
-        assert latched & Action.KEEP
-        assert non_latched & Action.KEEP == 0
+        latched = self._channel(ch_id=1, topic="/tf_static")
+        non_latched = self._channel(ch_id=2, topic="/scan")
+        assert proc.on_channel(channel_context(latched), latched, None) is Action.CONTINUE
+        assert proc.on_channel(channel_context(non_latched), non_latched, None) is Action.CONTINUE
+        assert proc.latched_channel_ids == {1}
 
     def test_metadata_detection_disabled_by_default(self) -> None:
         proc = LatchingProcessor()
-        action = proc.on_channel(self._channel(ch_id=1, topic="/static_thing", latched=True), None)
-        assert action & Action.KEEP == 0
+        channel = self._channel(ch_id=1, topic="/static_thing", latched=True)
+        action = proc.on_channel(channel_context(channel), channel, None)
+        assert action is Action.CONTINUE
+        assert proc.latched_channel_ids == set()
 
     def test_metadata_detection_when_opted_in(self) -> None:
         proc = LatchingProcessor(from_metadata=True)
-        action = proc.on_channel(self._channel(ch_id=1, topic="/static_thing", latched=True), None)
-        assert action & Action.KEEP
+        channel = self._channel(ch_id=1, topic="/static_thing", latched=True)
+        action = proc.on_channel(channel_context(channel), channel, None)
+        assert action is Action.CONTINUE
+        assert proc.latched_channel_ids == {1}
 
     def test_pattern_takes_precedence_over_disabled_metadata(self) -> None:
         proc = LatchingProcessor(patterns=[re.compile(r"_static")])
         # Channel has metadata but from_metadata disabled — pattern still hits.
-        action = proc.on_channel(self._channel(ch_id=1, topic="/tf_static", latched=True), None)
-        assert action & Action.KEEP
+        channel = self._channel(ch_id=1, topic="/tf_static", latched=True)
+        action = proc.on_channel(channel_context(channel), channel, None)
+        assert action is Action.CONTINUE
+        assert proc.latched_channel_ids == {1}
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +124,7 @@ def _read_messages(path: Path) -> list[tuple[str, int]]:
         return [(channel.topic, message.log_time) for _schema, channel, message in read_message(f)]
 
 
-def test_filter_keeps_latched_topic_when_topic_pattern_excludes_it(tmp_path: Path) -> None:
+def test_filter_drops_latched_topic_when_topic_pattern_excludes_it(tmp_path: Path) -> None:
     src = tmp_path / "in.mcap"
     src.write_bytes(create_latched_topic_mcap(other_messages=3, other_step_ns=NS_TO_SEC))
 
@@ -134,7 +142,7 @@ def test_filter_keeps_latched_topic_when_topic_pattern_excludes_it(tmp_path: Pat
 
     messages = _read_messages(out)
     topics = {topic for topic, _ in messages}
-    assert "/tf_static" in topics, f"expected latched /tf_static; got {topics}"
+    assert "/tf_static" not in topics
     assert "/scan" in topics
 
 
@@ -181,7 +189,7 @@ def test_metadata_autodetect_opt_in(tmp_path: Path) -> None:
     assert rc.stats is not None
 
     topics = {topic for topic, _ in _read_messages(out)}
-    assert "/tf_static" in topics
+    assert "/tf_static" not in topics
 
 
 def test_metadata_autodetect_off_by_default(tmp_path: Path) -> None:
@@ -217,7 +225,7 @@ def test_split_replays_latched_into_every_segment(tmp_path: Path) -> None:
         files=[str(src)],
         input_options=InputOptions.from_args(latch_topics=["/tf_static"]),
         output_options=OutputOptions(
-            processors=[DurationSplitProcessor(2 * NS_TO_SEC)],
+            routers=[DurationSplitProcessor(2 * NS_TO_SEC)],
             output_template=template,
         ),
     )
@@ -263,7 +271,7 @@ def test_split_replays_latches_from_all_input_streams(tmp_path: Path) -> None:
         files=[str(src_a), str(src_b)],
         input_options=InputOptions.from_args(latch_topics=["/tf_static_a", "/tf_static_b"]),
         output_options=OutputOptions(
-            processors=[DurationSplitProcessor(2 * NS_TO_SEC)],
+            routers=[DurationSplitProcessor(2 * NS_TO_SEC)],
             output_template=template,
         ),
     )
@@ -298,7 +306,7 @@ def test_split_replays_latest_latch_before_segment_start(tmp_path: Path) -> None
         files=[str(src)],
         input_options=InputOptions.from_args(latch_topics=["/tf_static"]),
         output_options=OutputOptions(
-            processors=[DurationSplitProcessor(2 * NS_TO_SEC)],
+            routers=[DurationSplitProcessor(2 * NS_TO_SEC)],
             output_template=template,
         ),
     )
@@ -316,6 +324,34 @@ def test_split_replays_latest_latch_before_segment_start(tmp_path: Path) -> None
     assert latched_times_by_segment[3] == [5 * NS_TO_SEC]
 
 
+def test_split_replays_latched_when_dynamic_segment_opens_on_fast_copy(tmp_path: Path) -> None:
+    src = tmp_path / "in.mcap"
+    src.write_bytes(
+        create_latched_topic_mcap(
+            other_messages=6,
+            other_step_ns=2 * NS_TO_SEC,
+            chunk_size=64,
+        )
+    )
+
+    template = str(tmp_path / "seg_{index:03d}.mcap")
+    rc = run_processor_multi(
+        files=[str(src)],
+        input_options=InputOptions.from_args(latch_topics=["/tf_static"]),
+        output_options=OutputOptions(
+            routers=[DurationSplitProcessor(2 * NS_TO_SEC)],
+            output_template=template,
+        ),
+    )
+    assert rc.stats is not None
+
+    seg_paths = sorted(tmp_path.glob("seg_*.mcap"))
+    assert len(seg_paths) >= 4
+    for seg in seg_paths:
+        topics = {topic for topic, _ in _read_messages(seg)}
+        assert "/tf_static" in topics, f"segment {seg.name} missing /tf_static"
+
+
 def test_split_no_latch_means_only_first_segment_has_static(tmp_path: Path) -> None:
     """Sanity check: without --latch the static topic is only in segment 0."""
     src = tmp_path / "in.mcap"
@@ -325,7 +361,7 @@ def test_split_no_latch_means_only_first_segment_has_static(tmp_path: Path) -> N
     rc = run_processor_multi(
         files=[str(src)],
         output_options=OutputOptions(
-            processors=[DurationSplitProcessor(2 * NS_TO_SEC)],
+            routers=[DurationSplitProcessor(2 * NS_TO_SEC)],
             output_template=template,
         ),
     )
@@ -370,7 +406,7 @@ def test_latched_chunk_is_decoded_not_fast_copied(tmp_path: Path) -> None:
     # empty (channels populated, but cache miss because on_message never fired
     # for them). Verify on_message did fire.
     latching_proc = next(
-        p for p in options.inputs[0].options.processors if isinstance(p, LatchingProcessor)
+        p for p in processor._get_processors(0) if isinstance(p, LatchingProcessor)
     )
     assert latching_proc.latched_channel_ids, "latched channels never registered"
     assert any(stats.messages_processed for _ in [None])

@@ -238,6 +238,9 @@ pymcap-cli merge *.mcap -o all_recordings.mcap --compression lz4
 
 # Exclude metadata/attachments
 pymcap-cli merge file1.mcap file2.mcap -o merged.mcap --metadata exclude
+
+# Drop duplicate messages (same channel, log_time, payload) from overlapping inputs
+pymcap-cli merge a.mcap b.mcap -o merged.mcap --dedup-identical
 ```
 
 ### `convert` — Convert DB3 to MCAP
@@ -272,7 +275,8 @@ pymcap-cli bag2mcap recording.bag -o recording.mcap --compression lz4 --chunk-si
 ### `split` — Split into Segments
 
 Split an MCAP file into multiple output segments by duration, explicit
-timestamps, or value-change of a message-path expression.
+timestamps, value-change of a message-path expression, or a byte budget per
+segment.
 
 ```bash
 # Split every 60 seconds
@@ -286,6 +290,9 @@ pymcap-cli split data.mcap -E "/gps/fix.status.status"
 
 # Predicate trigger — split on match/no-match transitions
 pymcap-cli split data.mcap -E "/detections.objects[:]{confidence>0.8}"
+
+# Split when each output reaches roughly 1 GB
+pymcap-cli split data.mcap --max-size 1G -t "shard_{index:03d}.mcap"
 ```
 
 ### `rechunk` — Topic-Based Rechunking

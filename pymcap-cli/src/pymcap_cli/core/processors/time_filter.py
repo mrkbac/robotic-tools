@@ -3,14 +3,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pymcap_cli.core.processors.base import Action, ChunkDecision, Processor
+from pymcap_cli.core.processors.base import (
+    Action,
+    ChunkContext,
+    ChunkDecision,
+    InputContext,
+    InputProcessor,
+    MessageContext,
+    PipelineContext,
+)
 from pymcap_cli.utils import RelativeTime
 
 if TYPE_CHECKING:
-    from small_mcap import Attachment, Chunk, LazyChunk, Message, MessageIndex, Summary
+    from collections.abc import Iterable
+
+    from small_mcap import Attachment, Chunk, LazyChunk, Message
 
 
-class TimeFilterProcessor(Processor):
+class TimeFilterProcessor(InputProcessor):
     """Filter messages and attachments by time range.
 
     ``None`` bounds mean "open-ended"; comparisons skip them. Bounds may also
@@ -36,16 +46,16 @@ class TimeFilterProcessor(Processor):
         self.start_ns: int | None = start_ns if isinstance(start_ns, int) else None
         self.end_ns: int | None = end_ns if isinstance(end_ns, int) else None
 
-    def initialize(self, summaries: list[Summary | None]) -> None:
+    def initialize(self, context: PipelineContext) -> None:
         """Resolve any RelativeTime bounds against the input summaries."""
         if not (isinstance(self._start, RelativeTime) or isinstance(self._end, RelativeTime)):
             return
         file_start: int | None = None
         file_end: int | None = None
-        for summary in summaries:
-            if summary is None or summary.statistics is None:
+        for input_context in context.inputs:
+            if input_context.statistics is None:
                 continue
-            stats = summary.statistics
+            stats = input_context.statistics
             if file_start is None or stats.message_start_time < file_start:
                 file_start = stats.message_start_time
             file_end = (
@@ -54,7 +64,13 @@ class TimeFilterProcessor(Processor):
                 else max(file_end, stats.message_end_time)
             )
         if file_start is None or file_end is None:
-            raise ValueError("Relative time bounds require MCAP summary statistics")
+            msg = (
+                "Relative time bounds (e.g. start+5s, end-1m) need the input's "
+                "summary statistics to resolve. Either pass absolute --start / "
+                "--end values, or run `pymcap-cli recover-inplace <file>` to "
+                "rebuild the missing summary section."
+            )
+            raise ValueError(msg)
         if isinstance(self._start, RelativeTime):
             self.start_ns = self._start.resolve(file_start, file_end)
         if isinstance(self._end, RelativeTime):
@@ -65,7 +81,11 @@ class TimeFilterProcessor(Processor):
                 f"resolved end_ns ({self.end_ns})"
             )
 
-    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
+    def on_chunk(
+        self,
+        context: ChunkContext,
+        chunk: Chunk | LazyChunk,
+    ) -> ChunkDecision:
         if self._invert:
             # Inverted window: any chunk fully inside is skipped, fully outside
             # passes through. Spanning chunks must DECODE to filter per-message.
@@ -109,12 +129,13 @@ class TimeFilterProcessor(Processor):
             return False
         return not (self.end_ns is not None and log_time >= self.end_ns)
 
-    def on_message(self, message: Message) -> Action:
+    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         inside = self._in_window(message.log_time)
         keep = inside ^ self._invert  # invert flips inside↔outside
-        return Action.CONTINUE if keep else Action.SKIP
+        if keep:
+            yield message
 
-    def on_attachment(self, attachment: Attachment) -> Action:
+    def on_attachment(self, context: InputContext, attachment: Attachment) -> Action:
         inside = self._in_window(attachment.log_time)
         keep = inside ^ self._invert
         return Action.CONTINUE if keep else Action.SKIP

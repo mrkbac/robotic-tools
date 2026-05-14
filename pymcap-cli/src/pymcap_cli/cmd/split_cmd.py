@@ -16,8 +16,10 @@ from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.duration import parse_duration_ns
+from pymcap_cli.types.size import parse_size_bytes
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
     CompressionOption,
@@ -81,6 +83,18 @@ def split(
                 "'{index:03d}' in --output-template. Messages on other topics "
                 "follow the current segment (sticky). Chunks with no "
                 "target-topic messages fast-copy without decoding."
+            ),
+        ),
+    ] = None,
+    max_size: Annotated[
+        str | None,
+        Parameter(
+            name=["--max-size"],
+            group=SPLIT_GROUP,
+            help=(
+                "Split when accumulated message bytes exceed N (e.g. '1G', "
+                "'500MB', '2GiB'). Segment count is dynamic. Output file "
+                "size is approximate — depends on output compression."
             ),
         ),
     ] = None,
@@ -190,6 +204,9 @@ def split(
         Timestamps at which to split (ns integer or RFC3339 format).
     expression
         ros-parser message path; each distinct value becomes a segment.
+    max_size
+        Approximate byte budget per segment (e.g. ``1G``, ``500MB``).
+        Output file size is approximate — depends on output compression.
     output_template
         Python format string for output filenames. Available variables:
         {index}, {index1}, {key}, {start_time}, {start_time_iso}, {end_time}.
@@ -229,10 +246,16 @@ def split(
     pymcap-cli split input.mcap \\
         --expression '/detections.objects[:]{confidence>0.8}' \\
         -t 'hits_{index:03d}.mcap'
+
+    # Split when each output reaches roughly 1 GB
+    pymcap-cli split input.mcap --max-size 1G -t 'shard_{index:03d}.mcap'
     ```
     """
-    if not duration and not split_at and not expression:
-        logger.error("Specify --duration, --split-at and/or --expression to define split points.")
+    if not duration and not split_at and not expression and not max_size:
+        logger.error(
+            "Specify --duration, --split-at, --expression, and/or --max-size to define "
+            "split points."
+        )
         return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
@@ -267,6 +290,17 @@ def split(
     if split_points:
         processors.append(TimestampSplitProcessor(split_points))
         logger.info(f"Timestamp split: {len(split_points)} point(s)")
+
+    if max_size:
+        try:
+            max_size_bytes = parse_size_bytes(max_size)
+        except ValueError:
+            logger.exception(f"Error parsing max-size '{max_size}'")
+            return 1
+        processors.append(SizeSplitProcessor(max_size_bytes))
+        logger.info(
+            f"Size split: every {bytes_to_human(max_size_bytes)} ({max_size_bytes:,} bytes)"
+        )
 
     if expression:
         # Hysteresis / trailing-context only apply to expression splits.
@@ -313,6 +347,8 @@ def split(
         modes.append("Timestamp")
     if expression:
         modes.append("Expression")
+    if max_size:
+        modes.append("Size")
     logger.info(f"Mode: {' + '.join(modes)} split")
 
     input_options = InputOptions.from_args(
@@ -325,7 +361,7 @@ def split(
             files=[file],
             input_options=input_options,
             output_options=OutputOptions(
-                processors=processors,
+                routers=processors,
                 output_template=output_template,
                 compression=compression,
                 chunk_size=chunk_size,

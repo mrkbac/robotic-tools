@@ -34,6 +34,19 @@ User-facing notes for releases.
   timestamp). Validates tree shape (rejects cycles, multi-parent frames
   without `--allow-multi-parent`, and multi-root trees without
   `--root`).
+- `split` adds `--max-size` (e.g. `1G`, `500MB`, `2GiB`) to start a new
+  segment when accumulated input payload exceeds the budget. Segment
+  count is dynamic; segments may overshoot by up to one input chunk's
+  worth, and output file size depends on output compression.
+- `merge` adds `--dedup-identical` to drop messages whose
+  ``(channel_id, log_time, payload-hash)`` was already written.
+  Useful when overlapping inputs would otherwise write the same
+  message twice. Hashing uses the optional ``xxhash`` package when
+  installed (~2x faster wall time on multi-MB payloads) and falls
+  back to CPython's builtin ``hash(bytes)`` otherwise. Skips forced
+  chunk decoding for chunks whose time range doesn't overlap any
+  other input's chunk range, so non-overlapping merges keep the
+  fast-copy path.
 - `cat` adds `--grep` / `--grep-ignore-case` for decoded scalar-value
   searches. Byte arrays are skipped during grep so image and point-cloud
   payloads do not dominate the search cost.

@@ -3,14 +3,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pymcap_cli.core.processors.base import Action, Processor
+from pymcap_cli.core.processors.base import (
+    Action,
+    ChannelContext,
+    ChunkContext,
+    InputProcessor,
+    MessageScope,
+)
 from pymcap_cli.utils import compile_topic_patterns
 
 if TYPE_CHECKING:
     from small_mcap import Channel, Schema
 
 
-class TopicFilterProcessor(Processor):
+class TopicFilterProcessor(InputProcessor):
     """Filter channels by topic regex patterns.
 
     Compiles patterns internally. Uses search() for flexible matching.
@@ -42,7 +48,12 @@ class TopicFilterProcessor(Processor):
 
         return Action.CONTINUE
 
-    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
+    def message_scope(self, context: ChunkContext) -> MessageScope:
+        return MessageScope.none()
+
+    def on_channel(
+        self, context: ChannelContext, channel: Channel, schema: Schema | None
+    ) -> Action:
         decision = self._decide(channel.topic)
         if self._invert:
             return Action.SKIP if decision == Action.CONTINUE else Action.CONTINUE

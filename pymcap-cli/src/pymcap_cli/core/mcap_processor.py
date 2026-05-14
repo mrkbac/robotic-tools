@@ -3,12 +3,12 @@
 import heapq
 import os
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from functools import cached_property
+from itertools import product
 from pathlib import Path
 from re import Pattern
 from typing import IO, BinaryIO, cast
@@ -47,19 +47,24 @@ from small_mcap.reader import _predecompress_chunk
 from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
-from pymcap_cli.core.processors.always_decode import AlwaysDecodeProcessor
-from pymcap_cli.core.processors.attachment_filter import AttachmentFilterProcessor
+from pymcap_cli.core.input_options import InputOptions
+from pymcap_cli.core.input_processor_chain import build_input_processors
 from pymcap_cli.core.processors.base import (
     SPLIT_REQUIRED,
     Action,
+    ChannelContext,
+    ChunkContext,
     ChunkDecision,
+    InputContext,
+    InputProcessor,
+    MessageContext,
+    OutputKey,
+    OutputRouter,
     OutputSegmentInfo,
-    Processor,
-    ProcessorInputContext,
+    PipelineContext,
+    RouteKey,
+    SegmentContext,
 )
-from pymcap_cli.core.processors.metadata_filter import MetadataFilterProcessor
-from pymcap_cli.core.processors.time_filter import TimeFilterProcessor
-from pymcap_cli.core.processors.topic_filter import TopicFilterProcessor
 from pymcap_cli.types.types_manual import (
     CompressionName,
     str_to_compression_type,
@@ -67,16 +72,13 @@ from pymcap_cli.types.types_manual import (
 from pymcap_cli.utils import (
     McapWriterOptions,
     ProgressTrackingIO,
-    RelativeTime,
     confirm_output_overwrite,
     create_mcap_writer,
     file_progress,
-    parse_timestamp_args,
 )
 
 console = Console()
 OUTPUT_LIBRARY = "pymcap-cli"
-OutputKey = int | str | tuple[int | str, ...]
 OutputStreamOpener = Callable[[OutputKey, int, int, int], tuple[str, BinaryIO]]
 
 
@@ -177,139 +179,6 @@ class OverwriteCollisionPolicy(str, Enum):
     ERROR = "error"
 
 
-@dataclass
-class InputOptions:
-    """Input file filtering options.
-
-    Stores explicit fields for proper merging. Processors are built lazily via build_processors().
-    """
-
-    always_decode_chunk: bool
-    start_time_ns: int | RelativeTime | None
-    end_time_ns: int | RelativeTime | None
-    include_topics: list[str]
-    exclude_topics: list[str]
-    include_metadata: bool
-    include_attachments: bool
-    latch_topics: list[str] = field(default_factory=list)
-    latch_from_metadata: bool = False
-    invert_topics: bool = False
-    invert_time: bool = False
-
-    @classmethod
-    def from_args(
-        cls,
-        always_decode_chunk: bool = False,
-        # Raw CLI args for time (accept any combination)
-        start: str = "",
-        start_nsecs: int = 0,
-        start_secs: int = 0,
-        end: str = "",
-        end_nsecs: int = 0,
-        end_secs: int = 0,
-        # Raw CLI args for topics (regex strings, not compiled)
-        include_topic_regex: list[str] | None = None,
-        exclude_topic_regex: list[str] | None = None,
-        # Topic globs (shell-style patterns, converted to regex)
-        include_topic_glob: list[str] | None = None,
-        exclude_topic_glob: list[str] | None = None,
-        # Content filtering
-        include_metadata: bool = True,
-        include_attachments: bool = True,
-        # Latching
-        latch_topics: list[str] | None = None,
-        latch_from_metadata: bool = False,
-        # Inversion
-        invert_topics: bool = False,
-        invert_time: bool = False,
-    ) -> "InputOptions":
-        import fnmatch  # noqa: PLC0415
-
-        include_topics = list(include_topic_regex or [])
-        include_topics.extend(r"\A" + fnmatch.translate(glob) for glob in include_topic_glob or [])
-        exclude_topics = list(exclude_topic_regex or [])
-        exclude_topics.extend(r"\A" + fnmatch.translate(glob) for glob in exclude_topic_glob or [])
-
-        return cls(
-            always_decode_chunk=always_decode_chunk,
-            start_time_ns=parse_timestamp_args(start, start_secs, start_nsecs, allow_relative=True),
-            end_time_ns=parse_timestamp_args(end, end_secs, end_nsecs, allow_relative=True),
-            include_topics=include_topics,
-            exclude_topics=exclude_topics,
-            include_metadata=include_metadata,
-            include_attachments=include_attachments,
-            latch_topics=latch_topics or [],
-            latch_from_metadata=latch_from_metadata,
-            invert_topics=invert_topics,
-            invert_time=invert_time,
-        )
-
-    @cached_property
-    def processors(self) -> list[Processor]:
-        """Build processor list from options. Cached on first access."""
-        from pymcap_cli.core.processors.latching import LatchingProcessor  # noqa: PLC0415
-        from pymcap_cli.utils import compile_topic_patterns  # noqa: PLC0415
-
-        procs: list[Processor] = []
-
-        # Positive-vote processors must run before filters so they can observe
-        # records before downstream SKIPs are applied.
-        if self.latch_topics or self.latch_from_metadata:
-            procs.append(
-                LatchingProcessor(
-                    patterns=compile_topic_patterns(self.latch_topics),
-                    from_metadata=self.latch_from_metadata,
-                )
-            )
-
-        if self.always_decode_chunk:
-            procs.append(AlwaysDecodeProcessor())
-
-        if self.start_time_ns is not None or self.end_time_ns is not None:
-            procs.append(
-                TimeFilterProcessor(
-                    self.start_time_ns,
-                    self.end_time_ns,
-                    invert=self.invert_time,
-                )
-            )
-
-        if self.include_topics or self.exclude_topics:
-            procs.append(
-                TopicFilterProcessor(
-                    self.include_topics,
-                    self.exclude_topics,
-                    invert=self.invert_topics,
-                )
-            )
-
-        if not self.include_metadata:
-            procs.append(MetadataFilterProcessor(include=False))
-
-        if not self.include_attachments:
-            procs.append(AttachmentFilterProcessor(include=False))
-
-        return procs
-
-    def __or__(self, other: "InputOptions") -> "InputOptions":
-        """Merge options - other (per-file) overrides self (global) for non-default values."""
-        return InputOptions(
-            always_decode_chunk=self.always_decode_chunk or other.always_decode_chunk,
-            start_time_ns=other.start_time_ns
-            if other.start_time_ns is not None
-            else self.start_time_ns,
-            end_time_ns=other.end_time_ns if other.end_time_ns is not None else self.end_time_ns,
-            include_topics=other.include_topics or self.include_topics,
-            exclude_topics=other.exclude_topics or self.exclude_topics,
-            include_metadata=self.include_metadata and other.include_metadata,
-            include_attachments=self.include_attachments and other.include_attachments,
-            latch_topics=other.latch_topics or self.latch_topics,
-            latch_from_metadata=self.latch_from_metadata or other.latch_from_metadata,
-            invert_topics=self.invert_topics or other.invert_topics,
-            invert_time=self.invert_time or other.invert_time,
-        )
-
-
 @dataclass(slots=True)
 class InputFile:
     """Input file stream with its size and options."""
@@ -332,8 +201,8 @@ class OutputOptions:
     rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
     rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
 
-    # Output processors (split routing, etc.)
-    processors: list[Processor] = field(default_factory=list)
+    # Output routers (split routing, etc.)
+    routers: list[OutputRouter] = field(default_factory=list)
     # Template for multi-output file naming (e.g., "output_{index:03d}.mcap")
     output_template: str = ""
     overwrite_policy: OverwriteCollisionPolicy = OverwriteCollisionPolicy.ASK
@@ -356,7 +225,7 @@ class OutputOptions:
 
     @property
     def is_splitting(self) -> bool:
-        return bool(self.processors)
+        return bool(self.routers)
 
 
 class ProcessingOptions:
@@ -437,9 +306,7 @@ class ProcessingStats:
         lines.append(f"Channels:     {ws.channel_count} written\n")
 
         if self.chunks_processed > 0:
-            verified_note = (
-                f", {self.chunks_verified} verified" if self.chunks_verified else ""
-            )
+            verified_note = f", {self.chunks_verified} verified" if self.chunks_verified else ""
             lines.append(
                 f"Chunks:       {self.chunks_processed} "
                 f"({self.chunks_copied} fast copied{verified_note}, "
@@ -529,9 +396,8 @@ class OutputSegment:
     start_time: int = 0
     end_time: int = 0
     pattern_groups: dict[int, MessageGroup] = field(default_factory=dict)
-    # on_segment_open fires lazily on the segment's first write so processors
-    # can inject records using state observed during processing.
-    replayed: bool = False
+    # on_segment_open fires lazily per processor as streams reach the segment.
+    replayed_processor_ids: set[int] = field(default_factory=set)
 
 
 class OutputManager:
@@ -559,6 +425,8 @@ class OutputManager:
         self.header = header
         self._open_output = open_output or self._open_template_output
         self.segments: dict[OutputKey, OutputSegment] = {}
+        # Reverse lookup so rechunking can find a segment from its writer in O(1).
+        self._segment_by_writer: dict[int, OutputSegment] = {}
         self._next_index: int = 0
         # Buffer records that arrive before any segments exist
         self._pending_attachments: list[Attachment] = []
@@ -643,6 +511,7 @@ class OutputManager:
             end_time=end_time,
         )
         self.segments[key] = segment
+        self._segment_by_writer[id(writer)] = segment
 
         # Flush any buffered records to this new segment
         self._flush_pending_to_segment(segment)
@@ -652,6 +521,10 @@ class OutputManager:
     def get_writer(self, key: OutputKey) -> McapWriter:
         """Get writer for output key, creating segment if needed."""
         return self.get_or_create_segment(key).writer
+
+    def segment_for_writer(self, writer: McapWriter) -> OutputSegment | None:
+        """Return the segment that owns ``writer``, or ``None`` if unknown."""
+        return self._segment_by_writer.get(id(writer))
 
     def ensure_channel_written(self, channel_id: int, key: OutputKey) -> None:
         """Write schema and channel to a segment if not already written."""
@@ -692,6 +565,7 @@ class OutputManager:
         # Clear buffers (records were flushed to all segments during creation)
         self._pending_attachments.clear()
         self._pending_metadata.clear()
+        self._segment_by_writer.clear()
         return stats
 
     def add_attachment(self, attachment: Attachment) -> None:
@@ -746,8 +620,65 @@ class McapProcessor:
         # Unified output management for both single-output and split-output modes.
         self.output_manager: OutputManager | None = None
 
-    def _get_input(self, stream_id: int) -> InputOptions:
-        return self.options.inputs[stream_id].options
+        # Per-stream processor chains, built once from the merged InputOptions
+        # so processor-implementation imports stay out of the options module.
+        self._input_processors: list[list[InputProcessor]] = [
+            build_input_processors(input_file.options) for input_file in self.options.inputs
+        ]
+        self._input_contexts: list[InputContext | None] = [None for _ in self.options.inputs]
+        self._validate_processor_roles()
+
+    def _validate_processor_roles(self) -> None:
+        for stream_id, chain in enumerate(self._input_processors):
+            for processor in chain:
+                if not isinstance(processor, InputProcessor):
+                    msg = (
+                        f"input stream {stream_id} has {type(processor).__name__}; "
+                        "input chains require InputProcessor instances"
+                    )
+                    raise TypeError(msg)
+        for router in self.options.output_options.routers:
+            if not isinstance(router, OutputRouter):
+                msg = (
+                    f"output router list has {type(router).__name__}; "
+                    "output routing requires OutputRouter instances"
+                )
+                raise TypeError(msg)
+
+    def _get_processors(self, stream_id: int) -> list[InputProcessor]:
+        return self._input_processors[stream_id]
+
+    def _iter_unique_input_processors(self) -> Iterator[InputProcessor]:
+        seen: set[int] = set()
+        for chain in self._input_processors:
+            for processor in chain:
+                if id(processor) in seen:
+                    continue
+                seen.add(id(processor))
+                yield processor
+
+    def _get_input_context(self, stream_id: int) -> InputContext:
+        context = self._input_contexts[stream_id]
+        if context is None:
+            msg = f"input context for stream {stream_id} has not been prepared"
+            raise RuntimeError(msg)
+        return context
+
+    def _message_context(
+        self,
+        stream_id: int,
+        input_channel_id: int | None,
+    ) -> MessageContext:
+        return MessageContext(
+            input=self._get_input_context(stream_id),
+            input_channel_id=input_channel_id,
+        )
+
+    def _chunk_context(self, stream_id: int, indexes: list[MessageIndex]) -> ChunkContext:
+        return ChunkContext(
+            input=self._get_input_context(stream_id),
+            message_indexes=tuple(indexes) if indexes else None,
+        )
 
     def _is_channel_included(self, stream_id: int, channel_id: int) -> bool:
         cache_key = (stream_id, channel_id)
@@ -756,17 +687,17 @@ class McapProcessor:
         channel = self.channels.get(channel_id)
         if not channel:
             return False
-        input_opts = self._get_input(stream_id)
-        if not input_opts.processors:
+        processors = self._get_processors(stream_id)
+        if not processors:
             return True
-        # Action.KEEP from any processor wins regardless of later SKIPs.
         skip = False
         schema = self.schemas.get(channel.schema_id)
-        for p in input_opts.processors:
-            action = p.on_channel(channel, schema)
-            if action & Action.KEEP:
-                self.channel_filter_cache[cache_key] = True
-                return True
+        context = ChannelContext(
+            input=self._get_input_context(stream_id),
+            input_channel_id=channel_id,
+        )
+        for p in processors:
+            action = p.on_channel(context, channel, schema)
             if action & Action.SKIP:
                 skip = True
         included = not skip
@@ -838,25 +769,14 @@ class McapProcessor:
     def _get_or_create_group_for_channel(
         self, channel_id: int, channel: Channel, writer: McapWriter
     ) -> MessageGroup:
-        """Get or create appropriate MessageGroup for a channel based on rechunk strategy."""
-        return self._get_or_create_group_for_channel_split(channel_id, channel, writer)
+        """Resolve the rechunk MessageGroup for ``channel_id`` on ``writer``'s segment.
 
-    def _get_or_create_group_for_channel_split(
-        self, channel_id: int, channel: Channel, writer: McapWriter
-    ) -> MessageGroup:
-        """Get or create MessageGroup when splitting is active.
-
-        Uses per-segment group tracking since each segment needs independent rechunk groups.
+        Each segment carries its own rechunk groups so split outputs stay
+        independent.
         """
         assert self.output_manager is not None
-        # Find which segment this writer belongs to
-        segment: OutputSegment | None = None
-        for seg in self.output_manager.segments.values():
-            if seg.writer is writer:
-                segment = seg
-                break
+        segment = self.output_manager.segment_for_writer(writer)
         if segment is None:
-            # Writer not yet in any segment, create one
             segment = self.output_manager.get_or_create_segment(0)
 
         if channel_id in segment.channel_to_group:
@@ -898,36 +818,53 @@ class McapProcessor:
         segment.rechunk_groups.append(group)
         return group
 
-    def _replay_segment_open(self, route_key: OutputKey) -> None:
-        """Fire ``on_segment_open`` once per segment, on its first write.
+    def _replay_segment_open(
+        self,
+        route_key: OutputKey,
+        stream_id: int,
+        observed_time: int | None = None,
+        observed_message: Message | None = None,
+    ) -> None:
+        """Fire ``on_segment_open`` once per processor as a stream reaches a segment.
 
-        Iterates processors from every input stream plus every output processor
-        and writes any records they choose to inject ahead of normal flow.
+        This keeps processors from needing stream seeks for common latch-style
+        state: if stream B opens a segment before stream A has observed its
+        latch, stream A's processors still get their own replay opportunity
+        when stream A later writes to that segment.
+
+        ``observed_time`` is the ``log_time`` of the record that triggered
+        the open — used to backfill ``segment.start_time`` for dynamic
+        (streaming-anchor) splits where the framework didn't know the
+        segment's start upfront.
         """
         assert self.output_manager is not None
         segment = self.output_manager.get_or_create_segment(route_key)
-        if segment.replayed:
-            return
-        segment.replayed = True
+        if segment.start_time == 0 and observed_time is not None:
+            segment.start_time = observed_time
 
-        seen: set[int] = set()
-        for input_file in self.options.inputs:
-            for processor in input_file.options.processors:
-                if id(processor) in seen:
-                    continue
-                seen.add(id(processor))
-                self._replay_from_processor(processor, route_key, segment)
-        for processor in self.options.output_options.processors:
-            if id(processor) in seen:
+        for processor in self._get_processors(stream_id):
+            processor_id = id(processor)
+            if processor_id in segment.replayed_processor_ids:
                 continue
-            seen.add(id(processor))
-            self._replay_from_processor(processor, route_key, segment)
+            segment.replayed_processor_ids.add(processor_id)
+            self._replay_from_processor(processor, route_key, segment, observed_message)
 
     def _replay_from_processor(
-        self, processor: Processor, route_key: OutputKey, segment: OutputSegment
+        self,
+        processor: InputProcessor,
+        route_key: OutputKey,
+        segment: OutputSegment,
+        observed_message: Message | None,
     ) -> None:
-        for channel_id, injected in processor.on_segment_open(route_key):
+        context = SegmentContext(
+            key=route_key,
+            start_time=segment.start_time,
+            observed_message=observed_message,
+        )
+        for channel_id, injected in processor.on_segment_open(context):
             assert self.output_manager is not None
+            if channel_id not in self.channels:
+                continue
             self.output_manager.ensure_channel_written(channel_id, route_key)
             segment.writer.add_message(
                 channel_id=channel_id,
@@ -937,86 +874,100 @@ class McapProcessor:
                 sequence=injected.sequence,
             )
 
-    def process_message(self, message: Message, stream_id: int) -> None:
+    def process_message(
+        self,
+        message: Message,
+        stream_id: int,
+        *,
+        input_channel_id: int | None = None,
+    ) -> None:
         self.stats.messages_processed += 1
         assert self.output_manager is not None
+        if input_channel_id is None:
+            input_channel_id = message.channel_id
 
         # Topic filtering using cached decision (avoid repeated regex matching)
         if not self._is_channel_included(stream_id, message.channel_id):
             self.stats.filter_rejections += 1
             return
 
-        input_opts = self._get_input(stream_id)
+        # Run the message through the processor chain BEFORE routing. Each
+        # processor yields zero or more messages and every yielded message
+        # continues at the next processor. There is no primary/branch identity
+        # rule: replacing a message and fan-out are both explicit in the
+        # iterable length.
+        processors = self._get_processors(stream_id)
+        pending: deque[tuple[Message, int]] = deque()
+        pending.append((message, 0))
+        survivors: list[Message] = []
+        dropped = False
 
-        route_key, routed_processors = self._get_message_routes(message)
-        if route_key is None:
-            route_key = 0
+        while pending:
+            current, start_idx = pending.popleft()
+            if start_idx >= len(processors):
+                survivors.append(current)
+                continue
 
-        # Segment-open injections run before message processors see the current
-        # record, so injected state represents records observed before this one.
-        self._replay_segment_open(route_key)
+            proc = processors[start_idx]
+            context = self._message_context(stream_id, input_channel_id)
+            produced = False
+            for out in proc.on_message(context, current):
+                if not isinstance(out, Message):
+                    msg = (
+                        f"{type(proc).__name__}.on_message yielded "
+                        f"{type(out).__name__}, expected Message"
+                    )
+                    raise TypeError(msg)
+                produced = True
+                pending.append((out, start_idx + 1))
+            if not produced:
+                dropped = True
 
-        # Action.KEEP from any processor wins regardless of later SKIPs.
-        skip = False
-        for p in input_opts.processors:
-            action = p.on_message(message)
-            if action & Action.KEEP:
-                skip = False
-                break
-            if action & Action.SKIP:
-                skip = True
-        if skip:
-            self.stats.filter_rejections += 1
+        if not survivors:
+            if dropped:
+                self.stats.filter_rejections += 1
             return
 
-        target_writer = self.output_manager.get_writer(route_key)
-        self.output_manager.ensure_channel_written(message.channel_id, route_key)
+        # Each survivor gets its own routing decision and writes — fan-out
+        # messages may land in different segments and rechunking applies per
+        # survivor.
+        for survivor_msg in survivors:
+            self._write_survivor(survivor_msg, stream_id, input_channel_id)
 
-        # Route to appropriate destination based on rechunking mode
-        if self.options.output_options.is_rechunking:
-            # Get channel for this message
-            channel = self.channels.get(message.channel_id)
-            if not channel:
-                # Channel not yet seen - skip message
-                return
+    def _write_survivor(
+        self,
+        message: Message,
+        stream_id: int,
+        input_channel_id: int | None,
+    ) -> None:
+        """Route a post-chain message to its segment(s) and write it."""
+        assert self.output_manager is not None
 
-            # Get or create the MessageGroup for this channel
-            group = self._get_or_create_group_for_channel(
-                message.channel_id, channel, target_writer
+        for route_key in self._get_message_routes(stream_id, input_channel_id, message):
+            self._replay_segment_open(
+                route_key,
+                stream_id,
+                observed_time=message.log_time,
+                observed_message=message,
             )
+            self.output_manager.ensure_channel_written(message.channel_id, route_key)
+            target_writer = self.output_manager.get_writer(route_key)
 
-            # Add message to its group (chunk builder auto-ensures within chunks)
-            group.add_message(message)
-        else:
-            target_writer.add_message(
-                channel_id=message.channel_id,
-                log_time=message.log_time,
-                data=message.data,
-                publish_time=message.publish_time,
-            )
-
-        # Trailing-context (split): also duplicate into any extra segments
-        # the output processors request via also_route_to. Skips rechunking
-        # mode for now — that path is not used by ExpressionSplitProcessor.
-        if not self.options.output_options.is_rechunking:
-            for processor in self.options.output_options.processors:
-                for requested_extra_key in processor.also_route_to(message):
-                    extra_key = self._compose_extra_message_route(
-                        processor,
-                        requested_extra_key,
-                        routed_processors,
-                    )
-                    if extra_key == route_key:
-                        continue
-                    self._replay_segment_open(extra_key)
-                    self.output_manager.ensure_channel_written(message.channel_id, extra_key)
-                    extra_writer = self.output_manager.get_writer(extra_key)
-                    extra_writer.add_message(
-                        channel_id=message.channel_id,
-                        log_time=message.log_time,
-                        data=message.data,
-                        publish_time=message.publish_time,
-                    )
+            if self.options.output_options.is_rechunking:
+                channel = self.channels.get(message.channel_id)
+                if channel is None:
+                    return
+                group = self._get_or_create_group_for_channel(
+                    message.channel_id, channel, target_writer
+                )
+                group.add_message(message)
+            else:
+                target_writer.add_message(
+                    channel_id=message.channel_id,
+                    log_time=message.log_time,
+                    data=message.data,
+                    publish_time=message.publish_time,
+                )
 
     def _handle_schema_record(self, schema: Schema, stream_id: int) -> None:
         remapped_schema = self.remapper.remap_schema(stream_id, schema)
@@ -1031,36 +982,77 @@ class McapProcessor:
             self.channels[remapped_channel.id] = remapped_channel
 
             # Pre-compute filtering decision for this stream (cache it).
-            # Action.KEEP wins immediately; otherwise any SKIP excludes.
-            input_opts = self._get_input(stream_id)
+            processors = self._get_processors(stream_id)
             should_include = True
-            if input_opts.processors:
-                schema = self.schemas.get(remapped_channel.schema_id)
+            schema = self.schemas.get(remapped_channel.schema_id)
+            context = ChannelContext(
+                input=self._get_input_context(stream_id),
+                input_channel_id=channel.id,
+            )
+            if processors:
                 skip = False
-                for p in input_opts.processors:
-                    action = p.on_channel(remapped_channel, schema)
-                    if action & Action.KEEP:
-                        skip = False
-                        break
+                for p in processors:
+                    action = p.on_channel(context, remapped_channel, schema)
                     if action & Action.SKIP:
                         skip = True
                 should_include = not skip
+            for router in self.options.output_options.routers:
+                router.on_channel(context, remapped_channel, schema)
             self.channel_filter_cache[(stream_id, remapped_channel.id)] = should_include
 
             if not should_include:
                 del self.channels[remapped_channel.id]
 
+    def _register_extra_channel(self, stream_id: int, channel: Channel) -> Channel:
+        """Register an output-only Channel allocated by a processor.
+
+        Picks a fresh id strictly above every id currently held by either the
+        writer registry or the Remapper, and *reserves* the id in the remapper
+        so a later input-channel allocation can't accidentally collide with
+        it. Marks the channel as included in the filter cache for every input
+        stream — synthetic channels bypass per-stream filters.
+
+        ``stream_id`` is retained in the signature for symmetry with
+        ``remap_channel`` / ``remap_message`` closures even though the
+        synthetic channel is global.
+        """
+        _ = stream_id  # synthetic channels are not stream-scoped
+        # Reserved id pool on the Remapper — no public API for this yet, so
+        # we poke the same set the remapper uses internally to allocate ids.
+        used_ids: set[int] = self.remapper._used_channel_ids  # noqa: SLF001
+        new_id = max(max(self.known_channels, default=0), max(used_ids, default=0)) + 1
+        new_channel = Channel(
+            id=new_id,
+            schema_id=channel.schema_id,
+            topic=channel.topic,
+            message_encoding=channel.message_encoding,
+            metadata=dict(channel.metadata),
+        )
+        self.known_channels.add(new_id)
+        self.channels[new_id] = new_channel
+        for sid in range(len(self.options.inputs)):
+            self.channel_filter_cache[(sid, new_id)] = True
+        used_ids.add(new_id)
+        return new_channel
+
     def _handle_message_record(self, message: Message, stream_id: int) -> None:
         message_to_process = self.remapper.remap_message(stream_id, message)
-        self.process_message(message_to_process, stream_id)
+        self.process_message(
+            message_to_process,
+            stream_id,
+            input_channel_id=message.channel_id,
+        )
 
     def _handle_attachment_record(self, attachment: Attachment, stream_id: int) -> None:
         self.stats.attachments_processed += 1
         assert self.output_manager is not None
 
         # Check all processors (includes AttachmentFilterProcessor and TimeFilterProcessor)
-        input_opts = self._get_input(stream_id)
-        if any(p.on_attachment(attachment) == Action.SKIP for p in input_opts.processors):
+        context = self._get_input_context(stream_id)
+        if any(
+            p.on_attachment(context, attachment) == Action.SKIP
+            for p in self._get_processors(stream_id)
+        ):
             return
 
         self.output_manager.add_attachment(attachment)
@@ -1104,9 +1096,10 @@ class McapProcessor:
                     self._handle_attachment_record(record, stream_id)
                 elif isinstance(record, Metadata):
                     self.stats.metadata_processed += 1
-                    input_opts = self._get_input(stream_id)
-                    if not input_opts.processors or all(
-                        p.on_metadata(record) != Action.SKIP for p in input_opts.processors
+                    processors = self._get_processors(stream_id)
+                    context = self._get_input_context(stream_id)
+                    if not processors or all(
+                        p.on_metadata(context, record) != Action.SKIP for p in processors
                     ):
                         assert self.output_manager is not None
                         self.output_manager.add_metadata(name=record.name, metadata=record.metadata)
@@ -1121,17 +1114,10 @@ class McapProcessor:
         if pending:
             yield pending
 
-    def _prepare_input_processors(
-        self,
-        summaries: list[Summary | None],
-        known_segments: list[tuple[OutputKey, int, int]],
-    ) -> None:
-        """Give input processors generic context before record processing starts."""
-        segment_infos = tuple(
-            OutputSegmentInfo(key=key, start_time=start_time, end_time=end_time)
-            for key, start_time, end_time in known_segments
-        )
-        for stream_id, input_file in enumerate(self.options.inputs):
+    def _build_input_contexts(self, summaries: list[Summary | None]) -> list[InputContext]:
+        """Build per-stream processor context from currently available resources."""
+        contexts: list[InputContext] = []
+        for stream_id, _input_file in enumerate(self.options.inputs):
             summary = summaries[stream_id] if stream_id < len(summaries) else None
 
             def remap_channel(channel: Channel, sid: int = stream_id) -> Channel:
@@ -1140,15 +1126,44 @@ class McapProcessor:
             def remap_message(message: Message, sid: int = stream_id) -> Message:
                 return self.remapper.remap_message(sid, message)
 
-            context = ProcessorInputContext(
-                stream_id=stream_id,
-                stream=input_file.stream,
-                summary=summary,
-                output_segments=segment_infos,
-                remap_channel=remap_channel,
-                remap_message=remap_message,
+            def register_channel(channel: Channel, sid: int = stream_id) -> Channel:
+                return self._register_extra_channel(sid, channel)
+
+            contexts.append(
+                InputContext(
+                    stream_id=stream_id,
+                    summary=summary,
+                    statistics=summary.statistics if summary is not None else None,
+                    chunk_indexes=(
+                        tuple(summary.chunk_indexes)
+                        if summary is not None and summary.chunk_indexes
+                        else None
+                    ),
+                    remap_channel=remap_channel,
+                    remap_message=remap_message,
+                    register_channel=register_channel,
+                )
             )
-            for processor in input_file.options.processors:
+        return contexts
+
+    def _pipeline_context(
+        self,
+        output_segments: list[tuple[OutputKey, int, int]] | None = None,
+    ) -> PipelineContext:
+        segment_infos = tuple(
+            OutputSegmentInfo(key=key, start_time=start_time, end_time=end_time)
+            for key, start_time, end_time in output_segments or []
+        )
+        return PipelineContext(
+            inputs=tuple(self._get_input_context(i) for i in range(len(self.options.inputs))),
+            output_segments=segment_infos,
+        )
+
+    def _prepare_input_processors(self) -> None:
+        """Give input processors per-stream context before record processing starts."""
+        for stream_id in range(len(self.options.inputs)):
+            context = self._get_input_context(stream_id)
+            for processor in self._get_processors(stream_id):
                 processor.prepare_input(context)
 
     def process(
@@ -1172,16 +1187,22 @@ class McapProcessor:
             summaries.append(summary)
             input_stream.seek(0)
 
-        # Initialize processors before pre-loading schemas/channels so channel
-        # handlers can consult summary-derived processor state.
-        for proc in output_opts.processors:
-            proc.initialize(summaries)
-        for stream_id, input_file in enumerate(self.options.inputs):
-            stream_summaries: list[Summary | None] = [
-                summaries[stream_id] if stream_id < len(summaries) else None
-            ]
-            for proc in input_file.options.processors:
-                proc.initialize(stream_summaries)
+        for stream_id, context in enumerate(self._build_input_contexts(summaries)):
+            self._input_contexts[stream_id] = context
+
+        # Output routers initialize first because they define statically-known
+        # output segments. Input processors then initialize with those segments
+        # included in PipelineContext.
+        for router in output_opts.routers:
+            router.initialize(self._pipeline_context())
+
+        known_segments = list(self._iter_known_output_segments())
+        if not known_segments and not output_opts.is_splitting:
+            known_segments = [(0, 0, 0)]
+
+        pipeline_context = self._pipeline_context(known_segments)
+        for proc in self._iter_unique_input_processors():
+            proc.initialize(pipeline_context)
 
         # Pass 2 — pre-load schemas / channels via the standard handlers, which
         # also populate the channel filter cache.
@@ -1193,12 +1214,7 @@ class McapProcessor:
             for channel in summary.channels.values():
                 self._handle_channel_record(channel, stream_id)
 
-        # Pre-compute statically known output segments and expose them to input
-        # processors before record processing starts.
-        known_segments = list(self._iter_known_output_segments())
-        if not known_segments and not output_opts.is_splitting:
-            known_segments = [(0, 0, 0)]
-        self._prepare_input_processors(summaries, known_segments)
+        self._prepare_input_processors()
 
         if not output_opts.is_splitting and output_stream is None:
             raise ValueError("output_stream is required when not splitting")
@@ -1296,26 +1312,36 @@ class McapProcessor:
               records, then fast-copy if clean else fall through to DECODE
             - DECODE: Chunk must be re-emitted (filter, rechunk, channel remap)
         """
-        input_opts = self._get_input(stream_id)
         output_opts = self.options.output_options
+        context = self._chunk_context(stream_id, indexes)
 
-        # Ask input processors for chunk-level decision (time filtering, always_decode, etc.)
-        for proc in input_opts.processors:
-            decision = proc.on_chunk(chunk, indexes)
+        # Ask input processors for chunk-level decision (time filtering, always_decode, etc.).
+        # A processor that mutates Channel/Schema records (e.g. TopicRewrite) may
+        # return DECODE_VERIFY to ask the dispatcher to re-verify that the chunk's
+        # embedded Channel/Schema records still match the writer's view.
+        decode_verify_requested = False
+        for proc in self._get_processors(stream_id):
+            decision = proc.on_chunk(context, chunk)
             if decision == ChunkDecision.SKIP:
                 return ChunkDecision.SKIP
             if decision == ChunkDecision.DECODE:
-                # Track that we need to decode, but keep checking for SKIP
                 return ChunkDecision.DECODE
+            if decision == ChunkDecision.DECODE_VERIFY:
+                decode_verify_requested = True
 
-        # Ask output processors (split routing forces DECODE on boundary chunks)
-        for proc in output_opts.processors:
-            decision = proc.on_chunk(chunk, indexes)
+        # Ask output routers (split routing forces DECODE on boundary chunks)
+        for proc in output_opts.routers:
+            decision = proc.on_chunk(context, chunk)
             if decision == ChunkDecision.DECODE:
                 return ChunkDecision.DECODE
+            if decision == ChunkDecision.DECODE_VERIFY:
+                decode_verify_requested = True
 
         # Force decode if rechunking is active (must reorganize messages)
         if output_opts.is_rechunking:
+            return ChunkDecision.DECODE
+
+        if not indexes:
             return ChunkDecision.DECODE
 
         compression_mismatch = chunk.compression != output_opts.compression_type.value
@@ -1347,8 +1373,10 @@ class McapProcessor:
         # Stream-level remap: messages are fine (no channel was reassigned
         # above), but in-chunk Schema/Channel records may be stale because
         # some writers eagerly embed every channel in every chunk. Defer
-        # to a verify pass on the decoded records.
-        if self.remapper.stream_had_remap(stream_id):
+        # to a verify pass on the decoded records. Same logic applies when
+        # an input/output processor explicitly requested DECODE_VERIFY (e.g.
+        # TopicRewrite mutating Channel.topic).
+        if self.remapper.stream_had_remap(stream_id) or decode_verify_requested:
             if compression_mismatch:
                 # Verifying then fast-copying would still leave the wrong
                 # codec; fall back to full DECODE for this rare combo.
@@ -1360,38 +1388,50 @@ class McapProcessor:
 
         return ChunkDecision.CONTINUE
 
-    def _get_chunk_route(self, chunk: Chunk | LazyChunk) -> OutputKey | None:
-        """Get output key for a chunk from output processors."""
-        routes: list[int | str] = []
-        for proc in self.options.output_options.processors:
-            route = proc.route_chunk(chunk)
-            if route is SPLIT_REQUIRED:
-                return None
-            if route is not None:
-                assert isinstance(route, (int, str))
-                routes.append(route)
-        if not routes:
-            return None
-        if len(routes) == 1:
-            return routes[0]
-        return tuple(routes)
+    @staticmethod
+    def _compose_route_groups(route_groups: list[list[RouteKey]]) -> list[OutputKey]:
+        if not route_groups:
+            return [0]
+        output_keys: list[OutputKey] = []
+        for route_tuple in product(*route_groups):
+            key: OutputKey = route_tuple[0] if len(route_tuple) == 1 else route_tuple
+            if key not in output_keys:
+                output_keys.append(key)
+        return output_keys
+
+    def _get_chunk_routes(
+        self,
+        stream_id: int,
+        chunk: Chunk | LazyChunk,
+        indexes: list[MessageIndex],
+    ) -> list[OutputKey]:
+        """Get output keys for a chunk from output routers."""
+        route_groups: list[list[RouteKey]] = []
+        context = self._chunk_context(stream_id, indexes)
+        for proc in self.options.output_options.routers:
+            route_result = proc.route_chunk(context, chunk)
+            if route_result is SPLIT_REQUIRED:
+                msg = (
+                    f"{type(proc).__name__}.route_chunk requested a split after "
+                    "the chunk was classified as fast-copy"
+                )
+                raise RuntimeError(msg)
+            routes = list(cast("Iterable[RouteKey]", route_result))
+            if routes:
+                route_groups.append(routes)
+        return self._compose_route_groups(route_groups)
 
     def _iter_known_output_segments(self) -> Iterator[tuple[OutputKey, int, int]]:
         """Yield statically known output routes for pre-creating segments."""
         known: list[list[tuple[int | str, int, int]]] = []
-        for proc in self.options.output_options.processors:
-            keys = proc.output_keys()
-            if keys is None:
+        for proc in self.options.output_options.routers:
+            segments = proc.output_segments()
+            if segments is None:
                 return
-            boundaries = getattr(proc, "boundaries", None)
             proc_known: list[tuple[int | str, int, int]] = []
-            for key in keys:
-                start_time = 0
-                end_time = 0
-                if boundaries and isinstance(key, int):
-                    start_time = boundaries[key]
-                    end_time = boundaries[key + 1]
-                proc_known.append((key, start_time, end_time))
+            for segment in segments:
+                assert isinstance(segment.key, (int, str))
+                proc_known.append((segment.key, segment.start_time, segment.end_time))
             known.append(proc_known)
 
         if not known:
@@ -1437,38 +1477,18 @@ class McapProcessor:
 
     def _get_message_routes(
         self,
+        stream_id: int,
+        input_channel_id: int | None,
         message: Message,
-    ) -> tuple[OutputKey | None, list[tuple[Processor, int | str]]]:
-        """Get the output key and the per-processor route components."""
-        routes: list[int | str] = []
-        routed_processors: list[tuple[Processor, int | str]] = []
-        for proc in self.options.output_options.processors:
-            route = proc.route_message(message)
-            if route is not None:
-                routes.append(route)
-                routed_processors.append((proc, route))
-        if not routes:
-            return None, routed_processors
-        if len(routes) == 1:
-            return routes[0], routed_processors
-        return tuple(routes), routed_processors
-
-    def _compose_extra_message_route(
-        self,
-        processor: Processor,
-        extra_key: OutputKey,
-        routed_processors: list[tuple[Processor, int | str]],
-    ) -> OutputKey:
-        if len(routed_processors) <= 1 or isinstance(extra_key, tuple):
-            return extra_key
-
-        for index, (routed_processor, _route) in enumerate(routed_processors):
-            if routed_processor is processor:
-                routes = [route for _processor, route in routed_processors]
-                routes[index] = extra_key
-                return tuple(routes)
-
-        return extra_key
+    ) -> list[OutputKey]:
+        """Get output keys for a post-processor-chain message."""
+        route_groups: list[list[RouteKey]] = []
+        context = self._message_context(stream_id, input_channel_id)
+        for proc in self.options.output_options.routers:
+            routes = list(proc.route_message(context, message))
+            if routes:
+                route_groups.append(routes)
+        return self._compose_route_groups(route_groups)
 
     def _run_chunk_pipeline(self, chunks: Iterator[PendingChunk]) -> None:
         """Consume chunks from the merged iterator, decompressing DECODE chunks ahead.
@@ -1532,6 +1552,34 @@ class McapProcessor:
                 enqueue_next()
                 self._process_chunk_smart(pending, decision, future)
 
+    def _prepare_chunk_writes(
+        self, pending: PendingChunk
+    ) -> list[tuple[OutputKey, McapWriter, dict[int, MessageIndex]]]:
+        """Resolve routes, fire segment-open, and ensure all referenced channels.
+
+        Returns ``(route_key, writer, indices_by_channel)`` entries so each branch in
+        ``_process_chunk_smart`` can hand the chunk to the writer without
+        duplicating the boilerplate.
+        """
+        assert self.output_manager is not None
+        writes: list[tuple[OutputKey, McapWriter, dict[int, MessageIndex]]] = []
+        for route_key in self._get_chunk_routes(
+            pending.stream_id,
+            pending.chunk,
+            pending.indexes,
+        ):
+            self._replay_segment_open(
+                route_key,
+                pending.stream_id,
+                observed_time=pending.chunk.message_start_time,
+            )
+            writer = self.output_manager.get_writer(route_key)
+            for idx in pending.indexes:
+                if self._is_channel_included(pending.stream_id, idx.channel_id):
+                    self.output_manager.ensure_channel_written(idx.channel_id, route_key)
+            writes.append((route_key, writer, {idx.channel_id: idx for idx in pending.indexes}))
+        return writes
+
     def _process_chunk_smart(
         self,
         pending: PendingChunk,
@@ -1572,17 +1620,11 @@ class McapProcessor:
             if _chunk_records_match_writer_view(records, self.schemas, self.channels):
                 # Clean: emit the materialized chunk as-is, skipping re-emit.
                 assert isinstance(pending.chunk, Chunk)
-                route_key = self._get_chunk_route(pending.chunk)
-                if route_key is None:
-                    route_key = 0
-                self._replay_segment_open(route_key)
-                target_writer = self.output_manager.get_writer(route_key)
-                for idx in pending.indexes:
-                    if self._is_channel_included(pending.stream_id, idx.channel_id):
-                        self.output_manager.ensure_channel_written(idx.channel_id, route_key)
-                indices_by_channel = {idx.channel_id: idx for idx in pending.indexes}
-                target_writer.add_chunk(pending.chunk, indices_by_channel)
-                self.stats.chunks_copied += 1
+                for _route_key, target_writer, indices_by_channel in self._prepare_chunk_writes(
+                    pending
+                ):
+                    target_writer.add_chunk(pending.chunk, indices_by_channel)
+                    self.stats.chunks_copied += 1
                 self.stats.chunks_verified += 1
                 return
             # Stale records: fall through to the existing re-emit path.
@@ -1600,44 +1642,29 @@ class McapProcessor:
                 )
                 self.stats.errors_encountered += 1
                 return
-            route_key = self._get_chunk_route(pending.chunk)
-            if route_key is None:
-                route_key = 0
-            self._replay_segment_open(route_key)
-            target_writer = self.output_manager.get_writer(route_key)
-            for idx in pending.indexes:
-                if self._is_channel_included(pending.stream_id, idx.channel_id):
-                    self.output_manager.ensure_channel_written(idx.channel_id, route_key)
-            indices_by_channel = {idx.channel_id: idx for idx in pending.indexes}
-            target_writer.add_chunk(new_chunk, indices_by_channel)
-            self.stats.chunks_copied += 1
+            for _route_key, target_writer, indices_by_channel in self._prepare_chunk_writes(
+                pending
+            ):
+                target_writer.add_chunk(new_chunk, indices_by_channel)
+                self.stats.chunks_copied += 1
             return
 
         # Fast-copy path (CONTINUE) -> nothing about the chunk must be changed.
         # We pipe raw bytes from input to output (no Chunk materialization).
-        route_key = self._get_chunk_route(pending.chunk)
-        if route_key is None:
-            route_key = 0
-        self._replay_segment_open(route_key)
-        target_writer = self.output_manager.get_writer(route_key)
-        for idx in pending.indexes:
-            if self._is_channel_included(pending.stream_id, idx.channel_id):
-                self.output_manager.ensure_channel_written(idx.channel_id, route_key)
-
-        indices_by_channel = {idx.channel_id: idx for idx in pending.indexes}
-        if isinstance(pending.chunk, LazyChunk):
-            try:
-                target_writer.add_chunk_raw(pending.stream, pending.chunk, indices_by_channel)
-            except (EOFError, McapError) as e:
-                console.print(
-                    f"[yellow]Warning (stream {pending.stream_id}): Failed to copy chunk: "
-                    f"{e}[/yellow]"
-                )
-                self.stats.errors_encountered += 1
-                return
-        else:
-            target_writer.add_chunk(pending.chunk, indices_by_channel)
-        self.stats.chunks_copied += 1
+        for _route_key, target_writer, indices_by_channel in self._prepare_chunk_writes(pending):
+            if isinstance(pending.chunk, LazyChunk):
+                try:
+                    target_writer.add_chunk_raw(pending.stream, pending.chunk, indices_by_channel)
+                except (EOFError, McapError) as e:
+                    console.print(
+                        f"[yellow]Warning (stream {pending.stream_id}): Failed to copy chunk: "
+                        f"{e}[/yellow]"
+                    )
+                    self.stats.errors_encountered += 1
+                    return
+            else:
+                target_writer.add_chunk(pending.chunk, indices_by_channel)
+            self.stats.chunks_copied += 1
 
     def _process_decoded_records(self, records: list[McapRecord], stream_id: int) -> None:
         """Process records that were already decoded from a chunk (by a worker)."""
@@ -1645,7 +1672,11 @@ class McapProcessor:
         for chunk_record in records:
             if isinstance(chunk_record, Message):
                 message_to_write = self.remapper.remap_message(stream_id, chunk_record)
-                self.process_message(message_to_write, stream_id)
+                self.process_message(
+                    message_to_write,
+                    stream_id,
+                    input_channel_id=chunk_record.channel_id,
+                )
             elif isinstance(chunk_record, Schema):
                 self._handle_schema_record(chunk_record, stream_id)
             elif isinstance(chunk_record, Channel):

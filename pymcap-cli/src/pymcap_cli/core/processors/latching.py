@@ -7,35 +7,35 @@ last-published value (TF tree, robot description, etc.). This processor:
 
 1. Identifies "latched" channels (explicit topic patterns and/or, opt-in,
    channels whose MCAP metadata advertises ``durability: transient_local``).
-2. Vetoes SKIP decisions from other input processors so latched channels
-   always reach the output.
-3. Caches the most recent message seen on each latched channel.
-4. When a new output segment first opens for writing, replays the cached
+2. Caches the most recent message seen on each latched channel.
+3. When a new output segment first opens for writing, replays the cached
    latched messages into it via the ``on_segment_open`` hook. The original
    ``log_time`` / ``publish_time`` are preserved.
 """
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING
 
 import yaml
-from small_mcap import McapError, read_message
 
 from pymcap_cli.core.processors.base import (
     Action,
-    ChunkDecision,
-    OutputSegmentInfo,
-    Processor,
-    ProcessorInputContext,
+    ChannelContext,
+    ChunkContext,
+    InputContext,
+    InputProcessor,
+    MessageContext,
+    MessageScope,
+    PipelineContext,
+    SegmentContext,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from re import Pattern
 
-    from small_mcap import Channel, Chunk, LazyChunk, Message, MessageIndex, Schema, Summary
+    from small_mcap import Channel, Message, Schema
 
     from pymcap_cli.core.processors.base import OutputKey
 
@@ -70,7 +70,7 @@ def _channel_is_transient_local(channel: Channel) -> bool:
     return False
 
 
-class LatchingProcessor(Processor):
+class LatchingProcessor(InputProcessor):
     """Keep latched topics across filter/split cuts and replay into new segments.
 
     Args:
@@ -92,11 +92,8 @@ class LatchingProcessor(Processor):
         self._latched_channel_ids: set[int] = set()
         self._latched_topics: set[str] = set()
         self._last_message: dict[int, Message] = {}
+        self._previous_message: dict[int, Message] = {}
         self._replayed_segments: set[OutputKey] = set()
-        self._context: ProcessorInputContext | None = None
-        self._segments_by_key: dict[OutputKey, OutputSegmentInfo] = {}
-        self._scan_channel_ids: set[int] = set()
-        self._segment_replays: dict[OutputKey, tuple[tuple[int, Message], ...]] = {}
 
     @property
     def latched_channel_ids(self) -> set[int]:
@@ -111,101 +108,61 @@ class LatchingProcessor(Processor):
             return True
         return self._from_metadata and _channel_is_transient_local(channel)
 
-    def initialize(self, summaries: list[Summary | None]) -> None:
-        for summary in summaries:
-            if summary is None:
+    def initialize(self, context: PipelineContext) -> None:
+        for input_context in context.inputs:
+            if input_context.summary is None:
                 continue
-            for channel in summary.channels.values():
+            for channel in input_context.summary.channels.values():
                 if self._is_latched(channel):
-                    self._latched_channel_ids.add(channel.id)
                     self._latched_topics.add(channel.topic)
 
-    def prepare_input(self, context: ProcessorInputContext) -> None:
-        self._context = context
-        self._segments_by_key = {segment.key: segment for segment in context.output_segments}
-        self._scan_channel_ids.clear()
-        summary = context.summary
-        if summary is None:
-            return
-        for channel in summary.channels.values():
-            if not self._is_latched(channel):
-                continue
-            remapped_channel = context.remap_channel(channel)
-            self._scan_channel_ids.add(remapped_channel.id)
+    def prepare_input(self, context: InputContext) -> None:
+        _ = context
 
-    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
+    def on_channel(
+        self, context: ChannelContext, channel: Channel, schema: Schema | None
+    ) -> Action:
         # Discover channels that arrive without a summary (recovery / streaming).
         if channel.id not in self._latched_channel_ids and self._is_latched(channel):
             self._latched_channel_ids.add(channel.id)
             self._latched_topics.add(channel.topic)
-            self._scan_channel_ids.add(channel.id)
-        if channel.id in self._latched_channel_ids:
-            return Action.KEEP
         return Action.CONTINUE
 
-    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
+    def message_scope(self, context: ChunkContext) -> MessageScope:
         # Fast-copied chunks bypass on_message — if the chunk references a
         # latched channel we must DECODE so the latch cache stays current.
-        if any(idx.channel_id in self._latched_channel_ids for idx in indexes):
-            return ChunkDecision.DECODE
-        return ChunkDecision.CONTINUE
+        return MessageScope.channels(set(self._latched_channel_ids))
 
-    def on_message(self, message: Message) -> Action:
+    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         if message.channel_id in self._latched_channel_ids:
+            previous = self._last_message.get(message.channel_id)
+            if previous is not None:
+                self._previous_message[message.channel_id] = previous
             self._last_message[message.channel_id] = message
-            return Action.KEEP
-        return Action.CONTINUE
+        yield message
 
-    def _find_segment_replay(self, key: OutputKey) -> tuple[tuple[int, Message], ...] | None:
-        segment = self._segments_by_key.get(key)
-        if segment is None:
-            return None
-        if segment.start_time <= 0:
+    def _replay_messages_before(
+        self,
+        start_time: int,
+        observed_message: Message | None,
+    ) -> tuple[tuple[int, Message], ...]:
+        replay: list[tuple[int, Message]] = []
+        for channel_id, message in self._last_message.items():
+            if message is observed_message:
+                previous = self._previous_message.get(channel_id)
+                if previous is not None and previous.log_time < start_time:
+                    replay.append((channel_id, previous))
+                continue
+            if message.log_time < start_time:
+                replay.append((channel_id, message))
+                continue
+            previous = self._previous_message.get(channel_id)
+            if previous is not None and previous.log_time < start_time:
+                replay.append((channel_id, previous))
+        return tuple(replay)
+
+    def on_segment_open(self, context: SegmentContext) -> Iterable[tuple[int, Message]]:
+        if context.key in self._replayed_segments:
             return ()
-        if key in self._segment_replays:
-            return self._segment_replays[key]
-        if self._context is None or not self._scan_channel_ids:
-            return None
-
-        stream = self._context.stream
-        try:
-            position = stream.tell()
-            stream.seek(0)
-        except (OSError, ValueError):
-            return None
-
-        found: dict[int, Message] = {}
-        try:
-            try:
-                messages = read_message(
-                    stream,
-                    end_time_ns=segment.start_time,
-                    reverse=True,
-                )
-                for _schema, _channel, message in messages:
-                    remapped = self._context.remap_message(message)
-                    if remapped.channel_id not in self._scan_channel_ids:
-                        continue
-                    if remapped.channel_id in found:
-                        continue
-                    found[remapped.channel_id] = remapped
-                    if self._scan_channel_ids <= found.keys():
-                        break
-            except (McapError, OSError, ValueError):
-                return None
-        finally:
-            with contextlib.suppress(OSError, ValueError):
-                stream.seek(position)
-
-        replay = tuple(found.items())
-        self._segment_replays[key] = replay
-        return replay
-
-    def on_segment_open(self, key: OutputKey) -> Iterable[tuple[int, Message]]:
-        if key in self._replayed_segments:
-            return ()
-        self._replayed_segments.add(key)
-        segment_replay = self._find_segment_replay(key)
-        if segment_replay is not None:
-            return segment_replay
-        return tuple(self._last_message.items())
+        self._replayed_segments.add(context.key)
+        return self._replay_messages_before(context.start_time, context.observed_message)

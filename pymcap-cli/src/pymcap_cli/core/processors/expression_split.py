@@ -15,24 +15,19 @@ from ros_parser.message_path import (
 from small_mcap import JSONDecoderFactory
 
 from pymcap_cli.core.processors.base import (
-    Action,
+    ChannelContext,
+    ChunkContext,
     ChunkDecision,
-    Processor,
+    MessageContext,
+    OutputRouter,
+    PipelineContext,
     _SplitRequiredSentinel,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from small_mcap import (
-        Channel,
-        Chunk,
-        LazyChunk,
-        Message,
-        MessageIndex,
-        Schema,
-        Summary,
-    )
+    from small_mcap import Channel, Chunk, LazyChunk, Message, MessageIndex, Schema
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +55,7 @@ class _TailWindow:
     count_left: int
 
 
-class ExpressionSplitProcessor(Processor):
+class ExpressionSplitProcessor(OutputRouter):
     """Split output each time a ros-parser message path changes its value.
 
     The path (e.g. ``/gps/fix.status.status`` or ``/detections{confidence>0.8}``)
@@ -109,17 +104,20 @@ class ExpressionSplitProcessor(Processor):
         self._trailing_count = trailing_context_count
         self._tail_windows: list[_TailWindow] = []
 
-    def initialize(self, summaries: list[Summary | None]) -> None:
-        for summary in summaries:
-            if summary is None:
+    def initialize(self, context: PipelineContext) -> None:
+        for input_context in context.inputs:
+            if input_context.summary is None:
                 continue
-            for channel in summary.channels.values():
-                schema = summary.schemas.get(channel.schema_id) if channel.schema_id else None
+            for channel in input_context.summary.channels.values():
+                schema = (
+                    input_context.summary.schemas.get(channel.schema_id)
+                    if channel.schema_id
+                    else None
+                )
                 self._register(channel, schema)
 
-    def on_channel(self, channel: Channel, schema: Schema | None) -> Action:
+    def on_channel(self, context: ChannelContext, channel: Channel, schema: Schema | None) -> None:
         self._register(channel, schema)
-        return Action.CONTINUE
 
     def _register(self, channel: Channel, schema: Schema | None) -> None:
         self.channels[channel.id] = channel
@@ -152,7 +150,7 @@ class ExpressionSplitProcessor(Processor):
         except ValidationError as e:
             logger.warning("path %r invalid for %s: %s", self.path_str, schema.name, e)
 
-    def _chunk_has_target(self, indexes: list[MessageIndex]) -> bool:
+    def _chunk_has_target(self, indexes: Iterable[MessageIndex]) -> bool:
         if not self.channels:
             return True  # channels not yet known → decode to stay safe
         target = self.parsed.topic
@@ -161,16 +159,22 @@ class ExpressionSplitProcessor(Processor):
             for idx in indexes
         )
 
-    def on_chunk(self, chunk: Chunk | LazyChunk, indexes: list[MessageIndex]) -> ChunkDecision:
-        if self._chunk_has_target(indexes):
+    def on_chunk(
+        self,
+        context: ChunkContext,
+        chunk: Chunk | LazyChunk,
+    ) -> ChunkDecision:
+        if context.message_indexes is None or self._chunk_has_target(context.message_indexes):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
-    def route_chunk(self, chunk: Chunk | LazyChunk) -> int | str | _SplitRequiredSentinel | None:
+    def route_chunk(
+        self, context: ChunkContext, chunk: Chunk | LazyChunk
+    ) -> tuple[int, ...] | _SplitRequiredSentinel:
         # Reached only for fast-copy chunks (on_chunk returned CONTINUE). Those
         # contain no target-topic messages, so route the whole chunk to the
         # current sticky segment.
-        return self._segment_index
+        return (self._segment_index,)
 
     def _commit_transition(self, new_value: object, log_time_ns: int) -> None:
         """Commit a value transition: bump the segment index and arm the
@@ -196,32 +200,32 @@ class ExpressionSplitProcessor(Processor):
             )
         )
 
-    def route_message(self, message: Message) -> int:
+    def route_message(self, context: MessageContext, message: Message) -> tuple[int, ...]:
         dec = self._decoders.get(message.channel_id)
         ch = self.channels.get(message.channel_id)
         if dec is None or ch is None or ch.topic != self.parsed.topic:
-            return self._segment_index
+            return (self._segment_index,)
         try:
             value = self.parsed.apply(dec(message.data))
         except MessagePathError:
-            return self._segment_index
+            return (self._segment_index,)
 
         if value == self._prev_value:
             # Same value as current segment — clear any pending candidate
             # (the transition flapped back).
             self._candidate = None
-            return self._segment_index
+            return self._routes_for_target_message(message)
 
         # The very first value seen is the initial state, not a transition —
         # commit it without consulting hysteresis so segment 0 holds the
         # right ``_prev_value`` for subsequent diffs.
         if self._prev_value is _UNSET:
             self._commit_transition(value, message.log_time)
-            return self._segment_index
+            return self._routes_for_target_message(message)
 
         if self._hysteresis_ns is None and self._hysteresis_count is None:
             self._commit_transition(value, message.log_time)
-            return self._segment_index
+            return self._routes_for_target_message(message)
 
         if self._candidate is None or self._candidate.value != value:
             self._candidate = _Candidate(value=value, first_seen_ns=message.log_time, count=1)
@@ -235,9 +239,12 @@ class ExpressionSplitProcessor(Processor):
         if time_ok and count_ok:
             self._commit_transition(value, message.log_time)
 
-        return self._segment_index
+        return self._routes_for_target_message(message)
 
-    def also_route_to(self, message: Message) -> Iterable[int]:
+    def _routes_for_target_message(self, message: Message) -> tuple[int, ...]:
+        return (self._segment_index, *self._extra_routes_for_target_message(message))
+
+    def _extra_routes_for_target_message(self, message: Message) -> Iterable[int]:
         """Duplicate target-topic messages into the previous segment during
         the trailing-context window. Other-topic messages stay sticky."""
         if not self._tail_windows:
@@ -264,6 +271,3 @@ class ExpressionSplitProcessor(Processor):
 
         self._tail_windows = active_windows
         return tuple(targets)
-
-    def output_keys(self) -> list[int | str] | None:
-        return None

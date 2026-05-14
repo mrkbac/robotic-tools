@@ -2,6 +2,7 @@ import pytest
 from pymcap_cli.cli import app
 from pymcap_cli.cmd import split_cmd
 from pymcap_cli.core.mcap_processor import OverwriteCollisionPolicy
+from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 
 from tests.helpers import empty_processor_result
 
@@ -76,6 +77,41 @@ def test_split_rejects_zero_expression_options_before_command_runs(
     assert exc_info.value.code == 1
     assert "Must be > 0" in output
     assert not called
+
+
+def test_split_requires_some_split_mode():
+    exit_code = split_cmd.split(file="input.mcap", force=True)
+    assert exit_code == 1
+
+
+def test_split_max_size_constructs_size_processor(monkeypatch):
+    seen: list[list] = []
+
+    def fake_run_processor_multi(*, files: list[str], output_options, input_options=None):
+        _ = files, input_options
+        seen.append(list(output_options.routers))
+        return empty_processor_result(segments={})
+
+    monkeypatch.setattr(split_cmd, "run_processor_multi", fake_run_processor_multi)
+
+    exit_code = split_cmd.split(file="input.mcap", max_size="500MB", force=True)
+
+    assert exit_code == 0
+    assert len(seen) == 1
+    procs = seen[0]
+    assert len(procs) == 1
+    assert isinstance(procs[0], SizeSplitProcessor)
+    assert procs[0].max_size_bytes == 500_000_000
+
+
+def test_split_max_size_rejects_invalid_value(monkeypatch):
+    monkeypatch.setattr(
+        split_cmd,
+        "run_processor_multi",
+        lambda **_: empty_processor_result(segments={}),
+    )
+    exit_code = split_cmd.split(file="input.mcap", max_size="not-a-size", force=True)
+    assert exit_code == 1
 
 
 def test_split_returns_one_when_processor_raises(monkeypatch):

@@ -57,8 +57,10 @@ def _build_table_rows(
         is_last_child = i == len(children) - 1
         connector = "└── " if is_last_child else "├── "
 
-        color = "green" if transform.is_static else "red"
-        frame_with_prefix = f"{prefix}{connector}[{color}]{child_frame_id}[/]"
+        if transform.is_static:
+            frame_with_prefix = f"{prefix}{connector}[green]{child_frame_id}[/]"
+        else:
+            frame_with_prefix = f"{prefix}[red]{connector}{child_frame_id}[/]"
         count = transform_counts[key]
         timestamp = _format_timestamp(transform.timestamp_ns)
         tx, ty, tz = transform.translation
