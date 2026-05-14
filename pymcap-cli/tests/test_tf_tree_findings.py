@@ -166,9 +166,22 @@ def test_collect_tf_findings_nonunit_quat_is_warning() -> None:
 
 
 def test_collect_tf_findings_tf_static_overlap_is_warning() -> None:
-    graph = TfGraph(
-        transforms={("a", "b"): _td("a", "b", xyz=(1.0, 0.0, 0.0), static=True)},
-        topics_by_edge={("a", "b"): {"/tf_static", "/tf"}},
+    graph = TfGraph()
+    graph.add(
+        static=True,
+        stamp_ns=0,
+        parent="a",
+        child="b",
+        translation=(1.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+    graph.add(
+        static=False,
+        stamp_ns=1,
+        parent="a",
+        child="b",
+        translation=(2.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
     )
     findings = collect_tf_findings(graph)
     overlap = _codes(findings, TfFindingCode.TF_STATIC_TF_OVERLAP)

@@ -20,7 +20,6 @@ from pymcap_cli.core.tf_tree import (
     TfGraph,
     TfLookupError,
     TfLookupResult,
-    lookup_transform,
     quaternion_to_euler_rad,
     read_tf_graph,
 )
@@ -83,7 +82,7 @@ def tf_get(
         return 1
 
     try:
-        result = lookup_transform(graph, target=target, source=source)
+        result = graph.lookup(target=target, source=source)
     except TfLookupError as exc:
         ERR.print(f"[red]{exc}[/red]")
         _print_lookup_context(graph, target=target, source=source, findings=findings)

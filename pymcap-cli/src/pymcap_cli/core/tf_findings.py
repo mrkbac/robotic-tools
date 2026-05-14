@@ -212,8 +212,8 @@ def collect_tf_findings(graph: TfGraph) -> list[TfFinding]:
             message=f"Edge {edge[0]} -> {edge[1]} was published on both /tf and /tf_static",
             frames=edge,
         )
-        for edge, topics in sorted(graph.topics_by_edge.items())
-        if "/tf_static" in topics and "/tf" in topics
+        for edge in sorted(graph.topic_flags_by_edge)
+        if graph.has_static_dynamic_overlap(edge)
     )
 
     findings.extend(

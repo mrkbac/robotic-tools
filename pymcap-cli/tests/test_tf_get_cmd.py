@@ -5,12 +5,7 @@ import math
 from typing import TYPE_CHECKING
 
 from pymcap_cli.cmd import tf_get_cmd
-from pymcap_cli.core.tf_tree import (
-    TfGraph,
-    TransformData,
-    lookup_transform,
-    quaternion_to_euler_rad,
-)
+from pymcap_cli.core.tf_tree import TfGraph, TransformData, quaternion_to_euler_rad
 from rich.console import Console
 
 from tests.fixtures.mcap_generator import create_tf_mcap
@@ -58,9 +53,8 @@ def _graph(transforms: dict[tuple[str, str], TransformData]) -> TfGraph:
     return TfGraph(transforms=transforms)
 
 
-def test_lookup_transform_direct_parent_from_child() -> None:
-    result = lookup_transform(
-        _graph({("base", "camera"): _td("base", "camera", (1.0, 2.0, 3.0))}),
+def test_tf_graph_lookup_direct_parent_from_child() -> None:
+    result = _graph({("base", "camera"): _td("base", "camera", (1.0, 2.0, 3.0))}).lookup(
         target="base",
         source="camera",
     )
@@ -71,15 +65,15 @@ def test_lookup_transform_direct_parent_from_child() -> None:
     assert result.path[0].is_inverted is False
 
 
-def test_lookup_transform_travels_up_and_down_tree() -> None:
+def test_tf_graph_lookup_travels_up_and_down_tree() -> None:
     transforms = {
         ("root", "base"): _td("root", "base", (1.0, 0.0, 0.0)),
         ("base", "camera"): _td("base", "camera", (2.0, 0.0, 0.0)),
     }
 
     graph = _graph(transforms)
-    up = lookup_transform(graph, target="root", source="camera")
-    down = lookup_transform(graph, target="camera", source="root")
+    up = graph.lookup(target="root", source="camera")
+    down = graph.lookup(target="camera", source="root")
 
     assert up.transform.translation == (3.0, 0.0, 0.0)
     assert down.transform.translation == (-3.0, 0.0, 0.0)
@@ -87,7 +81,7 @@ def test_lookup_transform_travels_up_and_down_tree() -> None:
     assert [step.is_inverted for step in down.path] == [True, True]
 
 
-def test_lookup_transform_composes_rotated_translation() -> None:
+def test_tf_graph_lookup_composes_rotated_translation() -> None:
     yaw_90 = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
     transforms = {
         ("root", "mid"): TransformData(
@@ -101,7 +95,7 @@ def test_lookup_transform_composes_rotated_translation() -> None:
         ("mid", "leaf"): _td("mid", "leaf", (1.0, 0.0, 0.0)),
     }
 
-    result = lookup_transform(_graph(transforms), target="root", source="leaf")
+    result = _graph(transforms).lookup(target="root", source="leaf")
 
     assert all(
         math.isclose(actual, expected, abs_tol=1e-12)
@@ -114,7 +108,34 @@ def test_lookup_transform_composes_rotated_translation() -> None:
     assert result.transform.rotation == yaw_90
 
 
-def test_lookup_transform_uses_ros_xyzw_quaternion_order() -> None:
+def test_tf_graph_supports_add_lookup_add_lookup() -> None:
+    graph = TfGraph()
+    graph.add(
+        static=True,
+        stamp_ns=0,
+        parent="root",
+        child="base",
+        translation=(1.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    first = graph.lookup(target="root", source="base")
+    assert first.transform.translation == (1.0, 0.0, 0.0)
+
+    graph.add(
+        static=True,
+        stamp_ns=0,
+        parent="base",
+        child="camera",
+        translation=(0.0, 2.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    second = graph.lookup(target="root", source="camera")
+    assert second.transform.translation == (1.0, 2.0, 0.0)
+
+
+def test_tf_graph_lookup_uses_ros_xyzw_quaternion_order() -> None:
     yaw_90_xyzw = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
     transforms = {
         ("root", "rotated"): TransformData(
@@ -128,7 +149,7 @@ def test_lookup_transform_uses_ros_xyzw_quaternion_order() -> None:
         ("rotated", "leaf"): _td("rotated", "leaf", (1.0, 0.0, 0.0)),
     }
 
-    result = lookup_transform(_graph(transforms), target="root", source="leaf")
+    result = _graph(transforms).lookup(target="root", source="leaf")
 
     assert all(
         math.isclose(actual, expected, abs_tol=1e-12)
@@ -153,13 +174,13 @@ def test_quaternion_to_euler_uses_ros_rpy_xyz_convention() -> None:
     assert math.isclose(yaw, math.radians(30.0), abs_tol=1e-12)
 
 
-def test_lookup_transform_between_siblings() -> None:
+def test_tf_graph_lookup_between_siblings() -> None:
     transforms = {
         ("root", "left"): _td("root", "left", (1.0, 0.0, 0.0)),
         ("root", "right"): _td("root", "right", (0.0, 2.0, 0.0)),
     }
 
-    result = lookup_transform(_graph(transforms), target="left", source="right")
+    result = _graph(transforms).lookup(target="left", source="right")
 
     assert result.transform.translation == (-1.0, 2.0, 0.0)
     assert [step.from_frame for step in result.path] == ["right", "root"]

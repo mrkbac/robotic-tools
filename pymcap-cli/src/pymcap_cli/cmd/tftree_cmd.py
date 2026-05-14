@@ -21,7 +21,9 @@ from pymcap_cli.core.tf_findings import (
     has_error_findings,
 )
 from pymcap_cli.core.tf_tree import (
-    TfGraphBuilder,
+    TF_STATIC_TOPIC,
+    TF_TOPIC,
+    TfGraph,
     TransformData,
     build_tree_and_find_roots,
     quaternion_to_euler_rad,
@@ -176,12 +178,12 @@ def tftree(
     change_only
         Update display only when tree structure changes (new frames added).
     """
-    builder = TfGraphBuilder()
+    graph = TfGraph()
     seen_frame_pairs: set[tuple[str, str]] = set()
 
-    topics = ["/tf_static"]
+    topics = [TF_STATIC_TOPIC]
     if not static_only:
-        topics.append("/tf")
+        topics.append(TF_TOPIC)
 
     try:
         with open_input(file) as (f, _file_size), Live(console=console) as live:
@@ -201,8 +203,8 @@ def tftree(
                         seen_frame_pairs.add(key)
                         tree_changed = True
 
-                    builder.add(
-                        static=msg.channel.topic == "/tf_static",
+                    graph.add(
+                        static=msg.channel.topic == TF_STATIC_TOPIC,
                         stamp_ns=stamp_to_ns(transform_stamped.header.stamp),
                         parent=transform_stamped.header.frame_id,
                         child=transform_stamped.child_frame_id,
@@ -211,17 +213,14 @@ def tftree(
                     )
 
                 if not change_only or tree_changed:
-                    graph = builder.graph()
                     table = _build_tf_table(graph.transforms, graph.counts)
                     if table:
                         live.update(table)
 
-            graph = builder.graph()
             table = _build_tf_table(graph.transforms, graph.counts)
             if table:
                 live.update(table)
 
-        graph = builder.graph()
         findings = collect_tf_findings(graph)
         if findings:
             console.print()
