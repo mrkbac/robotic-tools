@@ -42,7 +42,10 @@ def tf_get(
         Parameter(
             name=["--at"],
             group=SELECTION_GROUP,
-            help="Include /tf and choose the dynamic sample nearest this time.",
+            help=(
+                "Resolve dynamic /tf samples at this time (RFC3339 or nanoseconds). "
+                "Defaults to per-edge latest, like ROS 2 lookup_transform with Time(0)."
+            ),
         ),
     ] = None,
 ) -> int:
@@ -51,20 +54,16 @@ def tf_get(
     The returned transform maps coordinates expressed in SOURCE into
     coordinates expressed in TARGET.
     """
-    snapshot_ns: int | None = None
+    time_ns: int | None = None
     if at is not None:
         try:
-            snapshot_ns = parse_time_arg(at)
+            time_ns = parse_time_arg(at)
         except ValueError as exc:
             ERR.print(f"[red]Invalid --at value:[/red] {exc}")
             return 1
 
     try:
-        graph = read_tf_graph(
-            file,
-            include_dynamic=at is not None,
-            snapshot_ns=snapshot_ns,
-        )
+        graph = read_tf_graph(file, include_dynamic=True, keep_series=time_ns is not None)
     except (OSError, ValueError, RuntimeError):
         logger.exception("Error reading MCAP file")
         return 1
@@ -82,7 +81,10 @@ def tf_get(
         return 1
 
     try:
-        result = graph.lookup(target=target, source=source)
+        if time_ns is None:
+            result = graph.lookup(target=target, source=source)
+        else:
+            result = graph.lookup_at(target=target, source=source, time_ns=time_ns)
     except TfLookupError as exc:
         ERR.print(f"[red]{exc}[/red]")
         _print_lookup_context(graph, target=target, source=source, findings=findings)
@@ -90,7 +92,7 @@ def tf_get(
 
     console.print(_result_table(result))
     console.print()
-    console.print(_path_table(result))
+    console.print(_path_table(result, time_ns=time_ns))
     return 0
 
 
@@ -117,7 +119,8 @@ def _result_table(result: TfLookupResult) -> Table:
     return table
 
 
-def _path_table(result: TfLookupResult) -> Table:
+def _path_table(result: TfLookupResult, *, time_ns: int | None = None) -> Table:
+    stamp_header = "time_ns (interp)" if time_ns is not None else "timestamp_ns"
     table = Table(title="Traversal Path")
     table.add_column("#", justify="right", no_wrap=True)
     table.add_column("from", no_wrap=True)
@@ -125,7 +128,7 @@ def _path_table(result: TfLookupResult) -> Table:
     table.add_column("stored edge", no_wrap=True)
     table.add_column("use", no_wrap=True)
     table.add_column("topic", no_wrap=True)
-    table.add_column("timestamp_ns", justify="right", no_wrap=True)
+    table.add_column(stamp_header, justify="right", no_wrap=True)
 
     if not result.path:
         table.add_row("0", result.source, result.target, "identity", "identity", "-", "0")
@@ -133,6 +136,14 @@ def _path_table(result: TfLookupResult) -> Table:
 
     for index, step in enumerate(result.path, start=1):
         parent, child = step.edge
+        # In --at mode the displayed time is the user's requested time (the
+        # value the bracket samples were interpolated *to*), not any single
+        # stored sample.
+        stamp = (
+            time_ns
+            if time_ns is not None and not step.transform.is_static
+            else step.transform.timestamp_ns
+        )
         table.add_row(
             str(index),
             step.from_frame,
@@ -140,7 +151,7 @@ def _path_table(result: TfLookupResult) -> Table:
             f"{parent} -> {child}",
             "inverse" if step.is_inverted else "direct",
             "/tf_static" if step.transform.is_static else "/tf",
-            str(step.transform.timestamp_ns),
+            str(stamp),
         )
     return table
 

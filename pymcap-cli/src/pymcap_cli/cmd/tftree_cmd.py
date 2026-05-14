@@ -2,7 +2,7 @@
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -37,7 +37,9 @@ DISPLAY_GROUP = Group("Display")
 
 
 def _format_timestamp(timestamp_ns: int) -> str:
-    return datetime.fromtimestamp(timestamp_ns / NS_TO_SEC).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(timestamp_ns / NS_TO_SEC, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 def _build_table_rows(

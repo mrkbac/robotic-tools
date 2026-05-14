@@ -4,16 +4,15 @@ import io
 import math
 from typing import TYPE_CHECKING
 
+import pytest
 from pymcap_cli.cmd import tf_get_cmd
-from pymcap_cli.core.tf_tree import TfGraph, TransformData, quaternion_to_euler_rad
+from pymcap_cli.core.tf_tree import TfGraph, TfLookupError, TransformData, quaternion_to_euler_rad
 from rich.console import Console
 
 from tests.fixtures.mcap_generator import create_tf_mcap
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def _td(
@@ -187,6 +186,170 @@ def test_tf_graph_lookup_between_siblings() -> None:
     assert [step.to_frame for step in result.path] == ["root", "left"]
 
 
+def test_lookup_at_interpolates_translation_linearly() -> None:
+    graph = TfGraph(keep_series=True)
+    graph.add(
+        static=False,
+        stamp_ns=1_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(0.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+    graph.add(
+        static=False,
+        stamp_ns=3_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(10.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    result = graph.lookup_at(target="odom", source="base", time_ns=2_000_000_000)
+
+    assert all(
+        math.isclose(actual, expected, abs_tol=1e-12)
+        for actual, expected in zip(result.transform.translation, (5.0, 0.0, 0.0), strict=True)
+    )
+
+
+def test_lookup_at_slerps_rotation() -> None:
+    yaw_0 = (0.0, 0.0, 0.0, 1.0)
+    yaw_90 = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
+    yaw_45 = (0.0, 0.0, math.sin(math.pi / 8), math.cos(math.pi / 8))
+
+    graph = TfGraph(keep_series=True)
+    graph.add(
+        static=False,
+        stamp_ns=0,
+        parent="map",
+        child="robot",
+        translation=(0.0, 0.0, 0.0),
+        rotation=yaw_0,
+    )
+    graph.add(
+        static=False,
+        stamp_ns=2_000_000_000,
+        parent="map",
+        child="robot",
+        translation=(0.0, 0.0, 0.0),
+        rotation=yaw_90,
+    )
+
+    result = graph.lookup_at(target="map", source="robot", time_ns=1_000_000_000)
+
+    assert all(
+        math.isclose(actual, expected, abs_tol=1e-9)
+        for actual, expected in zip(result.transform.rotation, yaw_45, strict=True)
+    )
+
+
+def test_lookup_at_raises_on_extrapolation() -> None:
+    graph = TfGraph(keep_series=True)
+    graph.add(
+        static=False,
+        stamp_ns=1_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(0.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+    graph.add(
+        static=False,
+        stamp_ns=2_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(1.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    with pytest.raises(TfLookupError, match="Extrapolation"):
+        graph.lookup_at(target="odom", source="base", time_ns=500_000_000)
+    with pytest.raises(TfLookupError, match="Extrapolation"):
+        graph.lookup_at(target="odom", source="base", time_ns=3_000_000_000)
+
+
+def test_lookup_at_static_edge_is_time_invariant() -> None:
+    graph = TfGraph(keep_series=True)
+    graph.add(
+        static=True,
+        stamp_ns=0,
+        parent="base",
+        child="lidar",
+        translation=(0.5, 0.0, 1.2),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    far_future = graph.lookup_at(target="base", source="lidar", time_ns=10**18)
+
+    assert far_future.transform.translation == (0.5, 0.0, 1.2)
+
+
+def test_lookup_at_exact_sample_returns_sample_value() -> None:
+    graph = TfGraph(keep_series=True)
+    graph.add(
+        static=False,
+        stamp_ns=1_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(7.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+    graph.add(
+        static=False,
+        stamp_ns=2_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(9.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    on_sample = graph.lookup_at(target="odom", source="base", time_ns=2_000_000_000)
+
+    assert on_sample.transform.translation == (9.0, 0.0, 0.0)
+
+
+def test_lookup_at_exact_duplicate_stamp_returns_latest_sample() -> None:
+    graph = TfGraph(keep_series=True)
+    graph.add(
+        static=False,
+        stamp_ns=1_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(7.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+    graph.add(
+        static=False,
+        stamp_ns=1_000_000_000,
+        parent="odom",
+        child="base",
+        translation=(9.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    latest = graph.lookup(target="odom", source="base")
+    on_sample = graph.lookup_at(target="odom", source="base", time_ns=1_000_000_000)
+
+    assert latest.transform.translation == (9.0, 0.0, 0.0)
+    assert on_sample.transform.translation == latest.transform.translation
+
+
+def test_lookup_at_requires_keep_series() -> None:
+    graph = TfGraph()
+    graph.add(
+        static=False,
+        stamp_ns=0,
+        parent="odom",
+        child="base",
+        translation=(0.0, 0.0, 0.0),
+        rotation=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    with pytest.raises(TfLookupError, match="keep_series"):
+        graph.lookup_at(target="odom", source="base", time_ns=0)
+
+
 def test_tf_get_command_prints_result_and_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -212,9 +375,31 @@ def test_tf_get_command_prints_result_and_path(
     assert "qw" not in output
 
 
-def test_tf_get_command_at_uses_dynamic_timestamp(
+def test_tf_get_command_reads_dynamic_without_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """ROS 2 lookup_transform(..., Time(0)) returns the latest sample on /tf."""
+    bag = tmp_path / "tf.mcap"
+    bag.write_bytes(
+        create_tf_mcap(
+            dynamic_edges=[
+                ("odom", "base", (10.0, 0.0, 0.0)),
+            ],
+            dynamic_samples=3,
+        )
+    )
+
+    rc, output = _run_tf_get(bag, "odom", "base", monkeypatch)
+
+    assert rc == 0
+    assert "odom <- base" in output
+    assert "/tf" in output
+
+
+def test_tf_get_command_at_within_range_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Header stamps are 100/200/300 ms; --at=240ms interpolates between samples."""
     bag = tmp_path / "tf.mcap"
     bag.write_bytes(
         create_tf_mcap(
@@ -230,12 +415,14 @@ def test_tf_get_command_at_uses_dynamic_timestamp(
     assert rc == 0
     assert "odom <- base" in output
     assert "/tf" in output
-    assert "200000000" in output
+    # In --at mode the path table shows the requested time, not a single sample.
+    assert "240000000" in output
 
 
 def test_tf_get_command_at_uses_ros_header_stamp(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Header stamps are 1.1/1.2/1.3 s; --at compares against header.stamp."""
     bag = tmp_path / "tf.mcap"
     bag.write_bytes(
         create_tf_mcap(
@@ -247,11 +434,15 @@ def test_tf_get_command_at_uses_ros_header_stamp(
         )
     )
 
-    rc, output = _run_tf_get(bag, "odom", "base", monkeypatch, at="1240000000")
+    # 1240 ms is within the header range (1.1-1.3 s) — succeeds.
+    rc_in, _ = _run_tf_get(bag, "odom", "base", monkeypatch, at="1240000000")
+    assert rc_in == 0
 
-    assert rc == 0
-    assert "1200000000" in output
-    assert "300000000" not in output
+    # 240 ms is outside the header range — would have been *inside* the log-time
+    # range. Failing here proves the algorithm uses header.stamp, not log_time.
+    rc_out, _ = _run_tf_get(bag, "odom", "base", monkeypatch, at="240000000")
+    assert rc_out == 1
+    assert "Extrapolation" in capsys.readouterr().err
 
 
 def test_tf_get_command_rejects_disconnected_frames(

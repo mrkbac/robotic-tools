@@ -217,6 +217,9 @@ def tf_export(
         if not transforms:
             ERR.print(f"[red]Root frame '{root}' has no descendants.[/red]")
             return 1
+    elif not roots:
+        ERR.print("[red]No root frame found — every frame is also a child.[/red]")
+        return 1
     elif len(roots) > 1:
         ERR.print(
             "[red]Multiple root frames found — pass --root to pick one:[/red] " + ", ".join(roots)

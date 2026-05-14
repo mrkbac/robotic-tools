@@ -6,10 +6,14 @@ Shared by `tftree`, `tf-get`, and `tf-export`.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import IntFlag
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap import include_topics, read_message_decoded
@@ -91,14 +95,22 @@ class TfGraph:
     snapshot_ns: int | None = None
     counts: dict[Edge, int] = field(default_factory=dict)
     topic_flags_by_edge: dict[Edge, TfTopicFlag] = field(default_factory=dict)
+    keep_series: bool = False
+    series: dict[Edge, list[TransformData]] = field(default_factory=dict)
+    _parent_to_edges: dict[str, list[Edge]] = field(default_factory=dict, init=False, repr=False)
+    _child_to_edges: dict[str, list[Edge]] = field(default_factory=dict, init=False, repr=False)
+    _frames: set[str] = field(default_factory=set, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        for edge in self.transforms:
+            self._index_edge(edge)
+        for edge, samples in self.series.items():
+            self._index_edge(edge)
+            samples.sort(key=lambda sample: sample.timestamp_ns)
 
     @property
     def frames(self) -> set[str]:
-        frames: set[str] = set()
-        for parent, child in self.transforms:
-            frames.add(parent)
-            frames.add(child)
-        return frames
+        return self._frames
 
     def path(self, *, source: str, target: str) -> tuple[TfPathStep, ...] | None:
         if source == target:
@@ -130,7 +142,7 @@ class TfGraph:
         return tuple(reversed(steps))
 
     def component_for(self, frame: str) -> set[str]:
-        if frame not in self.frames:
+        if frame not in self._frames:
             return set()
 
         component = {frame}
@@ -168,37 +180,110 @@ class TfGraph:
             is_static=static,
             timestamp_ns=stamp_ns,
         )
+        if self.keep_series:
+            insort(
+                self.series.setdefault(edge, []),
+                transform,
+                key=lambda sample: sample.timestamp_ns,
+            )
         previous = self.transforms.get(edge)
-        if previous is not None and not self._should_replace(previous, transform):
+        if previous is None:
+            self.transforms[edge] = transform
+            self._index_edge(edge)
+            return True
+        if not self._should_replace(previous, transform):
             return False
-
         self.transforms[edge] = transform
         return True
 
     def lookup(self, *, target: str, source: str) -> TfLookupResult:
-        frames = self.frames
-        if not self.transforms:
-            raise TfLookupError("No transforms found on /tf_static or /tf")
-        if target not in frames:
-            raise TfLookupError(f"Target frame '{target}' is not present in the TF graph")
-        if source not in frames:
-            raise TfLookupError(f"Source frame '{source}' is not present in the TF graph")
-
-        path = self.path(source=source, target=target)
-        if path is None:
-            raise TfLookupError(f"No TF path connects source '{source}' to target '{target}'")
-
+        path = self._prepare_path(target=target, source=source)
         result = TransformValue(translation=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0, 1.0))
         for step in path:
             result = _compose_transforms(step.transform_to_next(), result)
+        return _finalize_result(target=target, source=source, transform=result, path=path)
 
-        return TfLookupResult(target=target, source=source, transform=result, path=path)
+    def lookup_at(self, *, target: str, source: str, time_ns: int) -> TfLookupResult:
+        """Lookup ``target_T_source`` interpolated at ``time_ns``.
+
+        Mirrors ``tf2_ros.Buffer.lookup_transform(..., time=Time(time_ns))``: for
+        each edge on the BFS path, samples bracketing ``time_ns`` are blended
+        (lerp + slerp). Raises :class:`TfLookupError` when ``time_ns`` is
+        outside any edge's recorded range (matches tf2's ExtrapolationException).
+        Static edges are time-invariant and bypass interpolation.
+        """
+        if not self.keep_series:
+            raise TfLookupError(
+                "TF graph was built without per-edge time series; rebuild with keep_series=True"
+            )
+        path = self._prepare_path(target=target, source=source)
+        result = TransformValue(translation=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0, 1.0))
+        for step in path:
+            edge_value = self._sample_at(step.edge, time_ns)
+            if step.is_inverted:
+                edge_value = _invert_transform(edge_value)
+            result = _compose_transforms(edge_value, result)
+        return _finalize_result(target=target, source=source, transform=result, path=path)
+
+    def _prepare_path(self, *, target: str, source: str) -> tuple[TfPathStep, ...]:
+        if not self.transforms:
+            raise TfLookupError("No transforms found on /tf_static or /tf")
+        if target not in self._frames:
+            raise TfLookupError(f"Target frame '{target}' is not present in the TF graph")
+        if source not in self._frames:
+            raise TfLookupError(f"Source frame '{source}' is not present in the TF graph")
+        path = self.path(source=source, target=target)
+        if path is None:
+            raise TfLookupError(f"No TF path connects source '{source}' to target '{target}'")
+        return path
+
+    def _sample_at(self, edge: Edge, time_ns: int) -> TransformValue:
+        samples = self.series.get(edge)
+        if not samples:
+            raise TfLookupError(f"No samples recorded for edge {edge[0]} -> {edge[1]}")
+        # Static transforms are time-invariant. If any sample on this edge is
+        # static, treat the edge as static (matches ROS 2 /tf_static semantics).
+        for sample in samples:
+            if sample.is_static:
+                return _transform_value_from_data(sample)
+        earliest = samples[0].timestamp_ns
+        latest = samples[-1].timestamp_ns
+        if time_ns < earliest or time_ns > latest:
+            raise TfLookupError(
+                f"Extrapolation: requested time {time_ns} ns is outside "
+                f"[{earliest}, {latest}] for edge {edge[0]} -> {edge[1]}"
+            )
+        idx = bisect_left(samples, time_ns, key=lambda sample: sample.timestamp_ns)
+        if idx < len(samples) and samples[idx].timestamp_ns == time_ns:
+            exact_idx = (
+                bisect_right(
+                    samples,
+                    time_ns,
+                    key=lambda sample: sample.timestamp_ns,
+                )
+                - 1
+            )
+            return _transform_value_from_data(samples[exact_idx])
+        lo = samples[idx - 1]
+        hi = samples[idx]
+        span = hi.timestamp_ns - lo.timestamp_ns
+        alpha = (time_ns - lo.timestamp_ns) / span if span else 0.0
+        return _interpolate_transforms(lo, hi, alpha)
 
     def has_static_dynamic_overlap(self, edge: Edge) -> bool:
         flags = self.topic_flags_by_edge.get(edge, TfTopicFlag(0))
         return flags == (TfTopicFlag.STATIC | TfTopicFlag.DYNAMIC)
 
     def _should_replace(self, previous: TransformData, current: TransformData) -> bool:
+        """Snapshot-view selection rule for which sample represents an edge.
+
+        Tie-break is deterministic by read order:
+        - Latest-mode (``snapshot_ns is None``): equal stamps replace (later
+          message wins), so identical-stamped frames behave like a publisher's
+          last write.
+        - Snapshot-mode: equal distances keep the first sample (current does
+          not replace), since strict ``<`` is used.
+        """
         if current.is_static and not previous.is_static:
             return True
         if previous.is_static and not current.is_static:
@@ -209,31 +294,30 @@ class TfGraph:
         previous_delta = abs(previous.timestamp_ns - self.snapshot_ns)
         return current_delta < previous_delta
 
-    def _neighbor_steps(self, frame: str) -> list[TfPathStep]:
-        steps: list[TfPathStep] = []
-        for edge, transform in sorted(self.transforms.items()):
-            parent, child = edge
-            if child == frame:
-                steps.append(
-                    TfPathStep(
-                        from_frame=child,
-                        to_frame=parent,
-                        edge=edge,
-                        transform=transform,
-                        is_inverted=False,
-                    )
-                )
-            if parent == frame:
-                steps.append(
-                    TfPathStep(
-                        from_frame=parent,
-                        to_frame=child,
-                        edge=edge,
-                        transform=transform,
-                        is_inverted=True,
-                    )
-                )
-        return sorted(steps, key=lambda item: (item.to_frame, item.edge))
+    def _index_edge(self, edge: Edge) -> None:
+        parent, child = edge
+        insort(self._parent_to_edges.setdefault(parent, []), edge)
+        insort(self._child_to_edges.setdefault(child, []), edge)
+        self._frames.add(parent)
+        self._frames.add(child)
+
+    def _neighbor_steps(self, frame: str) -> Iterator[TfPathStep]:
+        for edge in self._child_to_edges.get(frame, ()):
+            yield TfPathStep(
+                from_frame=frame,
+                to_frame=edge[0],
+                edge=edge,
+                transform=self.transforms[edge],
+                is_inverted=False,
+            )
+        for edge in self._parent_to_edges.get(frame, ()):
+            yield TfPathStep(
+                from_frame=frame,
+                to_frame=edge[1],
+                edge=edge,
+                transform=self.transforms[edge],
+                is_inverted=True,
+            )
 
 
 def read_tf_graph(
@@ -241,12 +325,13 @@ def read_tf_graph(
     *,
     include_dynamic: bool = False,
     snapshot_ns: int | None = None,
+    keep_series: bool = False,
 ) -> TfGraph:
     topics = [TF_STATIC_TOPIC]
     if include_dynamic:
         topics.append(TF_TOPIC)
 
-    graph = TfGraph(snapshot_ns=snapshot_ns)
+    graph = TfGraph(snapshot_ns=snapshot_ns, keep_series=keep_series)
     with open_input(file) as (stream, _file_size):
         for msg in read_message_decoded(
             stream,
@@ -292,7 +377,7 @@ def build_tree_and_find_roots(
         tree_dict[transform.frame_id].append(transform.child_frame_id)
         parents.add(transform.frame_id)
         children.add(transform.child_frame_id)
-    root_frames = sorted(parents - children) or sorted(parents)
+    root_frames = sorted(parents - children)
     return {parent: sorted(children) for parent, children in tree_dict.items()}, root_frames
 
 
@@ -324,24 +409,89 @@ def _transform_value_from_data(transform: TransformData) -> TransformValue:
     )
 
 
+def _finalize_result(
+    *,
+    target: str,
+    source: str,
+    transform: TransformValue,
+    path: tuple[TfPathStep, ...],
+) -> TfLookupResult:
+    """Normalize once at the end to absorb floating-point drift from chained multiplies."""
+    return TfLookupResult(
+        target=target,
+        source=source,
+        transform=TransformValue(
+            translation=transform.translation,
+            rotation=_normalize_quaternion(transform.rotation),
+        ),
+        path=path,
+    )
+
+
+def _interpolate_transforms(lo: TransformData, hi: TransformData, alpha: float) -> TransformValue:
+    lo_tx, lo_ty, lo_tz = lo.translation
+    hi_tx, hi_ty, hi_tz = hi.translation
+    translation = (
+        lo_tx + alpha * (hi_tx - lo_tx),
+        lo_ty + alpha * (hi_ty - lo_ty),
+        lo_tz + alpha * (hi_tz - lo_tz),
+    )
+    rotation = _slerp(
+        _normalize_quaternion(lo.rotation),
+        _normalize_quaternion(hi.rotation),
+        alpha,
+    )
+    return TransformValue(translation=translation, rotation=rotation)
+
+
+def _slerp(q0: Quat, q1: Quat, alpha: float) -> Quat:
+    """Shortest-path quaternion SLERP. Inputs must be unit quaternions."""
+    dot = q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3]
+    if dot < 0.0:
+        q1 = (-q1[0], -q1[1], -q1[2], -q1[3])
+        dot = -dot
+    # Near-collinear: fall back to nlerp to avoid divide-by-near-zero in sin(theta).
+    if dot > 0.9995:
+        result = (
+            q0[0] + alpha * (q1[0] - q0[0]),
+            q0[1] + alpha * (q1[1] - q0[1]),
+            q0[2] + alpha * (q1[2] - q0[2]),
+            q0[3] + alpha * (q1[3] - q0[3]),
+        )
+        return _normalize_quaternion(result)
+    theta_0 = math.acos(max(-1.0, min(1.0, dot)))
+    sin_theta_0 = math.sin(theta_0)
+    theta = theta_0 * alpha
+    sin_theta = math.sin(theta)
+    s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return (
+        s0 * q0[0] + s1 * q1[0],
+        s0 * q0[1] + s1 * q1[1],
+        s0 * q0[2] + s1 * q1[2],
+        s0 * q0[3] + s1 * q1[3],
+    )
+
+
 def _compose_transforms(left: TransformValue, right: TransformValue) -> TransformValue:
-    """Return ``left * right`` for transforms represented as target_T_source."""
-    left_rotation = _normalize_quaternion(left.rotation)
-    right_rotation = _normalize_quaternion(right.rotation)
-    rotated_translation = _rotate_vector(left_rotation, right.translation)
+    """Return ``left * right`` for transforms represented as target_T_source.
+
+    Both inputs must already be normalized; callers obtain ``TransformValue`` via
+    :func:`_transform_value_from_data` which performs the single normalization.
+    """
+    rotated_translation = _rotate_vector(left.rotation, right.translation)
     return TransformValue(
         translation=(
             rotated_translation[0] + left.translation[0],
             rotated_translation[1] + left.translation[1],
             rotated_translation[2] + left.translation[2],
         ),
-        rotation=_normalize_quaternion(_quaternion_multiply(left_rotation, right_rotation)),
+        rotation=_quaternion_multiply(left.rotation, right.rotation),
     )
 
 
 def _invert_transform(transform: TransformValue) -> TransformValue:
-    rotation = _normalize_quaternion(transform.rotation)
-    inverse_rotation = _quaternion_conjugate(rotation)
+    inverse_rotation = _quaternion_conjugate(transform.rotation)
     tx, ty, tz = transform.translation
     inverse_translation = _rotate_vector(inverse_rotation, (-tx, -ty, -tz))
     return TransformValue(translation=inverse_translation, rotation=inverse_rotation)
@@ -377,7 +527,12 @@ def _quaternion_multiply(left: Quat, right: Quat) -> Quat:
 
 
 def _rotate_vector(quaternion: Quat, vector: Vec3) -> Vec3:
-    qx, qy, qz, qw = _normalize_quaternion(quaternion)
+    """Rotate ``vector`` by a unit ``quaternion``.
+
+    Callers must pass an already-normalized quaternion. The hot path composes
+    many transforms in sequence, so re-normalizing per rotation would dominate.
+    """
+    qx, qy, qz, qw = quaternion
     vx, vy, vz = vector
     uv = (
         qy * vz - qz * vy,
