@@ -193,6 +193,14 @@ rosdecompress = _load_optional_command(
     message="ROS decompression requires the 'video' and 'pointcloud' extras.",
     install_command="uv add 'pymcap-cli[video,pointcloud]'",
 )
+index_app = _load_optional_app(
+    "pymcap_cli.cmd.index_cmd",
+    "index_app",
+    expected_missing_modules=("xxhash",),
+    message="Index command requires the 'xxhash' extra "
+    "(fingerprint stability requires a single committed hash function).",
+    install_command="uv add 'pymcap-cli[xxhash]'",
+)
 
 
 app = App(
@@ -217,6 +225,8 @@ app.command(name="diff", group=inspect_group)(diff_cmd.diff_cmd)
 app.command(name="duplicates", group=inspect_group)(duplicates_cmd.duplicates)
 app.command(name="info", group=inspect_group)(info_cmd.info)
 app.command(name="info-json", group=inspect_group)(info_json_cmd.info_json)
+index_app.group = (inspect_group,)
+app.command(index_app, name="index")
 get_cmd.get_app.group = (inspect_group,)
 app.command(get_cmd.get_app, name="get")
 list_cmd.list_app.group = (inspect_group,)
