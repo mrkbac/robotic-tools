@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import numpy as np
-
     from mcap_codec_support._protocols import CompressedImageMsg, RawImageMessage
 
 
