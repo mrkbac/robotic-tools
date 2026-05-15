@@ -1,12 +1,10 @@
 """Split command - divide MCAP files into multiple output segments."""
 
 import logging
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Group, Parameter, validators
-from cyclopts.token import Token
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
@@ -18,7 +16,7 @@ from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
-from pymcap_cli.types.duration import parse_duration_ns
+from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
 from pymcap_cli.types.size import parse_size_bytes
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
@@ -37,12 +35,6 @@ SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
 LATCHING_GROUP = Group("Latching")
 EXPRESSION_GROUP = Group("Expression Options")
-
-
-def _duration_ns_converter(_type: type, tokens: Sequence[Token]) -> int:
-    if len(tokens) != 1:
-        raise ValueError("Expected exactly one duration.")
-    return parse_duration_ns(tokens[0].value)
 
 
 def _coerce_duration_ns(value: int | str | None) -> int | None:
@@ -111,7 +103,7 @@ def split(
         Parameter(
             name=["--hysteresis"],
             group=EXPRESSION_GROUP,
-            converter=_duration_ns_converter,
+            converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
                 "Time hysteresis for --expression: a new value must persist "
@@ -138,7 +130,7 @@ def split(
         Parameter(
             name=["--keep-trailing-context"],
             group=EXPRESSION_GROUP,
-            converter=_duration_ns_converter,
+            converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
                 "After a transition, also write target-topic messages from "
@@ -389,11 +381,12 @@ def split(
     for _, segment in sorted(
         result.processor.output_manager.segments.items(), key=lambda x: x[1].index
     ):
+        assert segment.writer is not None
         seg_stats = segment.writer.statistics
         console.print(
             f"  [{segment.index}] {segment.path}: "
             f"{seg_stats.message_count:,} messages, "
-            f"{bytes_to_human(seg_stats.chunk_count * chunk_size)} "
+            f"{bytes_to_human(Path(segment.path).stat().st_size)} "
             f"({seg_stats.chunk_count} chunks)"
         )
 

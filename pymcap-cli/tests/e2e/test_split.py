@@ -11,6 +11,7 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     ProcessingOptions,
 )
+from pymcap_cli.core.processors.chunk_groupers import PerChannelGrouper
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
@@ -543,7 +544,7 @@ class TestSplitWithRechunking:
                     output_template=str(tmp_path / "seg_{index:03d}.mcap"),
                     compression="zstd",
                     chunk_size=DEFAULT_CHUNK_SIZE,
-                    rechunk_strategy="all",
+                    output_processors=[PerChannelGrouper()],
                 ),
             )
 

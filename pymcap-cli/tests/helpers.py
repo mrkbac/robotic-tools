@@ -71,7 +71,7 @@ def pipeline_context(summaries=()) -> PipelineContext:
 def empty_processor_result(
     segments: dict[int, SimpleNamespace] | None = None,
 ) -> SimpleNamespace:
-    output_segments = segments if segments is not None else {0: SimpleNamespace(rechunk_groups=[])}
+    output_segments = segments if segments is not None else {0: SimpleNamespace(chunk_groups=[])}
     return SimpleNamespace(
         stats=SimpleNamespace(
             messages_processed=0,

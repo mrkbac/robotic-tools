@@ -6,7 +6,7 @@ from enum import Enum, IntFlag, auto
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Hashable, Iterable
 
     from small_mcap import (
         Attachment,
@@ -260,4 +260,30 @@ class OutputRouter:
 
     def output_segments(self) -> tuple[OutputSegmentInfo, ...] | None:
         """Return statically-known output segments, or None for dynamic routing."""
+        return None
+
+
+class OutputProcessor:
+    """Output-side processor.
+
+    Output processors run on the write side, deciding how surviving messages
+    are grouped into chunks within each segment. ``chunk_group_key`` returns a
+    hashable identifier; channels yielding equal keys share one chunk group,
+    distinct keys get distinct chunk groups. Returning ``None`` opts out (the
+    processor has no opinion).
+
+    When multiple output processors are configured, their keys are composed
+    into a tuple; an all-``None`` tuple collapses to a single shared group.
+    """
+
+    def initialize(self, context: PipelineContext) -> None:
+        """Called before processing with all resources known to the pipeline."""
+
+    def chunk_group_key(
+        self,
+        segment_key: OutputKey,
+        channel: Channel,
+        schema: Schema | None,
+    ) -> Hashable | None:
+        """Return the chunk-group identifier for ``channel`` in ``segment_key``."""
         return None

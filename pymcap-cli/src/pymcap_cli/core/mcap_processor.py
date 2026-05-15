@@ -3,14 +3,13 @@
 import heapq
 import os
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Hashable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from itertools import product
 from pathlib import Path
-from re import Pattern
 from typing import IO, BinaryIO, cast
 
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -58,6 +57,7 @@ from pymcap_cli.core.processors.base import (
     InputProcessor,
     MessageContext,
     OutputKey,
+    OutputProcessor,
     OutputRouter,
     OutputSegmentInfo,
     PipelineContext,
@@ -160,15 +160,6 @@ class PendingChunk:
         return self.chunk
 
 
-# Rechunking strategy enum
-class RechunkStrategy(str, Enum):
-    """Rechunking strategy for organizing messages into chunks."""
-
-    NONE = "none"  # No rechunking - use fast-copy optimization when possible
-    PATTERN = "pattern"  # Group by regex patterns
-    ALL = "all"  # Each topic in its own chunk group
-
-
 class OverwriteCollisionPolicy(str, Enum):
     """How split outputs handle collisions with existing files."""
 
@@ -195,14 +186,17 @@ class OutputOptions:
     enable_crcs: bool = True
     use_chunking: bool = True
 
-    # Rechunking options
-    rechunk_strategy: RechunkStrategy = RechunkStrategy.NONE
-    rechunk_patterns: list[Pattern[str]] = field(default_factory=list)
-    rechunk_schema_patterns: list[Pattern[str]] = field(default_factory=list)
-    rechunk_max_groups: int | None = None  # None = unlimited
-    # Total uncompressed bytes buffered across all rechunk groups in a segment.
+    # Output processors (chunk grouping). When non-empty, each surviving
+    # message is routed through a per-segment MessageGroup keyed by the
+    # composite of every processor's ``chunk_group_key``. When empty, messages
+    # are written directly through the writer (fast-copy eligible).
+    output_processors: list[OutputProcessor] = field(default_factory=list)
+    # Hard cap on concurrent chunk groups per output segment. When the cap is
+    # hit, additional groups share the most-recently-created group (overflow).
+    max_chunk_groups: int | None = None
+    # Total uncompressed bytes buffered across all chunk groups in a segment.
     # When exceeded, the largest in-flight chunk is flushed prematurely.
-    rechunk_max_memory: int | None = None  # None = unlimited
+    max_chunk_memory_bytes: int | None = None
 
     # Output routers (split routing, etc.)
     routers: list[OutputRouter] = field(default_factory=list)
@@ -223,8 +217,8 @@ class OutputOptions:
         )
 
     @property
-    def is_rechunking(self) -> bool:
-        return self.rechunk_strategy != RechunkStrategy.NONE
+    def has_chunk_grouping(self) -> bool:
+        return bool(self.output_processors)
 
     @property
     def is_splitting(self) -> bool:
@@ -369,7 +363,7 @@ class MessageGroup:
         """Finalize the current chunk now (before chunk_size) and reset the builder.
 
         Used by the segment-level memory cap to evict the largest in-flight
-        chunk when total buffered bytes exceed ``rechunk_max_memory``.
+        chunk when total buffered bytes exceed ``max_chunk_memory_bytes``.
         """
         if self.chunk_builder.num_messages == 0:
             return
@@ -411,13 +405,16 @@ class OutputSegment:
     path: str
     written_schemas: set[int] = field(default_factory=set)
     written_channels: set[int] = field(default_factory=set)
-    rechunk_groups: list[MessageGroup] = field(default_factory=list)
+    # Ordered list of MessageGroups for this segment (used for flush ordering).
+    chunk_groups: list[MessageGroup] = field(default_factory=list)
+    # Per-channel cache: channel id → group it currently writes into.
     channel_to_group: dict[int, MessageGroup] = field(default_factory=dict)
     start_time: int = 0
     end_time: int = 0
-    pattern_groups: dict[int, MessageGroup] = field(default_factory=dict)
-    # Overflow group is lazily picked once rechunk_max_groups is reached; all
-    # further channels join it so the per-segment group count stops growing.
+    # Composite group key (from OutputProcessor chain) → MessageGroup.
+    groups: dict[Hashable, MessageGroup] = field(default_factory=dict)
+    # Overflow group is lazily picked once ``max_chunk_groups`` is reached;
+    # all further channels join it so the per-segment group count stops growing.
     overflow_group: MessageGroup | None = None
     # on_segment_open fires lazily per processor as streams reach the segment.
     replayed_processor_ids: set[int] = field(default_factory=set)
@@ -579,8 +576,8 @@ class OutputManager:
         """Finish and close all segment writers. Returns per-segment statistics."""
         stats: dict[OutputKey, Statistics] = {}
         for key, segment in self.segments.items():
-            # Flush rechunk groups
-            for group in segment.rechunk_groups:
+            # Flush chunk groups
+            for group in segment.chunk_groups:
                 group.flush()
             segment.writer.finish()
             stats[key] = segment.writer.statistics
@@ -664,6 +661,13 @@ class McapProcessor:
                     "output routing requires OutputRouter instances"
                 )
                 raise TypeError(msg)
+        for processor in self.options.output_options.output_processors:
+            if not isinstance(processor, OutputProcessor):
+                msg = (
+                    f"output processor list has {type(processor).__name__}; "
+                    "output processors require OutputProcessor instances"
+                )
+                raise TypeError(msg)
 
     def _get_processors(self, stream_id: int) -> list[InputProcessor]:
         return self._input_processors[stream_id]
@@ -724,31 +728,28 @@ class McapProcessor:
         self.channel_filter_cache[cache_key] = included
         return included
 
-    def _resolve_pattern_group_key(self, topic: str, schema_name: str | None) -> int:
-        """Return the group key for a channel under PATTERN strategy.
+    def _composite_group_key(self, segment_key: OutputKey, channel: Channel) -> Hashable:
+        """Compose every output processor's chunk_group_key into one key.
 
-        Topic patterns are tried first (indices 0..len(topic)-1), then schema
-        patterns (offset by len(topic)). ``-1`` is the default bucket for any
-        channel that matches nothing.
+        Returns the (possibly empty) tuple of non-``None`` per-processor keys.
+        Two channels yielding equal composite keys share a chunk group.
         """
-        topic_patterns = self.options.output_options.rechunk_patterns
-        for i, pattern in enumerate(topic_patterns):
-            if pattern.search(topic):
-                return i
-        if schema_name is not None:
-            schema_patterns = self.options.output_options.rechunk_schema_patterns
-            for i, pattern in enumerate(schema_patterns):
-                if pattern.search(schema_name):
-                    return len(topic_patterns) + i
-        return -1
+        schema = self.schemas.get(channel.schema_id)
+        parts: list[Hashable] = []
+        for processor in self.options.output_options.output_processors:
+            key = processor.chunk_group_key(segment_key, channel, schema)
+            if key is not None:
+                parts.append(key)
+        return tuple(parts)
 
     def _get_or_create_group_for_channel(
         self, channel_id: int, channel: Channel, writer: McapWriter
     ) -> MessageGroup:
-        """Resolve the rechunk MessageGroup for ``channel_id`` on ``writer``'s segment.
+        """Resolve the chunk MessageGroup for ``channel_id`` on ``writer``'s segment.
 
-        Each segment carries its own rechunk groups so split outputs stay
-        independent.
+        Each segment carries its own chunk groups so split outputs stay
+        independent. The composite key returned by the configured
+        ``OutputProcessor`` chain determines which channels share a group.
         """
         assert self.output_manager is not None
         segment = self.output_manager.segment_for_writer(writer)
@@ -758,23 +759,11 @@ class McapProcessor:
         if channel_id in segment.channel_to_group:
             return segment.channel_to_group[channel_id]
 
-        strategy = self.options.output_options.rechunk_strategy
-        group: MessageGroup | None = None
-
-        if strategy == RechunkStrategy.ALL:
-            group = self._create_or_overflow_group(segment)
-
-        elif strategy == RechunkStrategy.PATTERN:
-            schema = self.schemas.get(channel.schema_id)
-            schema_name = schema.name if schema is not None else None
-            group_key = self._resolve_pattern_group_key(channel.topic, schema_name)
-            group = segment.pattern_groups.get(group_key)
-            if group is None:
-                group = self._create_or_overflow_group(segment)
-                segment.pattern_groups[group_key] = group
-
+        composite_key = self._composite_group_key(segment.key, channel)
+        group = segment.groups.get(composite_key)
         if group is None:
-            group = self._create_segment_message_group(segment)
+            group = self._create_or_overflow_group(segment)
+            segment.groups[composite_key] = group
 
         segment.channel_to_group[channel_id] = group
         return group
@@ -782,16 +771,16 @@ class McapProcessor:
     def _create_or_overflow_group(self, segment: "OutputSegment") -> MessageGroup:
         """Create a new group, or route into the segment's overflow when the cap is hit.
 
-        With ``rechunk_max_groups=N``, the first N callers each get their own
+        With ``max_chunk_groups=N``, the first N callers each get their own
         new group. When the (N+1)th caller arrives, the most-recently-created
         group is promoted to the segment's overflow pool and all further
         callers join it. Total group count therefore never exceeds N.
         """
-        max_groups = self.options.output_options.rechunk_max_groups
-        if max_groups is not None and len(segment.rechunk_groups) >= max_groups:
+        max_groups = self.options.output_options.max_chunk_groups
+        if max_groups is not None and len(segment.chunk_groups) >= max_groups:
             if segment.overflow_group is None:
-                assert segment.rechunk_groups, "max_groups must be >= 1 if set"
-                segment.overflow_group = segment.rechunk_groups[-1]
+                assert segment.chunk_groups, "max_chunk_groups must be >= 1 if set"
+                segment.overflow_group = segment.chunk_groups[-1]
             return segment.overflow_group
         return self._create_segment_message_group(segment)
 
@@ -799,7 +788,7 @@ class McapProcessor:
         """Create a MessageGroup attached to a specific segment."""
         opts = self.options.output_options
         group = MessageGroup(segment.writer, opts.chunk_size, opts.compression_type)
-        segment.rechunk_groups.append(group)
+        segment.chunk_groups.append(group)
         return group
 
     def _enforce_segment_memory_cap(self, writer: McapWriter) -> None:
@@ -808,17 +797,17 @@ class McapProcessor:
         Iterates because flushing the largest may still leave us over budget
         when several groups are near-full simultaneously.
         """
-        cap = self.options.output_options.rechunk_max_memory
+        cap = self.options.output_options.max_chunk_memory_bytes
         if cap is None or self.output_manager is None:
             return
         segment = self.output_manager.segment_for_writer(writer)
-        if segment is None or not segment.rechunk_groups:
+        if segment is None or not segment.chunk_groups:
             return
         while True:
-            total = sum(g.buffered_bytes() for g in segment.rechunk_groups)
+            total = sum(g.buffered_bytes() for g in segment.chunk_groups)
             if total <= cap:
                 return
-            largest = max(segment.rechunk_groups, key=MessageGroup.buffered_bytes)
+            largest = max(segment.chunk_groups, key=MessageGroup.buffered_bytes)
             if largest.buffered_bytes() == 0:
                 # No further progress possible — every builder is empty.
                 return
@@ -935,8 +924,8 @@ class McapProcessor:
             return
 
         # Each survivor gets its own routing decision and writes — fan-out
-        # messages may land in different segments and rechunking applies per
-        # survivor.
+        # messages may land in different segments and chunk grouping applies
+        # per survivor.
         for survivor_msg in survivors:
             self._write_survivor(survivor_msg, stream_id, input_channel_id)
 
@@ -959,7 +948,7 @@ class McapProcessor:
             self.output_manager.ensure_channel_written(message.channel_id, route_key)
             target_writer = self.output_manager.get_writer(route_key)
 
-            if self.options.output_options.is_rechunking:
+            if self.options.output_options.has_chunk_grouping:
                 channel = self.channels.get(message.channel_id)
                 if channel is None:
                     return
@@ -1205,6 +1194,8 @@ class McapProcessor:
         pipeline_context = self._pipeline_context(known_segments)
         for proc in self._iter_unique_input_processors():
             proc.initialize(pipeline_context)
+        for output_processor in output_opts.output_processors:
+            output_processor.initialize(pipeline_context)
 
         # Pass 2 — pre-load schemas / channels via the standard handlers, which
         # also populate the channel filter cache.
@@ -1334,8 +1325,8 @@ class McapProcessor:
             if decision == ChunkDecision.DECODE_VERIFY:
                 decode_verify_requested = True
 
-        # Force decode if rechunking is active (must reorganize messages)
-        if output_opts.is_rechunking:
+        # Force decode if chunk grouping is active (must reorganize messages)
+        if output_opts.has_chunk_grouping:
             return ChunkDecision.DECODE
 
         if not indexes:

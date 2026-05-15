@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
+from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy, build_output_processors
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     resolve_overwrite_policy,
@@ -16,7 +17,6 @@ from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
-    RechunkStrategy,
 )
 from pymcap_cli.types.size import parse_size_bytes
 from pymcap_cli.types.types_manual import (
@@ -198,17 +198,21 @@ def rechunk(
             logger.error(str(e))  # noqa: TRY400
             return 1
 
+    output_processors = build_output_processors(
+        strategy,
+        topic_patterns=patterns,
+        schema_patterns=schema_patterns,
+    )
+
     try:
         result = run_processor(
             files=[file],
             output=output_file,
             input_options=InputOptions.from_args(),
             output_options=OutputOptions(
-                rechunk_strategy=strategy,
-                rechunk_patterns=patterns,
-                rechunk_schema_patterns=schema_patterns,
-                rechunk_max_groups=max_groups,
-                rechunk_max_memory=max_memory_bytes,
+                output_processors=output_processors,
+                max_chunk_groups=max_groups,
+                max_chunk_memory_bytes=max_memory_bytes,
                 compression=compression,
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
@@ -228,7 +232,7 @@ def rechunk(
     # Strategy-specific stats
     assert result.processor.output_manager is not None
     num_unique_groups = sum(
-        len(segment.rechunk_groups) for segment in result.processor.output_manager.segments.values()
+        len(segment.chunk_groups) for segment in result.processor.output_manager.segments.values()
     )
     if strategy == RechunkStrategy.ALL:
         console.print(f"Created {num_unique_groups} chunk group(s) (one per topic)")

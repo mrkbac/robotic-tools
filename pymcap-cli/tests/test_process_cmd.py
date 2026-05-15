@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd import process_cmd
-from pymcap_cli.core.mcap_processor import RechunkStrategy
+from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy
 from pymcap_cli.core.processors.channel_merge import ChannelMergeProcessor
+from pymcap_cli.core.processors.chunk_groupers import PatternGrouper
 from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
@@ -202,8 +203,10 @@ class TestExtraProcessorWiring:
         )
 
         assert rec.output_options is not None
-        assert rec.output_options.rechunk_strategy == RechunkStrategy.PATTERN
-        assert len(rec.output_options.rechunk_patterns) == 1
+        assert len(rec.output_options.output_processors) == 1
+        grouper = rec.output_options.output_processors[0]
+        assert isinstance(grouper, PatternGrouper)
+        assert len(grouper.topic_patterns) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +343,23 @@ class TestCombinedOperations:
         assert any(isinstance(p, TopicRewriteProcessor) for p in extras)
         assert rec.output_options is not None
         assert rec.output_options.compression == "lz4"
+
+    def test_split_duration_with_dedup_and_alias(self, monkeypatch: pytest.MonkeyPatch):
+        """Split routers and the input-stage extras chain compose."""
+        rec = _Recorder()
+        _patch_multi(monkeypatch, rec)
+
+        exit_code = process_cmd.process(
+            file=["a.mcap"],
+            split_duration="60s",
+            dedup_identical=True,
+            alias_topic=["/old=/new"],
+        )
+
+        assert exit_code == 0
+        assert rec.input_options is not None
+        extras = list(rec.input_options.extra_processors)
+        assert any(isinstance(p, DedupIdenticalProcessor) for p in extras)
+        assert any(isinstance(p, TopicAliasProcessor) for p in extras)
+        assert rec.output_options is not None
+        assert any(isinstance(r, DurationSplitProcessor) for r in rec.output_options.routers)

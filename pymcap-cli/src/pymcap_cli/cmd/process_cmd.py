@@ -11,6 +11,7 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
+from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy, build_output_processors
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     resolve_overwrite_policy,
@@ -21,7 +22,6 @@ from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
-    RechunkStrategy,
 )
 from pymcap_cli.core.processors.channel_merge import ChannelMergeProcessor
 from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
@@ -33,7 +33,7 @@ from pymcap_cli.core.processors.time_offset import TimeOffsetProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.core.processors.topic_alias import TopicAliasProcessor
 from pymcap_cli.core.processors.topic_rewrite import TopicRewriteProcessor
-from pymcap_cli.types.duration import parse_duration_ns
+from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
 from pymcap_cli.types.size import parse_size_bytes
 from pymcap_cli.types.types_manual import (
     OUTPUT_OPTIONS_GROUP,
@@ -52,10 +52,6 @@ from pymcap_cli.utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from cyclopts.token import Token
-
     from pymcap_cli.core.processors.base import InputProcessor, OutputRouter
 
 logger = logging.getLogger(__name__)
@@ -113,13 +109,6 @@ def _parse_alias_rules(tokens: list[str]) -> dict[str, str | list[str]]:
         else:
             rules[pat] = [existing, repl]
     return rules
-
-
-def _duration_ns_converter(_type: type, tokens: Sequence[Token]) -> int:
-    if len(tokens) != 1:
-        msg = "Expected exactly one duration."
-        raise ValueError(msg)
-    return parse_duration_ns(tokens[0].value)
 
 
 def process(
@@ -361,7 +350,7 @@ def process(
         Parameter(
             name=["--split-hysteresis"],
             group=SPLIT_EXPR_GROUP,
-            converter=_duration_ns_converter,
+            converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
                 "Time hysteresis for --split-expression: a new value must "
@@ -387,7 +376,7 @@ def process(
         Parameter(
             name=["--split-keep-trailing-context"],
             group=SPLIT_EXPR_GROUP,
-            converter=_duration_ns_converter,
+            converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
                 "After a transition, also write target-topic messages from "
@@ -666,15 +655,19 @@ def process(
             logger.exception("Invalid --split-expression option")
             return 1
 
+    output_processors = build_output_processors(
+        rechunk_strategy,
+        topic_patterns=rechunk_patterns_compiled,
+        schema_patterns=rechunk_schema_patterns_compiled,
+    )
+
     # --- Run ------------------------------------------------------------------
     output_options = OutputOptions(
         compression=compression,
         chunk_size=chunk_size,
-        rechunk_strategy=rechunk_strategy,
-        rechunk_patterns=rechunk_patterns_compiled,
-        rechunk_schema_patterns=rechunk_schema_patterns_compiled,
-        rechunk_max_groups=rechunk_max_groups,
-        rechunk_max_memory=rechunk_max_memory_bytes,
+        output_processors=output_processors,
+        max_chunk_groups=rechunk_max_groups,
+        max_chunk_memory_bytes=rechunk_max_memory_bytes,
         routers=routers,
         output_template=output_template if any_split else "",
         overwrite_policy=overwrite_policy,
@@ -719,11 +712,12 @@ def process(
         segments = result.processor.output_manager.segments
         console.print(f"Created {len(segments)} output file(s)")
         for _, segment in sorted(segments.items(), key=lambda x: x[1].index):
+            assert segment.writer is not None
             seg_stats = segment.writer.statistics
             console.print(
                 f"  [{segment.index}] {segment.path}: "
                 f"{seg_stats.message_count:,} messages, "
-                f"{bytes_to_human(seg_stats.chunk_count * chunk_size)} "
+                f"{bytes_to_human(Path(segment.path).stat().st_size)} "
                 f"({seg_stats.chunk_count} chunks)"
             )
 

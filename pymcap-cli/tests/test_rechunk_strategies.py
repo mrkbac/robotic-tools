@@ -6,7 +6,7 @@ Covers:
   CLI through to ``OutputOptions``.
 - The streaming-safe routing semantics: schema patterns route after topic
   patterns; the max-groups cap is a hard upper bound on
-  ``segment.rechunk_groups`` per output segment.
+  ``segment.chunk_groups`` per output segment.
 """
 
 from __future__ import annotations
@@ -17,12 +17,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pymcap_cli.cmd import process_cmd, rechunk_cmd
+from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy
 from pymcap_cli.cmd._run_processor import run_processor
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
     OverwriteCollisionPolicy,
-    RechunkStrategy,
+)
+from pymcap_cli.core.processors.chunk_groupers import (
+    PatternGrouper,
+    PerChannelGrouper,
 )
 from small_mcap import McapWriter
 
@@ -57,7 +61,8 @@ def test_rechunk_default_strategy_is_all(monkeypatch: pytest.MonkeyPatch):
     rechunk_cmd.rechunk(file="in.mcap", output=Path("out.mcap"))
 
     assert rec.output_options is not None
-    assert rec.output_options.rechunk_strategy == RechunkStrategy.ALL
+    assert len(rec.output_options.output_processors) == 1
+    assert isinstance(rec.output_options.output_processors[0], PerChannelGrouper)
 
 
 def test_rechunk_pattern_strategy_accepts_schema_pattern_alone(monkeypatch: pytest.MonkeyPatch):
@@ -73,7 +78,10 @@ def test_rechunk_pattern_strategy_accepts_schema_pattern_alone(monkeypatch: pyte
 
     assert exit_code == 0
     assert rec.output_options is not None
-    assert len(rec.output_options.rechunk_schema_patterns) == 1
+    assert len(rec.output_options.output_processors) == 1
+    grouper = rec.output_options.output_processors[0]
+    assert isinstance(grouper, PatternGrouper)
+    assert len(grouper.schema_patterns) == 1
 
 
 def test_rechunk_pattern_strategy_rejects_no_patterns():
@@ -97,7 +105,7 @@ def test_rechunk_max_groups_propagates(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert rec.output_options is not None
-    assert rec.output_options.rechunk_max_groups == 4
+    assert rec.output_options.max_chunk_groups == 4
 
 
 def test_rechunk_max_groups_rejects_zero():
@@ -122,7 +130,7 @@ def test_rechunk_max_memory_propagates(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert rec.output_options is not None
-    assert rec.output_options.rechunk_max_memory == 1_000_000
+    assert rec.output_options.max_chunk_memory_bytes == 1_000_000
 
 
 def test_rechunk_max_memory_rejects_unparsable():
@@ -149,9 +157,12 @@ def test_process_propagates_schema_pattern_and_max_groups(monkeypatch: pytest.Mo
     )
 
     assert rec.output_options is not None
-    assert len(rec.output_options.rechunk_schema_patterns) == 1
-    assert rec.output_options.rechunk_max_groups == 3
-    assert rec.output_options.rechunk_max_memory == 512_000
+    assert len(rec.output_options.output_processors) == 1
+    grouper = rec.output_options.output_processors[0]
+    assert isinstance(grouper, PatternGrouper)
+    assert len(grouper.schema_patterns) == 1
+    assert rec.output_options.max_chunk_groups == 3
+    assert rec.output_options.max_chunk_memory_bytes == 512_000
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +226,7 @@ def _run(input_path: Path, output_path: Path, **output_opts):
 
 class TestEndToEndRechunk:
     def test_max_groups_caps_segment_group_count(self, tmp_path: Path):
-        """strategy=all with 5 channels and max_groups=2 → exactly 2 groups."""
+        """PerChannelGrouper with 5 channels and max_chunk_groups=2 → exactly 2 groups."""
         inp = tmp_path / "in.mcap"
         out = tmp_path / "out.mcap"
         _write_fixture(
@@ -226,20 +237,20 @@ class TestEndToEndRechunk:
         result = _run(
             inp,
             out,
-            rechunk_strategy=RechunkStrategy.ALL,
-            rechunk_max_groups=2,
+            output_processors=[PerChannelGrouper()],
+            max_chunk_groups=2,
         )
 
         assert result.processor.output_manager is not None
         segments = list(result.processor.output_manager.segments.values())
         assert len(segments) == 1
-        assert len(segments[0].rechunk_groups) == 2
+        assert len(segments[0].chunk_groups) == 2
 
     def test_schema_pattern_routes_matching_channels_together(self, tmp_path: Path):
         """Channels sharing a schema-pattern match collapse into one group.
 
         Two channels use ``ImageSchema``; one uses ``OtherSchema``. With
-        ``--schema-pattern 'Image'``, the two Image channels share a group;
+        ``schema_patterns=['Image']``, the two Image channels share a group;
         the other lands in the unmatched (-1) bucket.
         """
         inp = tmp_path / "in.mcap"
@@ -256,14 +267,18 @@ class TestEndToEndRechunk:
         result = _run(
             inp,
             out,
-            rechunk_strategy=RechunkStrategy.PATTERN,
-            rechunk_schema_patterns=[re.compile("Image")],
+            output_processors=[
+                PatternGrouper(
+                    topic_patterns=[],
+                    schema_patterns=[re.compile("Image")],
+                )
+            ],
         )
 
         assert result.processor.output_manager is not None
         segment = next(iter(result.processor.output_manager.segments.values()))
         # 2 groups total: the schema-matched pool + the unmatched bucket.
-        assert len(segment.rechunk_groups) == 2
+        assert len(segment.chunk_groups) == 2
         # Both image channels point at the same group; the imu channel does not.
         cam_a_group = segment.channel_to_group[1]
         cam_b_group = segment.channel_to_group[2]
@@ -292,13 +307,13 @@ class TestEndToEndRechunk:
         unconstrained = _run(
             inp,
             out_uncapped,
-            rechunk_strategy=RechunkStrategy.ALL,
+            output_processors=[PerChannelGrouper()],
         )
         capped = _run(
             inp,
             out_capped,
-            rechunk_strategy=RechunkStrategy.ALL,
-            rechunk_max_memory=1024,
+            output_processors=[PerChannelGrouper()],
+            max_chunk_memory_bytes=1024,
         )
 
         # Capped run must emit strictly more chunks than the unconstrained run.
@@ -330,9 +345,12 @@ class TestEndToEndRechunk:
         result = _run(
             inp,
             out,
-            rechunk_strategy=RechunkStrategy.PATTERN,
-            rechunk_patterns=[re.compile("cam_a")],  # only matches cam_a's topic
-            rechunk_schema_patterns=[re.compile("Image")],  # matches both schemas
+            output_processors=[
+                PatternGrouper(
+                    topic_patterns=[re.compile("cam_a")],  # only matches cam_a's topic
+                    schema_patterns=[re.compile("Image")],  # matches both schemas
+                )
+            ],
         )
 
         assert result.processor.output_manager is not None
