@@ -873,6 +873,13 @@ def topics_cmd(
         Parameter(help="Optional topic prefix filter (e.g. '/tf' or '/sensor')."),
     ] = None,
     *,
+    sort_by: Annotated[
+        Literal["files", "messages", "name"],
+        Parameter(
+            name=["--sort-by"],
+            help="Sort results (descending except for ``name``).",
+        ),
+    ] = "files",
     limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
     min_files: Annotated[
         int,
@@ -893,6 +900,14 @@ def topics_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
+    # Always tie-break by the other counts and then the topic name for
+    # deterministic output.
+    order_by = {
+        "files":    "files DESC, messages DESC, t.name",
+        "messages": "messages DESC, files DESC, t.name",
+        "name":     "t.name",
+    }[sort_by]
+
     sql = (
         "SELECT t.name AS topic, "
         "       COUNT(DISTINCT cf.abs_path) AS files, "
@@ -906,7 +921,7 @@ def topics_cmd(
     if prefix is not None:
         sql += "WHERE t.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
-    sql += "GROUP BY t.name HAVING files >= ? ORDER BY files DESC, messages DESC LIMIT ?"
+    sql += f"GROUP BY t.name HAVING files >= ? ORDER BY {order_by} LIMIT ?"
     params.extend([min_files, limit])
 
     with open_db(db_path, read_only=True) as conn:
@@ -950,6 +965,13 @@ def schemas_cmd(
         Parameter(help="Optional schema-name prefix (e.g. 'sensor_msgs')."),
     ] = None,
     *,
+    sort_by: Annotated[
+        Literal["files", "name", "encoding"],
+        Parameter(
+            name=["--sort-by"],
+            help="Sort results (descending only for ``files``).",
+        ),
+    ] = "files",
     limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
     min_files: Annotated[
         int,
@@ -970,6 +992,12 @@ def schemas_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
+    order_by = {
+        "files":    "files DESC, s.name",
+        "name":     "s.name",
+        "encoding": "s.encoding, s.name",
+    }[sort_by]
+
     sql = (
         "SELECT s.name, s.encoding, "
         "       COUNT(DISTINCT cf.abs_path) AS files "
@@ -981,7 +1009,7 @@ def schemas_cmd(
     if prefix is not None:
         sql += "WHERE s.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
-    sql += "GROUP BY s.name, s.encoding HAVING files >= ? ORDER BY files DESC, s.name LIMIT ?"
+    sql += f"GROUP BY s.name, s.encoding HAVING files >= ? ORDER BY {order_by} LIMIT ?"
     params.extend([min_files, limit])
 
     with open_db(db_path, read_only=True) as conn:

@@ -142,6 +142,68 @@ def test_topics_prefix_filter_treats_underscore_literally(tmp_path: Path) -> Non
     assert [r["topic"] for r in rows] == ["/foo_bar"]
 
 
+def test_topics_sort_by_name(tmp_path: Path) -> None:
+    """``--sort-by name`` orders topics alphabetically ascending."""
+    (tmp_path / "rec.mcap").write_bytes(
+        create_multi_topic_mcap(["/zeta", "/alpha", "/mid"], messages_per_topic=1)
+    )
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    rc, output = _capture_stdout(lambda: topics_cmd(db=db, format="json", sort_by="name"))
+    assert rc == 0
+    rows = _json.loads(output)
+    assert [r["topic"] for r in rows] == ["/alpha", "/mid", "/zeta"]
+
+
+def test_topics_sort_by_messages(tmp_path: Path) -> None:
+    """``--sort-by messages`` puts the chattiest topic first."""
+    (tmp_path / "rec.mcap").write_bytes(
+        # /many gets 20 messages, /few gets 3 — same shape via the helper.
+        create_multi_topic_mcap(["/few"], messages_per_topic=3)
+        # We need two topics with different counts; build manually instead:
+    )
+    payload = BytesIO()
+    writer = McapWriter(payload)
+    writer.start()
+    writer.add_schema(schema_id=1, name="std/empty", encoding="ros2msg", data=b"")
+    writer.add_channel(channel_id=1, topic="/few", message_encoding="cdr", schema_id=1)
+    writer.add_channel(channel_id=2, topic="/many", message_encoding="cdr", schema_id=1)
+    for i in range(3):
+        writer.add_message(channel_id=1, log_time=i, publish_time=i, data=b"")
+    for i in range(20):
+        writer.add_message(channel_id=2, log_time=i, publish_time=i, data=b"")
+    writer.finish()
+    (tmp_path / "rec.mcap").write_bytes(payload.getvalue())
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    rc, output = _capture_stdout(lambda: topics_cmd(db=db, format="json", sort_by="messages"))
+    assert rc == 0
+    rows = _json.loads(output)
+    assert [r["topic"] for r in rows] == ["/many", "/few"]
+
+
+def test_schemas_sort_by_name(tmp_path: Path) -> None:
+    """``schemas --sort-by name`` orders schemas alphabetically ascending."""
+    def _mcap_with_schema(schema_name: str, topic: str) -> bytes:
+        output = BytesIO()
+        writer = McapWriter(output)
+        writer.start()
+        writer.add_schema(schema_id=1, name=schema_name, encoding="ros2msg", data=schema_name.encode())
+        writer.add_channel(channel_id=1, topic=topic, message_encoding="cdr", schema_id=1)
+        writer.add_message(channel_id=1, log_time=1, publish_time=1, data=b"")
+        writer.finish()
+        return output.getvalue()
+
+    (tmp_path / "a.mcap").write_bytes(_mcap_with_schema("z/Latest", "/x"))
+    (tmp_path / "b.mcap").write_bytes(_mcap_with_schema("a/Earliest", "/y"))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    rc, output = _capture_stdout(lambda: schemas_cmd(db=db, format="json", sort_by="name"))
+    assert rc == 0
+    rows = _json.loads(output)
+    assert [r["name"] for r in rows] == ["a/Earliest", "z/Latest"]
+
+
 def test_schemas_lists_schema_names(tmp_path: Path) -> None:
     (tmp_path / "rec.mcap").write_bytes(create_multi_topic_mcap(["/foo"], messages_per_topic=2))
     db = tmp_path / "index.sqlite"
