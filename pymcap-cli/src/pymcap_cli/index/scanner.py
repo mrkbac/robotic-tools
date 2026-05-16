@@ -23,7 +23,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import stat
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
@@ -137,28 +139,33 @@ class _ScanResult:
     error_message: str | None = None
 
 
+_DEFAULT_WALKER_WORKERS = 8
+
+
 def _iter_mcap_files(
     root: Path,
     *,
     recurse: bool,
     on_dir_done: Callable[[int], None] | None = None,
+    walker_workers: int = _DEFAULT_WALKER_WORKERS,
 ) -> Iterator[tuple[Path, os.stat_result | None]]:
     """Yield ``(path, stat_result | None)`` for every ``.mcap`` under ``root``.
 
-    Streaming, so callers can start processing the first files while the
-    walker keeps going — important when ``root`` is on a slow mount.
-    ``follow_symlinks=False`` on directory descent matches
-    :meth:`Path.rglob`'s default and skips venv / cache symlinks.
+    Recursive walks spread ``os.scandir()`` and ``entry.stat()`` across
+    ``walker_workers`` threads. On slow mounts (NFS, FUSE, SSHFS) most of the
+    per-directory cost is round-trip latency rather than CPU work, so even
+    a small thread pool overlaps those round-trips and cuts walker
+    wall-clock dramatically. ``walker_workers <= 1`` falls back to a serial
+    BFS that uses no threads.
 
-    The walker calls ``entry.stat()`` once per ``.mcap`` and hands the result
-    back to the caller, so the main loop does not need a second ``stat`` per
-    file. This roughly halves stat syscalls on filesystems where
-    ``DirEntry.is_file()`` would have triggered its own stat (slow remote
-    mounts, FUSE, NFS with ``DT_UNKNOWN`` dirents).
+    The walker hands the caller the ``stat_result`` from each entry, so the
+    main loop avoids a second ``stat`` per file. ``follow_symlinks=False``
+    on directory descent matches :meth:`Path.rglob`'s default and skips
+    venv / cache symlinks.
 
-    ``on_dir_done`` is called with the running directory count every time
-    a directory finishes scanning, so the caller can drive a progress UI
-    even before the first ``.mcap`` is found.
+    ``on_dir_done`` is called with the running directory count after every
+    finished directory, so the caller can drive a progress UI even before
+    the first ``.mcap`` is yielded.
     """
     if root.is_file():
         if root.suffix == ".mcap":
@@ -188,6 +195,20 @@ def _iter_mcap_files(
             on_dir_done(1)
         return
 
+    if walker_workers <= 1:
+        yield from _iter_mcap_files_serial(root_str, on_dir_done=on_dir_done)
+    else:
+        yield from _iter_mcap_files_parallel(
+            root_str, walker_workers=walker_workers, on_dir_done=on_dir_done
+        )
+
+
+def _iter_mcap_files_serial(
+    root_str: str,
+    *,
+    on_dir_done: Callable[[int], None] | None,
+) -> Iterator[tuple[Path, os.stat_result]]:
+    """Single-threaded BFS used when ``walker_workers <= 1``."""
     stack: list[str] = [root_str]
     dirs_done = 0
     while stack:
@@ -214,6 +235,99 @@ def _iter_mcap_files(
             on_dir_done(dirs_done)
     if on_dir_done is not None:
         on_dir_done(dirs_done)
+
+
+def _iter_mcap_files_parallel(
+    root_str: str,
+    *,
+    walker_workers: int,
+    on_dir_done: Callable[[int], None] | None,
+) -> Iterator[tuple[Path, os.stat_result]]:
+    """Walk the tree with a small thread pool issuing scandir() in parallel.
+
+    Each worker pulls a directory path off ``dir_q``, scandirs it, pushes
+    subdirectories back onto ``dir_q``, and feeds ``(path, stat)`` tuples to
+    ``out_q`` for the main thread to yield. An ``in_flight`` counter (under
+    ``state_lock``) tracks how many directories are still pending — when it
+    hits zero the workers send a sentinel and exit.
+    """
+    out_q: queue.Queue[tuple[Path, os.stat_result] | None] = queue.Queue(maxsize=8192)
+    dir_q: queue.Queue[str] = queue.Queue()
+    dir_q.put(root_str)
+
+    state_lock = threading.Lock()
+    state = {"in_flight": 1, "dirs_done": 0, "shutdown": False}
+    sentinels_sent = [False]
+
+    def _worker() -> None:
+        while True:
+            try:
+                directory = dir_q.get(timeout=0.25)
+            except queue.Empty:
+                with state_lock:
+                    if state["shutdown"] or state["in_flight"] == 0:
+                        return
+                continue
+            new_dirs: list[str] = []
+            try:
+                with os.scandir(directory) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                new_dirs.append(entry.path)
+                                continue
+                            if not entry.name.endswith(".mcap"):
+                                continue
+                            st = entry.stat()
+                        except OSError:
+                            continue
+                        if stat.S_ISREG(st.st_mode):
+                            out_q.put((Path(entry.path), st))
+            except OSError:
+                pass
+            with state_lock:
+                state["in_flight"] += len(new_dirs)
+                state["in_flight"] -= 1
+                state["dirs_done"] += 1
+                local_dirs_done = state["dirs_done"]
+                drained = state["in_flight"] == 0
+            for d in new_dirs:
+                dir_q.put(d)
+            if on_dir_done is not None and local_dirs_done % 200 == 0:
+                # Rich progress's update() is thread-safe; the only shared
+                # state we mutate from the callback is ScanStats.dirs_walked,
+                # whose monotonic-int set is harmless under a small race.
+                on_dir_done(local_dirs_done)
+            if drained:
+                with state_lock:
+                    if not sentinels_sent[0]:
+                        sentinels_sent[0] = True
+                        for _ in range(walker_workers):
+                            out_q.put(None)
+                return
+
+    threads = [
+        threading.Thread(target=_worker, name=f"walker-{i}", daemon=True)
+        for i in range(walker_workers)
+    ]
+    for t in threads:
+        t.start()
+
+    pending_sentinels = walker_workers
+    try:
+        while pending_sentinels > 0:
+            item = out_q.get()
+            if item is None:
+                pending_sentinels -= 1
+                continue
+            yield item
+    finally:
+        with state_lock:
+            state["shutdown"] = True
+        for t in threads:
+            t.join(timeout=1.0)
+        if on_dir_done is not None:
+            on_dir_done(state["dirs_done"])
 
 
 def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
