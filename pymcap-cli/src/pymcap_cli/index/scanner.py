@@ -27,12 +27,14 @@ import queue
 import stat
 import threading
 import time
+import zlib
 from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
+import xxhash
 from small_mcap import McapError, get_header, get_summary, rebuild_summary
 
 from pymcap_cli.index.db import finish_session, start_session
@@ -623,7 +625,8 @@ def _insert_content(
     *,
     topic_id_cache: dict[str, int],
     schema_pk_id_cache: dict[str, int],
-    channel_sig_cache: dict[tuple[int, int, str, str], int],
+    channel_sig_cache: dict[tuple[int, int, str, int], int],
+    metadata_id_cache: dict[str, int],
 ) -> int:
     """Insert ``content`` + child rows. Returns the new ``content_id``.
 
@@ -693,34 +696,58 @@ def _insert_content(
         ).fetchone()
         topic_id_cache[topic] = row[0]
 
-    # ``channel_sig`` dimension — collapses the (topic, schema, encoding,
-    # metadata) tuple that repeats heavily across files.
+    # ``channel_metadata`` dim — same JSON metadata repeats heavily across
+    # files. Intern + zlib-compress so the channel_sig row carries only an
+    # INTEGER FK.
+    def _intern_metadata(raw: str | None) -> int | None:
+        if raw is None:
+            return None
+        cached = metadata_id_cache.get(raw)
+        if cached is not None:
+            return cached
+        encoded = raw.encode("utf-8")
+        content_hash = xxhash.xxh3_128_hexdigest(encoded)
+        conn.execute(
+            "INSERT OR IGNORE INTO channel_metadata(content_hash, blob_zlib) VALUES (?, ?)",
+            (content_hash, zlib.compress(encoded, 6)),
+        )
+        row = conn.execute(
+            "SELECT metadata_id FROM channel_metadata WHERE content_hash = ?",
+            (content_hash,),
+        ).fetchone()
+        metadata_id_cache[raw] = row[0]
+        return row[0]
+
+    # ``channel_sig`` dimension — collapses the
+    # (topic, schema, encoding, metadata) tuple that repeats heavily across
+    # files. Now keyed by the small INTEGER ``metadata_id`` from
+    # ``channel_metadata`` rather than the raw blob.
     channel_rows: list[tuple[int, int, int, int | None]] = []
     for ch in content.channels:
         topic_id = topic_id_cache[ch["topic"]]
         schema_pk_id = schema_pk_id_by_local.get(ch["schema_id"])
         encoding = ch["message_encoding"]
-        metadata = ch["metadata"]
+        metadata_id = _intern_metadata(ch["metadata"])
         sig_key = (
             topic_id,
             schema_pk_id if schema_pk_id is not None else 0,
             encoding or "",
-            metadata or "",
+            metadata_id if metadata_id is not None else 0,
         )
         sig_id = channel_sig_cache.get(sig_key)
         if sig_id is None:
             conn.execute(
                 "INSERT OR IGNORE INTO channel_sig"
-                " (topic_id, schema_pk_id, message_encoding, metadata)"
+                " (topic_id, schema_pk_id, message_encoding, channel_metadata_id)"
                 " VALUES (?, ?, ?, ?)",
-                (topic_id, schema_pk_id, encoding, metadata),
+                (topic_id, schema_pk_id, encoding, metadata_id),
             )
             row = conn.execute(
                 "SELECT channel_sig_id FROM channel_sig"
                 " WHERE topic_id = ?"
                 "   AND COALESCE(schema_pk_id, 0) = ?"
                 "   AND COALESCE(message_encoding, '') = ?"
-                "   AND COALESCE(metadata, '') = ?",
+                "   AND COALESCE(channel_metadata_id, 0) = ?",
                 sig_key,
             ).fetchone()
             sig_id = row[0]
@@ -796,7 +823,8 @@ def scan(
     content_id_by_fp: dict[str, int] = {}
     topic_id_cache: dict[str, int] = {}
     schema_pk_id_cache: dict[str, int] = {}
-    channel_sig_cache: dict[tuple[int, int, str, str], int] = {}
+    channel_sig_cache: dict[tuple[int, int, str, int], int] = {}
+    metadata_id_cache: dict[str, int] = {}
 
     def _resolve_content_id(summary_fp: str) -> int:
         cid = content_id_by_fp.get(summary_fp)
@@ -871,6 +899,7 @@ def scan(
                     topic_id_cache=topic_id_cache,
                     schema_pk_id_cache=schema_pk_id_cache,
                     channel_sig_cache=channel_sig_cache,
+                    metadata_id_cache=metadata_id_cache,
                 )
                 content_id_by_fp[result.summary_fingerprint] = content_id
                 _record_observation(
