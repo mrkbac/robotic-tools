@@ -588,8 +588,9 @@ def tree_cmd(
         topics = conn.execute(
             f"""SELECT cf.abs_path, t.name
                 FROM current_file cf
-                JOIN content_channel cc ON cc.content_id = cf.content_id
-                JOIN topic t            ON t.topic_id    = cc.topic_id
+                JOIN content_channel cc ON cc.content_id     = cf.content_id
+                JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id
+                JOIN topic t            ON t.topic_id         = sig.topic_id
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
@@ -736,21 +737,17 @@ def query_cmd(
             f"{_EFF_END_SQL}   AS eff_end, "
             "cf.size_bytes "
             "FROM current_file cf "
-            "JOIN content c           ON c.content_id  = cf.content_id "
-            "JOIN content_channel cc  ON cc.content_id = cf.content_id "
+            "JOIN content c           ON c.content_id        = cf.content_id "
+            "JOIN content_channel cc  ON cc.content_id       = cf.content_id "
+            "JOIN channel_sig sig     ON sig.channel_sig_id  = cc.channel_sig_id "
         )
         where: list[str] = []
         if topic is not None:
-            sql += "JOIN topic t ON t.topic_id = cc.topic_id "
+            sql += "JOIN topic t ON t.topic_id = sig.topic_id "
             where.append("t.name = ?")
             params.append(topic)
         if schema is not None:
-            sql += (
-                "JOIN content_schema cs "
-                "  ON cs.content_id = cf.content_id "
-                "  AND cs.schema_id = cc.schema_id "
-                "JOIN schema s ON s.schema_pk_id = cs.schema_pk_id "
-            )
+            sql += "JOIN schema s ON s.schema_pk_id = sig.schema_pk_id "
             where.append("s.name = ?")
             params.append(schema)
         if fingerprint is not None:
@@ -901,8 +898,9 @@ def topics_cmd(
         "       COUNT(DISTINCT cf.abs_path) AS files, "
         "       COALESCE(SUM(cc.message_count), 0) AS messages "
         "FROM current_file cf "
-        "JOIN content_channel cc ON cc.content_id = cf.content_id "
-        "JOIN topic t            ON t.topic_id   = cc.topic_id "
+        "JOIN content_channel cc ON cc.content_id      = cf.content_id "
+        "JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id "
+        "JOIN topic t            ON t.topic_id         = sig.topic_id "
     )
     params: list[str | int] = []
     if prefix is not None:
@@ -1202,14 +1200,12 @@ def info_cmd(
         ).fetchone()
         topic_rows = conn.execute(
             "SELECT t.name AS topic, s.name AS schema_name, "
-            "       cc.message_encoding, cc.message_count "
+            "       sig.message_encoding, cc.message_count "
             "FROM content_channel cc "
-            "JOIN content c       ON c.content_id = cc.content_id "
-            "JOIN topic t         ON t.topic_id   = cc.topic_id "
-            "LEFT JOIN content_schema cs "
-            "  ON cs.content_id = cc.content_id "
-            "  AND cs.schema_id = cc.schema_id "
-            "LEFT JOIN schema s  ON s.schema_pk_id = cs.schema_pk_id "
+            "JOIN content c       ON c.content_id        = cc.content_id "
+            "JOIN channel_sig sig ON sig.channel_sig_id  = cc.channel_sig_id "
+            "JOIN topic t         ON t.topic_id          = sig.topic_id "
+            "LEFT JOIN schema s   ON s.schema_pk_id      = sig.schema_pk_id "
             "WHERE c.summary_fingerprint = ? "
             "ORDER BY cc.message_count DESC NULLS LAST, t.name",
             (summary_fp,),

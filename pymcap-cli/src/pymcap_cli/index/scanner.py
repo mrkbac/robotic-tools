@@ -497,11 +497,12 @@ def _insert_content(
     *,
     topic_id_cache: dict[str, int],
     schema_pk_id_cache: dict[str, int],
+    channel_sig_cache: dict[tuple[int, int, str, str], int],
 ) -> int:
     """Insert ``content`` + child rows. Returns the new ``content_id``.
 
-    Mutates the caches so repeated topic / schema names within one scan don't
-    re-roundtrip to SQLite.
+    Mutates the caches so repeated topic / schema / channel-signature lookups
+    within one scan don't re-roundtrip to SQLite.
     """
     cur = conn.execute(
         """INSERT INTO content
@@ -549,6 +550,12 @@ def _insert_content(
         ).fetchone()
         schema_pk_id_cache[sh] = row[0]
 
+    # Map file-local schema_id → canonical schema_pk_id (NULL when the
+    # channel declares no schema, i.e. schema_id == 0 in MCAP).
+    schema_pk_id_by_local: dict[int, int | None] = {
+        sc["schema_id"]: schema_pk_id_cache[sc["schema_hash"]] for sc in content.schemas
+    }
+
     # ``topic`` dimension table — one row per channel topic string.
     for ch in content.channels:
         topic = ch["topic"]
@@ -560,23 +567,45 @@ def _insert_content(
         ).fetchone()
         topic_id_cache[topic] = row[0]
 
+    # ``channel_sig`` dimension — collapses the (topic, schema, encoding,
+    # metadata) tuple that repeats heavily across files.
+    channel_rows: list[tuple[int, int, int, int | None]] = []
+    for ch in content.channels:
+        topic_id = topic_id_cache[ch["topic"]]
+        schema_pk_id = schema_pk_id_by_local.get(ch["schema_id"])
+        encoding = ch["message_encoding"]
+        metadata = ch["metadata"]
+        sig_key = (
+            topic_id,
+            schema_pk_id if schema_pk_id is not None else 0,
+            encoding or "",
+            metadata or "",
+        )
+        sig_id = channel_sig_cache.get(sig_key)
+        if sig_id is None:
+            conn.execute(
+                "INSERT OR IGNORE INTO channel_sig"
+                " (topic_id, schema_pk_id, message_encoding, metadata)"
+                " VALUES (?, ?, ?, ?)",
+                (topic_id, schema_pk_id, encoding, metadata),
+            )
+            row = conn.execute(
+                "SELECT channel_sig_id FROM channel_sig"
+                " WHERE topic_id = ?"
+                "   AND COALESCE(schema_pk_id, 0) = ?"
+                "   AND COALESCE(message_encoding, '') = ?"
+                "   AND COALESCE(metadata, '') = ?",
+                sig_key,
+            ).fetchone()
+            sig_id = row[0]
+            channel_sig_cache[sig_key] = sig_id
+        channel_rows.append((content_id, ch["channel_id"], sig_id, ch["message_count"]))
+
     conn.executemany(
         """INSERT INTO content_channel
-           (content_id, channel_id, topic_id, schema_id, message_encoding,
-            metadata, message_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        [
-            (
-                content_id,
-                ch["channel_id"],
-                topic_id_cache[ch["topic"]],
-                ch["schema_id"],
-                ch["message_encoding"],
-                ch["metadata"],
-                ch["message_count"],
-            )
-            for ch in content.channels
-        ],
+           (content_id, channel_id, channel_sig_id, message_count)
+           VALUES (?, ?, ?, ?)""",
+        channel_rows,
     )
     conn.executemany(
         """INSERT INTO content_schema
@@ -641,6 +670,7 @@ def scan(
     content_id_by_fp: dict[str, int] = {}
     topic_id_cache: dict[str, int] = {}
     schema_pk_id_cache: dict[str, int] = {}
+    channel_sig_cache: dict[tuple[int, int, str, str], int] = {}
 
     def _resolve_content_id(summary_fp: str) -> int:
         cid = content_id_by_fp.get(summary_fp)
@@ -714,6 +744,7 @@ def scan(
                     active_session_id,
                     topic_id_cache=topic_id_cache,
                     schema_pk_id_cache=schema_pk_id_cache,
+                    channel_sig_cache=channel_sig_cache,
                 )
                 content_id_by_fp[result.summary_fingerprint] = content_id
                 _record_observation(
