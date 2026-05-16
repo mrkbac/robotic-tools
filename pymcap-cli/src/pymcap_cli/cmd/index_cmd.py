@@ -28,7 +28,12 @@ from pymcap_cli.display.display_utils import (
     display_channels_table,
 )
 from pymcap_cli.index import SANE_EPOCH_NS
-from pymcap_cli.index.db import IndexDbNeedsMigrationError, default_db_path, open_db
+from pymcap_cli.index.db import (
+    CURRENT_SCHEMA_VERSION,
+    IndexDbNeedsMigrationError,
+    default_db_path,
+    open_db,
+)
 from pymcap_cli.index.scanner import ScanStats, scan, unpack_distribution_blob
 from pymcap_cli.utils import bytes_to_human, parse_time_arg
 
@@ -67,12 +72,12 @@ _MAX_PLAUSIBLE_DURATION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 # ``ChunkIndex`` records, with the same threshold applied (see
 # ``scanner._build_content_row``).
 _EFF_START_SQL = (
-    f"CASE WHEN c.message_start_time >= {SANE_EPOCH_NS} "
-    "THEN c.message_start_time ELSE c.sane_message_start_time END"
+    f"CASE WHEN c.message_start_time_ns >= {SANE_EPOCH_NS} "
+    "THEN c.message_start_time_ns ELSE c.sane_message_start_time_ns END"
 )
 _EFF_END_SQL = (
-    f"CASE WHEN c.message_start_time >= {SANE_EPOCH_NS} "
-    "THEN c.message_end_time ELSE c.sane_message_end_time END"
+    f"CASE WHEN c.message_start_time_ns >= {SANE_EPOCH_NS} "
+    "THEN c.message_end_time_ns ELSE c.sane_message_end_time_ns END"
 )
 
 
@@ -293,6 +298,97 @@ def _optional_path_filter_params(path: Path | None) -> tuple[str | None, str, in
     resolved = str(path.expanduser().resolve())
     child_prefix = resolved if resolved.endswith(os.sep) else f"{resolved}{os.sep}"
     return resolved, resolved, len(child_prefix), child_prefix
+
+
+SqlValue = str | int | None
+SqlParams = Sequence[SqlValue]
+
+
+def _connect_status_db(db_path: Path) -> sqlite3.Connection:
+    """Open an index DB read-only without enforcing schema version.
+
+    ``status`` is the one read command that needs to keep working on DBs at
+    other ``user_version`` values — it's how the user discovers they need to
+    run a migration. Skip the version check from :func:`connect` and rely on
+    the ``_status_*`` query wrappers to convert missing-table errors into
+    "unavailable" cells.
+    """
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-65536")
+    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _status_fetchone(
+    conn: sqlite3.Connection,
+    label: str,
+    sql: str,
+    params: SqlParams,
+    warnings: list[str],
+) -> tuple[SqlValue, ...] | None:
+    try:
+        row = conn.execute(sql, params).fetchone()
+    except sqlite3.DatabaseError as exc:
+        warnings.append(f"{label}: {exc}")
+        return None
+    return tuple(row) if row is not None else None
+
+
+def _status_fetchall(
+    conn: sqlite3.Connection,
+    label: str,
+    sql: str,
+    params: SqlParams,
+    warnings: list[str],
+) -> list[tuple[SqlValue, ...]]:
+    try:
+        return [tuple(row) for row in conn.execute(sql, params).fetchall()]
+    except sqlite3.DatabaseError as exc:
+        warnings.append(f"{label}: {exc}")
+        return []
+
+
+def _status_int(
+    conn: sqlite3.Connection,
+    label: str,
+    sql: str,
+    params: SqlParams,
+    warnings: list[str],
+) -> int | None:
+    row = _status_fetchone(conn, label, sql, params, warnings)
+    if row is None or row[0] is None:
+        warnings.append(f"{label}: no value returned")
+        return None
+    return int(row[0])
+
+
+def _status_unavailable(label: str, reason: str, warnings: list[str]) -> None:
+    warnings.append(f"{label}: {reason}")
+
+
+def _format_optional_count(value: int | None) -> str:
+    if value is None:
+        return "[dim]unavailable[/]"
+    return f"[green]{value:,}[/]"
+
+
+def _format_optional_compact_count(value: int | None) -> str:
+    if value is None:
+        return "[dim]unavailable[/]"
+    return f"[green]{_format_count(value)}[/]"
+
+
+def _format_user_version(user_version: int) -> str:
+    expected = CURRENT_SCHEMA_VERSION
+    if user_version == expected:
+        return f"[green]{user_version} / {expected}[/]"
+    if user_version < expected:
+        return f"[yellow]{user_version} / {expected}[/] [dim](older than this CLI)[/]"
+    return f"[yellow]{user_version} / {expected}[/] [dim](newer than this CLI)[/]"
 
 
 def _format_count(n: int) -> str:
@@ -537,53 +633,168 @@ def status_cmd(
         return 1
 
     path_filter_params = _optional_path_filter_params(folder)
+    warnings: list[str] = []
+    # ``shape_row`` / ``last_scan_row`` populate the topic/schema/scan rows
+    # below; the rest start as None so the renderer falls back to "unavailable"
+    # if a query fails.
+    topic_count: int | None = None
+    schema_count: int | None = None
+    content_channel_count: int | None = None
+    last_scan_id: int | None = None
+    last_scan_started_at: int | None = None
+    last_scan_finished_at: int | None = None
+    last_scan_root: str | None = None
+    last_scan_version: str | None = None
 
     try:
-        with open_db(db_path, read_only=True) as conn:
-            files = conn.execute(
-                "SELECT COUNT(DISTINCT abs_path) FROM current_file "
-                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
-                path_filter_params,
-            ).fetchone()[0]
-            with_content = conn.execute(
-                "SELECT COUNT(DISTINCT abs_path) FROM current_file "
-                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
-                "AND summary_fingerprint IS NOT NULL",
-                path_filter_params,
-            ).fetchone()[0]
-            contents = conn.execute(
-                "SELECT COUNT(*) FROM content "
-                "WHERE summary_fingerprint IN ("
-                "  SELECT summary_fingerprint FROM current_file "
-                "  WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)"
-                ")",
-                path_filter_params,
-            ).fetchone()[0]
-            errors = conn.execute(
-                "SELECT COUNT(*) FROM scan_error "
-                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
-                path_filter_params,
-            ).fetchone()[0]
-            totals_sql = (
-                "SELECT COALESCE(SUM(c.message_count),0), COALESCE(SUM(cf.size_bytes),0) "
-                "FROM current_file cf "
-                "JOIN content c ON c.content_id = cf.content_id "
-                "WHERE (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?)"
-            )
-            total_messages, total_bytes = conn.execute(totals_sql, path_filter_params).fetchone()
-            error_breakdown = conn.execute(
-                "SELECT error_kind, COUNT(*) FROM scan_error "
-                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
-                "GROUP BY error_kind ORDER BY error_kind",
-                path_filter_params,
-            ).fetchall()
-    except IndexDbNeedsMigrationError as exc:
-        _print_db_needs_migration(exc)
+        conn = _connect_status_db(db_path)
+    except (OSError, sqlite3.DatabaseError) as exc:
+        console.print(f"[red]Error:[/] could not open index DB at {db_path}: {exc}")
         return 1
+    try:
+        user_version = _status_int(conn, "User version", "PRAGMA user_version", (), warnings) or 0
 
-    coverage = f"{with_content:,} / {files:,}" if files else "0 / 0"
-    if files:
+        # All queries target the current (v7) schema. Older / partial DBs
+        # raise ``sqlite3.DatabaseError`` on missing tables or columns; the
+        # ``_status_*`` wrappers convert that into a warning + ``None``, which
+        # the renderer surfaces as "unavailable". No legacy dispatch.
+
+        files = _status_int(
+            conn,
+            "Files tracked",
+            "SELECT COUNT(DISTINCT abs_path) FROM current_file "
+            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
+            path_filter_params,
+            warnings,
+        )
+
+        with_content = _status_int(
+            conn,
+            "Files with summary",
+            "SELECT COUNT(DISTINCT abs_path) FROM current_file "
+            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
+            "AND content_id IS NOT NULL",
+            path_filter_params,
+            warnings,
+        )
+
+        contents = _status_int(
+            conn,
+            "Distinct content rows",
+            "SELECT COUNT(DISTINCT content_id) FROM current_file "
+            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
+            "AND content_id IS NOT NULL",
+            path_filter_params,
+            warnings,
+        )
+
+        total_bytes = _status_int(
+            conn,
+            "Total bytes",
+            "SELECT COALESCE(SUM(size_bytes),0) FROM current_file "
+            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
+            path_filter_params,
+            warnings,
+        )
+
+        total_messages = _status_int(
+            conn,
+            "Total messages",
+            "SELECT COALESCE(SUM(c.message_count),0) "
+            "FROM current_file cf JOIN content c ON c.id = cf.content_id "
+            "WHERE (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?)",
+            path_filter_params,
+            warnings,
+        )
+
+        if folder is None:
+            errors = _status_int(
+                conn,
+                "Scan errors recorded",
+                "SELECT COUNT(*) FROM scan_error",
+                (),
+                warnings,
+            )
+            error_breakdown = [
+                (str(kind), int(count or 0))
+                for kind, count in _status_fetchall(
+                    conn,
+                    "Scan error breakdown",
+                    "SELECT error_kind, COUNT(*) FROM scan_error "
+                    "GROUP BY error_kind ORDER BY error_kind",
+                    (),
+                    warnings,
+                )
+            ]
+        else:
+            errors = _status_int(
+                conn,
+                "Scan errors recorded",
+                "SELECT COUNT(*) FROM scan_error se "
+                "JOIN file_path fp ON fp.id = se.file_path_id "
+                "WHERE (? IS NULL OR fp.value = ? OR substr(fp.value, 1, ?) = ?)",
+                path_filter_params,
+                warnings,
+            )
+            error_breakdown = [
+                (str(kind), int(count or 0))
+                for kind, count in _status_fetchall(
+                    conn,
+                    "Scan error breakdown",
+                    "SELECT se.error_kind, COUNT(*) FROM scan_error se "
+                    "JOIN file_path fp ON fp.id = se.file_path_id "
+                    "WHERE (? IS NULL OR fp.value = ? OR substr(fp.value, 1, ?) = ?) "
+                    "GROUP BY se.error_kind ORDER BY se.error_kind",
+                    path_filter_params,
+                    warnings,
+                )
+            ]
+
+        shape_row = _status_fetchone(
+            conn,
+            "Dataset shape",
+            "SELECT COUNT(DISTINCT sig.topic_id), "
+            "       COUNT(DISTINCT sig.schema_id), "
+            "       COUNT(*) "
+            "FROM current_file cf "
+            "JOIN content_channel cc ON cc.content_id = cf.content_id "
+            "JOIN channel_signature sig ON sig.id = cc.channel_signature_id "
+            "WHERE (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?)",
+            path_filter_params,
+            warnings,
+        )
+        if shape_row is not None:
+            topic_count = int(shape_row[0] or 0)
+            schema_count = int(shape_row[1] or 0)
+            content_channel_count = int(shape_row[2] or 0)
+
+        last_scan_row = _status_fetchone(
+            conn,
+            "Last DB scan",
+            "SELECT s.id, s.started_at_ns, s.finished_at_ns, "
+            "       fp.value, s.pymcap_cli_version "
+            "FROM scan_session s "
+            "LEFT JOIN file_path fp ON fp.id = s.root_file_path_id "
+            "ORDER BY s.id DESC LIMIT 1",
+            (),
+            warnings,
+        )
+        if last_scan_row is not None:
+            last_scan_id = int(last_scan_row[0]) if last_scan_row[0] is not None else None
+            last_scan_started_at = int(last_scan_row[1]) if last_scan_row[1] is not None else None
+            last_scan_finished_at = int(last_scan_row[2]) if last_scan_row[2] is not None else None
+            last_scan_root = str(last_scan_row[3]) if last_scan_row[3] is not None else None
+            last_scan_version = str(last_scan_row[4]) if last_scan_row[4] is not None else None
+    finally:
+        conn.close()
+
+    if files is None or with_content is None:
+        coverage = "[dim]unavailable[/]"
+    elif files:
+        coverage = f"{with_content:,} / {files:,}"
         coverage += f"  [dim]({with_content * 100 // files}%)[/]"
+    else:
+        coverage = "0 / 0"
 
     # Sum of the main DB file plus the WAL/SHM sidecars. WAL can dominate the
     # apparent on-disk footprint between checkpoints, so showing the total
@@ -598,27 +809,59 @@ def status_cmd(
     table = Table(title="Index status", show_header=False)
     table.add_column(style="bold blue")
     table.add_column()
-    table.add_row("DB", f"[green]{db_path}[/]")
+    table.add_row("DB", _format_parts_with_colors(str(db_path)))
     table.add_row(
         "DB size",
         f"[yellow]{bytes_to_human(db_size_bytes)}[/]  [dim]({db_size_bytes:,} B)[/]",
     )
+    table.add_row("User version", _format_user_version(user_version))
     if folder is not None:
-        table.add_row("Filter", f"[green]{folder}[/]")
-    table.add_row("Files tracked", f"[green]{files:,}[/]")
+        table.add_row("Filter", _format_parts_with_colors(str(folder)))
+    table.add_row("Files tracked", _format_optional_count(files))
     table.add_row("Files with summary", f"[green]{coverage}[/]")
-    table.add_row("Distinct content rows", f"[green]{contents:,}[/]")
+    table.add_row("Distinct content rows", _format_optional_count(contents))
     table.add_row(
         "Scan errors recorded",
-        f"[red]{errors:,}[/]" if errors else f"[green]{errors:,}[/]",
+        "[dim]unavailable[/]"
+        if errors is None
+        else (f"[red]{errors:,}[/]" if errors else f"[green]{errors:,}[/]"),
     )
     for kind, count in error_breakdown:
         table.add_row(f"  [dim]└ {_describe_error_kind(kind)}[/]", f"[dim]{count:,}[/]")
-    table.add_row("Total messages", f"[green]{_format_count(int(total_messages))}[/]")
+    table.add_row("Total messages", _format_optional_compact_count(total_messages))
     table.add_row(
         "Total bytes",
-        f"[yellow]{bytes_to_human(total_bytes)}[/]  [dim]({total_bytes:,} B)[/]",
+        "[dim]unavailable[/]"
+        if total_bytes is None
+        else f"[yellow]{bytes_to_human(total_bytes)}[/]  [dim]({total_bytes:,} B)[/]",
     )
+    if topic_count is None or schema_count is None:
+        table.add_row("Topics / schemas", "[dim]unavailable[/]")
+    else:
+        table.add_row("Topics / schemas", f"[green]{topic_count:,}[/] / [cyan]{schema_count:,}[/]")
+    table.add_row("Content channels", _format_optional_count(content_channel_count))
+    if last_scan_id is None:
+        table.add_row("Last DB scan", "[dim]none[/]")
+    else:
+        state = (
+            "[yellow]RUNNING[/]"
+            if last_scan_finished_at is None
+            else f"[cyan]{_format_duration_ns(last_scan_started_at, last_scan_finished_at)}[/]"
+        )
+        table.add_row("Last DB scan", f"[green]#{last_scan_id}[/]  {state}")
+        table.add_row("  Started", _format_ts_ns(last_scan_started_at))
+        table.add_row(
+            "  Finished",
+            "[yellow]RUNNING[/]"
+            if last_scan_finished_at is None
+            else _format_ts_ns(last_scan_finished_at),
+        )
+        if last_scan_root is not None:
+            table.add_row("  Root", _format_parts_with_colors(last_scan_root))
+        if last_scan_version is not None:
+            table.add_row("  CLI version", f"[dim]{last_scan_version}[/]")
+    if warnings:
+        table.add_row("Warnings", f"[yellow]{'; '.join(warnings[:5])}[/]")
     console.print(table)
     return 0
 
@@ -823,14 +1066,14 @@ def tree_cmd(
         with open_db(db_path, read_only=True) as conn:
             files = conn.execute(
                 """SELECT cf.abs_path, cf.size_bytes, c.message_count,
-                          CASE WHEN c.message_start_time >= ?
-                               THEN c.message_start_time ELSE c.sane_message_start_time END
+                          CASE WHEN c.message_start_time_ns >= ?
+                               THEN c.message_start_time_ns ELSE c.sane_message_start_time_ns END
                                AS eff_start,
-                          CASE WHEN c.message_start_time >= ?
-                               THEN c.message_end_time ELSE c.sane_message_end_time END
+                          CASE WHEN c.message_start_time_ns >= ?
+                               THEN c.message_end_time_ns ELSE c.sane_message_end_time_ns END
                                AS eff_end
                     FROM current_file cf
-                    JOIN content c ON c.content_id = cf.content_id
+                    JOIN content c ON c.id = cf.content_id
                     WHERE (? IS NULL OR cf.abs_path = ?
                            OR substr(cf.abs_path, 1, ?) = ?)""",
                 (*time_filter_params, *path_filter_params),
@@ -845,8 +1088,8 @@ def tree_cmd(
                     JOIN (
                         SELECT cc.content_id, GROUP_CONCAT(DISTINCT t.name) AS names
                         FROM content_channel cc
-                        JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id
-                        JOIN topic t         ON t.topic_id          = sig.topic_id
+                        JOIN channel_signature sig ON sig.id = cc.channel_signature_id
+                        JOIN topic t         ON t.id          = sig.topic_id
                         GROUP BY cc.content_id
                     ) agg ON agg.content_id = cf.content_id
                     WHERE (? IS NULL OR cf.abs_path = ?
@@ -859,7 +1102,7 @@ def tree_cmd(
                     JOIN (
                         SELECT cs.content_id, GROUP_CONCAT(DISTINCT s.schema_hash) AS hashes
                         FROM content_schema cs
-                        JOIN schema s ON s.schema_pk_id = cs.schema_pk_id
+                        JOIN schema s ON s.id = cs.schema_id
                         GROUP BY cs.content_id
                     ) agg ON agg.content_id = cf.content_id
                     WHERE (? IS NULL OR cf.abs_path = ?
@@ -1003,33 +1246,33 @@ def query_cmd(
         sql = (
             "SELECT cf.abs_path, "  # noqa: S608
             "COALESCE(SUM(cc.message_count), 0) AS messages, "
-            "COUNT(DISTINCT cc.channel_id) AS channels, "
+            "COUNT(DISTINCT cc.mcap_channel_id) AS channels, "
             f"{_EFF_START_SQL} AS eff_start, "
             f"{_EFF_END_SQL}   AS eff_end, "
             "cf.size_bytes, "
             "c.summary_fingerprint "
             "FROM current_file cf "
-            "JOIN content c           ON c.content_id        = cf.content_id "
+            "JOIN content c           ON c.id        = cf.content_id "
             "JOIN content_channel cc  ON cc.content_id       = cf.content_id "
-            "JOIN channel_sig sig     ON sig.channel_sig_id  = cc.channel_sig_id "
+            "JOIN channel_signature sig     ON sig.id  = cc.channel_signature_id "
         )
         where: list[str] = []
         if topic is not None:
-            sql += "JOIN topic t ON t.topic_id = sig.topic_id "
+            sql += "JOIN topic t ON t.id = sig.topic_id "
             where.append("t.name = ?")
             params.append(topic)
         if schema is not None:
-            sql += "JOIN schema s ON s.schema_pk_id = sig.schema_pk_id "
+            sql += "JOIN schema s ON s.id = sig.schema_id "
             where.append("s.name = ?")
             params.append(schema)
         if fingerprint is not None:
             where.append("c.summary_fingerprint = ?")
             params.append(fingerprint)
         if window_end is not None:
-            where.append("c.message_start_time <= ?")
+            where.append("c.message_start_time_ns <= ?")
             params.append(window_end)
         if window_start is not None:
-            where.append("c.message_end_time >= ?")
+            where.append("c.message_end_time_ns >= ?")
             params.append(window_start)
         if folder_clause:
             where.append(folder_clause)
@@ -1044,17 +1287,17 @@ def query_cmd(
             "cf.size_bytes, "
             "c.summary_fingerprint "
             "FROM current_file cf "
-            "JOIN content c ON c.content_id = cf.content_id "
+            "JOIN content c ON c.id = cf.content_id "
         )
         where = []
         if fingerprint is not None:
             where.append("c.summary_fingerprint = ?")
             params.append(fingerprint)
         if window_end is not None:
-            where.append("c.message_start_time <= ?")
+            where.append("c.message_start_time_ns <= ?")
             params.append(window_end)
         if window_start is not None:
-            where.append("c.message_end_time >= ?")
+            where.append("c.message_end_time_ns >= ?")
             params.append(window_start)
         if folder_clause:
             where.append(folder_clause)
@@ -1191,13 +1434,13 @@ def topics_cmd(
         "SELECT t.name AS topic, "
         "       COUNT(DISTINCT cf.abs_path)        AS files, "
         "       COALESCE(SUM(cc.message_count), 0) AS messages, "
-        "       COUNT(DISTINCT sig.schema_pk_id)   AS schemas, "
+        "       COUNT(DISTINCT sig.schema_id)   AS schemas, "
         "       MIN(s.name)                        AS schema_name "
         "FROM current_file cf "
         "JOIN content_channel cc ON cc.content_id      = cf.content_id "
-        "JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id "
-        "JOIN topic t            ON t.topic_id         = sig.topic_id "
-        "LEFT JOIN schema s      ON s.schema_pk_id     = sig.schema_pk_id "
+        "JOIN channel_signature sig    ON sig.id = cc.channel_signature_id "
+        "JOIN topic t            ON t.id         = sig.topic_id "
+        "LEFT JOIN schema s      ON s.id     = sig.schema_id "
     )
     params: list[str | int] = []
     if prefix is not None:
@@ -1302,7 +1545,7 @@ def schemas_cmd(
         "encoding": "s.encoding, s.name",
     }[sort_by]
 
-    # JOIN through ``channel_sig`` so we can count topics + messages per
+    # JOIN through ``channel_signature`` so we can count topics + messages per
     # schema. This drops schemas that are declared in a Summary but never
     # referenced by any channel — that's both rare and arguably more useful,
     # since the new ``topics`` / ``messages`` columns are meaningless without
@@ -1314,16 +1557,14 @@ def schemas_cmd(
         "       COALESCE(SUM(cc.message_count), 0) AS messages "
         "FROM current_file cf "
         "JOIN content_channel cc ON cc.content_id      = cf.content_id "
-        "JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id "
-        "JOIN schema s           ON s.schema_pk_id     = sig.schema_pk_id "
+        "JOIN channel_signature sig    ON sig.id = cc.channel_signature_id "
+        "JOIN schema s           ON s.id     = sig.schema_id "
     )
     params: list[str | int] = []
     if prefix is not None:
         sql += "WHERE s.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
-    sql += (
-        f"GROUP BY s.schema_pk_id, s.name, s.encoding HAVING files >= ? ORDER BY {order_by} LIMIT ?"
-    )
+    sql += f"GROUP BY s.id, s.name, s.encoding HAVING files >= ? ORDER BY {order_by} LIMIT ?"
     params.extend([min_files, limit])
 
     try:
@@ -1560,32 +1801,36 @@ def sessions_cmd(
     params: list[str | int] = []
     if folder is not None:
         clause, prefix_params = _path_prefix_where(folder)
-        where.append(clause.removeprefix("WHERE ").replace("abs_path", "s.root_path"))
+        where.append(clause.removeprefix("WHERE ").replace("abs_path", "fp.value"))
         params.extend(prefix_params)
     if since is not None:
-        where.append("s.started_at >= ?")
+        where.append("s.started_at_ns >= ?")
         params.append(_parse_time_or_exit(since, "since"))
     if until is not None:
-        where.append("s.started_at <= ?")
+        where.append("s.started_at_ns <= ?")
         params.append(_parse_time_or_exit(until, "until"))
     if running:
-        where.append("s.finished_at IS NULL")
+        where.append("s.finished_at_ns IS NULL")
 
     sql = (
-        "SELECT s.id, s.started_at, s.finished_at, s.root_path, s.pymcap_cli_version, "
+        "SELECT s.id, s.started_at_ns, s.finished_at_ns, fp.value AS root_path, "
+        "       s.pymcap_cli_version, "
         "       COALESCE(obs.n, 0)  AS observations, "
         "       COALESCE(newc.n, 0) AS new_content, "
         "       COALESCE(errs.n, 0) AS errors "
         "FROM scan_session s "
+        "JOIN file_path fp ON fp.id = s.root_file_path_id "
         "LEFT JOIN ("
-        "  SELECT session_id, COUNT(*) AS n FROM file_observation GROUP BY session_id"
+        "  SELECT scan_session_id, COUNT(*) AS n FROM file_observation GROUP BY scan_session_id"
         ") obs "
-        "  ON obs.session_id = s.id "
-        "LEFT JOIN (SELECT first_seen_session AS session_id, COUNT(*) AS n FROM content "
-        "           WHERE first_seen_session IS NOT NULL GROUP BY first_seen_session) newc "
-        "  ON newc.session_id = s.id "
-        "LEFT JOIN (SELECT session_id, COUNT(*) AS n FROM scan_error GROUP BY session_id) errs "
-        "  ON errs.session_id = s.id "
+        "  ON obs.scan_session_id = s.id "
+        "LEFT JOIN (SELECT first_seen_scan_session_id AS scan_session_id, COUNT(*) AS n "
+        "           FROM content WHERE first_seen_scan_session_id IS NOT NULL "
+        "           GROUP BY first_seen_scan_session_id) newc "
+        "  ON newc.scan_session_id = s.id "
+        "LEFT JOIN (SELECT scan_session_id, COUNT(*) AS n FROM scan_error "
+        "           GROUP BY scan_session_id) errs "
+        "  ON errs.scan_session_id = s.id "
     )
     if where:
         sql += "WHERE " + " AND ".join(where) + " "
@@ -1715,38 +1960,39 @@ def errors_cmd(
         return 1
 
     sql = (
-        "SELECT se.id, se.observed_at, se.abs_path, se.error_kind, "
-        "       se.error_message, se.size_bytes, se.session_id "
+        "SELECT se.id, se.observed_at_ns, fp.value AS abs_path, se.error_kind, "
+        "       se.error_message, se.size_bytes, se.scan_session_id "
         "FROM scan_error se "
+        "JOIN file_path fp ON fp.id = se.file_path_id "
     )
     where: list[str] = []
     params: list[str | int] = []
     if current:
         sql += (
             "JOIN current_file cf "
-            "  ON cf.abs_path  = se.abs_path "
+            "  ON cf.abs_path  = fp.value "
             " AND cf.size_bytes = se.size_bytes "
             " AND cf.mtime_ns   = se.mtime_ns "
         )
     if folder is not None:
         clause, prefix_params = _path_prefix_where(folder)
-        where.append(clause.removeprefix("WHERE ").replace("abs_path", "se.abs_path"))
+        where.append(clause.removeprefix("WHERE ").replace("abs_path", "fp.value"))
         params.extend(prefix_params)
     if kind is not None:
         where.append("se.error_kind = ?")
         params.append(kind)
     if session is not None:
-        where.append("se.session_id = ?")
+        where.append("se.scan_session_id = ?")
         params.append(session)
     if since is not None:
-        where.append("se.observed_at >= ?")
+        where.append("se.observed_at_ns >= ?")
         params.append(_parse_time_or_exit(since, "since"))
     if until is not None:
-        where.append("se.observed_at <= ?")
+        where.append("se.observed_at_ns <= ?")
         params.append(_parse_time_or_exit(until, "until"))
     if where:
         sql += "WHERE " + " AND ".join(where) + " "
-    sql += "ORDER BY se.observed_at DESC, se.id DESC LIMIT ?"
+    sql += "ORDER BY se.observed_at_ns DESC, se.id DESC LIMIT ?"
     params.append(limit)
 
     try:
@@ -1854,17 +2100,17 @@ def timeline_cmd(
     bucket_fmt = _TIMELINE_BUCKET_FORMAT[bucket]
     sql = (
         "SELECT "
-        "strftime(?, c.message_start_time / 1000000000, 'unixepoch') "
+        "strftime(?, c.message_start_time_ns / 1000000000, 'unixepoch') "
         "AS bucket, "
         "       COUNT(DISTINCT cf.abs_path)        AS files, "
         "       COALESCE(SUM(c.message_count), 0) AS messages, "
         "       COALESCE(SUM(cf.size_bytes), 0)   AS size_bytes "
         "FROM current_file cf "
-        "JOIN content c ON c.content_id = cf.content_id "
-        "WHERE c.message_start_time >= ? "
+        "JOIN content c ON c.id = cf.content_id "
+        "WHERE c.message_start_time_ns >= ? "
         "AND (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?) "
-        "AND (? IS NULL OR c.message_start_time >= ?) "
-        "AND (? IS NULL OR c.message_start_time <= ?) "
+        "AND (? IS NULL OR c.message_start_time_ns >= ?) "
+        "AND (? IS NULL OR c.message_start_time_ns <= ?) "
         "GROUP BY bucket ORDER BY bucket ASC LIMIT ?"
     )
     params: list[str | int | None] = [
@@ -1938,48 +2184,56 @@ def info_cmd(
                 return 1
 
             content = conn.execute(
-                "SELECT size_bytes, library, profile, message_count, schema_count, "
-                "       channel_count, attachment_count, metadata_count, chunk_count, "
-                "       message_start_time, message_end_time, first_seen_at, "
-                "       compression, compressed_size_bytes, uncompressed_size_bytes "
-                "FROM content WHERE summary_fingerprint = ?",
+                "SELECT c.size_bytes, lib.name, prof.name, "
+                "       c.message_count, c.schema_count, c.channel_count, "
+                "       c.attachment_count, c.metadata_count, c.chunk_count, "
+                "       c.message_start_time_ns, c.message_end_time_ns, c.first_seen_at_ns, "
+                "       c.compression, c.compressed_size_bytes, c.uncompressed_size_bytes "
+                "FROM content c "
+                "LEFT JOIN library lib  ON lib.id  = c.library_id "
+                "LEFT JOIN profile prof ON prof.id = c.profile_id "
+                "WHERE c.summary_fingerprint = ?",
                 (summary_fp,),
             ).fetchone()
             topic_rows = conn.execute(
-                "SELECT cc.channel_id, t.name AS topic, "
-                "       sig.schema_pk_id, sig.message_encoding, "
+                "SELECT cc.mcap_channel_id, t.name AS topic, "
+                "       sig.schema_id, sig.message_encoding, "
                 "       cc.message_count, cc.uncompressed_size_bytes, "
-                "       cc.message_start_time, cc.message_end_time, "
+                "       cc.message_start_time_ns, cc.message_end_time_ns, "
                 "       cc.distribution_blob "
                 "FROM content_channel cc "
-                "JOIN content c       ON c.content_id        = cc.content_id "
-                "JOIN channel_sig sig ON sig.channel_sig_id  = cc.channel_sig_id "
-                "JOIN topic t         ON t.topic_id          = sig.topic_id "
+                "JOIN content c       ON c.id        = cc.content_id "
+                "JOIN channel_signature sig ON sig.id  = cc.channel_signature_id "
+                "JOIN topic t         ON t.id          = sig.topic_id "
                 "WHERE c.summary_fingerprint = ? "
                 "ORDER BY cc.message_count DESC NULLS LAST, t.name",
                 (summary_fp,),
             ).fetchall()
             schema_dim_rows = conn.execute(
-                "SELECT DISTINCT s.schema_pk_id, s.name, s.encoding, s.schema_size "
+                "SELECT DISTINCT s.id, s.name, s.encoding, s.size_bytes "
                 "FROM content_channel cc "
-                "JOIN content c       ON c.content_id        = cc.content_id "
-                "JOIN channel_sig sig ON sig.channel_sig_id  = cc.channel_sig_id "
-                "JOIN schema s        ON s.schema_pk_id      = sig.schema_pk_id "
+                "JOIN content c       ON c.id        = cc.content_id "
+                "JOIN channel_signature sig ON sig.id  = cc.channel_signature_id "
+                "JOIN schema s        ON s.id      = sig.schema_id "
                 "WHERE c.summary_fingerprint = ?",
                 (summary_fp,),
             ).fetchall()
             observation_rows = conn.execute(
-                "SELECT obs.abs_path, obs.observed_at, obs.session_id, "
+                "SELECT fp.value AS abs_path, obs.observed_at_ns, obs.scan_session_id, "
                 "       obs.file_fingerprint, c.summary_fingerprint "
                 "FROM file_observation obs "
-                "LEFT JOIN content c ON c.content_id = obs.content_id "
-                "WHERE c.summary_fingerprint = ? OR obs.abs_path = ? "
-                "ORDER BY obs.observed_at DESC LIMIT 20",
+                "JOIN file_path fp ON fp.id = obs.file_path_id "
+                "LEFT JOIN content c ON c.id = obs.content_id "
+                "WHERE c.summary_fingerprint = ? OR fp.value = ? "
+                "ORDER BY obs.observed_at_ns DESC LIMIT 20",
                 (summary_fp, abs_path or ""),
             ).fetchall()
             error_rows = conn.execute(
-                "SELECT abs_path, observed_at, error_kind, error_message "
-                "FROM scan_error WHERE abs_path = ? ORDER BY observed_at DESC LIMIT 10",
+                "SELECT fp.value AS abs_path, se.observed_at_ns, se.error_kind, se.error_message "
+                "FROM scan_error se "
+                "JOIN file_path fp ON fp.id = se.file_path_id "
+                "WHERE fp.value = ? "
+                "ORDER BY se.observed_at_ns DESC LIMIT 10",
                 (abs_path or "",),
             ).fetchall()
     except IndexDbNeedsMigrationError as exc:

@@ -39,7 +39,7 @@ import xxhash
 from small_mcap import McapError, get_header, read_info_approximate, rebuild_summary
 
 from pymcap_cli.index import SANE_EPOCH_NS
-from pymcap_cli.index.db import finish_session, start_session
+from pymcap_cli.index.db import finish_session, intern_file_path, start_session
 from pymcap_cli.index.fingerprint import fingerprint_stream
 from pymcap_cli.index.summary_fingerprint import compute_schema_hash_map, summary_fingerprint
 from pymcap_cli.types.info_data import collect_channel_metrics
@@ -366,8 +366,9 @@ def _iter_mcap_files_parallel(
 
 def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
     row = conn.execute(
-        """SELECT size_bytes, mtime_ns, content_id FROM file_observation
-           WHERE abs_path=? ORDER BY id DESC LIMIT 1""",
+        """SELECT fo.size_bytes, fo.mtime_ns, fo.content_id
+           FROM file_observation fo JOIN file_path fp ON fp.id = fo.file_path_id
+           WHERE fp.value = ? ORDER BY fo.id DESC LIMIT 1""",
         (str(inp.path),),
     ).fetchone()
     if row is None:
@@ -383,9 +384,10 @@ def _error_skip(
     rebuild_missing: bool,
 ) -> bool:
     row = conn.execute(
-        """SELECT error_kind FROM scan_error
-           WHERE abs_path=? AND size_bytes=? AND mtime_ns=?
-           ORDER BY id DESC LIMIT 1""",
+        """SELECT se.error_kind FROM scan_error se
+           JOIN file_path fp ON fp.id = se.file_path_id
+           WHERE fp.value = ? AND se.size_bytes = ? AND se.mtime_ns = ?
+           ORDER BY se.id DESC LIMIT 1""",
         (str(inp.path), inp.size_bytes, inp.mtime_ns),
     ).fetchone()
     if row is None:
@@ -671,13 +673,14 @@ def _record_observation(
     content_id: int | None,
     session_id: int,
 ) -> None:
+    file_path_id = intern_file_path(conn, str(inp.path))
     conn.execute(
         """INSERT INTO file_observation
-           (abs_path, size_bytes, mtime_ns, inode, file_fingerprint,
-            content_id, session_id, observed_at)
+           (file_path_id, size_bytes, mtime_ns, inode, file_fingerprint,
+            content_id, scan_session_id, observed_at_ns)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            str(inp.path),
+            file_path_id,
             inp.size_bytes,
             inp.mtime_ns,
             inp.inode,
@@ -696,12 +699,14 @@ def _record_error(
     message: str,
     session_id: int,
 ) -> None:
+    file_path_id = intern_file_path(conn, str(inp.path))
     conn.execute(
         """INSERT INTO scan_error
-           (abs_path, size_bytes, mtime_ns, session_id, observed_at, error_kind, error_message)
+           (file_path_id, size_bytes, mtime_ns, scan_session_id, observed_at_ns,
+            error_kind, error_message)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
-            str(inp.path),
+            file_path_id,
             inp.size_bytes,
             inp.mtime_ns,
             session_id,
@@ -713,12 +718,13 @@ def _record_error(
 
 
 def _record_deletion(conn: sqlite3.Connection, abs_path: str, session_id: int) -> None:
+    file_path_id = intern_file_path(conn, abs_path)
     conn.execute(
         """INSERT INTO file_observation
-           (abs_path, size_bytes, mtime_ns, inode, file_fingerprint,
-            content_id, is_deleted, session_id, observed_at)
+           (file_path_id, size_bytes, mtime_ns, inode, file_fingerprint,
+            content_id, is_deleted, scan_session_id, observed_at_ns)
            VALUES (?, 0, 0, NULL, '', NULL, 1, ?, ?)""",
-        (abs_path, session_id, time.time_ns()),
+        (file_path_id, session_id, time.time_ns()),
     )
 
 
@@ -731,26 +737,30 @@ def _insert_content(
     schema_pk_id_cache: dict[str, int],
     channel_sig_cache: dict[tuple[int, int, str, int], int],
     metadata_id_cache: dict[str, int],
+    library_id_cache: dict[str, int],
+    profile_id_cache: dict[str, int],
 ) -> int:
     """Insert ``content`` + child rows. Returns the new ``content_id``.
 
-    Mutates the caches so repeated topic / schema / channel-signature lookups
-    within one scan don't re-roundtrip to SQLite.
+    Mutates the caches so repeated topic / schema / channel-signature /
+    library / profile lookups within one scan don't re-roundtrip to SQLite.
     """
+    library_id = _intern_simple_dim(conn, "library", "name", content.library, library_id_cache)
+    profile_id = _intern_simple_dim(conn, "profile", "name", content.profile, profile_id_cache)
     cur = conn.execute(
         """INSERT INTO content
-           (summary_fingerprint, size_bytes, library, profile, message_count, schema_count,
+           (summary_fingerprint, size_bytes, library_id, profile_id, message_count, schema_count,
             channel_count, attachment_count, metadata_count, chunk_count,
-            message_start_time, message_end_time,
-            sane_message_start_time, sane_message_end_time,
+            message_start_time_ns, message_end_time_ns,
+            sane_message_start_time_ns, sane_message_end_time_ns,
             compression, compressed_size_bytes, uncompressed_size_bytes,
-            scan_kind, first_seen_at, first_seen_session)
+            scan_kind, first_seen_at_ns, first_seen_scan_session_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             content.summary_fingerprint,
             content.size_bytes,
-            content.library,
-            content.profile,
+            library_id,
+            profile_id,
             content.message_count,
             content.schema_count,
             content.channel_count,
@@ -778,18 +788,16 @@ def _insert_content(
         if sh in schema_pk_id_cache:
             continue
         conn.execute(
-            "INSERT OR IGNORE INTO schema(schema_hash, name, encoding, schema_size) "
+            "INSERT OR IGNORE INTO schema(schema_hash, name, encoding, size_bytes) "
             "VALUES (?, ?, ?, ?)",
             (sh, sc.name, sc.encoding, sc.schema_size),
         )
-        row = conn.execute(
-            "SELECT schema_pk_id FROM schema WHERE schema_hash = ?", (sh,)
-        ).fetchone()
+        row = conn.execute("SELECT id FROM schema WHERE schema_hash = ?", (sh,)).fetchone()
         schema_pk_id_cache[sh] = row[0]
 
-    # Map file-local schema_id → canonical schema_pk_id (NULL when the
+    # Map file-local schema_id → canonical schema.id (NULL when the
     # channel declares no schema, i.e. schema_id == 0 in MCAP).
-    schema_pk_id_by_local: dict[int, int | None] = {
+    schema_id_by_local: dict[int, int | None] = {
         sc.schema_id: schema_pk_id_cache[sc.schema_hash] for sc in content.schemas
     }
 
@@ -799,13 +807,13 @@ def _insert_content(
         if topic in topic_id_cache:
             continue
         conn.execute("INSERT OR IGNORE INTO topic(name) VALUES (?)", (topic,))
-        row = conn.execute("SELECT topic_id FROM topic WHERE name = ?", (topic,)).fetchone()
+        row = conn.execute("SELECT id FROM topic WHERE name = ?", (topic,)).fetchone()
         topic_id_cache[topic] = row[0]
 
     # ``channel_metadata`` dim — same JSON metadata repeats heavily across
-    # files. Intern + zlib-compress so the channel_sig row carries only an
-    # INTEGER FK.
-    def _intern_metadata(raw: str | None) -> int | None:
+    # files. Intern + zlib-compress so the channel_signature row carries only
+    # an INTEGER FK.
+    def _intern_channel_metadata(raw: str | None) -> int | None:
         if raw is None:
             return None
         cached = metadata_id_cache.get(raw)
@@ -814,46 +822,47 @@ def _insert_content(
         encoded = raw.encode("utf-8")
         content_hash = xxhash.xxh3_128_hexdigest(encoded)
         conn.execute(
-            "INSERT OR IGNORE INTO channel_metadata(content_hash, blob_zlib) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO channel_metadata(content_hash, metadata_json_zlib) "
+            "VALUES (?, ?)",
             (content_hash, zlib.compress(encoded, 6)),
         )
         row = conn.execute(
-            "SELECT metadata_id FROM channel_metadata WHERE content_hash = ?",
+            "SELECT id FROM channel_metadata WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
         metadata_id_cache[raw] = row[0]
         return row[0]
 
-    # ``channel_sig`` dimension — collapses the
+    # ``channel_signature`` dimension — collapses the
     # (topic, schema, encoding, metadata) tuple that repeats heavily across
-    # files. Now keyed by the small INTEGER ``metadata_id`` from
-    # ``channel_metadata`` rather than the raw blob.
+    # files. Keyed by the small INTEGER ``channel_metadata.id`` rather than
+    # the raw blob.
     channel_rows: list[
         tuple[int, int, int, int | None, int | None, int | None, int | None, bytes | None]
     ] = []
     for ch in content.channels:
         topic_id = topic_id_cache[ch.topic]
-        schema_pk_id = schema_pk_id_by_local.get(ch.schema_id)
+        schema_id = schema_id_by_local.get(ch.schema_id)
         encoding = ch.message_encoding
-        metadata_id = _intern_metadata(ch.metadata)
+        metadata_id = _intern_channel_metadata(ch.metadata)
         sig_key = (
             topic_id,
-            schema_pk_id if schema_pk_id is not None else 0,
+            schema_id if schema_id is not None else 0,
             encoding or "",
             metadata_id if metadata_id is not None else 0,
         )
         sig_id = channel_sig_cache.get(sig_key)
         if sig_id is None:
             conn.execute(
-                "INSERT OR IGNORE INTO channel_sig"
-                " (topic_id, schema_pk_id, message_encoding, channel_metadata_id)"
+                "INSERT OR IGNORE INTO channel_signature"
+                " (topic_id, schema_id, message_encoding, channel_metadata_id)"
                 " VALUES (?, ?, ?, ?)",
-                (topic_id, schema_pk_id, encoding, metadata_id),
+                (topic_id, schema_id, encoding, metadata_id),
             )
             row = conn.execute(
-                "SELECT channel_sig_id FROM channel_sig"
+                "SELECT id FROM channel_signature"
                 " WHERE topic_id = ?"
-                "   AND COALESCE(schema_pk_id, 0) = ?"
+                "   AND COALESCE(schema_id, 0) = ?"
                 "   AND COALESCE(message_encoding, '') = ?"
                 "   AND COALESCE(channel_metadata_id, 0) = ?",
                 sig_key,
@@ -875,20 +884,43 @@ def _insert_content(
 
     conn.executemany(
         """INSERT INTO content_channel
-           (content_id, channel_id, channel_sig_id, message_count,
+           (content_id, mcap_channel_id, channel_signature_id, message_count,
             uncompressed_size_bytes,
-            message_start_time, message_end_time,
+            message_start_time_ns, message_end_time_ns,
             distribution_blob)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         channel_rows,
     )
     conn.executemany(
         """INSERT INTO content_schema
-           (content_id, schema_id, schema_pk_id)
+           (content_id, mcap_schema_id, schema_id)
            VALUES (?, ?, ?)""",
         [(content_id, sc.schema_id, schema_pk_id_cache[sc.schema_hash]) for sc in content.schemas],
     )
     return content_id
+
+
+def _intern_simple_dim(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    value: str | None,
+    cache: dict[str, int],
+) -> int | None:
+    """Return the dim row id for ``value`` (NULL → NULL), populating if new.
+
+    Used for the two-column ``(id, <column>)`` dims with a UNIQUE on ``<column>``:
+    ``library`` and ``profile``.
+    """
+    if value is None:
+        return None
+    cached = cache.get(value)
+    if cached is not None:
+        return cached
+    conn.execute(f"INSERT OR IGNORE INTO {table}({column}) VALUES (?)", (value,))  # noqa: S608
+    row = conn.execute(f"SELECT id FROM {table} WHERE {column} = ?", (value,)).fetchone()  # noqa: S608
+    cache[value] = row[0]
+    return row[0]
 
 
 def _update_content_aggregates(
@@ -912,12 +944,12 @@ def _update_content_aggregates(
     """
     conn.execute(
         "UPDATE content "
-        "   SET sane_message_start_time = ?, "
-        "       sane_message_end_time   = ?, "
-        "       compression             = ?, "
-        "       compressed_size_bytes   = ?, "
-        "       uncompressed_size_bytes = ? "
-        " WHERE content_id = ?",
+        "   SET sane_message_start_time_ns = ?, "
+        "       sane_message_end_time_ns   = ?, "
+        "       compression                = ?, "
+        "       compressed_size_bytes      = ?, "
+        "       uncompressed_size_bytes    = ? "
+        " WHERE id = ?",
         (
             content.sane_message_start_time,
             content.sane_message_end_time,
@@ -929,11 +961,11 @@ def _update_content_aggregates(
     )
     conn.executemany(
         "UPDATE content_channel "
-        "   SET uncompressed_size_bytes  = ?, "
-        "       message_start_time       = ?, "
-        "       message_end_time         = ?, "
-        "       distribution_blob        = ? "
-        " WHERE content_id = ? AND channel_id = ?",
+        "   SET uncompressed_size_bytes = ?, "
+        "       message_start_time_ns   = ?, "
+        "       message_end_time_ns     = ?, "
+        "       distribution_blob       = ? "
+        " WHERE content_id = ? AND mcap_channel_id = ?",
         [
             (
                 ch.uncompressed_size_bytes,
@@ -963,7 +995,7 @@ def _existing_file_to_summary(conn: sqlite3.Connection) -> dict[str, str]:
         for row in conn.execute(
             "SELECT DISTINCT obs.file_fingerprint, c.summary_fingerprint "
             "FROM file_observation obs "
-            "JOIN content c ON c.content_id = obs.content_id "
+            "JOIN content c ON c.id = obs.content_id "
             "WHERE obs.content_id IS NOT NULL"
         )
     }
@@ -1007,13 +1039,15 @@ def scan(
     schema_pk_id_cache: dict[str, int] = {}
     channel_sig_cache: dict[tuple[int, int, str, int], int] = {}
     metadata_id_cache: dict[str, int] = {}
+    library_id_cache: dict[str, int] = {}
+    profile_id_cache: dict[str, int] = {}
 
     def _resolve_content_id(summary_fp: str) -> int:
         cid = content_id_by_fp.get(summary_fp)
         if cid is not None:
             return cid
         row = conn.execute(
-            "SELECT content_id FROM content WHERE summary_fingerprint = ?",
+            "SELECT id FROM content WHERE summary_fingerprint = ?",
             (summary_fp,),
         ).fetchone()
         assert row is not None, f"content row missing for {summary_fp!r}"
@@ -1087,6 +1121,8 @@ def scan(
                     schema_pk_id_cache=schema_pk_id_cache,
                     channel_sig_cache=channel_sig_cache,
                     metadata_id_cache=metadata_id_cache,
+                    library_id_cache=library_id_cache,
+                    profile_id_cache=profile_id_cache,
                 )
                 content_id_by_fp[result.summary_fingerprint] = content_id
                 _record_observation(

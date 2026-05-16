@@ -172,7 +172,9 @@ def test_deleted_file_is_removed_from_current_file(tmp_path: Path) -> None:
         ).fetchone()
         assert current is None
         tombstone = conn.execute(
-            "SELECT is_deleted FROM file_observation WHERE abs_path=? ORDER BY id DESC LIMIT 1",
+            "SELECT fo.is_deleted FROM file_observation fo "
+            "JOIN file_path fp ON fp.id = fo.file_path_id "
+            "WHERE fp.value = ? ORDER BY fo.id DESC LIMIT 1",
             (str(p.resolve()),),
         ).fetchone()
         assert tombstone == (1,)
@@ -202,7 +204,10 @@ def test_corrupt_file_records_scan_error(tmp_path: Path) -> None:
         assert stats.errored == 1
         assert stats.indexed == 0
         assert stats.errored_by_kind == {"corrupt": 1}
-        errs = conn.execute("SELECT abs_path, error_kind FROM scan_error").fetchall()
+        errs = conn.execute(
+            "SELECT fp.value, se.error_kind FROM scan_error se "
+            "JOIN file_path fp ON fp.id = se.file_path_id"
+        ).fetchall()
         assert len(errs) == 1
         assert errs[0][0] == str(bad.resolve())
         current = conn.execute(
@@ -309,10 +314,10 @@ def test_per_channel_stats_populated(tmp_path: Path) -> None:
         scan(tmp_path, conn, pymcap_cli_version="test")
         rows = conn.execute(
             "SELECT t.name, cc.message_count, cc.uncompressed_size_bytes, "
-            "       cc.message_start_time, cc.message_end_time "
+            "       cc.message_start_time_ns, cc.message_end_time_ns "
             "FROM content_channel cc "
-            "JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id "
-            "JOIN topic t ON t.topic_id = sig.topic_id "
+            "JOIN channel_signature sig ON sig.id = cc.channel_signature_id "
+            "JOIN topic t ON t.id = sig.topic_id "
             "ORDER BY t.name"
         ).fetchall()
         assert len(rows) == 2
@@ -337,8 +342,8 @@ def test_per_channel_distribution_blob_round_trip(tmp_path: Path) -> None:
         blob, msg_count = conn.execute(
             "SELECT cc.distribution_blob, cc.message_count "
             "FROM content_channel cc "
-            "JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id "
-            "JOIN topic t ON t.topic_id = sig.topic_id WHERE t.name = '/foo'"
+            "JOIN channel_signature sig ON sig.id = cc.channel_signature_id "
+            "JOIN topic t ON t.id = sig.topic_id WHERE t.name = '/foo'"
         ).fetchone()
     assert blob is not None
     bins = unpack_distribution_blob(blob)
@@ -358,7 +363,7 @@ def test_force_rebuild_backfills_per_channel_stats(tmp_path: Path) -> None:
         # Simulate a pre-v6 row by nulling the new columns.
         conn.execute(
             "UPDATE content_channel SET uncompressed_size_bytes = NULL, "
-            "message_start_time = NULL, message_end_time = NULL, "
+            "message_start_time_ns = NULL, message_end_time_ns = NULL, "
             "distribution_blob = NULL"
         )
         null_before = conn.execute(
@@ -391,9 +396,7 @@ def test_identical_schemas_are_deduplicated_across_content(tmp_path: Path) -> No
         assert _count(conn, "content") == 2
         assert _count(conn, "schema") == 1
         # content_schema has one mapping per (content_id, schema_id).
-        rows = conn.execute(
-            "SELECT cs.content_id, cs.schema_pk_id FROM content_schema cs"
-        ).fetchall()
+        rows = conn.execute("SELECT cs.content_id, cs.schema_id FROM content_schema cs").fetchall()
         assert len(rows) == 2
         assert len({pk for _cid, pk in rows}) == 1
 
@@ -486,7 +489,7 @@ def test_session_finished_on_exception(tmp_path: Path, monkeypatch: pytest.Monke
             scan(tmp_path, conn, pymcap_cli_version="test")
 
         row = conn.execute(
-            "SELECT finished_at FROM scan_session ORDER BY id DESC LIMIT 1"
+            "SELECT finished_at_ns FROM scan_session ORDER BY id DESC LIMIT 1"
         ).fetchone()
         assert row is not None
         assert row[0] is not None

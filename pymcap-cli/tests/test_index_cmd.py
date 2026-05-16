@@ -29,7 +29,7 @@ from pymcap_cli.cmd.index_cmd import (
     timeline_cmd,
     topics_cmd,
 )
-from pymcap_cli.index.db import open_db
+from pymcap_cli.index.db import CURRENT_SCHEMA_VERSION, open_db
 from rich.text import Text
 from small_mcap import CompressionType, McapWriter
 
@@ -57,6 +57,69 @@ def test_status_handles_extensionless_db_path(tmp_path: Path) -> None:
 
     assert scan_cmd(tmp_path, db=db) == 0
     assert status_cmd(tmp_path, db=db) == 0
+
+
+def test_status_shows_user_version(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc, output = _capture_stdout(lambda: status_cmd(tmp_path, db=db))
+
+    assert rc == 0
+    assert "User version" in output
+    assert str(CURRENT_SCHEMA_VERSION) in output
+
+
+def test_status_allows_older_user_version(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
+    finally:
+        raw.close()
+
+    rc, output = _capture_stdout(lambda: status_cmd(tmp_path, db=db))
+
+    assert rc == 0
+    assert "User version" in output
+    assert "older than this CLI" in output
+
+
+def test_status_allows_newer_user_version(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
+    finally:
+        raw.close()
+
+    rc, output = _capture_stdout(lambda: status_cmd(tmp_path, db=db))
+
+    assert rc == 0
+    assert "User version" in output
+    assert "newer than this CLI" in output
+
+
+def test_status_reports_unavailable_metrics_for_partial_schema(tmp_path: Path) -> None:
+    db = tmp_path / "partial.sqlite"
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute("PRAGMA user_version = 999")
+        raw.execute("CREATE TABLE content(content_id INTEGER PRIMARY KEY)")
+    finally:
+        raw.close()
+
+    rc, output = _capture_stdout(lambda: status_cmd(db=db))
+
+    assert rc == 0
+    assert "User version" in output
+    assert "unavailable" in output
+    assert "Warnings" in output
 
 
 def test_status_without_db_errors(tmp_path: Path) -> None:
@@ -591,10 +654,16 @@ def test_info_short_id_ambiguous_errors(tmp_path: Path) -> None:
         twin_fp = prefix + ("0" * (3 + 32 - len(prefix)))
         if twin_fp == real_fp:
             twin_fp = prefix + ("1" * (3 + 32 - len(prefix)))
+        # Take the first session_id so the NOT NULL FK is satisfied.
+        sid = raw.execute("SELECT id FROM scan_session LIMIT 1").fetchone()[0]
         raw.execute(
-            "INSERT INTO content(summary_fingerprint, size_bytes, scan_kind, first_seen_at) "
-            "VALUES (?, 0, 'test', 0)",
-            (twin_fp,),
+            "INSERT INTO content("
+            "  summary_fingerprint, size_bytes, message_count, schema_count, "
+            "  channel_count, attachment_count, metadata_count, chunk_count, "
+            "  message_start_time_ns, message_end_time_ns, scan_kind, "
+            "  first_seen_at_ns, first_seen_scan_session_id"
+            ") VALUES (?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'test', 0, ?)",
+            (twin_fp, sid),
         )
         raw.commit()
     finally:

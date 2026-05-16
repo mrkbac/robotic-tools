@@ -39,7 +39,7 @@ def test_connect_creates_db_and_applies_schema(tmp_path: Path) -> None:
             "schema",
             "content_schema",
             "topic",
-            "channel_sig",
+            "channel_signature",
             "channel_metadata",
             "file_observation",
             "scan_error",
@@ -70,7 +70,9 @@ def test_session_lifecycle(tmp_path: Path) -> None:
         session_id = start_session(conn, tmp_path, "1.2.3")
         assert session_id >= 1
         row = conn.execute(
-            "SELECT root_path, pymcap_cli_version, finished_at FROM scan_session WHERE id=?",
+            "SELECT fp.value, s.pymcap_cli_version, s.finished_at_ns "
+            "FROM scan_session s JOIN file_path fp ON fp.id = s.root_file_path_id "
+            "WHERE s.id = ?",
             (session_id,),
         ).fetchone()
         assert row[0] == str(tmp_path)
@@ -79,7 +81,7 @@ def test_session_lifecycle(tmp_path: Path) -> None:
 
         finish_session(conn, session_id)
         finished_at = conn.execute(
-            "SELECT finished_at FROM scan_session WHERE id=?", (session_id,)
+            "SELECT finished_at_ns FROM scan_session WHERE id=?", (session_id,)
         ).fetchone()[0]
         assert finished_at is not None
 

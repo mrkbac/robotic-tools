@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 
 CURRENT_SCHEMA_VERSION = max((v for v, _, _ in _discover()), default=0)
 
+# Migration 0007 creates STRICT tables; SQLite 3.37 (2021-11-27) is the first
+# release that supports them. Guard at ``connect()`` rather than module load
+# because ``index_cmd`` imports this module during CLI startup, and a stray
+# ``RuntimeError`` would take out unrelated commands.
+_MIN_SQLITE_VERSION = (3, 37, 0)
+
 
 class IndexDbNeedsMigrationError(RuntimeError):
     """Raised when a read-only open sees an older on-disk schema."""
@@ -45,6 +51,11 @@ def connect(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
 
     Returns a connection with WAL mode and foreign keys enabled. Caller closes.
     """
+    if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION:
+        required = ".".join(str(part) for part in _MIN_SQLITE_VERSION)
+        raise RuntimeError(
+            f"pymcap-cli index requires SQLite >= {required}; got {sqlite3.sqlite_version}"
+        )
     if not read_only:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db_path, isolation_level=None, timeout=30.0)
@@ -94,9 +105,11 @@ def open_db(db_path: Path, *, read_only: bool = False) -> Iterator[sqlite3.Conne
 
 def start_session(conn: sqlite3.Connection, root_path: Path, pymcap_cli_version: str) -> int:
     """Insert a scan_session row and return its id."""
+    root_file_path_id = intern_file_path(conn, str(root_path))
     cur = conn.execute(
-        "INSERT INTO scan_session(started_at, root_path, pymcap_cli_version) VALUES (?, ?, ?)",
-        (time.time_ns(), str(root_path), pymcap_cli_version),
+        "INSERT INTO scan_session(started_at_ns, root_file_path_id, pymcap_cli_version) "
+        "VALUES (?, ?, ?)",
+        (time.time_ns(), root_file_path_id, pymcap_cli_version),
     )
     session_id = cur.lastrowid
     assert session_id is not None
@@ -105,6 +118,13 @@ def start_session(conn: sqlite3.Connection, root_path: Path, pymcap_cli_version:
 
 def finish_session(conn: sqlite3.Connection, session_id: int) -> None:
     conn.execute(
-        "UPDATE scan_session SET finished_at = ? WHERE id = ?",
+        "UPDATE scan_session SET finished_at_ns = ? WHERE id = ?",
         (time.time_ns(), session_id),
     )
+
+
+def intern_file_path(conn: sqlite3.Connection, value: str) -> int:
+    """Return the ``file_path.id`` for ``value``, inserting the row if new."""
+    conn.execute("INSERT OR IGNORE INTO file_path(value) VALUES (?)", (value,))
+    row = conn.execute("SELECT id FROM file_path WHERE value = ?", (value,)).fetchone()
+    return row[0]
