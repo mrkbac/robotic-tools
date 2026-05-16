@@ -47,6 +47,21 @@ _ERROR_KIND_LABEL: dict[str, str] = {
 }
 
 
+# Anything before 2000-01-01 UTC almost certainly comes from an uninitialised
+# clock (e.g. ROS time before NTP sync) and would inflate any duration
+# aggregate by decades. We use it to gate duration math without changing what
+# is stored in the catalog.
+_SANE_EPOCH_NS = 946_684_800 * 1_000_000_000  # 2000-01-01T00:00:00Z
+
+
+def _safe_duration_ns(start_ns: int | None, end_ns: int | None) -> int | None:
+    if start_ns is None or end_ns is None or end_ns <= start_ns:
+        return None
+    if start_ns < _SANE_EPOCH_NS:
+        return None
+    return end_ns - start_ns
+
+
 def _pymcap_cli_version() -> str:
     try:
         return importlib.metadata.version("pymcap-cli")
@@ -98,9 +113,10 @@ def _format_ts_ns(time_ns: int | None) -> str:
 
 
 def _format_duration_ns(start_ns: int | None, end_ns: int | None) -> str:
-    if start_ns is None or end_ns is None or end_ns <= start_ns:
+    duration = _safe_duration_ns(start_ns, end_ns)
+    if duration is None:
         return "-"
-    secs = (end_ns - start_ns) / 1e9
+    secs = duration / 1e9
     if secs < 60:
         return f"{secs:.1f}s"
     if secs < 3600:
@@ -437,11 +453,7 @@ def _build_path_tree(
         chain = _chain_for(abs_path)
         size_v = size or 0
         msg_v = msg_count or 0
-        dur_v = (
-            ts_end - ts_start
-            if ts_start is not None and ts_end is not None and ts_end > ts_start
-            else 0
-        )
+        dur_v = _safe_duration_ns(ts_start, ts_end) or 0
         for node in chain:
             node.file_count += 1
             node.size_bytes += size_v
@@ -673,9 +685,15 @@ def query_cmd(
     if until is not None:
         window_end = _parse_time_or_exit(until, "until")
 
+    # Files with bogus start times (uninitialised clock) would sort first if
+    # we just diffed end-start. Treat sub-epoch starts as having no duration.
+    _safe_dur_sql = (
+        f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
+        "THEN (c.message_end_time - c.message_start_time) ELSE 0 END"
+    )
     order_by = {
         "path": "cf.abs_path",
-        "duration": "(c.message_end_time - c.message_start_time) DESC",
+        "duration": f"{_safe_dur_sql} DESC",
         "messages": "messages DESC" if (topic is not None or schema is not None) else "c.message_count DESC",
         "size": "cf.size_bytes DESC",
         "start": "c.message_start_time DESC",
@@ -764,7 +782,7 @@ def query_cmd(
             "channels": channels,
             "start_time_ns": start,
             "end_time_ns": end,
-            "duration_ns": (end - start) if (start and end and end > start) else None,
+            "duration_ns": _safe_duration_ns(start, end),
             "size_bytes": size,
         }
         for path, msgs, channels, start, end, size in sql_rows
