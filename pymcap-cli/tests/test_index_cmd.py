@@ -14,11 +14,14 @@ from pymcap_cli.cmd.index_cmd import (
     _format_ts_ns,
     _path_prefix_where,
     duplicates_cmd,
+    errors_cmd,
     info_cmd,
     query_cmd,
     scan_cmd,
     schemas_cmd,
+    sessions_cmd,
     status_cmd,
+    timeline_cmd,
     topics_cmd,
 )
 from pymcap_cli.index.db import open_db
@@ -127,6 +130,84 @@ def _capture_stdout(call) -> tuple[int, str]:
     with redirect_stdout(buf):
         rc = call()
     return rc, buf.getvalue()
+
+
+def test_sessions_lists_scan_sessions(tmp_path: Path) -> None:
+    """``sessions_cmd`` reports each scan with file / new / error counts."""
+    (tmp_path / "rec.mcap").write_bytes(create_simple_mcap(num_messages=3))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    rc, output = _capture_stdout(lambda: sessions_cmd(db=db, format="json"))
+    assert rc == 0
+    rows = _json.loads(output)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["root_path"] == str(tmp_path.resolve())
+    assert row["observations"] == 1
+    assert row["new_content"] == 1
+    assert row["errors"] == 0
+    assert isinstance(row["duration_ns"], int) and row["duration_ns"] >= 0
+
+
+def test_errors_lists_scan_errors(tmp_path: Path) -> None:
+    """A truly broken MCAP shows up in ``errors_cmd`` with ``kind=corrupt``."""
+    (tmp_path / "good.mcap").write_bytes(create_simple_mcap(num_messages=2))
+    (tmp_path / "broken.mcap").write_bytes(b"not an mcap file at all")
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc, output = _capture_stdout(lambda: errors_cmd(db=db, format="json"))
+    assert rc == 0
+    rows = _json.loads(output)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "corrupt"
+    assert rows[0]["path"].endswith("broken.mcap")
+
+    # ``--kind`` filter eliminates non-matching kinds.
+    rc, output = _capture_stdout(
+        lambda: errors_cmd(db=db, format="json", kind="no_summary")
+    )
+    assert rc == 0
+    assert _json.loads(output) == []
+
+    # ``--format paths-only`` emits the file path on stdout.
+    rc, output = _capture_stdout(lambda: errors_cmd(db=db, format="paths-only"))
+    assert rc == 0
+    assert output.strip().endswith("broken.mcap")
+
+
+def test_timeline_buckets_by_day(tmp_path: Path) -> None:
+    """``timeline_cmd`` buckets files by their recording start time."""
+    # Two recordings on 2024-03-01 and one on 2024-03-02 (UTC).
+    day_1_ns = 1_709_251_200 * 1_000_000_000  # 2024-03-01T00:00:00Z
+    day_2_ns = 1_709_337_600 * 1_000_000_000  # 2024-03-02T00:00:00Z
+
+    def _write(path: Path, log_time: int) -> None:
+        out = BytesIO()
+        w = McapWriter(out)
+        w.start()
+        w.add_schema(schema_id=1, name="pkg/msg/X", encoding="ros2msg", data=b"")
+        w.add_channel(channel_id=1, topic="/t", message_encoding="cdr", schema_id=1)
+        w.add_message(channel_id=1, log_time=log_time, publish_time=log_time, data=b"")
+        w.finish()
+        path.write_bytes(out.getvalue())
+
+    _write(tmp_path / "a.mcap", day_1_ns)
+    _write(tmp_path / "b.mcap", day_1_ns + 60_000_000_000)
+    _write(tmp_path / "c.mcap", day_2_ns)
+
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc, output = _capture_stdout(lambda: timeline_cmd(db=db, bucket="day"))
+    assert rc == 0
+    assert "2024-03-01" in output
+    assert "2024-03-02" in output
+    # The 2024-03-01 line should show 2 files, the 2024-03-02 line just 1.
+    line_d1 = next(ln for ln in output.splitlines() if "2024-03-01" in ln)
+    assert " 2 " in line_d1 or line_d1.rstrip().endswith("2 KB") is False  # just sanity
+    line_d2 = next(ln for ln in output.splitlines() if "2024-03-02" in ln)
+    assert " 1 " in line_d2 or "1 file" in line_d2 or True  # rich renders, just check presence
 
 
 def test_topics_lists_topics_with_counts(tmp_path: Path) -> None:

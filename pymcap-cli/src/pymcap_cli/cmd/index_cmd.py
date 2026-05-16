@@ -1237,6 +1237,383 @@ def duplicates_cmd(
     return 0
 
 
+@index_app.command(name="sessions")
+def sessions_cmd(
+    folder: Annotated[
+        Path | None,
+        Parameter(help="Optional path prefix to filter sessions by their ``root_path``."),
+    ] = None,
+    *,
+    since: Annotated[
+        str | None,
+        Parameter(
+            name=["--since"],
+            help="Only sessions started after this instant (ns or RFC3339).",
+        ),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Parameter(
+            name=["--until"],
+            help="Only sessions started before this instant (ns or RFC3339).",
+        ),
+    ] = None,
+    running: Annotated[
+        bool,
+        Parameter(
+            name=["--running"],
+            help="Only sessions that have not finished (``finished_at IS NULL``).",
+        ),
+    ] = False,
+    limit: Annotated[int, Parameter(name=["--limit"], help="Max sessions to print.")] = 25,
+    format: Annotated[
+        OutputFormat,
+        Parameter(
+            name=["--format"],
+            help="Output as Rich table, JSON, or paths-only (root_path).",
+        ),
+    ] = "table",
+    db: Annotated[
+        Path | None,
+        Parameter(name=["--db"], help="Override the sidecar DB path."),
+    ] = None,
+) -> int:
+    """List ``scan_session`` rows — when, where, and how each scan went."""
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        console.print(f"[red]Error:[/] no index DB at {db_path}")
+        return 1
+
+    where: list[str] = []
+    params: list[str | int] = []
+    if folder is not None:
+        clause, prefix_params = _path_prefix_where(folder)
+        where.append(clause.removeprefix("WHERE ").replace("abs_path", "s.root_path"))
+        params.extend(prefix_params)
+    if since is not None:
+        where.append("s.started_at >= ?")
+        params.append(_parse_time_or_exit(since, "since"))
+    if until is not None:
+        where.append("s.started_at <= ?")
+        params.append(_parse_time_or_exit(until, "until"))
+    if running:
+        where.append("s.finished_at IS NULL")
+
+    sql = (
+        "SELECT s.id, s.started_at, s.finished_at, s.root_path, s.pymcap_cli_version, "
+        "       COALESCE(obs.n, 0)  AS observations, "
+        "       COALESCE(newc.n, 0) AS new_content, "
+        "       COALESCE(errs.n, 0) AS errors "
+        "FROM scan_session s "
+        "LEFT JOIN (SELECT session_id, COUNT(*) AS n FROM file_observation GROUP BY session_id) obs "
+        "  ON obs.session_id = s.id "
+        "LEFT JOIN (SELECT first_seen_session AS session_id, COUNT(*) AS n FROM content "
+        "           WHERE first_seen_session IS NOT NULL GROUP BY first_seen_session) newc "
+        "  ON newc.session_id = s.id "
+        "LEFT JOIN (SELECT session_id, COUNT(*) AS n FROM scan_error GROUP BY session_id) errs "
+        "  ON errs.session_id = s.id "
+    )
+    if where:
+        sql += "WHERE " + " AND ".join(where) + " "
+    sql += "ORDER BY s.id DESC LIMIT ?"
+    params.append(limit)
+
+    with open_db(db_path, read_only=True) as conn:
+        rows_sql = conn.execute(sql, params).fetchall()
+
+    rows: list[dict[str, object]] = [
+        {
+            "id": sid,
+            "started_at_ns": started,
+            "finished_at_ns": finished,
+            "duration_ns": (finished - started) if (finished and started and finished > started) else None,
+            "root_path": root,
+            "pymcap_cli_version": version,
+            "observations": obs,
+            "new_content": newc,
+            "errors": errs,
+        }
+        for sid, started, finished, root, version, obs, newc, errs in rows_sql
+    ]
+
+    if not rows:
+        if format == "table":
+            console.print("[yellow]No sessions[/]")
+        elif format == "json":
+            _stdout_line("[]")
+        return 0
+
+    if _emit_non_table(format, rows, path_key="root_path"):
+        return 0
+
+    table = Table(title=f"Scan sessions ({len(rows):,})")
+    table.add_column("ID", justify="right", style="dim")
+    table.add_column("Started (UTC)")
+    table.add_column("Finished (UTC)")
+    table.add_column("Duration", justify="right", style="cyan")
+    table.add_column("Root", overflow="fold")
+    table.add_column("Files", justify="right", style="green")
+    table.add_column("New", justify="right", style="green")
+    table.add_column("Errors", justify="right", style="red")
+    for row in rows:
+        finished = row["finished_at_ns"]
+        if not isinstance(finished, int):
+            duration_cell = "[yellow]RUNNING[/]"
+        else:
+            duration_cell = _format_duration_ns(
+                row["started_at_ns"] if isinstance(row["started_at_ns"], int) else None,
+                finished,
+            )
+        errs = row["errors"]
+        table.add_row(
+            str(row["id"]),
+            _format_ts_ns(row["started_at_ns"] if isinstance(row["started_at_ns"], int) else None),
+            _format_ts_ns(finished if isinstance(finished, int) else None),
+            duration_cell,
+            _format_parts_with_colors(str(row["root_path"])),
+            f"{row['observations']:,}" if isinstance(row["observations"], int) else "-",
+            f"{row['new_content']:,}" if isinstance(row["new_content"], int) else "-",
+            f"[red]{errs:,}[/]" if isinstance(errs, int) and errs else (f"{errs:,}" if isinstance(errs, int) else "-"),
+        )
+    console.print(table)
+    return 0
+
+
+@index_app.command(name="errors")
+def errors_cmd(
+    folder: Annotated[
+        Path | None,
+        Parameter(help="Optional path prefix to restrict errors to."),
+    ] = None,
+    *,
+    kind: Annotated[
+        str | None,
+        Parameter(
+            name=["--kind"],
+            help="Filter by error_kind (e.g. ``corrupt``, ``no_summary``, ``io``).",
+        ),
+    ] = None,
+    session: Annotated[
+        int | None,
+        Parameter(name=["--session"], help="Filter by ``scan_session.id``."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        Parameter(name=["--since"], help="Only errors observed after this instant."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Parameter(name=["--until"], help="Only errors observed before this instant."),
+    ] = None,
+    current: Annotated[
+        bool,
+        Parameter(
+            name=["--current"],
+            help="Only errors whose (path, size, mtime) still match the latest "
+            "file_observation — i.e. the file is still broken in the same way.",
+        ),
+    ] = False,
+    limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
+    format: Annotated[
+        OutputFormat,
+        Parameter(
+            name=["--format"],
+            help="Output as Rich table, JSON, or paths-only.",
+        ),
+    ] = "table",
+    db: Annotated[
+        Path | None,
+        Parameter(name=["--db"], help="Override the sidecar DB path."),
+    ] = None,
+) -> int:
+    """Browse ``scan_error`` rows: which files failed, when, and why."""
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        console.print(f"[red]Error:[/] no index DB at {db_path}")
+        return 1
+
+    sql = (
+        "SELECT se.id, se.observed_at, se.abs_path, se.error_kind, "
+        "       se.error_message, se.size_bytes, se.session_id "
+        "FROM scan_error se "
+    )
+    where: list[str] = []
+    params: list[str | int] = []
+    if current:
+        sql += (
+            "JOIN current_file cf "
+            "  ON cf.abs_path  = se.abs_path "
+            " AND cf.size_bytes = se.size_bytes "
+            " AND cf.mtime_ns   = se.mtime_ns "
+        )
+    if folder is not None:
+        clause, prefix_params = _path_prefix_where(folder)
+        where.append(clause.removeprefix("WHERE ").replace("abs_path", "se.abs_path"))
+        params.extend(prefix_params)
+    if kind is not None:
+        where.append("se.error_kind = ?")
+        params.append(kind)
+    if session is not None:
+        where.append("se.session_id = ?")
+        params.append(session)
+    if since is not None:
+        where.append("se.observed_at >= ?")
+        params.append(_parse_time_or_exit(since, "since"))
+    if until is not None:
+        where.append("se.observed_at <= ?")
+        params.append(_parse_time_or_exit(until, "until"))
+    if where:
+        sql += "WHERE " + " AND ".join(where) + " "
+    sql += "ORDER BY se.observed_at DESC, se.id DESC LIMIT ?"
+    params.append(limit)
+
+    with open_db(db_path, read_only=True) as conn:
+        rows_sql = conn.execute(sql, params).fetchall()
+
+    rows: list[dict[str, object]] = [
+        {
+            "id": eid,
+            "observed_at_ns": observed_at,
+            "path": path,
+            "kind": kind_,
+            "message": msg,
+            "size_bytes": size,
+            "session_id": session_id,
+        }
+        for eid, observed_at, path, kind_, msg, size, session_id in rows_sql
+    ]
+
+    if not rows:
+        if format == "table":
+            console.print("[yellow]No errors[/]")
+        elif format == "json":
+            _stdout_line("[]")
+        return 0
+
+    if _emit_non_table(format, rows, path_key="path"):
+        return 0
+
+    table = Table(title=f"Scan errors ({len(rows):,})")
+    table.add_column("Observed (UTC)")
+    table.add_column("Kind", style="red")
+    table.add_column("Path", overflow="fold")
+    table.add_column("Message", overflow="fold")
+    table.add_column("Size", justify="right", style="yellow")
+    table.add_column("Session", justify="right", style="dim")
+    for row in rows:
+        table.add_row(
+            _format_ts_ns(row["observed_at_ns"] if isinstance(row["observed_at_ns"], int) else None),
+            _describe_error_kind(str(row["kind"])),
+            _format_parts_with_colors(str(row["path"])),
+            str(row["message"] or "-"),
+            bytes_to_human(row["size_bytes"]) if isinstance(row["size_bytes"], int) else "-",
+            str(row["session_id"]) if isinstance(row["session_id"], int) else "-",
+        )
+    console.print(table)
+    return 0
+
+
+# Bucket spec → SQLite ``strftime`` format. Keep these in sync with the
+# ``Literal`` on ``timeline_cmd``'s ``--bucket`` argument.
+_TIMELINE_BUCKET_FORMAT: dict[str, str] = {
+    "day":   "%Y-%m-%d",
+    "week":  "%Y-W%W",
+    "month": "%Y-%m",
+    "year":  "%Y",
+}
+
+
+@index_app.command(name="timeline")
+def timeline_cmd(
+    folder: Annotated[
+        Path | None,
+        Parameter(help="Optional path prefix to restrict the timeline to."),
+    ] = None,
+    *,
+    bucket: Annotated[
+        Literal["day", "week", "month", "year"],
+        Parameter(name=["--bucket"], help="Time bucket size."),
+    ] = "day",
+    since: Annotated[
+        str | None,
+        Parameter(name=["--since"], help="Only files whose recording started after this instant."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Parameter(name=["--until"], help="Only files whose recording started before this instant."),
+    ] = None,
+    limit: Annotated[int, Parameter(name=["--limit"], help="Max buckets to print.")] = 100,
+    db: Annotated[
+        Path | None,
+        Parameter(name=["--db"], help="Override the sidecar DB path."),
+    ] = None,
+) -> int:
+    """Bucketed histogram of recording activity (files, messages, bytes).
+
+    Buckets are based on each file's ``message_start_time``. Files with a
+    sub-2000 start are skipped (same gate the rest of ``index`` uses for
+    duration math), so a single mis-clocked file can't poison the chart.
+    """
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        console.print(f"[red]Error:[/] no index DB at {db_path}")
+        return 1
+
+    where: list[str] = [f"c.message_start_time >= {_SANE_EPOCH_NS}"]
+    params: list[str | int] = []
+    if folder is not None:
+        clause, prefix_params = _path_prefix_where(folder)
+        where.append(clause.removeprefix("WHERE "))
+        params.extend(prefix_params)
+    if since is not None:
+        where.append("c.message_start_time >= ?")
+        params.append(_parse_time_or_exit(since, "since"))
+    if until is not None:
+        where.append("c.message_start_time <= ?")
+        params.append(_parse_time_or_exit(until, "until"))
+
+    bucket_fmt = _TIMELINE_BUCKET_FORMAT[bucket]
+    sql = (
+        f"SELECT strftime('{bucket_fmt}', c.message_start_time / 1000000000, 'unixepoch') AS bucket, "
+        "       COUNT(DISTINCT cf.abs_path)        AS files, "
+        "       COALESCE(SUM(c.message_count), 0) AS messages, "
+        "       COALESCE(SUM(cf.size_bytes), 0)   AS size_bytes "
+        "FROM current_file cf "
+        "JOIN content c ON c.content_id = cf.content_id "
+        "WHERE " + " AND ".join(where) + " "
+        "GROUP BY bucket ORDER BY bucket ASC LIMIT ?"
+    )
+    params.append(limit)
+
+    with open_db(db_path, read_only=True) as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    if not rows:
+        console.print("[yellow]No data in range[/]")
+        return 0
+
+    max_files = max(r[1] for r in rows) or 1
+    bar_width = 30
+
+    table = Table(title=f"Timeline by {bucket} ({len(rows):,} buckets)")
+    table.add_column(bucket.capitalize(), style="bold blue")
+    table.add_column("Files", justify="right", style="green")
+    table.add_column("Activity", overflow="crop")
+    table.add_column("Messages", justify="right", style="green")
+    table.add_column("Size", justify="right", style="yellow")
+    for label, files, messages, size in rows:
+        bar = "█" * max(1, int(round(bar_width * files / max_files))) if files else ""
+        table.add_row(
+            str(label),
+            f"{files:,}",
+            f"[cyan]{bar}[/]",
+            _format_count(int(messages)) if isinstance(messages, int) else "-",
+            bytes_to_human(size) if isinstance(size, int) else "-",
+        )
+    console.print(table)
+    return 0
+
+
 @index_app.command(name="info")
 def info_cmd(
     target: str,
