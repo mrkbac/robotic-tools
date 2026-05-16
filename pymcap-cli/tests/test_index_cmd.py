@@ -114,6 +114,59 @@ def test_topics_lists_topics_with_counts(tmp_path: Path) -> None:
     assert set(by_topic) == {"/foo", "/bar"}
     assert by_topic["/foo"]["files"] == 1
     assert by_topic["/foo"]["messages"] == 4
+    # Single-schema topic reports its schema name and a schemas count of 1.
+    assert by_topic["/foo"]["schemas"] == 1
+    assert isinstance(by_topic["/foo"]["schema"], str)
+
+
+def test_topics_counts_distinct_schemas(tmp_path: Path) -> None:
+    """A topic published with two different schemas reports schemas == 2."""
+    def _file(schema_name: str, msg_log_time: int) -> bytes:
+        out = BytesIO()
+        w = McapWriter(out)
+        w.start()
+        w.add_schema(schema_id=1, name=schema_name, encoding="ros2msg", data=b"")
+        w.add_channel(channel_id=1, topic="/x", message_encoding="cdr", schema_id=1)
+        w.add_message(channel_id=1, log_time=msg_log_time, publish_time=msg_log_time, data=b"")
+        w.finish()
+        return out.getvalue()
+
+    (tmp_path / "a.mcap").write_bytes(_file("pkg/msg/SchemaA", 1))
+    (tmp_path / "b.mcap").write_bytes(_file("pkg/msg/SchemaB", 2))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    rc, output = _capture_stdout(lambda: topics_cmd(db=db, format="json"))
+    assert rc == 0
+    [row] = _json.loads(output)
+    assert row["topic"] == "/x"
+    assert row["files"] == 2
+    assert row["schemas"] == 2
+    assert row["schema"] in {"pkg/msg/SchemaA", "pkg/msg/SchemaB"}
+
+
+def test_schemas_counts_topics_and_messages(tmp_path: Path) -> None:
+    """One schema used by two topics + total message count surfaces."""
+    out = BytesIO()
+    w = McapWriter(out)
+    w.start()
+    w.add_schema(schema_id=1, name="pkg/msg/Shared", encoding="ros2msg", data=b"")
+    w.add_channel(channel_id=1, topic="/a", message_encoding="cdr", schema_id=1)
+    w.add_channel(channel_id=2, topic="/b", message_encoding="cdr", schema_id=1)
+    for i in range(7):
+        w.add_message(channel_id=1, log_time=i, publish_time=i, data=b"")
+    for i in range(11):
+        w.add_message(channel_id=2, log_time=i, publish_time=i, data=b"")
+    w.finish()
+    (tmp_path / "rec.mcap").write_bytes(out.getvalue())
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    rc, output = _capture_stdout(lambda: schemas_cmd(db=db, format="json"))
+    assert rc == 0
+    [row] = _json.loads(output)
+    assert row["name"] == "pkg/msg/Shared"
+    assert row["files"] == 1
+    assert row["topics"] == 2
+    assert row["messages"] == 18
 
 
 def test_topics_prefix_filter(tmp_path: Path) -> None:

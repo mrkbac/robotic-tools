@@ -874,7 +874,7 @@ def topics_cmd(
     ] = None,
     *,
     sort_by: Annotated[
-        Literal["files", "messages", "name"],
+        Literal["files", "messages", "schemas", "name"],
         Parameter(
             name=["--sort-by"],
             help="Sort results (descending except for ``name``).",
@@ -905,17 +905,21 @@ def topics_cmd(
     order_by = {
         "files":    "files DESC, messages DESC, t.name",
         "messages": "messages DESC, files DESC, t.name",
+        "schemas":  "schemas DESC, files DESC, t.name",
         "name":     "t.name",
     }[sort_by]
 
     sql = (
         "SELECT t.name AS topic, "
-        "       COUNT(DISTINCT cf.abs_path) AS files, "
-        "       COALESCE(SUM(cc.message_count), 0) AS messages "
+        "       COUNT(DISTINCT cf.abs_path)        AS files, "
+        "       COALESCE(SUM(cc.message_count), 0) AS messages, "
+        "       COUNT(DISTINCT sig.schema_pk_id)   AS schemas, "
+        "       MIN(s.name)                        AS schema_name "
         "FROM current_file cf "
         "JOIN content_channel cc ON cc.content_id      = cf.content_id "
         "JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id "
         "JOIN topic t            ON t.topic_id         = sig.topic_id "
+        "LEFT JOIN schema s      ON s.schema_pk_id     = sig.schema_pk_id "
     )
     params: list[str | int] = []
     if prefix is not None:
@@ -928,8 +932,14 @@ def topics_cmd(
         sql_rows = conn.execute(sql, params).fetchall()
 
     rows: list[dict[str, object]] = [
-        {"topic": topic, "files": files, "messages": messages}
-        for topic, files, messages in sql_rows
+        {
+            "topic": topic,
+            "files": files,
+            "messages": messages,
+            "schemas": schemas,
+            "schema": schema_name,
+        }
+        for topic, files, messages, schemas, schema_name in sql_rows
     ]
 
     if not rows:
@@ -946,13 +956,23 @@ def topics_cmd(
     table.add_column("Topic", overflow="fold")
     table.add_column("Files", justify="right", style="green")
     table.add_column("Messages", justify="right", style="green")
+    table.add_column("Schema", overflow="fold")
     for row in rows:
         files = row["files"]
         messages = row["messages"]
+        schemas = row["schemas"]
+        schema_name = row["schema"]
+        if isinstance(schema_name, str):
+            cell = _format_schema_with_link(schema_name)
+            if isinstance(schemas, int) and schemas > 1:
+                cell += f"  [dim](+{schemas - 1} more)[/]"
+        else:
+            cell = "-"
         table.add_row(
             _format_parts_with_colors(str(row["topic"])),
             f"{files:,}" if isinstance(files, int) else "-",
             _format_count(int(messages)) if isinstance(messages, int) else "-",
+            cell,
         )
     console.print(table)
     return 0
@@ -966,10 +986,10 @@ def schemas_cmd(
     ] = None,
     *,
     sort_by: Annotated[
-        Literal["files", "name", "encoding"],
+        Literal["files", "messages", "topics", "name", "encoding"],
         Parameter(
             name=["--sort-by"],
-            help="Sort results (descending only for ``files``).",
+            help="Sort results (descending for the counts; ascending for name / encoding).",
         ),
     ] = "files",
     limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
@@ -994,29 +1014,49 @@ def schemas_cmd(
 
     order_by = {
         "files":    "files DESC, s.name",
+        "messages": "messages DESC, files DESC, s.name",
+        "topics":   "topics DESC, files DESC, s.name",
         "name":     "s.name",
         "encoding": "s.encoding, s.name",
     }[sort_by]
 
+    # JOIN through ``channel_sig`` so we can count topics + messages per
+    # schema. This drops schemas that are declared in a Summary but never
+    # referenced by any channel — that's both rare and arguably more useful,
+    # since the new ``topics`` / ``messages`` columns are meaningless without
+    # a channel anyway.
     sql = (
         "SELECT s.name, s.encoding, "
-        "       COUNT(DISTINCT cf.abs_path) AS files "
+        "       COUNT(DISTINCT cf.abs_path)        AS files, "
+        "       COUNT(DISTINCT sig.topic_id)       AS topics, "
+        "       COALESCE(SUM(cc.message_count), 0) AS messages "
         "FROM current_file cf "
-        "JOIN content_schema cs ON cs.content_id  = cf.content_id "
-        "JOIN schema s          ON s.schema_pk_id = cs.schema_pk_id "
+        "JOIN content_channel cc ON cc.content_id      = cf.content_id "
+        "JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id "
+        "JOIN schema s           ON s.schema_pk_id     = sig.schema_pk_id "
     )
     params: list[str | int] = []
     if prefix is not None:
         sql += "WHERE s.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
-    sql += f"GROUP BY s.name, s.encoding HAVING files >= ? ORDER BY {order_by} LIMIT ?"
+    sql += (
+        f"GROUP BY s.schema_pk_id, s.name, s.encoding "
+        f"HAVING files >= ? ORDER BY {order_by} LIMIT ?"
+    )
     params.extend([min_files, limit])
 
     with open_db(db_path, read_only=True) as conn:
         sql_rows = conn.execute(sql, params).fetchall()
 
     rows: list[dict[str, object]] = [
-        {"name": name, "encoding": encoding, "files": files} for name, encoding, files in sql_rows
+        {
+            "name": name,
+            "encoding": encoding,
+            "files": files,
+            "topics": topics,
+            "messages": messages,
+        }
+        for name, encoding, files, topics, messages in sql_rows
     ]
 
     if not rows:
@@ -1033,13 +1073,19 @@ def schemas_cmd(
     table.add_column("Name", overflow="fold")
     table.add_column("Encoding", style="yellow")
     table.add_column("Files", justify="right", style="green")
+    table.add_column("Topics", justify="right", style="green")
+    table.add_column("Messages", justify="right", style="green")
     for row in rows:
         files = row["files"]
+        topics = row["topics"]
+        messages = row["messages"]
         name = row["name"]
         table.add_row(
             _format_schema_with_link(str(name)) if name else "-",
             str(row.get("encoding") or "-"),
             f"{files:,}" if isinstance(files, int) else "-",
+            f"{topics:,}" if isinstance(topics, int) else "-",
+            _format_count(int(messages)) if isinstance(messages, int) else "-",
         )
     console.print(table)
     return 0
