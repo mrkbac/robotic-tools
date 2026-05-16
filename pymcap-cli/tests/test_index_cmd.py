@@ -132,6 +132,51 @@ def _capture_stdout(call) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
+def test_format_compression_cell_variants() -> None:
+    """Renderer copes with NULL, none, single-codec, and mixed-codec inputs."""
+    from pymcap_cli.cmd.index_cmd import _format_compression_cell
+
+    # Pre-0005 row (or a rebuilt summary): nothing to say.
+    assert "-" in _format_compression_cell(None, None, None)
+    # Chunks exist but every one was stored uncompressed.
+    assert "none" in _format_compression_cell("none", 100, 100)
+    # Single codec, sensible ratio: 3 KB original → 1 KB compressed.
+    out = _format_compression_cell("zstd", 1000, 3000)
+    assert "zstd" in out and "3.00×" in out
+    # Mixed codecs (some lz4, some zstd) — round-trip both names and tag as mixed.
+    mixed = _format_compression_cell("lz4,zstd", 500, 4000)
+    assert "mixed" in mixed and "lz4,zstd" in mixed
+    # "none,zstd" is the canonical representation for a file with some
+    # uncompressed chunks alongside compressed ones.
+    none_zstd = _format_compression_cell("none,zstd", 200, 1000)
+    assert "mixed" in none_zstd and "none,zstd" in none_zstd
+
+
+def test_info_shows_compression_for_compressed_mcap(tmp_path: Path) -> None:
+    """Compression row appears in ``info`` after a fresh scan."""
+    payload = BytesIO()
+    writer = McapWriter(payload, compression=CompressionType.LZ4)
+    writer.start()
+    writer.add_schema(schema_id=1, name="x", encoding="ros2msg", data=b"")
+    writer.add_channel(channel_id=1, topic="/t", message_encoding="cdr", schema_id=1)
+    for i in range(64):
+        writer.add_message(channel_id=1, log_time=i, publish_time=i, data=b"abc" * 128)
+    writer.finish()
+    (tmp_path / "rec.mcap").write_bytes(payload.getvalue())
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc, output = _capture_stdout(
+        lambda: info_cmd(str(tmp_path / "rec.mcap"), format="json", db=db)
+    )
+    assert rc == 0
+    identity = _json.loads(output)["identity"]
+    assert identity["compression"] == "lz4"
+    assert isinstance(identity["compressed_size_bytes"], int)
+    assert isinstance(identity["uncompressed_size_bytes"], int)
+    assert identity["uncompressed_size_bytes"] >= identity["compressed_size_bytes"]
+
+
 def test_sessions_lists_scan_sessions(tmp_path: Path) -> None:
     """``sessions_cmd`` reports each scan with file / new / error counts."""
     (tmp_path / "rec.mcap").write_bytes(create_simple_mcap(num_messages=3))

@@ -121,6 +121,13 @@ class _ContentRow:
     # when no chunk qualifies, in which case the duration is unknown.
     sane_message_start_time: int | None
     sane_message_end_time: int | None
+    # Aggregated chunk-level compression info (introduced in migration 0005).
+    # ``compression`` is a comma-joined sorted set of codec names; ``""`` if
+    # chunks exist but none compress; ``None`` if no chunk indexes were
+    # available at all (e.g. ``scan_kind == "rebuilt"``).
+    compression: str | None
+    compressed_size_bytes: int | None
+    uncompressed_size_bytes: int | None
     scan_kind: str
     channels: list[dict] = field(default_factory=list)
     schemas: list[dict] = field(default_factory=list)
@@ -469,6 +476,27 @@ def _build_content_row(
         if ci.message_start_time >= _SANE_EPOCH_NS
     ]
 
+    # Compression aggregates. ``None`` (rather than ``0`` / ``""``) when no
+    # chunk indexes are available, so readers can tell "unknown" from
+    # "definitely uncompressed". Per-chunk ``compression`` is a string; the
+    # MCAP spec uses ``""`` for uncompressed chunks. We map that to the
+    # explicit token ``"none"`` so a mixed file (some zstd + some
+    # uncompressed chunks) round-trips as ``"none,zstd"`` instead of
+    # silently looking like a pure-zstd file.
+    if summary.chunk_indexes:
+        codecs = sorted({(ci.compression or "none") for ci in summary.chunk_indexes})
+        compression: str | None = ",".join(codecs)
+        compressed_size_bytes: int | None = sum(
+            ci.compressed_size or 0 for ci in summary.chunk_indexes
+        )
+        uncompressed_size_bytes: int | None = sum(
+            ci.uncompressed_size or 0 for ci in summary.chunk_indexes
+        )
+    else:
+        compression = None
+        compressed_size_bytes = None
+        uncompressed_size_bytes = None
+
     return _ContentRow(
         summary_fingerprint=summary_fp,
         size_bytes=size_bytes,
@@ -485,6 +513,9 @@ def _build_content_row(
         message_end_time=(stats.message_end_time if stats is not None else 0),
         sane_message_start_time=min(sane_starts) if sane_starts else None,
         sane_message_end_time=max(sane_ends) if sane_ends else None,
+        compression=compression,
+        compressed_size_bytes=compressed_size_bytes,
+        uncompressed_size_bytes=uncompressed_size_bytes,
         scan_kind=scan_kind,
         channels=channels,
         schemas=schemas,
@@ -639,8 +670,9 @@ def _insert_content(
             channel_count, attachment_count, metadata_count, chunk_count,
             message_start_time, message_end_time,
             sane_message_start_time, sane_message_end_time,
+            compression, compressed_size_bytes, uncompressed_size_bytes,
             scan_kind, first_seen_at, first_seen_session)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             content.summary_fingerprint,
             content.size_bytes,
@@ -656,6 +688,9 @@ def _insert_content(
             content.message_end_time,
             content.sane_message_start_time,
             content.sane_message_end_time,
+            content.compression,
+            content.compressed_size_bytes,
+            content.uncompressed_size_bytes,
             content.scan_kind,
             time.time_ns(),
             session_id,

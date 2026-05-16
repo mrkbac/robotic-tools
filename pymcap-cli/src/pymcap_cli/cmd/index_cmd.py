@@ -76,6 +76,44 @@ _EFF_END_SQL = (
 )
 
 
+def _format_compression_cell(
+    compression: str | None,
+    compressed: int | None,
+    uncompressed: int | None,
+) -> str:
+    """Human-readable summary for the per-content compression aggregates."""
+    if compression is None:
+        # Pre-0005 content row, or a ``scan_kind = 'rebuilt'`` file with no
+        # chunk indexes — we genuinely don't know.
+        return "[dim]-[/]"
+    if compression in ("", "none"):
+        # Chunks exist, none compress. Still show the byte total so the user
+        # can confirm the size on disk matches the message payload.
+        size = bytes_to_human(uncompressed) if isinstance(uncompressed, int) and uncompressed else "-"
+        return f"[dim]none[/]  [yellow]{size}[/]"
+    ratio_part = ""
+    if (
+        isinstance(uncompressed, int)
+        and isinstance(compressed, int)
+        and compressed > 0
+        and uncompressed > 0
+    ):
+        ratio = uncompressed / compressed
+        ratio_part = (
+            f"  [cyan]{ratio:.2f}×[/]"
+            f"  [dim]({bytes_to_human(uncompressed)} → {bytes_to_human(compressed)})[/]"
+        )
+    # ``compression`` is a comma-joined sorted set of codec names. Single
+    # codec → ``"zstd"``; mixed → ``"lz4,zstd"`` or ``"none,zstd"`` when some
+    # chunks are uncompressed. We render verbatim so the user can see the mix.
+    codec_label = (
+        f"[green]{compression}[/]"
+        if "," not in compression
+        else f"[yellow]mixed[/] [dim]({compression})[/]"
+    )
+    return f"{codec_label}{ratio_part}"
+
+
 def _safe_duration_ns(start_ns: int | None, end_ns: int | None) -> int | None:
     if start_ns is None or end_ns is None or end_ns <= start_ns:
         return None
@@ -1662,7 +1700,8 @@ def info_cmd(
         content = conn.execute(
             "SELECT size_bytes, library, profile, message_count, schema_count, channel_count, "
             "       attachment_count, metadata_count, chunk_count, "
-            "       message_start_time, message_end_time, first_seen_at "
+            "       message_start_time, message_end_time, first_seen_at, "
+            "       compression, compressed_size_bytes, uncompressed_size_bytes "
             "FROM content WHERE summary_fingerprint = ?",
             (summary_fp,),
         ).fetchone()
@@ -1706,6 +1745,9 @@ def info_cmd(
         start_ns,
         end_ns,
         first_seen_at,
+        compression,
+        compressed_size_bytes,
+        uncompressed_size_bytes,
     ) = content
 
     identity = {
@@ -1723,6 +1765,9 @@ def info_cmd(
         "message_start_time_ns": start_ns,
         "message_end_time_ns": end_ns,
         "duration_ns": (duration_ns := _safe_duration_ns(start_ns, end_ns)),
+        "compression": compression,
+        "compressed_size_bytes": compressed_size_bytes,
+        "uncompressed_size_bytes": uncompressed_size_bytes,
         "first_seen_at_ns": first_seen_at,
     }
     topics_payload = [
@@ -1803,6 +1848,9 @@ def info_cmd(
         "Duration:",
         f"[cyan]{_format_duration_ns(0, duration_ns) if duration_ns is not None else '-'}[/]",
     )
+    identity_table.add_row("Compression:", _format_compression_cell(
+        compression, compressed_size_bytes, uncompressed_size_bytes,
+    ))
     console.print("[bold cyan]Identity[/]")
     console.print(identity_table)
 
