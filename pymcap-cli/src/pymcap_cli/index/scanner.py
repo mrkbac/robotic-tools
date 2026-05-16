@@ -72,6 +72,7 @@ def _process_file_task(inp: "_ScanInput", rebuild_missing: bool) -> "_ScanResult
 @dataclass(slots=True)
 class ScanStats:
     discovered: int = 0
+    dirs_walked: int = 0
     stat_skipped: int = 0
     error_skipped: int = 0
     fingerprint_reused: int = 0
@@ -127,42 +128,52 @@ class _ScanResult:
     error_message: str | None = None
 
 
-def _collect_mcap_files(root: Path, *, recurse: bool) -> list[Path]:
-    """Walk ``root`` and return every ``.mcap`` file.
+def _iter_mcap_files(
+    root: Path,
+    *,
+    recurse: bool,
+    on_dir_done: Callable[[int], None] | None = None,
+) -> Iterator[Path]:
+    """Yield ``.mcap`` files under ``root`` as they are discovered.
 
-    Materialises the full list up front (rather than yielding lazily) so the
-    main thread isn't competing with worker threads for the GIL while it's
-    deep inside ``os.scandir`` iteration. ``follow_symlinks=False`` on the
-    directory check matches :meth:`Path.rglob`'s default and prevents the
-    walker from descending into venv / cache symlinks.
+    Streaming so callers can start processing the first files while the
+    walker keeps going — important when ``root`` is on a slow mount.
+    ``follow_symlinks=False`` on directory descent matches
+    :meth:`Path.rglob`'s default and skips venv / cache symlinks.
+
+    ``on_dir_done`` is called with the running directory count every time
+    a directory finishes scanning, so the caller can drive a progress UI
+    even before the first ``.mcap`` is found.
     """
     if root.is_file():
         if root.suffix == ".mcap":
-            return [root.resolve()]
-        return []
+            yield root.resolve()
+        return
     if not root.is_dir():
-        return []
+        return
 
     root_str = str(root.resolve())
 
     if not recurse:
-        found: list[Path] = []
         try:
-            with os.scandir(root_str) as it:
-                for entry in it:
-                    if not entry.name.endswith(".mcap"):
-                        continue
-                    try:
-                        if entry.is_file():
-                            found.append(Path(entry.path))
-                    except OSError:
-                        continue
+            scan_it = os.scandir(root_str)
         except OSError:
-            return []
-        return found
+            return
+        with scan_it:
+            for entry in scan_it:
+                if not entry.name.endswith(".mcap"):
+                    continue
+                try:
+                    if entry.is_file():
+                        yield Path(entry.path)
+                except OSError:
+                    continue
+        if on_dir_done is not None:
+            on_dir_done(1)
+        return
 
-    collected: list[str] = []
     stack: list[str] = [root_str]
+    dirs_done = 0
     while stack:
         directory = stack.pop()
         try:
@@ -175,10 +186,14 @@ def _collect_mcap_files(root: Path, *, recurse: bool) -> list[Path]:
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(entry.path)
                     elif entry.name.endswith(".mcap") and entry.is_file():
-                        collected.append(entry.path)
+                        yield Path(entry.path)
                 except OSError:
                     continue
-    return [Path(p) for p in collected]
+        dirs_done += 1
+        if on_dir_done is not None and dirs_done % 200 == 0:
+            on_dir_done(dirs_done)
+    if on_dir_done is not None:
+        on_dir_done(dirs_done)
 
 
 def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
@@ -690,13 +705,17 @@ def scan(
                 conn.execute("ROLLBACK")
                 raise
 
-        discovered_paths = _collect_mcap_files(root, recurse=recurse)
+        def _on_dir_done(dirs: int) -> None:
+            stats.dirs_walked = dirs
+            if progress is not None:
+                progress(stats)
+
         with ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=_worker_init,
             initargs=(file_fp_cache_snapshot, known_summary_fps_snapshot),
         ) as pool:
-            for path in discovered_paths:
+            for path in _iter_mcap_files(root, recurse=recurse, on_dir_done=_on_dir_done):
                 stats.discovered += 1
                 _ensure_session()
                 abs_path = str(path)

@@ -11,10 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+
 from cyclopts import App, Parameter
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from rich.tree import Tree
 
 from pymcap_cli.display.display_utils import (
     _format_parts_with_colors,
@@ -180,7 +184,6 @@ def scan_cmd(
     rebuild_missing: Annotated[
         bool,
         Parameter(
-            name=["--rebuild-missing/--no-rebuild-missing"],
             help=(
                 "Rebuild summaries in memory for files without usable summary data. "
                 "This can read entire MCAP files."
@@ -213,6 +216,7 @@ def scan_cmd(
         MofNCompleteColumn(),
         TextColumn("•"),
         TextColumn(
+            "[dim]walked={task.fields[walked]} dirs[/] "
             "[green]indexed={task.fields[indexed]}[/] "
             "[cyan]reused={task.fields[reused]}[/] "
             "[dim]skip={task.fields[skip]}[/] "
@@ -222,7 +226,9 @@ def scan_cmd(
         console=console,
         transient=True,
     ) as progress_bar:
-        task_id = progress_bar.add_task("scan", total=None, indexed=0, reused=0, skip=0, errored=0)
+        task_id = progress_bar.add_task(
+            "scan", total=None, walked=0, indexed=0, reused=0, skip=0, errored=0
+        )
         seen = 0
 
         def _progress(stats: ScanStats) -> None:
@@ -241,6 +247,7 @@ def scan_cmd(
             progress_bar.update(
                 task_id,
                 advance=done - seen,
+                walked=stats.dirs_walked,
                 indexed=stats.indexed,
                 reused=stats.fingerprint_reused,
                 skip=stats.stat_skipped + stats.error_skipped,
@@ -353,6 +360,242 @@ def status_cmd(
         f"[yellow]{bytes_to_human(total_bytes)}[/]  [dim]({total_bytes:,} B)[/]",
     )
     console.print(table)
+    return 0
+
+
+@dataclass
+class _PathNode:
+    """Aggregate stats for one directory in the path tree."""
+
+    file_count: int = 0
+    size_bytes: int = 0
+    message_count: int = 0
+    duration_ns: int = 0
+    topics: set[str] = field(default_factory=set)
+    schemas: set[str] = field(default_factory=set)
+    children: dict[str, "_PathNode"] = field(default_factory=dict)
+
+
+def _format_seconds_short(secs: float) -> str:
+    if secs < 60:
+        return f"{secs:.1f}s"
+    if secs < 3600:
+        m, s = divmod(int(secs), 60)
+        return f"{m}m{s}s"
+    if secs < 86400:
+        h, rem = divmod(int(secs), 3600)
+        return f"{h}h{rem // 60}m"
+    d, rem = divmod(int(secs), 86400)
+    return f"{d}d{rem // 3600}h"
+
+
+def _format_node_stats(node: _PathNode) -> str:
+    parts = [
+        f"[yellow]{bytes_to_human(node.size_bytes)}[/]",
+        f"[green]{_format_count(node.file_count)}f[/]",
+        f"[cyan]{_format_count(node.message_count)}msg[/]",
+    ]
+    if node.duration_ns:
+        parts.append(f"[magenta]{_format_seconds_short(node.duration_ns / 1e9)}[/]")
+    if node.topics:
+        parts.append(f"[blue]{len(node.topics)} topics[/]")
+    if node.schemas:
+        parts.append(f"[dim]{len(node.schemas)} schemas[/]")
+    return "  ".join(parts)
+
+
+def _build_path_tree(
+    files: Sequence[tuple[str, int | None, int | None, int | None, int | None]],
+    topics: Sequence[tuple[str, str]],
+    schemas: Sequence[tuple[str, str]],
+    root_prefix: str,
+) -> _PathNode:
+    """Group rows by their path prefix and accumulate stats up the chain."""
+    root = _PathNode()
+    chain_cache: dict[str, list[_PathNode]] = {}
+
+    def _chain_for(abs_path: str) -> list[_PathNode]:
+        cached = chain_cache.get(abs_path)
+        if cached is not None:
+            return cached
+        try:
+            rel = os.path.relpath(abs_path, root_prefix) if root_prefix else abs_path
+        except ValueError:
+            rel = abs_path
+        parts = [p for p in rel.split(os.sep) if p and p != "."]
+        # Last component is the filename — only its ancestor directories
+        # get nodes.
+        chain = [root]
+        node = root
+        for part in parts[:-1]:
+            node = node.children.setdefault(part, _PathNode())
+            chain.append(node)
+        chain_cache[abs_path] = chain
+        return chain
+
+    for abs_path, size, msg_count, ts_start, ts_end in files:
+        chain = _chain_for(abs_path)
+        size_v = size or 0
+        msg_v = msg_count or 0
+        dur_v = (
+            ts_end - ts_start
+            if ts_start is not None and ts_end is not None and ts_end > ts_start
+            else 0
+        )
+        for node in chain:
+            node.file_count += 1
+            node.size_bytes += size_v
+            node.message_count += msg_v
+            node.duration_ns += dur_v
+
+    for abs_path, topic in topics:
+        for node in _chain_for(abs_path):
+            node.topics.add(topic)
+
+    for abs_path, schema_hash in schemas:
+        for node in _chain_for(abs_path):
+            node.schemas.add(schema_hash)
+
+    return root
+
+
+_TREE_SORT_KEYS = {
+    "size": lambda kv: (-kv[1].size_bytes, kv[0]),
+    "files": lambda kv: (-kv[1].file_count, kv[0]),
+    "messages": lambda kv: (-kv[1].message_count, kv[0]),
+    "duration": lambda kv: (-kv[1].duration_ns, kv[0]),
+    "name": lambda kv: (0.0, kv[0]),
+}
+
+
+def _fold_single_child_chain(name: str, node: _PathNode) -> tuple[str, _PathNode]:
+    """Collapse ``a/ -> b/ -> c/`` chains where each level has exactly one child."""
+    while len(node.children) == 1:
+        only_name, only_child = next(iter(node.children.items()))
+        name = f"{name}/{only_name}"
+        node = only_child
+    return name, node
+
+
+def _render_path_tree(
+    root: _PathNode,
+    root_label: str,
+    *,
+    max_depth: int,
+    min_files: int,
+    sort_by: str,
+) -> Tree:
+    sort_key = _TREE_SORT_KEYS[sort_by]
+    folded_root_label, folded_root = _fold_single_child_chain(root_label, root)
+    tree = Tree(
+        f"[bold blue]{folded_root_label}[/]  [dim]→[/]  {_format_node_stats(folded_root)}"
+    )
+
+    def _add(parent: Tree, node: _PathNode, depth: int) -> None:
+        if depth >= max_depth:
+            if node.children:
+                parent.add(f"[dim]… {len(node.children):,} subdirs collapsed[/]")
+            return
+        for name, child in sorted(node.children.items(), key=sort_key):
+            if child.file_count < min_files:
+                continue
+            display_name, display_child = _fold_single_child_chain(name, child)
+            sub = parent.add(
+                f"[bold]{display_name}/[/]  [dim]→[/]  {_format_node_stats(display_child)}"
+            )
+            _add(sub, display_child, depth + 1)
+
+    _add(tree, folded_root, 0)
+    return tree
+
+
+@index_app.command(name="tree")
+def tree_cmd(
+    folder: Annotated[
+        Path | None,
+        Parameter(help="Optional path prefix to restrict the tree to."),
+    ] = None,
+    *,
+    db: Annotated[
+        Path | None,
+        Parameter(name=["--db"], help="Override the sidecar DB path."),
+    ] = None,
+    max_depth: Annotated[
+        int,
+        Parameter(
+            help="Limit how many directory levels to render. Aggregates still cover everything below.",
+        ),
+    ] = 4,
+    min_files: Annotated[
+        int,
+        Parameter(help="Hide directories containing fewer than this many .mcap files."),
+    ] = 1,
+    sort_by: Annotated[
+        Literal["size", "files", "messages", "duration", "name"],
+        Parameter(help="Sort children of each node by this metric (descending)."),
+    ] = "size",
+) -> int:
+    """Show a directory-tree breakdown of indexed data.
+
+    Each node aggregates everything below it: total size on disk, number of
+    indexed files, total message count, total duration, and the number of
+    distinct topics / schemas that appear under the prefix.
+    """
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        console.print(f"[red]Error:[/] no index DB at {db_path}")
+        return 1
+
+    where = ""
+    params: tuple[str | int, ...] = ()
+    if folder is not None:
+        where, params = _path_prefix_where(folder)
+
+    with open_db(db_path, read_only=True) as conn:
+        files = conn.execute(
+            f"""SELECT cf.abs_path, cf.size_bytes, c.message_count,
+                       c.message_start_time, c.message_end_time
+                FROM current_file cf
+                JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint
+                {where}""",  # noqa: S608
+            params,
+        ).fetchall()
+        topics = conn.execute(
+            f"""SELECT cf.abs_path, cc.topic
+                FROM current_file cf
+                JOIN content_channel cc ON cc.summary_fingerprint = cf.summary_fingerprint
+                {where}""",  # noqa: S608
+            params,
+        ).fetchall()
+        schema_rows = conn.execute(
+            f"""SELECT cf.abs_path, cs.schema_hash
+                FROM current_file cf
+                JOIN content_schema cs ON cs.summary_fingerprint = cf.summary_fingerprint
+                {where}""",  # noqa: S608
+            params,
+        ).fetchall()
+
+    if not files:
+        console.print("[dim]No indexed files match.[/]")
+        return 0
+
+    if folder is not None:
+        root_prefix = str(folder.expanduser().resolve())
+    else:
+        try:
+            root_prefix = os.path.commonpath([row[0] for row in files])
+        except ValueError:
+            root_prefix = ""
+
+    root_node = _build_path_tree(files, topics, schema_rows, root_prefix)
+    rendered = _render_path_tree(
+        root_node,
+        root_label=root_prefix or "(all)",
+        max_depth=max_depth,
+        min_files=min_files,
+        sort_by=sort_by,
+    )
+    console.print(rendered)
     return 0
 
 
