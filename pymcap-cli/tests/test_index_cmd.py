@@ -84,6 +84,34 @@ def test_format_ts_ns_formats_utc() -> None:
     assert Text.from_markup(_format_ts_ns(ns)).plain == "2024-01-02 03:04:05"
 
 
+def test_safe_duration_ns_rejects_implausible_span() -> None:
+    """``_safe_duration_ns`` returns ``None`` for spans over the cap."""
+    from pymcap_cli.cmd.index_cmd import (
+        _MAX_PLAUSIBLE_DURATION_NS,
+        _SANE_EPOCH_NS,
+        _safe_duration_ns,
+    )
+
+    sane_start = 1_700_000_000 * 1_000_000_000  # ~2023 UTC
+    day_ns = 86400 * 1_000_000_000
+
+    # Sub-epoch starts always rejected.
+    assert _safe_duration_ns(0, 30 * 1_000_000_000) is None
+    # Plausible recording: post-epoch, short span.
+    assert _safe_duration_ns(sane_start, sane_start + 60 * 1_000_000_000) == 60 * 1_000_000_000
+    # Multi-year span: bogus.
+    assert _safe_duration_ns(sane_start, sane_start + 365 * day_ns) is None
+    # Exactly at the cap is still accepted.
+    assert (
+        _safe_duration_ns(sane_start, sane_start + _MAX_PLAUSIBLE_DURATION_NS)
+        == _MAX_PLAUSIBLE_DURATION_NS
+    )
+    # One nanosecond past the cap is rejected.
+    assert _safe_duration_ns(sane_start, sane_start + _MAX_PLAUSIBLE_DURATION_NS + 1) is None
+    # Constants are also exported, so callers can build their own SQL.
+    assert _SANE_EPOCH_NS > 0
+
+
 def test_format_duration_ns_buckets() -> None:
     s = 1_000_000_000  # 1 second in ns
     assert _format_duration_ns(0, 30 * s) == "30.0s"

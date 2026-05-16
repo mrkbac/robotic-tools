@@ -53,6 +53,15 @@ _ERROR_KIND_LABEL: dict[str, str] = {
 # is stored in the catalog.
 _SANE_EPOCH_NS = 946_684_800 * 1_000_000_000  # 2000-01-01T00:00:00Z
 
+# Second sanity gate: even when both ``message_start_time`` and
+# ``message_end_time`` are post-epoch, the *span* between them can still be
+# bogus when two channels publish on desynced clocks (e.g. GPS stuck at 2011,
+# system clock at 2017, both messages legitimately written into the same MCAP
+# in 2024 — chunk-level MIN/MAX can't recover from that because every chunk
+# contains a mix). 30 days comfortably catches multi-year spans while letting
+# unusually-long single-recording datasets through.
+_MAX_PLAUSIBLE_DURATION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
+
 # Pick whichever value (raw vs precomputed sane fallback) is post-epoch. The
 # ``sane_message_*`` columns are populated by the scanner from
 # ``ChunkIndex`` records, with the same threshold applied (see
@@ -72,7 +81,10 @@ def _safe_duration_ns(start_ns: int | None, end_ns: int | None) -> int | None:
         return None
     if start_ns < _SANE_EPOCH_NS:
         return None
-    return end_ns - start_ns
+    span = end_ns - start_ns
+    if span > _MAX_PLAUSIBLE_DURATION_NS:
+        return None
+    return span
 
 
 def _pymcap_cli_version() -> str:
@@ -701,10 +713,15 @@ def query_cmd(
     if until is not None:
         window_end = _parse_time_or_exit(until, "until")
 
-    # Files with bogus start times (uninitialised clock) would sort first if
-    # we just diffed end-start. Use the chunk-based fallback when the
-    # file-level start is sub-epoch.
-    _safe_dur_sql = f"({_EFF_END_SQL} - {_EFF_START_SQL})"
+    # Mirror ``_safe_duration_ns`` in SQL: reject sub-epoch starts and
+    # implausibly-long spans so the sort key matches the rendered cell. The
+    # CASE collapses bogus rows to ``0`` so they sink to the bottom on
+    # ``--sort-by duration DESC``.
+    _safe_dur_sql = (
+        f"CASE WHEN {_EFF_START_SQL} >= {_SANE_EPOCH_NS}"
+        f"      AND ({_EFF_END_SQL} - {_EFF_START_SQL}) BETWEEN 0 AND {_MAX_PLAUSIBLE_DURATION_NS}"
+        f"     THEN ({_EFF_END_SQL} - {_EFF_START_SQL}) ELSE 0 END"
+    )
     _safe_start_sql = (
         f"CASE WHEN {_EFF_START_SQL} >= {_SANE_EPOCH_NS} "
         f"THEN {_EFF_START_SQL} ELSE NULL END"
@@ -1328,7 +1345,7 @@ def info_cmd(
         "chunk_count": chunk_count,
         "message_start_time_ns": start_ns,
         "message_end_time_ns": end_ns,
-        "duration_ns": (end_ns - start_ns) if start_ns and end_ns and end_ns > start_ns else None,
+        "duration_ns": (duration_ns := _safe_duration_ns(start_ns, end_ns)),
         "first_seen_at_ns": first_seen_at,
     }
     topics_payload = [
@@ -1405,7 +1422,10 @@ def info_cmd(
     )
     identity_table.add_row("Start:", _format_ts_ns(start_ns))
     identity_table.add_row("End:", _format_ts_ns(end_ns))
-    identity_table.add_row("Duration:", f"[cyan]{_format_duration_ns(start_ns, end_ns)}[/]")
+    identity_table.add_row(
+        "Duration:",
+        f"[cyan]{_format_duration_ns(0, duration_ns) if duration_ns is not None else '-'}[/]",
+    )
     console.print("[bold cyan]Identity[/]")
     console.print(identity_table)
 
