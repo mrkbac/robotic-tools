@@ -58,7 +58,13 @@ def test_first_scan_indexes_all(tmp_path: Path) -> None:
         assert _count(conn, "file_observation") == 3
         assert _count(conn, "content_channel") >= len(files)
         assert _count(conn, "content_schema") >= 1
-        assert _count(conn, "content_chunk") >= 3
+        # ``content.chunk_count`` is populated from the MCAP Statistics
+        # record. Per-chunk rows no longer live in their own table.
+        chunk_totals = conn.execute(
+            "SELECT MIN(chunk_count), SUM(chunk_count) FROM content"
+        ).fetchone()
+        assert chunk_totals[0] >= 1
+        assert chunk_totals[1] >= 3
 
 
 def test_rescan_skips_unchanged_via_stat(tmp_path: Path, monkeypatch) -> None:
@@ -250,9 +256,10 @@ def test_multi_topic_records_channels_and_chunks(tmp_path: Path) -> None:
 
     with open_db(db) as conn:
         scan(tmp_path, conn, pymcap_cli_version="test")
-        topics = {row[0] for row in conn.execute("SELECT topic FROM content_channel").fetchall()}
+        topics = {row[0] for row in conn.execute("SELECT name FROM topic").fetchall()}
         assert topics == {"/a", "/b", "/c"}
-        assert _count(conn, "content_chunk") >= 1
+        # ``chunk_count`` from the MCAP Statistics record lives on ``content``.
+        assert conn.execute("SELECT MAX(chunk_count) FROM content").fetchone()[0] >= 1
         schemas = conn.execute("SELECT name FROM schema").fetchall()
         assert len(schemas) == 1
 
@@ -271,12 +278,12 @@ def test_identical_schemas_are_deduplicated_across_content(tmp_path: Path) -> No
         # Two distinct content rows, but only one shared schema.
         assert _count(conn, "content") == 2
         assert _count(conn, "schema") == 1
-        # content_schema has one mapping per (summary_fingerprint, schema_id).
+        # content_schema has one mapping per (content_id, schema_id).
         rows = conn.execute(
-            "SELECT summary_fingerprint, schema_hash FROM content_schema"
+            "SELECT cs.content_id, cs.schema_pk_id FROM content_schema cs"
         ).fetchall()
         assert len(rows) == 2
-        assert len({sh for _fp, sh in rows}) == 1
+        assert len({pk for _cid, pk in rows}) == 1
 
 
 def test_byte_cache_rescan_skips_rebuild(tmp_path: Path, monkeypatch) -> None:

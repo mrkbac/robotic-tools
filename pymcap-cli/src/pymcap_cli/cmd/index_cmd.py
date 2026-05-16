@@ -53,27 +53,17 @@ _ERROR_KIND_LABEL: dict[str, str] = {
 # is stored in the catalog.
 _SANE_EPOCH_NS = 946_684_800 * 1_000_000_000  # 2000-01-01T00:00:00Z
 
-# Re-derive ``(start, end)`` from ``content_chunk`` when the file-level value
-# is bogus: keep only chunks whose own ``message_start_time`` clears the same
-# sanity threshold, then take MIN/MAX over them. SQLite uses the PK
-# ``(summary_fingerprint, chunk_idx)`` to group cheaply per file.
-_CHUNK_FALLBACK_JOIN = (
-    "LEFT JOIN ( "
-    "  SELECT summary_fingerprint, "
-    f"         MIN(message_start_time) AS eff_start, "
-    f"         MAX(message_end_time)   AS eff_end "
-    "  FROM content_chunk "
-    f"  WHERE message_start_time >= {_SANE_EPOCH_NS} "
-    "  GROUP BY summary_fingerprint "
-    ") cc_fb ON cc_fb.summary_fingerprint = c.summary_fingerprint "
-)
+# Pick whichever value (raw vs precomputed sane fallback) is post-epoch. The
+# ``sane_message_*`` columns are populated by the scanner from
+# ``ChunkIndex`` records, with the same threshold applied (see
+# ``scanner._build_content_row``).
 _EFF_START_SQL = (
     f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
-    "THEN c.message_start_time ELSE cc_fb.eff_start END"
+    "THEN c.message_start_time ELSE c.sane_message_start_time END"
 )
 _EFF_END_SQL = (
     f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
-    "THEN c.message_end_time ELSE cc_fb.eff_end END"
+    "THEN c.message_end_time ELSE c.sane_message_end_time END"
 )
 
 
@@ -363,7 +353,7 @@ def status_cmd(
         totals_sql = (
             "SELECT COALESCE(SUM(c.message_count),0), COALESCE(SUM(cf.size_bytes),0) "
             "FROM current_file cf "
-            "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint"
+            "JOIN content c ON c.content_id = cf.content_id"
         )
         if where:
             totals_sql += " WHERE (abs_path = ? OR substr(abs_path, 1, ?) = ?)"
@@ -591,22 +581,23 @@ def tree_cmd(
                        {_EFF_START_SQL} AS eff_start,
                        {_EFF_END_SQL}   AS eff_end
                 FROM current_file cf
-                JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint
-                {_CHUNK_FALLBACK_JOIN}
+                JOIN content c ON c.content_id = cf.content_id
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
         topics = conn.execute(
-            f"""SELECT cf.abs_path, cc.topic
+            f"""SELECT cf.abs_path, t.name
                 FROM current_file cf
-                JOIN content_channel cc ON cc.summary_fingerprint = cf.summary_fingerprint
+                JOIN content_channel cc ON cc.content_id = cf.content_id
+                JOIN topic t            ON t.topic_id    = cc.topic_id
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
         schema_rows = conn.execute(
-            f"""SELECT cf.abs_path, cs.schema_hash
+            f"""SELECT cf.abs_path, s.schema_hash
                 FROM current_file cf
-                JOIN content_schema cs ON cs.summary_fingerprint = cf.summary_fingerprint
+                JOIN content_schema cs ON cs.content_id = cf.content_id
+                JOIN schema s          ON s.schema_pk_id = cs.schema_pk_id
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
@@ -745,20 +736,20 @@ def query_cmd(
             f"{_EFF_END_SQL}   AS eff_end, "
             "cf.size_bytes "
             "FROM current_file cf "
-            "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint "
-            f"{_CHUNK_FALLBACK_JOIN}"
-            "JOIN content_channel cc ON cc.summary_fingerprint = c.summary_fingerprint "
+            "JOIN content c           ON c.content_id  = cf.content_id "
+            "JOIN content_channel cc  ON cc.content_id = cf.content_id "
         )
         where: list[str] = []
         if topic is not None:
-            where.append("cc.topic = ?")
+            sql += "JOIN topic t ON t.topic_id = cc.topic_id "
+            where.append("t.name = ?")
             params.append(topic)
         if schema is not None:
             sql += (
                 "JOIN content_schema cs "
-                "  ON cs.summary_fingerprint = c.summary_fingerprint "
+                "  ON cs.content_id = cf.content_id "
                 "  AND cs.schema_id = cc.schema_id "
-                "JOIN schema s ON s.schema_hash = cs.schema_hash "
+                "JOIN schema s ON s.schema_pk_id = cs.schema_pk_id "
             )
             where.append("s.name = ?")
             params.append(schema)
@@ -783,8 +774,7 @@ def query_cmd(
             f"{_EFF_END_SQL}   AS eff_end, "
             "cf.size_bytes "
             "FROM current_file cf "
-            "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint "
-            f"{_CHUNK_FALLBACK_JOIN}"
+            "JOIN content c ON c.content_id = cf.content_id "
         )
         where = []
         if fingerprint is not None:
@@ -907,17 +897,18 @@ def topics_cmd(
         return 1
 
     sql = (
-        "SELECT cc.topic, "
+        "SELECT t.name AS topic, "
         "       COUNT(DISTINCT cf.abs_path) AS files, "
         "       COALESCE(SUM(cc.message_count), 0) AS messages "
         "FROM current_file cf "
-        "JOIN content_channel cc ON cc.summary_fingerprint = cf.summary_fingerprint "
+        "JOIN content_channel cc ON cc.content_id = cf.content_id "
+        "JOIN topic t            ON t.topic_id   = cc.topic_id "
     )
     params: list[str | int] = []
     if prefix is not None:
-        sql += "WHERE cc.topic LIKE ? ESCAPE '\\' "
+        sql += "WHERE t.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
-    sql += "GROUP BY cc.topic HAVING files >= ? ORDER BY files DESC, messages DESC LIMIT ?"
+    sql += "GROUP BY t.name HAVING files >= ? ORDER BY files DESC, messages DESC LIMIT ?"
     params.extend([min_files, limit])
 
     with open_db(db_path, read_only=True) as conn:
@@ -985,8 +976,8 @@ def schemas_cmd(
         "SELECT s.name, s.encoding, "
         "       COUNT(DISTINCT cf.abs_path) AS files "
         "FROM current_file cf "
-        "JOIN content_schema cs ON cs.summary_fingerprint = cf.summary_fingerprint "
-        "JOIN schema s          ON s.schema_hash         = cs.schema_hash "
+        "JOIN content_schema cs ON cs.content_id  = cf.content_id "
+        "JOIN schema s          ON s.schema_pk_id = cs.schema_pk_id "
     )
     params: list[str | int] = []
     if prefix is not None:
@@ -1079,7 +1070,7 @@ def duplicates_cmd(
         "       GROUP_CONCAT(cf.abs_path, CHAR(10)) AS paths "
         "FROM current_file cf "
     )
-    where_parts = ["cf.summary_fingerprint IS NOT NULL"]
+    where_parts = ["cf.content_id IS NOT NULL"]
     params: list[str | int] = []
     if folder is not None:
         predicate, prefix_params = _path_prefix_predicate(folder)
@@ -1210,21 +1201,26 @@ def info_cmd(
             (summary_fp,),
         ).fetchone()
         topic_rows = conn.execute(
-            "SELECT cc.topic, s.name, cc.message_encoding, cc.message_count "
+            "SELECT t.name AS topic, s.name AS schema_name, "
+            "       cc.message_encoding, cc.message_count "
             "FROM content_channel cc "
+            "JOIN content c       ON c.content_id = cc.content_id "
+            "JOIN topic t         ON t.topic_id   = cc.topic_id "
             "LEFT JOIN content_schema cs "
-            "  ON cs.summary_fingerprint = cc.summary_fingerprint "
+            "  ON cs.content_id = cc.content_id "
             "  AND cs.schema_id = cc.schema_id "
-            "LEFT JOIN schema s ON s.schema_hash = cs.schema_hash "
-            "WHERE cc.summary_fingerprint = ? "
-            "ORDER BY cc.message_count DESC NULLS LAST, cc.topic",
+            "LEFT JOIN schema s  ON s.schema_pk_id = cs.schema_pk_id "
+            "WHERE c.summary_fingerprint = ? "
+            "ORDER BY cc.message_count DESC NULLS LAST, t.name",
             (summary_fp,),
         ).fetchall()
         observation_rows = conn.execute(
-            "SELECT abs_path, observed_at, session_id, file_fingerprint, summary_fingerprint "
-            "FROM file_observation "
-            "WHERE summary_fingerprint = ? OR abs_path = ? "
-            "ORDER BY observed_at DESC LIMIT 20",
+            "SELECT fo.abs_path, fo.observed_at, fo.session_id, "
+            "       fo.file_fingerprint, c.summary_fingerprint "
+            "FROM file_observation fo "
+            "LEFT JOIN content c ON c.content_id = fo.content_id "
+            "WHERE c.summary_fingerprint = ? OR fo.abs_path = ? "
+            "ORDER BY fo.observed_at DESC LIMIT 20",
             (summary_fp, abs_path or ""),
         ).fetchall()
         error_rows = conn.execute(

@@ -112,10 +112,18 @@ class _ContentRow:
     chunk_count: int
     message_start_time: int
     message_end_time: int
+    # MIN/MAX over chunks whose own start clears ``_SANE_EPOCH_NS``. ``None``
+    # when no chunk qualifies, in which case the duration is unknown.
+    sane_message_start_time: int | None
+    sane_message_end_time: int | None
     scan_kind: str
     channels: list[dict] = field(default_factory=list)
     schemas: list[dict] = field(default_factory=list)
-    chunks: list[dict] = field(default_factory=list)
+
+
+# 2000-01-01T00:00:00Z in ns. Mirrors ``cmd.index_cmd._SANE_EPOCH_NS`` and
+# ``migrations.0002_normalise_and_drop_chunks._SANE_EPOCH_NS`` — keep in sync.
+_SANE_EPOCH_NS = 946_684_800 * 1_000_000_000
 
 
 @dataclass(slots=True)
@@ -198,14 +206,14 @@ def _iter_mcap_files(
 
 def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
     row = conn.execute(
-        """SELECT size_bytes, mtime_ns, summary_fingerprint FROM file_observation
+        """SELECT size_bytes, mtime_ns, content_id FROM file_observation
            WHERE abs_path=? ORDER BY id DESC LIMIT 1""",
         (str(inp.path),),
     ).fetchone()
     if row is None:
         return False
-    size_bytes, mtime_ns, summary_fp = row
-    return size_bytes == inp.size_bytes and mtime_ns == inp.mtime_ns and summary_fp is not None
+    size_bytes, mtime_ns, content_id = row
+    return size_bytes == inp.size_bytes and mtime_ns == inp.mtime_ns and content_id is not None
 
 
 def _error_skip(
@@ -322,18 +330,15 @@ def _build_content_row(
         for sc in summary.schemas.values()
     ]
 
-    chunks = [
-        {
-            "chunk_idx": idx,
-            "message_start_time": ci.message_start_time,
-            "message_end_time": ci.message_end_time,
-            "chunk_start_offset": ci.chunk_start_offset,
-            "chunk_length": ci.chunk_length,
-            "compression": ci.compression,
-            "compressed_size": ci.compressed_size,
-            "uncompressed_size": ci.uncompressed_size,
-        }
-        for idx, ci in enumerate(summary.chunk_indexes)
+    sane_starts = [
+        ci.message_start_time
+        for ci in summary.chunk_indexes
+        if ci.message_start_time >= _SANE_EPOCH_NS
+    ]
+    sane_ends = [
+        ci.message_end_time
+        for ci in summary.chunk_indexes
+        if ci.message_start_time >= _SANE_EPOCH_NS
     ]
 
     return _ContentRow(
@@ -350,10 +355,11 @@ def _build_content_row(
         chunk_count=(stats.chunk_count if stats is not None else len(summary.chunk_indexes)),
         message_start_time=(stats.message_start_time if stats is not None else 0),
         message_end_time=(stats.message_end_time if stats is not None else 0),
+        sane_message_start_time=min(sane_starts) if sane_starts else None,
+        sane_message_end_time=max(sane_ends) if sane_ends else None,
         scan_kind=scan_kind,
         channels=channels,
         schemas=schemas,
-        chunks=chunks,
     )
 
 
@@ -430,13 +436,13 @@ def _record_observation(
     conn: sqlite3.Connection,
     inp: _ScanInput,
     file_fp: str,
-    summary_fp: str | None,
+    content_id: int | None,
     session_id: int,
 ) -> None:
     conn.execute(
         """INSERT INTO file_observation
            (abs_path, size_bytes, mtime_ns, inode, file_fingerprint,
-            summary_fingerprint, session_id, observed_at)
+            content_id, session_id, observed_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             str(inp.path),
@@ -444,7 +450,7 @@ def _record_observation(
             inp.mtime_ns,
             inp.inode,
             file_fp,
-            summary_fp,
+            content_id,
             session_id,
             time.time_ns(),
         ),
@@ -478,20 +484,33 @@ def _record_deletion(conn: sqlite3.Connection, abs_path: str, session_id: int) -
     conn.execute(
         """INSERT INTO file_observation
            (abs_path, size_bytes, mtime_ns, inode, file_fingerprint,
-            summary_fingerprint, is_deleted, session_id, observed_at)
+            content_id, is_deleted, session_id, observed_at)
            VALUES (?, 0, 0, NULL, '', NULL, 1, ?, ?)""",
         (abs_path, session_id, time.time_ns()),
     )
 
 
-def _insert_content(conn: sqlite3.Connection, content: _ContentRow, session_id: int) -> None:
-    conn.execute(
-        """INSERT OR IGNORE INTO content
+def _insert_content(
+    conn: sqlite3.Connection,
+    content: _ContentRow,
+    session_id: int,
+    *,
+    topic_id_cache: dict[str, int],
+    schema_pk_id_cache: dict[str, int],
+) -> int:
+    """Insert ``content`` + child rows. Returns the new ``content_id``.
+
+    Mutates the caches so repeated topic / schema names within one scan don't
+    re-roundtrip to SQLite.
+    """
+    cur = conn.execute(
+        """INSERT INTO content
            (summary_fingerprint, size_bytes, library, profile, message_count, schema_count,
             channel_count, attachment_count, metadata_count, chunk_count,
-            message_start_time, message_end_time, scan_kind, first_seen_at,
-            first_seen_session)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            message_start_time, message_end_time,
+            sane_message_start_time, sane_message_end_time,
+            scan_kind, first_seen_at, first_seen_session)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             content.summary_fingerprint,
             content.size_bytes,
@@ -505,21 +524,52 @@ def _insert_content(conn: sqlite3.Connection, content: _ContentRow, session_id: 
             content.chunk_count,
             content.message_start_time,
             content.message_end_time,
+            content.sane_message_start_time,
+            content.sane_message_end_time,
             content.scan_kind,
             time.time_ns(),
             session_id,
         ),
     )
+    content_id = cur.lastrowid
+    assert content_id is not None
+
+    # ``schema`` dimension table — one row per canonical schema hash.
+    for sc in content.schemas:
+        sh = sc["schema_hash"]
+        if sh in schema_pk_id_cache:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO schema(schema_hash, name, encoding, schema_size) "
+            "VALUES (?, ?, ?, ?)",
+            (sh, sc["name"], sc["encoding"], sc["schema_size"]),
+        )
+        row = conn.execute(
+            "SELECT schema_pk_id FROM schema WHERE schema_hash = ?", (sh,)
+        ).fetchone()
+        schema_pk_id_cache[sh] = row[0]
+
+    # ``topic`` dimension table — one row per channel topic string.
+    for ch in content.channels:
+        topic = ch["topic"]
+        if topic in topic_id_cache:
+            continue
+        conn.execute("INSERT OR IGNORE INTO topic(name) VALUES (?)", (topic,))
+        row = conn.execute(
+            "SELECT topic_id FROM topic WHERE name = ?", (topic,)
+        ).fetchone()
+        topic_id_cache[topic] = row[0]
+
     conn.executemany(
-        """INSERT OR IGNORE INTO content_channel
-           (summary_fingerprint, channel_id, topic, schema_id, message_encoding,
+        """INSERT INTO content_channel
+           (content_id, channel_id, topic_id, schema_id, message_encoding,
             metadata, message_count)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         [
             (
-                content.summary_fingerprint,
+                content_id,
                 ch["channel_id"],
-                ch["topic"],
+                topic_id_cache[ch["topic"]],
                 ch["schema_id"],
                 ch["message_encoding"],
                 ch["metadata"],
@@ -529,43 +579,15 @@ def _insert_content(conn: sqlite3.Connection, content: _ContentRow, session_id: 
         ],
     )
     conn.executemany(
-        """INSERT OR IGNORE INTO schema
-           (schema_hash, name, encoding, schema_size)
-           VALUES (?, ?, ?, ?)""",
-        [
-            (sc["schema_hash"], sc["name"], sc["encoding"], sc["schema_size"])
-            for sc in content.schemas
-        ],
-    )
-    conn.executemany(
-        """INSERT OR IGNORE INTO content_schema
-           (summary_fingerprint, schema_id, schema_hash)
+        """INSERT INTO content_schema
+           (content_id, schema_id, schema_pk_id)
            VALUES (?, ?, ?)""",
         [
-            (content.summary_fingerprint, sc["schema_id"], sc["schema_hash"])
+            (content_id, sc["schema_id"], schema_pk_id_cache[sc["schema_hash"]])
             for sc in content.schemas
         ],
     )
-    conn.executemany(
-        """INSERT OR IGNORE INTO content_chunk
-           (summary_fingerprint, chunk_idx, message_start_time, message_end_time,
-            chunk_start_offset, chunk_length, compression, compressed_size, uncompressed_size)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        [
-            (
-                content.summary_fingerprint,
-                ck["chunk_idx"],
-                ck["message_start_time"],
-                ck["message_end_time"],
-                ck["chunk_start_offset"],
-                ck["chunk_length"],
-                ck["compression"],
-                ck["compressed_size"],
-                ck["uncompressed_size"],
-            )
-            for ck in content.chunks
-        ],
-    )
+    return content_id
 
 
 def _existing_summary_fingerprints(conn: sqlite3.Connection) -> set[str]:
@@ -581,9 +603,10 @@ def _existing_file_to_summary(conn: sqlite3.Connection) -> dict[str, str]:
     return {
         row[0]: row[1]
         for row in conn.execute(
-            "SELECT DISTINCT file_fingerprint, summary_fingerprint "
-            "FROM file_observation "
-            "WHERE summary_fingerprint IS NOT NULL"
+            "SELECT DISTINCT fo.file_fingerprint, c.summary_fingerprint "
+            "FROM file_observation fo "
+            "JOIN content c ON c.content_id = fo.content_id "
+            "WHERE fo.content_id IS NOT NULL"
         )
     }
 
@@ -613,6 +636,23 @@ def scan(
         if session_id is None:
             session_id = start_session(conn, root, pymcap_cli_version)
         return session_id
+
+    # Per-scan caches.
+    content_id_by_fp: dict[str, int] = {}
+    topic_id_cache: dict[str, int] = {}
+    schema_pk_id_cache: dict[str, int] = {}
+
+    def _resolve_content_id(summary_fp: str) -> int:
+        cid = content_id_by_fp.get(summary_fp)
+        if cid is not None:
+            return cid
+        row = conn.execute(
+            "SELECT content_id FROM content WHERE summary_fingerprint = ?",
+            (summary_fp,),
+        ).fetchone()
+        assert row is not None, f"content row missing for {summary_fp!r}"
+        content_id_by_fp[summary_fp] = row[0]
+        return row[0]
 
     def _record_scan_error(inp: _ScanInput, kind: str, message: str, file_fp: str = "") -> None:
         active_session_id = _ensure_session()
@@ -646,32 +686,41 @@ def scan(
             stats.errored += 1
             _bump_error_kind(stats, result.error_kind)
         elif result.summary_fingerprint is not None and result.content is None:
+            content_id = _resolve_content_id(result.summary_fingerprint)
             _record_observation(
                 conn,
                 result.inp,
                 result.file_fingerprint or "",
-                result.summary_fingerprint,
+                content_id,
                 active_session_id,
             )
             file_fp_cache[result.file_fingerprint or ""] = result.summary_fingerprint
             stats.fingerprint_reused += 1
         elif result.summary_fingerprint is not None and result.content is not None:
             if _content_exists(conn, result.summary_fingerprint):
+                content_id = _resolve_content_id(result.summary_fingerprint)
                 _record_observation(
                     conn,
                     result.inp,
                     result.file_fingerprint or "",
-                    result.summary_fingerprint,
+                    content_id,
                     active_session_id,
                 )
                 stats.fingerprint_reused += 1
             else:
-                _insert_content(conn, result.content, active_session_id)
+                content_id = _insert_content(
+                    conn,
+                    result.content,
+                    active_session_id,
+                    topic_id_cache=topic_id_cache,
+                    schema_pk_id_cache=schema_pk_id_cache,
+                )
+                content_id_by_fp[result.summary_fingerprint] = content_id
                 _record_observation(
                     conn,
                     result.inp,
                     result.file_fingerprint or "",
-                    result.summary_fingerprint,
+                    content_id,
                     active_session_id,
                 )
                 known_summary_fps.add(result.summary_fingerprint)

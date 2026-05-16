@@ -47,6 +47,7 @@ def _ensure_transaction_active(conn: sqlite3.Connection, version: int) -> None:
 def apply_pending(conn: sqlite3.Connection) -> None:
     """Apply every migration whose version is greater than ``user_version``."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
+    ran_any = False
     for version, apply, description in _discover():
         if version <= current:
             continue
@@ -65,3 +66,9 @@ def apply_pending(conn: sqlite3.Connection) -> None:
                 conn.execute("ROLLBACK")
             raise
         current = version
+        ran_any = True
+    if ran_any:
+        # Migrations that drop tables (e.g. 0002) leave a lot of free pages.
+        # ``VACUUM`` reclaims them so the file actually shrinks. Must run
+        # outside any transaction.
+        conn.execute("VACUUM")
