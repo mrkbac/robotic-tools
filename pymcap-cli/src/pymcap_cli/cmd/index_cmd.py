@@ -1145,12 +1145,22 @@ def query_cmd(
     ] = None,
     *,
     sort_by: Annotated[
-        Literal["path", "duration", "messages", "size", "start"],
+        Literal[
+            "discovered",
+            "observed",
+            "modified",
+            "path",
+            "start",
+            "end",
+            "size",
+            "messages",
+            "duration",
+        ],
         Parameter(
-            name=["--sort-by"],
+            name=["--sort-by", "-s"],
             help="Sort results (descending except for ``path``).",
         ),
-    ] = "path",
+    ] = "discovered",
     topic: Annotated[
         str | None,
         Parameter(name=["--topic"], help="Match files containing this topic."),
@@ -1223,14 +1233,19 @@ def query_cmd(
     _safe_start_sql = (
         f"CASE WHEN {_EFF_START_SQL} >= {SANE_EPOCH_NS} THEN {_EFF_START_SQL} ELSE NULL END"
     )
+    _safe_end_sql = f"CASE WHEN {_EFF_END_SQL} >= {SANE_EPOCH_NS} THEN {_EFF_END_SQL} ELSE NULL END"
     order_by = {
+        "discovered": "c.first_seen_at_ns DESC, cf.abs_path",
+        "observed": "cf.observed_at_ns DESC, cf.abs_path",
+        "modified": "cf.mtime_ns DESC, cf.abs_path",
         "path": "cf.abs_path",
-        "duration": f"{_safe_dur_sql} DESC",
-        "messages": "messages DESC"
+        "duration": f"{_safe_dur_sql} DESC, cf.abs_path",
+        "messages": "messages DESC, cf.abs_path"
         if (topic is not None or schema is not None)
-        else "c.message_count DESC",
-        "size": "cf.size_bytes DESC",
-        "start": f"{_safe_start_sql} DESC",
+        else "c.message_count DESC, cf.abs_path",
+        "size": "cf.size_bytes DESC, cf.abs_path",
+        "start": f"{_safe_start_sql} DESC, cf.abs_path",
+        "end": f"{_safe_end_sql} DESC, cf.abs_path",
     }[sort_by]
 
     folder_clause = ""

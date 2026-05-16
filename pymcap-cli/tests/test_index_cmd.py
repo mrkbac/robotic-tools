@@ -9,6 +9,7 @@ import sqlite3
 from contextlib import redirect_stdout
 from io import BytesIO
 from pathlib import Path
+from typing import Literal
 
 from pymcap_cli.cmd.index_cmd import (
     _MAX_PLAUSIBLE_DURATION_NS,
@@ -20,6 +21,7 @@ from pymcap_cli.cmd.index_cmd import (
     _safe_duration_ns,
     duplicates_cmd,
     errors_cmd,
+    index_app,
     info_cmd,
     query_cmd,
     scan_cmd,
@@ -34,6 +36,18 @@ from rich.text import Text
 from small_mcap import CompressionType, McapWriter
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap, create_simple_mcap
+
+QuerySort = Literal[
+    "discovered",
+    "observed",
+    "modified",
+    "path",
+    "start",
+    "end",
+    "size",
+    "messages",
+    "duration",
+]
 
 
 def _seed(tmp_path: Path) -> Path:
@@ -200,6 +214,29 @@ def _capture_stdout(call) -> tuple[int, str]:
     with redirect_stdout(buf):
         rc = call()
     return rc, buf.getvalue()
+
+
+def _query_sort_fixture(tmp_path: Path) -> tuple[Path, dict[str, int]]:
+    (tmp_path / "alpha.mcap").write_bytes(create_simple_mcap(num_messages=1))
+    (tmp_path / "beta.mcap").write_bytes(create_simple_mcap(num_messages=2))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    raw = sqlite3.connect(db)
+    try:
+        rows = raw.execute("SELECT abs_path, content_id FROM current_file").fetchall()
+    finally:
+        raw.close()
+    return db, {Path(path).name: int(content_id) for path, content_id in rows}
+
+
+def _query_path_names(db: Path, *, sort_by: QuerySort | None = None) -> list[str]:
+    if sort_by is None:
+        rc, output = _capture_stdout(lambda: query_cmd(db=db, format="json"))
+    else:
+        rc, output = _capture_stdout(lambda: query_cmd(db=db, format="json", sort_by=sort_by))
+    assert rc == 0
+    return [Path(str(row["path"])).name for row in _json.loads(output)]
 
 
 def test_format_compression_cell_variants() -> None:
@@ -610,6 +647,114 @@ def test_query_json_exposes_short_id_and_fingerprint(tmp_path: Path) -> None:
     assert row["summary_fingerprint"].startswith("s1:")
     assert len(row["summary_fingerprint"]) == 3 + 32
     assert row["short_id"] == row["summary_fingerprint"][3:11]
+
+
+def test_query_defaults_to_newest_discovered(tmp_path: Path) -> None:
+    db, content_ids = _query_sort_fixture(tmp_path)
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(
+            "UPDATE content SET first_seen_at_ns = 100 WHERE id = ?",
+            (content_ids["alpha.mcap"],),
+        )
+        raw.execute(
+            "UPDATE content SET first_seen_at_ns = 200 WHERE id = ?",
+            (content_ids["beta.mcap"],),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert _query_path_names(db) == ["beta.mcap", "alpha.mcap"]
+
+
+def test_query_sort_by_path_is_still_available(tmp_path: Path) -> None:
+    db, content_ids = _query_sort_fixture(tmp_path)
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(
+            "UPDATE content SET first_seen_at_ns = 200 WHERE id = ?",
+            (content_ids["alpha.mcap"],),
+        )
+        raw.execute(
+            "UPDATE content SET first_seen_at_ns = 100 WHERE id = ?",
+            (content_ids["beta.mcap"],),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert _query_path_names(db, sort_by="path") == ["alpha.mcap", "beta.mcap"]
+
+
+def test_query_sort_by_observed_modified_and_end(tmp_path: Path) -> None:
+    db, content_ids = _query_sort_fixture(tmp_path)
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(
+            "UPDATE file_observation SET observed_at_ns = 300 WHERE content_id = ?",
+            (content_ids["alpha.mcap"],),
+        )
+        raw.execute(
+            "UPDATE file_observation SET observed_at_ns = 100 WHERE content_id = ?",
+            (content_ids["beta.mcap"],),
+        )
+        raw.execute(
+            "UPDATE file_observation SET mtime_ns = 100 WHERE content_id = ?",
+            (content_ids["alpha.mcap"],),
+        )
+        raw.execute(
+            "UPDATE file_observation SET mtime_ns = 300 WHERE content_id = ?",
+            (content_ids["beta.mcap"],),
+        )
+        raw.execute(
+            "UPDATE content SET message_start_time_ns = ?, message_end_time_ns = ? WHERE id = ?",
+            (SANE_EPOCH_NS, SANE_EPOCH_NS + 10, content_ids["alpha.mcap"]),
+        )
+        raw.execute(
+            "UPDATE content SET message_start_time_ns = ?, message_end_time_ns = ? WHERE id = ?",
+            (SANE_EPOCH_NS, SANE_EPOCH_NS + 20, content_ids["beta.mcap"]),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert _query_path_names(db, sort_by="observed") == ["alpha.mcap", "beta.mcap"]
+    assert _query_path_names(db, sort_by="modified") == ["beta.mcap", "alpha.mcap"]
+    assert _query_path_names(db, sort_by="end") == ["beta.mcap", "alpha.mcap"]
+
+
+def test_query_sort_by_short_alias(tmp_path: Path) -> None:
+    db, content_ids = _query_sort_fixture(tmp_path)
+    raw = sqlite3.connect(db)
+    try:
+        raw.execute(
+            "UPDATE content SET first_seen_at_ns = 200 WHERE id = ?",
+            (content_ids["alpha.mcap"],),
+        )
+        raw.execute(
+            "UPDATE content SET first_seen_at_ns = 100 WHERE id = ?",
+            (content_ids["beta.mcap"],),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        try:
+            index_app(["query", "-s", "path", "--format", "json", "--db", str(db)])
+        except SystemExit as exc:
+            rc = int(exc.code or 0)
+        else:
+            rc = 0
+    output = buf.getvalue()
+
+    assert rc == 0
+    assert [Path(str(row["path"])).name for row in _json.loads(output)] == [
+        "alpha.mcap",
+        "beta.mcap",
+    ]
 
 
 def test_info_resolves_short_id(tmp_path: Path) -> None:
