@@ -53,6 +53,29 @@ _ERROR_KIND_LABEL: dict[str, str] = {
 # is stored in the catalog.
 _SANE_EPOCH_NS = 946_684_800 * 1_000_000_000  # 2000-01-01T00:00:00Z
 
+# Re-derive ``(start, end)`` from ``content_chunk`` when the file-level value
+# is bogus: keep only chunks whose own ``message_start_time`` clears the same
+# sanity threshold, then take MIN/MAX over them. SQLite uses the PK
+# ``(summary_fingerprint, chunk_idx)`` to group cheaply per file.
+_CHUNK_FALLBACK_JOIN = (
+    "LEFT JOIN ( "
+    "  SELECT summary_fingerprint, "
+    f"         MIN(message_start_time) AS eff_start, "
+    f"         MAX(message_end_time)   AS eff_end "
+    "  FROM content_chunk "
+    f"  WHERE message_start_time >= {_SANE_EPOCH_NS} "
+    "  GROUP BY summary_fingerprint "
+    ") cc_fb ON cc_fb.summary_fingerprint = c.summary_fingerprint "
+)
+_EFF_START_SQL = (
+    f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
+    "THEN c.message_start_time ELSE cc_fb.eff_start END"
+)
+_EFF_END_SQL = (
+    f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
+    "THEN c.message_end_time ELSE cc_fb.eff_end END"
+)
+
 
 def _safe_duration_ns(start_ns: int | None, end_ns: int | None) -> int | None:
     if start_ns is None or end_ns is None or end_ns <= start_ns:
@@ -113,10 +136,9 @@ def _format_ts_ns(time_ns: int | None) -> str:
 
 
 def _format_duration_ns(start_ns: int | None, end_ns: int | None) -> str:
-    duration = _safe_duration_ns(start_ns, end_ns)
-    if duration is None:
+    if start_ns is None or end_ns is None or end_ns <= start_ns:
         return "-"
-    secs = duration / 1e9
+    secs = (end_ns - start_ns) / 1e9
     if secs < 60:
         return f"{secs:.1f}s"
     if secs < 3600:
@@ -566,9 +588,11 @@ def tree_cmd(
     with open_db(db_path, read_only=True) as conn:
         files = conn.execute(
             f"""SELECT cf.abs_path, cf.size_bytes, c.message_count,
-                       c.message_start_time, c.message_end_time
+                       {_EFF_START_SQL} AS eff_start,
+                       {_EFF_END_SQL}   AS eff_end
                 FROM current_file cf
                 JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint
+                {_CHUNK_FALLBACK_JOIN}
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
@@ -686,17 +710,19 @@ def query_cmd(
         window_end = _parse_time_or_exit(until, "until")
 
     # Files with bogus start times (uninitialised clock) would sort first if
-    # we just diffed end-start. Treat sub-epoch starts as having no duration.
-    _safe_dur_sql = (
-        f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
-        "THEN (c.message_end_time - c.message_start_time) ELSE 0 END"
+    # we just diffed end-start. Use the chunk-based fallback when the
+    # file-level start is sub-epoch.
+    _safe_dur_sql = f"({_EFF_END_SQL} - {_EFF_START_SQL})"
+    _safe_start_sql = (
+        f"CASE WHEN {_EFF_START_SQL} >= {_SANE_EPOCH_NS} "
+        f"THEN {_EFF_START_SQL} ELSE NULL END"
     )
     order_by = {
         "path": "cf.abs_path",
         "duration": f"{_safe_dur_sql} DESC",
         "messages": "messages DESC" if (topic is not None or schema is not None) else "c.message_count DESC",
         "size": "cf.size_bytes DESC",
-        "start": "c.message_start_time DESC",
+        "start": f"{_safe_start_sql} DESC",
     }[sort_by]
 
     folder_clause = ""
@@ -715,9 +741,12 @@ def query_cmd(
             "SELECT cf.abs_path, "
             "COALESCE(SUM(cc.message_count), 0) AS messages, "
             "COUNT(DISTINCT cc.channel_id) AS channels, "
-            "c.message_start_time, c.message_end_time, cf.size_bytes "
+            f"{_EFF_START_SQL} AS eff_start, "
+            f"{_EFF_END_SQL}   AS eff_end, "
+            "cf.size_bytes "
             "FROM current_file cf "
             "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint "
+            f"{_CHUNK_FALLBACK_JOIN}"
             "JOIN content_channel cc ON cc.summary_fingerprint = c.summary_fingerprint "
         )
         where: list[str] = []
@@ -750,9 +779,12 @@ def query_cmd(
     else:
         sql = (
             "SELECT cf.abs_path, c.message_count, c.channel_count, "
-            "c.message_start_time, c.message_end_time, cf.size_bytes "
+            f"{_EFF_START_SQL} AS eff_start, "
+            f"{_EFF_END_SQL}   AS eff_end, "
+            "cf.size_bytes "
             "FROM current_file cf "
             "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint "
+            f"{_CHUNK_FALLBACK_JOIN}"
         )
         where = []
         if fingerprint is not None:
@@ -829,16 +861,19 @@ def query_cmd(
         channels = row["channels"]
         start = row["start_time_ns"]
         end = row["end_time_ns"]
+        duration_ns = row["duration_ns"]
+        duration_str = (
+            _format_duration_ns(0, duration_ns)
+            if isinstance(duration_ns, int)
+            else "-"
+        )
         table.add_row(
             _format_parts_with_colors(str(row["path"])),
             f"{msgs:,}" if isinstance(msgs, int) else "-",
             f"{channels:,}" if isinstance(channels, int) else "-",
             _format_ts_ns(start if isinstance(start, int) else None),
             _format_ts_ns(end if isinstance(end, int) else None),
-            _format_duration_ns(
-                start if isinstance(start, int) else None,
-                end if isinstance(end, int) else None,
-            ),
+            duration_str,
         )
     console.print(table)
     return 0
