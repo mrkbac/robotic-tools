@@ -35,11 +35,12 @@ if TYPE_CHECKING:
 description = "normalise keys; drop content_chunk; precompute sane times"
 
 # 2000-01-01T00:00:00Z in nanoseconds. Anything earlier almost certainly comes
-# from an uninitialised clock (e.g. ROS time before NTP sync). Mirrored in
-# ``pymcap_cli.cmd.index_cmd._SANE_EPOCH_NS`` — keep them in sync.
+# from an uninitialised clock (e.g. ROS time before NTP sync). Frozen here at
+# the value used when this migration was authored; the live constant lives at
+# ``pymcap_cli.index.SANE_EPOCH_NS`` but migrations don't import it.
 _SANE_EPOCH_NS = 946_684_800 * 1_000_000_000
 
-_NEW_TABLES = f"""
+_NEW_TABLES = """
 CREATE TABLE content_v2 (
   content_id              INTEGER PRIMARY KEY AUTOINCREMENT,
   summary_fingerprint     TEXT NOT NULL UNIQUE,

@@ -46,6 +46,14 @@ def connect(db_path: Path, *, read_only: bool = False) -> sqlite3.Connection:
         raise FileNotFoundError(db_path)
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    # Read-side tuning. SQLite's defaults (2 MiB page cache, no mmap) are
+    # tiny relative to a sidecar catalog that is typically 100–500 MiB and
+    # gets aggregated repeatedly. ``query_only`` guards against accidental
+    # writer calls on a connection meant for reads.
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-65536")
+    conn.execute("PRAGMA mmap_size=268435456")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

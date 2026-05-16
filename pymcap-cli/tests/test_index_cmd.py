@@ -91,7 +91,7 @@ def test_safe_duration_ns_rejects_implausible_span() -> None:
     """``_safe_duration_ns`` returns ``None`` for spans over the cap."""
     from pymcap_cli.cmd.index_cmd import (
         _MAX_PLAUSIBLE_DURATION_NS,
-        _SANE_EPOCH_NS,
+        SANE_EPOCH_NS,
         _safe_duration_ns,
     )
 
@@ -112,7 +112,7 @@ def test_safe_duration_ns_rejects_implausible_span() -> None:
     # One nanosecond past the cap is rejected.
     assert _safe_duration_ns(sane_start, sane_start + _MAX_PLAUSIBLE_DURATION_NS + 1) is None
     # Constants are also exported, so callers can build their own SQL.
-    assert _SANE_EPOCH_NS > 0
+    assert SANE_EPOCH_NS > 0
 
 
 def test_format_duration_ns_buckets() -> None:
@@ -166,9 +166,7 @@ def test_info_shows_compression_for_compressed_mcap(tmp_path: Path) -> None:
     db = tmp_path / "index.sqlite"
     assert scan_cmd(tmp_path, db=db) == 0
 
-    rc, output = _capture_stdout(
-        lambda: info_cmd(str(tmp_path / "rec.mcap"), format="json", db=db)
-    )
+    rc, output = _capture_stdout(lambda: info_cmd(str(tmp_path / "rec.mcap"), format="json", db=db))
     assert rc == 0
     identity = _json.loads(output)["identity"]
     assert identity["compression"] == "lz4"
@@ -209,9 +207,7 @@ def test_errors_lists_scan_errors(tmp_path: Path) -> None:
     assert rows[0]["path"].endswith("broken.mcap")
 
     # ``--kind`` filter eliminates non-matching kinds.
-    rc, output = _capture_stdout(
-        lambda: errors_cmd(db=db, format="json", kind="no_summary")
-    )
+    rc, output = _capture_stdout(lambda: errors_cmd(db=db, format="json", kind="no_summary"))
     assert rc == 0
     assert _json.loads(output) == []
 
@@ -275,6 +271,7 @@ def test_topics_lists_topics_with_counts(tmp_path: Path) -> None:
 
 def test_topics_counts_distinct_schemas(tmp_path: Path) -> None:
     """A topic published with two different schemas reports schemas == 2."""
+
     def _file(schema_name: str, msg_log_time: int) -> bytes:
         out = BytesIO()
         w = McapWriter(out)
@@ -391,11 +388,14 @@ def test_topics_sort_by_messages(tmp_path: Path) -> None:
 
 def test_schemas_sort_by_name(tmp_path: Path) -> None:
     """``schemas --sort-by name`` orders schemas alphabetically ascending."""
+
     def _mcap_with_schema(schema_name: str, topic: str) -> bytes:
         output = BytesIO()
         writer = McapWriter(output)
         writer.start()
-        writer.add_schema(schema_id=1, name=schema_name, encoding="ros2msg", data=schema_name.encode())
+        writer.add_schema(
+            schema_id=1, name=schema_name, encoding="ros2msg", data=schema_name.encode()
+        )
         writer.add_channel(channel_id=1, topic=topic, message_encoding="cdr", schema_id=1)
         writer.add_message(channel_id=1, log_time=1, publish_time=1, data=b"")
         writer.finish()

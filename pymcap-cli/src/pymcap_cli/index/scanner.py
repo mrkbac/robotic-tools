@@ -37,6 +37,7 @@ from typing import IO, TYPE_CHECKING
 import xxhash
 from small_mcap import McapError, get_header, get_summary, rebuild_summary
 
+from pymcap_cli.index import SANE_EPOCH_NS
 from pymcap_cli.index.db import finish_session, start_session
 from pymcap_cli.index.fingerprint import fingerprint_stream
 from pymcap_cli.index.summary_fingerprint import compute_schema_hash_map, summary_fingerprint
@@ -65,7 +66,7 @@ def _worker_init(file_fp_cache: dict[str, str], known_summary_fps: set[str]) -> 
     _WORKER_KNOWN_SUMMARY_FPS = known_summary_fps
 
 
-def _process_file_task(inp: "_ScanInput", rebuild_missing: bool) -> "_ScanResult":
+def _process_file_task(inp: _ScanInput, rebuild_missing: bool) -> _ScanResult:
     return _process_file(
         inp,
         file_fp_cache=_WORKER_FILE_FP_CACHE,
@@ -117,7 +118,7 @@ class _ContentRow:
     chunk_count: int
     message_start_time: int
     message_end_time: int
-    # MIN/MAX over chunks whose own start clears ``_SANE_EPOCH_NS``. ``None``
+    # MIN/MAX over chunks whose own start clears ``SANE_EPOCH_NS``. ``None``
     # when no chunk qualifies, in which case the duration is unknown.
     sane_message_start_time: int | None
     sane_message_end_time: int | None
@@ -131,11 +132,6 @@ class _ContentRow:
     scan_kind: str
     channels: list[dict] = field(default_factory=list)
     schemas: list[dict] = field(default_factory=list)
-
-
-# 2000-01-01T00:00:00Z in ns. Mirrors ``cmd.index_cmd._SANE_EPOCH_NS`` and
-# ``migrations.0002_normalise_and_drop_chunks._SANE_EPOCH_NS`` — keep in sync.
-_SANE_EPOCH_NS = 946_684_800 * 1_000_000_000
 
 
 @dataclass(slots=True)
@@ -468,12 +464,12 @@ def _build_content_row(
     sane_starts = [
         ci.message_start_time
         for ci in summary.chunk_indexes
-        if ci.message_start_time >= _SANE_EPOCH_NS
+        if ci.message_start_time >= SANE_EPOCH_NS
     ]
     sane_ends = [
         ci.message_end_time
         for ci in summary.chunk_indexes
-        if ci.message_start_time >= _SANE_EPOCH_NS
+        if ci.message_start_time >= SANE_EPOCH_NS
     ]
 
     # Compression aggregates. ``None`` (rather than ``0`` / ``""``) when no
@@ -559,9 +555,7 @@ def _process_file(
                 summary_fingerprint=summary_fp,
             )
 
-        content = _build_content_row(
-            summary_fp, info, inp.size_bytes, scan_kind, schema_hash_by_id
-        )
+        content = _build_content_row(summary_fp, info, inp.size_bytes, scan_kind, schema_hash_by_id)
         return _ScanResult(
             inp=inp,
             file_fingerprint=file_fp,
@@ -726,9 +720,7 @@ def _insert_content(
         if topic in topic_id_cache:
             continue
         conn.execute("INSERT OR IGNORE INTO topic(name) VALUES (?)", (topic,))
-        row = conn.execute(
-            "SELECT topic_id FROM topic WHERE name = ?", (topic,)
-        ).fetchone()
+        row = conn.execute("SELECT topic_id FROM topic WHERE name = ?", (topic,)).fetchone()
         topic_id_cache[topic] = row[0]
 
     # ``channel_metadata`` dim — same JSON metadata repeats heavily across
@@ -1081,9 +1073,7 @@ def scan(
                     if progress is not None:
                         progress(stats)
                     continue
-                pending.add(
-                    pool.submit(_process_file_task, inp, rebuild_missing)
-                )
+                pending.add(pool.submit(_process_file_task, inp, rebuild_missing))
                 if len(pending) >= max_pending:
                     _drain_one_or_more()
 

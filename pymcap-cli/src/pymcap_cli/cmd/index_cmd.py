@@ -7,12 +7,11 @@ import json as _json
 import logging
 import os
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
-
-from collections.abc import Sequence
-from dataclasses import dataclass, field
 
 from cyclopts import App, Parameter
 from rich.console import Console
@@ -25,6 +24,7 @@ from pymcap_cli.display.display_utils import (
     _format_schema_with_link,
     _text_to_color,
 )
+from pymcap_cli.index import SANE_EPOCH_NS
 from pymcap_cli.index.db import default_db_path, open_db
 from pymcap_cli.index.scanner import ScanStats, scan
 from pymcap_cli.utils import bytes_to_human, parse_time_arg
@@ -47,19 +47,13 @@ _ERROR_KIND_LABEL: dict[str, str] = {
 }
 
 
-# Anything before 2000-01-01 UTC almost certainly comes from an uninitialised
-# clock (e.g. ROS time before NTP sync) and would inflate any duration
-# aggregate by decades. We use it to gate duration math without changing what
-# is stored in the catalog.
-_SANE_EPOCH_NS = 946_684_800 * 1_000_000_000  # 2000-01-01T00:00:00Z
-
-# Second sanity gate: even when both ``message_start_time`` and
-# ``message_end_time`` are post-epoch, the *span* between them can still be
-# bogus when two channels publish on desynced clocks (e.g. GPS stuck at 2011,
-# system clock at 2017, both messages legitimately written into the same MCAP
-# in 2024 — chunk-level MIN/MAX can't recover from that because every chunk
-# contains a mix). 30 days comfortably catches multi-year spans while letting
-# unusually-long single-recording datasets through.
+# Second sanity gate beyond ``SANE_EPOCH_NS``: even when both
+# ``message_start_time`` and ``message_end_time`` are post-epoch, the *span*
+# between them can still be bogus when two channels publish on desynced clocks
+# (e.g. GPS stuck at 2011, system clock at 2017, both messages legitimately
+# written into the same MCAP in 2024 — chunk-level MIN/MAX can't recover from
+# that because every chunk contains a mix). 30 days comfortably catches multi-
+# year spans while letting unusually-long single-recording datasets through.
 _MAX_PLAUSIBLE_DURATION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 
 # Pick whichever value (raw vs precomputed sane fallback) is post-epoch. The
@@ -67,11 +61,11 @@ _MAX_PLAUSIBLE_DURATION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 # ``ChunkIndex`` records, with the same threshold applied (see
 # ``scanner._build_content_row``).
 _EFF_START_SQL = (
-    f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
+    f"CASE WHEN c.message_start_time >= {SANE_EPOCH_NS} "
     "THEN c.message_start_time ELSE c.sane_message_start_time END"
 )
 _EFF_END_SQL = (
-    f"CASE WHEN c.message_start_time >= {_SANE_EPOCH_NS} "
+    f"CASE WHEN c.message_start_time >= {SANE_EPOCH_NS} "
     "THEN c.message_end_time ELSE c.sane_message_end_time END"
 )
 
@@ -89,7 +83,9 @@ def _format_compression_cell(
     if compression in ("", "none"):
         # Chunks exist, none compress. Still show the byte total so the user
         # can confirm the size on disk matches the message payload.
-        size = bytes_to_human(uncompressed) if isinstance(uncompressed, int) and uncompressed else "-"
+        size = (
+            bytes_to_human(uncompressed) if isinstance(uncompressed, int) and uncompressed else "-"
+        )
         return f"[dim]none[/]  [yellow]{size}[/]"
     ratio_part = ""
     if (
@@ -117,7 +113,7 @@ def _format_compression_cell(
 def _safe_duration_ns(start_ns: int | None, end_ns: int | None) -> int | None:
     if start_ns is None or end_ns is None or end_ns <= start_ns:
         return None
-    if start_ns < _SANE_EPOCH_NS:
+    if start_ns < SANE_EPOCH_NS:
         return None
     span = end_ns - start_ns
     if span > _MAX_PLAUSIBLE_DURATION_NS:
@@ -463,7 +459,7 @@ class _PathNode:
     duration_ns: int = 0
     topics: set[str] = field(default_factory=set)
     schemas: set[str] = field(default_factory=set)
-    children: dict[str, "_PathNode"] = field(default_factory=dict)
+    children: dict[str, _PathNode] = field(default_factory=dict)
 
 
 def _format_seconds_short(secs: float) -> str:
@@ -496,11 +492,18 @@ def _format_node_stats(node: _PathNode) -> str:
 
 def _build_path_tree(
     files: Sequence[tuple[str, int | None, int | None, int | None, int | None]],
-    topics: Sequence[tuple[str, str]],
-    schemas: Sequence[tuple[str, str]],
+    topics: Sequence[tuple[str, str | None]],
+    schemas: Sequence[tuple[str, str | None]],
     root_prefix: str,
 ) -> _PathNode:
-    """Group rows by their path prefix and accumulate stats up the chain."""
+    """Group rows by their path prefix and accumulate stats up the chain.
+
+    ``topics`` and ``schemas`` are aggregated one row per file, with the
+    member values comma-joined. That avoids materializing one Python row
+    per (file, topic) pair — for large indexes the un-aggregated fan-out
+    is the dominant cost of the tree. Topic names start with ``/`` and
+    schema hashes are hex digests, so ``,`` is a safe separator.
+    """
     root = _PathNode()
     chain_cache: dict[str, list[_PathNode]] = {}
 
@@ -534,13 +537,19 @@ def _build_path_tree(
             node.message_count += msg_v
             node.duration_ns += dur_v
 
-    for abs_path, topic in topics:
+    for abs_path, joined in topics:
+        if not joined:
+            continue
+        members = joined.split(",")
         for node in _chain_for(abs_path):
-            node.topics.add(topic)
+            node.topics.update(members)
 
-    for abs_path, schema_hash in schemas:
+    for abs_path, joined in schemas:
+        if not joined:
+            continue
+        members = joined.split(",")
         for node in _chain_for(abs_path):
-            node.schemas.add(schema_hash)
+            node.schemas.update(members)
 
     return root
 
@@ -573,9 +582,7 @@ def _render_path_tree(
 ) -> Tree:
     sort_key = _TREE_SORT_KEYS[sort_by]
     folded_root_label, folded_root = _fold_single_child_chain(root_label, root)
-    tree = Tree(
-        f"[bold blue]{folded_root_label}[/]  [dim]→[/]  {_format_node_stats(folded_root)}"
-    )
+    tree = Tree(f"[bold blue]{folded_root_label}[/]  [dim]→[/]  {_format_node_stats(folded_root)}")
 
     def _add(parent: Tree, node: _PathNode, depth: int) -> None:
         if depth >= max_depth:
@@ -647,20 +654,32 @@ def tree_cmd(
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
+        # One row per file. The per-content aggregate (~56k content rows on a
+        # representative corpus) collapses what would otherwise be a
+        # row-per-(file, topic) fan-out (~1.5M rows) and is the dominant cost
+        # of the tree. Members are comma-joined; see ``_build_path_tree``.
         topics = conn.execute(
-            f"""SELECT cf.abs_path, t.name
+            f"""SELECT cf.abs_path, agg.names
                 FROM current_file cf
-                JOIN content_channel cc ON cc.content_id     = cf.content_id
-                JOIN channel_sig sig    ON sig.channel_sig_id = cc.channel_sig_id
-                JOIN topic t            ON t.topic_id         = sig.topic_id
+                JOIN (
+                    SELECT cc.content_id, GROUP_CONCAT(DISTINCT t.name) AS names
+                    FROM content_channel cc
+                    JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id
+                    JOIN topic t         ON t.topic_id          = sig.topic_id
+                    GROUP BY cc.content_id
+                ) agg ON agg.content_id = cf.content_id
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
         schema_rows = conn.execute(
-            f"""SELECT cf.abs_path, s.schema_hash
+            f"""SELECT cf.abs_path, agg.hashes
                 FROM current_file cf
-                JOIN content_schema cs ON cs.content_id = cf.content_id
-                JOIN schema s          ON s.schema_pk_id = cs.schema_pk_id
+                JOIN (
+                    SELECT cs.content_id, GROUP_CONCAT(DISTINCT s.schema_hash) AS hashes
+                    FROM content_schema cs
+                    JOIN schema s ON s.schema_pk_id = cs.schema_pk_id
+                    GROUP BY cs.content_id
+                ) agg ON agg.content_id = cf.content_id
                 {where}""",  # noqa: S608
             params,
         ).fetchall()
@@ -768,18 +787,19 @@ def query_cmd(
     # CASE collapses bogus rows to ``0`` so they sink to the bottom on
     # ``--sort-by duration DESC``.
     _safe_dur_sql = (
-        f"CASE WHEN {_EFF_START_SQL} >= {_SANE_EPOCH_NS}"
+        f"CASE WHEN {_EFF_START_SQL} >= {SANE_EPOCH_NS}"
         f"      AND ({_EFF_END_SQL} - {_EFF_START_SQL}) BETWEEN 0 AND {_MAX_PLAUSIBLE_DURATION_NS}"
         f"     THEN ({_EFF_END_SQL} - {_EFF_START_SQL}) ELSE 0 END"
     )
     _safe_start_sql = (
-        f"CASE WHEN {_EFF_START_SQL} >= {_SANE_EPOCH_NS} "
-        f"THEN {_EFF_START_SQL} ELSE NULL END"
+        f"CASE WHEN {_EFF_START_SQL} >= {SANE_EPOCH_NS} THEN {_EFF_START_SQL} ELSE NULL END"
     )
     order_by = {
         "path": "cf.abs_path",
         "duration": f"{_safe_dur_sql} DESC",
-        "messages": "messages DESC" if (topic is not None or schema is not None) else "c.message_count DESC",
+        "messages": "messages DESC"
+        if (topic is not None or schema is not None)
+        else "c.message_count DESC",
         "size": "cf.size_bytes DESC",
         "start": f"{_safe_start_sql} DESC",
     }[sort_by]
@@ -789,9 +809,7 @@ def query_cmd(
     if folder is not None:
         folder_where, folder_params = _path_prefix_where(folder)
         # _path_prefix_where returns ``WHERE ...`` — re-tag as inline conjunct.
-        folder_clause = folder_where.removeprefix("WHERE ").replace(
-            "abs_path", "cf.abs_path"
-        )
+        folder_clause = folder_where.removeprefix("WHERE ").replace("abs_path", "cf.abs_path")
 
     channel_filtered = topic is not None or schema is not None
     params: list[str | int] = []
@@ -916,11 +934,7 @@ def query_cmd(
         start = row["start_time_ns"]
         end = row["end_time_ns"]
         duration_ns = row["duration_ns"]
-        duration_str = (
-            _format_duration_ns(0, duration_ns)
-            if isinstance(duration_ns, int)
-            else "-"
-        )
+        duration_str = _format_duration_ns(0, duration_ns) if isinstance(duration_ns, int) else "-"
         table.add_row(
             _format_parts_with_colors(str(row["path"])),
             f"{msgs:,}" if isinstance(msgs, int) else "-",
@@ -970,10 +984,10 @@ def topics_cmd(
     # Always tie-break by the other counts and then the topic name for
     # deterministic output.
     order_by = {
-        "files":    "files DESC, messages DESC, t.name",
+        "files": "files DESC, messages DESC, t.name",
         "messages": "messages DESC, files DESC, t.name",
-        "schemas":  "schemas DESC, files DESC, t.name",
-        "name":     "t.name",
+        "schemas": "schemas DESC, files DESC, t.name",
+        "name": "t.name",
     }[sort_by]
 
     sql = (
@@ -1080,10 +1094,10 @@ def schemas_cmd(
         return 1
 
     order_by = {
-        "files":    "files DESC, s.name",
+        "files": "files DESC, s.name",
         "messages": "messages DESC, files DESC, s.name",
-        "topics":   "topics DESC, files DESC, s.name",
-        "name":     "s.name",
+        "topics": "topics DESC, files DESC, s.name",
+        "name": "s.name",
         "encoding": "s.encoding, s.name",
     }[sort_by]
 
@@ -1107,8 +1121,7 @@ def schemas_cmd(
         sql += "WHERE s.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
     sql += (
-        f"GROUP BY s.schema_pk_id, s.name, s.encoding "
-        f"HAVING files >= ? ORDER BY {order_by} LIMIT ?"
+        f"GROUP BY s.schema_pk_id, s.name, s.encoding HAVING files >= ? ORDER BY {order_by} LIMIT ?"
     )
     params.extend([min_files, limit])
 
@@ -1376,7 +1389,9 @@ def sessions_cmd(
             "id": sid,
             "started_at_ns": started,
             "finished_at_ns": finished,
-            "duration_ns": (finished - started) if (finished and started and finished > started) else None,
+            "duration_ns": (finished - started)
+            if (finished and started and finished > started)
+            else None,
             "root_path": root,
             "pymcap_cli_version": version,
             "observations": obs,
@@ -1423,7 +1438,9 @@ def sessions_cmd(
             _format_parts_with_colors(str(row["root_path"])),
             f"{row['observations']:,}" if isinstance(row["observations"], int) else "-",
             f"{row['new_content']:,}" if isinstance(row["new_content"], int) else "-",
-            f"[red]{errs:,}[/]" if isinstance(errs, int) and errs else (f"{errs:,}" if isinstance(errs, int) else "-"),
+            f"[red]{errs:,}[/]"
+            if isinstance(errs, int) and errs
+            else (f"{errs:,}" if isinstance(errs, int) else "-"),
         )
     console.print(table)
     return 0
@@ -1552,7 +1569,9 @@ def errors_cmd(
     table.add_column("Session", justify="right", style="dim")
     for row in rows:
         table.add_row(
-            _format_ts_ns(row["observed_at_ns"] if isinstance(row["observed_at_ns"], int) else None),
+            _format_ts_ns(
+                row["observed_at_ns"] if isinstance(row["observed_at_ns"], int) else None
+            ),
             _describe_error_kind(str(row["kind"])),
             _format_parts_with_colors(str(row["path"])),
             str(row["message"] or "-"),
@@ -1566,10 +1585,10 @@ def errors_cmd(
 # Bucket spec → SQLite ``strftime`` format. Keep these in sync with the
 # ``Literal`` on ``timeline_cmd``'s ``--bucket`` argument.
 _TIMELINE_BUCKET_FORMAT: dict[str, str] = {
-    "day":   "%Y-%m-%d",
-    "week":  "%Y-W%W",
+    "day": "%Y-%m-%d",
+    "week": "%Y-W%W",
     "month": "%Y-%m",
-    "year":  "%Y",
+    "year": "%Y",
 }
 
 
@@ -1609,7 +1628,7 @@ def timeline_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    where: list[str] = [f"c.message_start_time >= {_SANE_EPOCH_NS}"]
+    where: list[str] = [f"c.message_start_time >= {SANE_EPOCH_NS}"]
     params: list[str | int] = []
     if folder is not None:
         clause, prefix_params = _path_prefix_where(folder)
@@ -1860,9 +1879,14 @@ def info_cmd(
         "Duration:",
         f"[cyan]{_format_duration_ns(0, duration_ns) if duration_ns is not None else '-'}[/]",
     )
-    identity_table.add_row("Compression:", _format_compression_cell(
-        compression, compressed_size_bytes, uncompressed_size_bytes,
-    ))
+    identity_table.add_row(
+        "Compression:",
+        _format_compression_cell(
+            compression,
+            compressed_size_bytes,
+            uncompressed_size_bytes,
+        ),
+    )
     console.print("[bold cyan]Identity[/]")
     console.print(identity_table)
 

@@ -25,6 +25,7 @@ from pymcap_cli.rihs01 import compute_rihs01
 
 if TYPE_CHECKING:
     from small_mcap.rebuild import RebuildInfo
+    from small_mcap.records import Summary
 
 SCHEME_VERSION = "s1"
 
@@ -54,17 +55,14 @@ def _canonical_metadata(meta: dict[str, str] | None) -> list[list[str]]:
     return [[k, v] for k, v in sorted(meta.items())]
 
 
-def compute_schema_hash_map(summary: object) -> dict[int, str]:
+def compute_schema_hash_map(summary: Summary) -> dict[int, str]:
     """Map each schema's local ``id`` to its canonical hash.
 
     Pulled out of :func:`summary_fingerprint` so callers that also need the
     per-schema hashes (e.g. the content-row builder) don't have to compute
     them a second time.
     """
-    return {
-        sc.id: _schema_hash(sc.encoding, sc.name, sc.data)
-        for sc in summary.schemas.values()  # type: ignore[attr-defined]
-    }
+    return {sc.id: _schema_hash(sc.encoding, sc.name, sc.data) for sc in summary.schemas.values()}
 
 
 def summary_fingerprint(
