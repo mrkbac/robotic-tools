@@ -54,13 +54,33 @@ def _canonical_metadata(meta: dict[str, str] | None) -> list[list[str]]:
     return [[k, v] for k, v in sorted(meta.items())]
 
 
-def summary_fingerprint(info: RebuildInfo) -> str:
+def compute_schema_hash_map(summary: object) -> dict[int, str]:
+    """Map each schema's local ``id`` to its canonical hash.
+
+    Pulled out of :func:`summary_fingerprint` so callers that also need the
+    per-schema hashes (e.g. the content-row builder) don't have to compute
+    them a second time.
+    """
+    return {
+        sc.id: _schema_hash(sc.encoding, sc.name, sc.data)
+        for sc in summary.schemas.values()  # type: ignore[attr-defined]
+    }
+
+
+def summary_fingerprint(
+    info: RebuildInfo,
+    *,
+    schema_hash_by_id: dict[int, str] | None = None,
+) -> str:
     """Compute the semantic summary fingerprint for an MCAP file.
 
     Requires ``info.summary`` to carry a Statistics record — without it,
     per-channel message counts are missing and the hash would collide
     across unrelated recordings. Caller must trigger a full rebuild for
     such files.
+
+    Pass ``schema_hash_by_id`` (from :func:`compute_schema_hash_map`) when the
+    caller has already computed it, to avoid re-parsing every schema.
 
     Raises:
         ValueError: if the summary's statistics is missing.
@@ -71,22 +91,21 @@ def summary_fingerprint(info: RebuildInfo) -> str:
     if stats is None:
         raise ValueError("summary_fingerprint requires Statistics in the Summary")
 
+    if schema_hash_by_id is None:
+        schema_hash_by_id = compute_schema_hash_map(summary)
+
     # Schemas — keyed by their canonical hash (RIHS01 for ros2msg, content
     # hash otherwise) rather than the writer's local ``schema_id`` (which is
     # not stable across writers).
-    schema_hash_by_id: dict[int, str] = {}
-    schema_entries: list[dict[str, object]] = []
-    for sc in summary.schemas.values():
-        h = _schema_hash(sc.encoding, sc.name, sc.data)
-        schema_hash_by_id[sc.id] = h
-        schema_entries.append(
-            {
-                "h": h,
-                "name": sc.name,
-                "encoding": sc.encoding,
-                "size": len(sc.data),
-            }
-        )
+    schema_entries: list[dict[str, object]] = [
+        {
+            "h": schema_hash_by_id[sc.id],
+            "name": sc.name,
+            "encoding": sc.encoding,
+            "size": len(sc.data),
+        }
+        for sc in summary.schemas.values()
+    ]
     schema_entries.sort(key=lambda e: (e["h"], e["name"], e["encoding"]))
 
     # Channels — sorted by topic + referenced schema hash.

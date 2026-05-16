@@ -5,6 +5,7 @@
 
 """
 
+import functools
 import hashlib
 import json
 
@@ -121,8 +122,14 @@ def _find_main_def(
     raise ValueError(f"Schema {schema_name} not found in definitions")
 
 
+@functools.lru_cache(maxsize=1024)
 def compute_rihs01(schema_name: str, schema_data: bytes) -> str:
-    """Compute RIHS01 hash for a ros2msg schema per REP-2011."""
+    """Compute RIHS01 hash for a ros2msg schema per REP-2011.
+
+    Cached: the same (name, data) pair is hashed identically every time, and
+    ros2msg schemas repeat heavily across MCAPs (typically hundreds of files
+    share the same ~tens of canonical schemas).
+    """
     definitions = parse_schema_to_definitions(schema_name, schema_data)
 
     seen: set[int] = set()

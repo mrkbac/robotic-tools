@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
@@ -34,7 +34,7 @@ from small_mcap import McapError, get_header, get_summary, rebuild_summary
 
 from pymcap_cli.index.db import finish_session, start_session
 from pymcap_cli.index.fingerprint import fingerprint_stream
-from pymcap_cli.index.summary_fingerprint import _schema_hash, summary_fingerprint
+from pymcap_cli.index.summary_fingerprint import compute_schema_hash_map, summary_fingerprint
 
 if TYPE_CHECKING:
     import sqlite3
@@ -46,6 +46,27 @@ logger = logging.getLogger(__name__)
 
 class _SummaryUnavailableError(Exception):
     """Raised when indexing would need a full data-section rebuild."""
+
+
+# Per-process state for worker pool — populated once by ``_worker_init`` in
+# each child process, then read by ``_process_file_task`` for every job.
+_WORKER_FILE_FP_CACHE: dict[str, str] = {}
+_WORKER_KNOWN_SUMMARY_FPS: set[str] = set()
+
+
+def _worker_init(file_fp_cache: dict[str, str], known_summary_fps: set[str]) -> None:
+    global _WORKER_FILE_FP_CACHE, _WORKER_KNOWN_SUMMARY_FPS
+    _WORKER_FILE_FP_CACHE = file_fp_cache
+    _WORKER_KNOWN_SUMMARY_FPS = known_summary_fps
+
+
+def _process_file_task(inp: "_ScanInput", rebuild_missing: bool) -> "_ScanResult":
+    return _process_file(
+        inp,
+        file_fp_cache=_WORKER_FILE_FP_CACHE,
+        known_summary_fps=_WORKER_KNOWN_SUMMARY_FPS,
+        rebuild_missing=rebuild_missing,
+    )
 
 
 @dataclass(slots=True)
@@ -106,17 +127,58 @@ class _ScanResult:
     error_message: str | None = None
 
 
-def _iter_mcap_files(root: Path, *, recurse: bool) -> Iterator[Path]:
+def _collect_mcap_files(root: Path, *, recurse: bool) -> list[Path]:
+    """Walk ``root`` and return every ``.mcap`` file.
+
+    Materialises the full list up front (rather than yielding lazily) so the
+    main thread isn't competing with worker threads for the GIL while it's
+    deep inside ``os.scandir`` iteration. ``follow_symlinks=False`` on the
+    directory check matches :meth:`Path.rglob`'s default and prevents the
+    walker from descending into venv / cache symlinks.
+    """
     if root.is_file():
         if root.suffix == ".mcap":
-            yield root.resolve()
-        return
+            return [root.resolve()]
+        return []
     if not root.is_dir():
-        return
-    pattern = "*.mcap" if not recurse else "**/*.mcap"
-    for path in root.glob(pattern):
-        if path.is_file():
-            yield path.resolve()
+        return []
+
+    root_str = str(root.resolve())
+
+    if not recurse:
+        found: list[Path] = []
+        try:
+            with os.scandir(root_str) as it:
+                for entry in it:
+                    if not entry.name.endswith(".mcap"):
+                        continue
+                    try:
+                        if entry.is_file():
+                            found.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            return []
+        return found
+
+    collected: list[str] = []
+    stack: list[str] = [root_str]
+    while stack:
+        directory = stack.pop()
+        try:
+            scan_it = os.scandir(directory)
+        except OSError:
+            continue
+        with scan_it:
+            for entry in scan_it:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.name.endswith(".mcap") and entry.is_file():
+                        collected.append(entry.path)
+                except OSError:
+                    continue
+    return [Path(p) for p in collected]
 
 
 def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
@@ -215,6 +277,7 @@ def _build_content_row(
     info: RebuildInfo,
     size_bytes: int,
     scan_kind: str,
+    schema_hash_by_id: dict[int, str],
 ) -> _ContentRow:
     header = info.header
     summary = info.summary
@@ -239,7 +302,7 @@ def _build_content_row(
             "name": sc.name,
             "encoding": sc.encoding,
             "schema_size": len(sc.data),
-            "schema_hash": _schema_hash(sc.encoding, sc.name, sc.data),
+            "schema_hash": schema_hash_by_id[sc.id],
         }
         for sc in summary.schemas.values()
     ]
@@ -304,7 +367,8 @@ def _process_file(
 
         with inp.path.open("rb") as f:
             info, scan_kind = _load_summary_info(f, rebuild_missing=rebuild_missing)
-        summary_fp = summary_fingerprint(info)
+        schema_hash_by_id = compute_schema_hash_map(info.summary)
+        summary_fp = summary_fingerprint(info, schema_hash_by_id=schema_hash_by_id)
 
         if summary_fp in known_summary_fps:
             # Same logical content as another file we've already inserted —
@@ -315,7 +379,9 @@ def _process_file(
                 summary_fingerprint=summary_fp,
             )
 
-        content = _build_content_row(summary_fp, info, inp.size_bytes, scan_kind)
+        content = _build_content_row(
+            summary_fp, info, inp.size_bytes, scan_kind, schema_hash_by_id
+        )
         return _ScanResult(
             inp=inp,
             file_fingerprint=file_fp,
@@ -545,27 +611,37 @@ def scan(
             raise
 
     def _record_scan_result(result: _ScanResult) -> None:
+        """Apply one scan result. Caller wraps a batch in a single BEGIN/COMMIT."""
         active_session_id = _ensure_session()
-        conn.execute("BEGIN")
-        try:
-            if result.error_kind is not None:
-                _record_error(
-                    conn,
-                    result.inp,
-                    result.error_kind,
-                    result.error_message or "",
-                    active_session_id,
-                )
-                _record_observation(
-                    conn,
-                    result.inp,
-                    result.file_fingerprint or "",
-                    None,
-                    active_session_id,
-                )
-                stats.errored += 1
-                _bump_error_kind(stats, result.error_kind)
-            elif result.summary_fingerprint is not None and result.content is None:
+        if result.error_kind is not None:
+            _record_error(
+                conn,
+                result.inp,
+                result.error_kind,
+                result.error_message or "",
+                active_session_id,
+            )
+            _record_observation(
+                conn,
+                result.inp,
+                result.file_fingerprint or "",
+                None,
+                active_session_id,
+            )
+            stats.errored += 1
+            _bump_error_kind(stats, result.error_kind)
+        elif result.summary_fingerprint is not None and result.content is None:
+            _record_observation(
+                conn,
+                result.inp,
+                result.file_fingerprint or "",
+                result.summary_fingerprint,
+                active_session_id,
+            )
+            file_fp_cache[result.file_fingerprint or ""] = result.summary_fingerprint
+            stats.fingerprint_reused += 1
+        elif result.summary_fingerprint is not None and result.content is not None:
+            if _content_exists(conn, result.summary_fingerprint):
                 _record_observation(
                     conn,
                     result.inp,
@@ -573,34 +649,19 @@ def scan(
                     result.summary_fingerprint,
                     active_session_id,
                 )
-                file_fp_cache[result.file_fingerprint or ""] = result.summary_fingerprint
                 stats.fingerprint_reused += 1
-            elif result.summary_fingerprint is not None and result.content is not None:
-                if _content_exists(conn, result.summary_fingerprint):
-                    _record_observation(
-                        conn,
-                        result.inp,
-                        result.file_fingerprint or "",
-                        result.summary_fingerprint,
-                        active_session_id,
-                    )
-                    stats.fingerprint_reused += 1
-                else:
-                    _insert_content(conn, result.content, active_session_id)
-                    _record_observation(
-                        conn,
-                        result.inp,
-                        result.file_fingerprint or "",
-                        result.summary_fingerprint,
-                        active_session_id,
-                    )
-                    known_summary_fps.add(result.summary_fingerprint)
-                    stats.indexed += 1
-                file_fp_cache[result.file_fingerprint or ""] = result.summary_fingerprint
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
+            else:
+                _insert_content(conn, result.content, active_session_id)
+                _record_observation(
+                    conn,
+                    result.inp,
+                    result.file_fingerprint or "",
+                    result.summary_fingerprint,
+                    active_session_id,
+                )
+                known_summary_fps.add(result.summary_fingerprint)
+                stats.indexed += 1
+            file_fp_cache[result.file_fingerprint or ""] = result.summary_fingerprint
 
         if progress is not None:
             progress(stats)
@@ -618,11 +679,24 @@ def scan(
         def _drain_one_or_more() -> None:
             nonlocal pending
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                _record_scan_result(future.result())
+            if not done:
+                return
+            conn.execute("BEGIN")
+            try:
+                for future in done:
+                    _record_scan_result(future.result())
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for path in _iter_mcap_files(root, recurse=recurse):
+        discovered_paths = _collect_mcap_files(root, recurse=recurse)
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_worker_init,
+            initargs=(file_fp_cache_snapshot, known_summary_fps_snapshot),
+        ) as pool:
+            for path in discovered_paths:
                 stats.discovered += 1
                 _ensure_session()
                 abs_path = str(path)
@@ -654,13 +728,7 @@ def scan(
                         progress(stats)
                     continue
                 pending.add(
-                    pool.submit(
-                        _process_file,
-                        inp,
-                        file_fp_cache=file_fp_cache_snapshot,
-                        known_summary_fps=known_summary_fps_snapshot,
-                        rebuild_missing=rebuild_missing,
-                    )
+                    pool.submit(_process_file_task, inp, rebuild_missing)
                 )
                 if len(pending) >= max_pending:
                     _drain_one_or_more()
