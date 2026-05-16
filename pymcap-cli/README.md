@@ -352,6 +352,23 @@ pymcap-cli list attachments data.mcap
 pymcap-cli list metadata data.mcap
 ```
 
+### `msg-def` — Resolve ROS2 Message Definitions
+
+Print a complete ROS2 `.msg` definition, including dependent message
+definitions. Interactive terminals use colored schema rendering; redirected
+stdout stays raw `.msg` text.
+
+```bash
+# Resolve a standard ROS2 message
+pymcap-cli msg-def sensor_msgs/msg/Image --distro humble
+
+# Include custom package roots before AMENT_PREFIX_PATH and the user cache
+pymcap-cli msg-def my_robot_msgs/msg/Status -I ./install/share
+```
+
+Missing standard packages are resolved from rosdistro/GitHub and cached under
+the `pymcap_cli_msg_def` user cache.
+
 ### `get` — Extract Attachments and Metadata
 
 Extract a single attachment's bytes or a metadata record's key/value map.
