@@ -4,6 +4,7 @@ import enum
 import hashlib
 from collections.abc import Callable, Iterator
 from functools import lru_cache
+from typing import TypedDict
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
 from rich.jupyter import JupyterMixin
@@ -15,6 +16,19 @@ from rich.text import Text
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.types.info_types import ChannelInfo, McapInfoOutput, SchemaInfo
 from pymcap_cli.utils import bytes_to_human
+
+
+class ChannelTableStatistics(TypedDict):
+    duration_ns: int
+
+
+class _ChannelTableData(TypedDict):
+    statistics: ChannelTableStatistics
+    schemas: list[SchemaInfo]
+    channels: list[ChannelInfo]
+
+
+ChannelTableData = McapInfoOutput | _ChannelTableData
 
 
 def _build_schema_map(schemas: list[SchemaInfo]) -> dict[int, str]:
@@ -457,7 +471,7 @@ def tree_iter(
 
 
 def display_channels_table(
-    data: McapInfoOutput,
+    data: ChannelTableData,
     console: Console,
     *,
     sort_key: str = "topic",

@@ -2,7 +2,7 @@
 
 On the corpus this was built against, 937k ``content_channel`` rows collapse to
 ~13k distinct ``(topic_id, schema_pk_id, message_encoding, metadata)`` tuples —
-a ~70× repetition factor, dominated by the per-channel ``metadata`` JSON
+a ~70x repetition factor, dominated by the per-channel ``metadata`` JSON
 (>200 byte blobs duplicated across files). This migration:
 
 - Adds a ``channel_sig(channel_sig_id, topic_id, schema_pk_id,

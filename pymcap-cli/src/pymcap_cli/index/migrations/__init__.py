@@ -73,7 +73,8 @@ def apply_pending(conn: sqlite3.Connection) -> None:
                 apply(conn)
                 _ensure_transaction_active(conn, version)
                 conn.execute(
-                    "INSERT INTO schema_migrations(version, applied_at, description) VALUES (?, ?, ?)",
+                    "INSERT INTO schema_migrations(version, applied_at, description) "
+                    "VALUES (?, ?, ?)",
                     (version, time.time_ns(), description),
                 )
                 conn.execute(f"PRAGMA user_version = {version}")
@@ -92,6 +93,4 @@ def apply_pending(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA foreign_keys=ON")
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
-                raise RuntimeError(
-                    f"foreign-key violations after migrations: {violations[:5]}"
-                )
+                raise RuntimeError(f"foreign-key violations after migrations: {violations[:5]}")

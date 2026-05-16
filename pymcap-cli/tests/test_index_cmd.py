@@ -5,14 +5,19 @@ from __future__ import annotations
 import io
 import json as _json
 import os
+import sqlite3
 from contextlib import redirect_stdout
 from io import BytesIO
 from pathlib import Path
 
 from pymcap_cli.cmd.index_cmd import (
+    _MAX_PLAUSIBLE_DURATION_NS,
+    SANE_EPOCH_NS,
+    _format_compression_cell,
     _format_duration_ns,
     _format_ts_ns,
     _path_prefix_where,
+    _safe_duration_ns,
     duplicates_cmd,
     errors_cmd,
     info_cmd,
@@ -44,6 +49,14 @@ def test_scan_status_query_roundtrip(tmp_path: Path) -> None:
     assert scan_cmd(tmp_path, db=db) == 0
     assert status_cmd(tmp_path, db=db) == 0
     assert query_cmd(topic="/foo", db=db) == 0
+
+
+def test_status_handles_extensionless_db_path(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    db = tmp_path / "index"
+
+    assert scan_cmd(tmp_path, db=db) == 0
+    assert status_cmd(tmp_path, db=db) == 0
 
 
 def test_status_without_db_errors(tmp_path: Path) -> None:
@@ -89,12 +102,6 @@ def test_format_ts_ns_formats_utc() -> None:
 
 def test_safe_duration_ns_rejects_implausible_span() -> None:
     """``_safe_duration_ns`` returns ``None`` for spans over the cap."""
-    from pymcap_cli.cmd.index_cmd import (
-        _MAX_PLAUSIBLE_DURATION_NS,
-        SANE_EPOCH_NS,
-        _safe_duration_ns,
-    )
-
     sane_start = 1_700_000_000 * 1_000_000_000  # ~2023 UTC
     day_ns = 86400 * 1_000_000_000
 
@@ -134,22 +141,23 @@ def _capture_stdout(call) -> tuple[int, str]:
 
 def test_format_compression_cell_variants() -> None:
     """Renderer copes with NULL, none, single-codec, and mixed-codec inputs."""
-    from pymcap_cli.cmd.index_cmd import _format_compression_cell
-
     # Pre-0005 row (or a rebuilt summary): nothing to say.
     assert "-" in _format_compression_cell(None, None, None)
     # Chunks exist but every one was stored uncompressed.
     assert "none" in _format_compression_cell("none", 100, 100)
-    # Single codec, sensible ratio: 3 KB original → 1 KB compressed.
+    # Single codec, sensible ratio: 3 KB original -> 1 KB compressed.
     out = _format_compression_cell("zstd", 1000, 3000)
-    assert "zstd" in out and "3.00×" in out
-    # Mixed codecs (some lz4, some zstd) — round-trip both names and tag as mixed.
+    assert "zstd" in out
+    assert "3.00x" in out
+    # Mixed codecs (some lz4, some zstd) round-trip both names and tag as mixed.
     mixed = _format_compression_cell("lz4,zstd", 500, 4000)
-    assert "mixed" in mixed and "lz4,zstd" in mixed
+    assert "mixed" in mixed
+    assert "lz4,zstd" in mixed
     # "none,zstd" is the canonical representation for a file with some
     # uncompressed chunks alongside compressed ones.
     none_zstd = _format_compression_cell("none,zstd", 200, 1000)
-    assert "mixed" in none_zstd and "none,zstd" in none_zstd
+    assert "mixed" in none_zstd
+    assert "none,zstd" in none_zstd
 
 
 def test_info_shows_compression_for_compressed_mcap(tmp_path: Path) -> None:
@@ -189,7 +197,8 @@ def test_sessions_lists_scan_sessions(tmp_path: Path) -> None:
     assert row["observations"] == 1
     assert row["new_content"] == 1
     assert row["errors"] == 0
-    assert isinstance(row["duration_ns"], int) and row["duration_ns"] >= 0
+    assert isinstance(row["duration_ns"], int)
+    assert row["duration_ns"] >= 0
 
 
 def test_errors_lists_scan_errors(tmp_path: Path) -> None:
@@ -244,11 +253,10 @@ def test_timeline_buckets_by_day(tmp_path: Path) -> None:
     assert rc == 0
     assert "2024-03-01" in output
     assert "2024-03-02" in output
-    # The 2024-03-01 line should show 2 files, the 2024-03-02 line just 1.
     line_d1 = next(ln for ln in output.splitlines() if "2024-03-01" in ln)
-    assert " 2 " in line_d1 or line_d1.rstrip().endswith("2 KB") is False  # just sanity
     line_d2 = next(ln for ln in output.splitlines() if "2024-03-02" in ln)
-    assert " 1 " in line_d2 or "1 file" in line_d2 or True  # rich renders, just check presence
+    assert line_d1
+    assert line_d2
 
 
 def test_topics_lists_topics_with_counts(tmp_path: Path) -> None:
@@ -503,12 +511,96 @@ def test_info_by_path_shows_topics(tmp_path: Path) -> None:
     assert topic_names == {"/x", "/y"}
 
 
+def test_info_table_reuses_channel_renderer(tmp_path: Path) -> None:
+    rec = tmp_path / "rec.mcap"
+    rec.write_bytes(create_multi_topic_mcap(["/x", "/y"], messages_per_topic=2))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc, output = _capture_stdout(lambda: info_cmd(str(rec), db=db, format="table"))
+
+    assert rc == 0
+    assert "Topics" in output
+    assert "/x" in output
+    assert "/y" in output
+
+
 def test_info_unknown_target_errors(tmp_path: Path) -> None:
     (tmp_path / "rec.mcap").write_bytes(create_multi_topic_mcap(["/x"], messages_per_topic=1))
     db = tmp_path / "index.sqlite"
     assert scan_cmd(tmp_path, db=db) == 0
     # Unknown fingerprint hex.
     assert info_cmd("deadbeefdeadbeefdeadbeefdeadbeef", db=db) == 1
+
+
+def test_query_json_exposes_short_id_and_fingerprint(tmp_path: Path) -> None:
+    """``query --format json`` carries enough identity to feed ``info``."""
+    (tmp_path / "rec.mcap").write_bytes(create_multi_topic_mcap(["/x"], messages_per_topic=2))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc, output = _capture_stdout(lambda: query_cmd(db=db, format="json"))
+    assert rc == 0
+    rows = _json.loads(output)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["summary_fingerprint"].startswith("s1:")
+    assert len(row["summary_fingerprint"]) == 3 + 32
+    assert row["short_id"] == row["summary_fingerprint"][3:11]
+
+
+def test_info_resolves_short_id(tmp_path: Path) -> None:
+    """``info <short_id>`` resolves to the same content as the full fingerprint."""
+    (tmp_path / "rec.mcap").write_bytes(create_multi_topic_mcap(["/x"], messages_per_topic=2))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+
+    rc_query, query_out = _capture_stdout(lambda: query_cmd(db=db, format="json"))
+    assert rc_query == 0
+    short_id = _json.loads(query_out)[0]["short_id"]
+    full_fp = _json.loads(query_out)[0]["summary_fingerprint"]
+
+    for target in (short_id, short_id.upper(), f"s1:{short_id}", full_fp):
+        rc, info_out = _capture_stdout(lambda t=target: info_cmd(t, db=db, format="json"))
+        assert rc == 0, target
+        payload = _json.loads(info_out)
+        assert payload["identity"]["summary_fingerprint"] == full_fp
+        assert payload["identity"]["short_id"] == short_id
+
+
+def test_info_short_id_unknown_errors(tmp_path: Path) -> None:
+    (tmp_path / "rec.mcap").write_bytes(create_multi_topic_mcap(["/x"], messages_per_topic=1))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    # 'deadbeef' is a valid 8-hex-char prefix but won't match anything indexed.
+    assert info_cmd("deadbeef", db=db) == 1
+
+
+def test_info_short_id_ambiguous_errors(tmp_path: Path) -> None:
+    """A prefix that matches multiple content rows surfaces the candidates."""
+    (tmp_path / "rec.mcap").write_bytes(create_multi_topic_mcap(["/x"], messages_per_topic=2))
+    db = tmp_path / "index.sqlite"
+    assert scan_cmd(tmp_path, db=db) == 0
+    # Inject a second content row sharing a prefix with the indexed file's fp.
+    # Use a raw connection so we bypass the FK chain for child tables (we just
+    # need ``content`` rows for the prefix-resolver's LIKE query).
+    raw = sqlite3.connect(db)
+    try:
+        real_fp = raw.execute("SELECT summary_fingerprint FROM content").fetchone()[0]
+        prefix = real_fp[:11]  # 's1:' + 8 hex
+        twin_fp = prefix + ("0" * (3 + 32 - len(prefix)))
+        if twin_fp == real_fp:
+            twin_fp = prefix + ("1" * (3 + 32 - len(prefix)))
+        raw.execute(
+            "INSERT INTO content(summary_fingerprint, size_bytes, scan_kind, first_seen_at) "
+            "VALUES (?, 0, 'test', 0)",
+            (twin_fp,),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    assert info_cmd(prefix[3:], db=db) == 1
 
 
 def test_query_time_range_overlap(tmp_path: Path) -> None:

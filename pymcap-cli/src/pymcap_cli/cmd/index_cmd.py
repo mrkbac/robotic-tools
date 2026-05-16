@@ -6,12 +6,13 @@ import importlib.metadata
 import json as _json
 import logging
 import os
+import sqlite3
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, TypedDict
 
 from cyclopts import App, Parameter
 from rich.console import Console
@@ -20,14 +21,19 @@ from rich.table import Table
 from rich.tree import Tree
 
 from pymcap_cli.display.display_utils import (
+    ChannelTableData,
     _format_parts_with_colors,
     _format_schema_with_link,
     _text_to_color,
+    display_channels_table,
 )
 from pymcap_cli.index import SANE_EPOCH_NS
-from pymcap_cli.index.db import default_db_path, open_db
-from pymcap_cli.index.scanner import ScanStats, scan
+from pymcap_cli.index.db import IndexDbNeedsMigrationError, default_db_path, open_db
+from pymcap_cli.index.scanner import ScanStats, scan, unpack_distribution_blob
 from pymcap_cli.utils import bytes_to_human, parse_time_arg
+
+if TYPE_CHECKING:
+    from pymcap_cli.types.info_types import ChannelInfo, SchemaInfo
 
 OutputFormat = Literal["table", "json", "paths-only"]
 
@@ -96,11 +102,11 @@ def _format_compression_cell(
     ):
         ratio = uncompressed / compressed
         ratio_part = (
-            f"  [cyan]{ratio:.2f}×[/]"
-            f"  [dim]({bytes_to_human(uncompressed)} → {bytes_to_human(compressed)})[/]"
+            f"  [cyan]{ratio:.2f}x[/]"
+            f"  [dim]({bytes_to_human(uncompressed)} -> {bytes_to_human(compressed)})[/]"
         )
     # ``compression`` is a comma-joined sorted set of codec names. Single
-    # codec → ``"zstd"``; mixed → ``"lz4,zstd"`` or ``"none,zstd"`` when some
+    # codec -> ``"zstd"``; mixed -> ``"lz4,zstd"`` or ``"none,zstd"`` when some
     # chunks are uncompressed. We render verbatim so the user can see the mix.
     codec_label = (
         f"[green]{compression}[/]"
@@ -121,6 +127,77 @@ def _safe_duration_ns(start_ns: int | None, end_ns: int | None) -> int | None:
     return span
 
 
+_SHORT_ID_LEN = 8
+_FULL_FP_LEN = len("s1:") + 32  # ``s1:`` + 32 hex chars
+
+
+def _short_id_from_fingerprint(fp: str) -> str:
+    """Return the first ``_SHORT_ID_LEN`` hex chars after the ``s1:`` scheme prefix.
+
+    Empty string when ``fp`` doesn't start with a recognised scheme — callers
+    treat that as "unknown" and render ``-``.
+    """
+    if fp.startswith("s1:"):
+        return fp[3 : 3 + _SHORT_ID_LEN]
+    return ""
+
+
+def _resolve_target_to_summary_fp(
+    conn: sqlite3.Connection, target: str
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve a user-supplied target to a summary fingerprint.
+
+    Returns ``(summary_fp, abs_path, error_message)`` — exactly one of
+    ``summary_fp`` or ``error_message`` is set. ``abs_path`` is filled in
+    when the target resolved as a filesystem path so the caller can render
+    it in the Identity table.
+
+    The target can be:
+
+    - A filesystem path (exists, or contains ``os.sep``).
+    - A full ``s1:...`` fingerprint.
+    - A short hex prefix, with or without the ``s1:`` scheme. Case-insensitive.
+      Resolved via ``LIKE`` against ``content.summary_fingerprint``; ambiguity
+      surfaces as an error listing candidates.
+    """
+    candidate = Path(target).expanduser()
+    if candidate.exists() or os.sep in target:
+        abs_path = str(candidate.resolve())
+        row = conn.execute(
+            "SELECT summary_fingerprint FROM current_file WHERE abs_path = ?",
+            (abs_path,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None, abs_path, f"no indexed content for {abs_path}"
+        return row[0], abs_path, None
+
+    if len(target) == _FULL_FP_LEN and target.startswith("s1:"):
+        row = conn.execute(
+            "SELECT 1 FROM content WHERE summary_fingerprint = ?", (target,)
+        ).fetchone()
+        if row is None:
+            return None, None, f"unknown summary fingerprint {target}"
+        return target, None, None
+
+    prefix = target.lower().removeprefix("s1:")
+    if not prefix or not all(c in "0123456789abcdef" for c in prefix):
+        return (
+            None,
+            None,
+            f"unrecognised target '{target}' - expected path, fingerprint, or short id",
+        )
+    matches = conn.execute(
+        "SELECT summary_fingerprint FROM content WHERE summary_fingerprint LIKE ? LIMIT 5",
+        (f"s1:{prefix}%",),
+    ).fetchall()
+    if not matches:
+        return None, None, f"no content matching id '{target}'"
+    if len(matches) > 1:
+        candidates = ", ".join(row[0][: 3 + _SHORT_ID_LEN + 4] + "…" for row in matches)
+        return None, None, f"id '{target}' is ambiguous ({len(matches)} matches): {candidates}"
+    return matches[0][0], None, None
+
+
 def _pymcap_cli_version() -> str:
     try:
         return importlib.metadata.version("pymcap-cli")
@@ -128,8 +205,72 @@ def _pymcap_cli_version() -> str:
         return "unknown"
 
 
+class _IndexedTopicPayload(TypedDict):
+    channel_id: int
+    topic: str
+    schema_pk_id: int | None
+    schema: str | None
+    encoding: str | None
+    message_count: int | None
+    uncompressed_size_bytes: int | None
+    message_start_time_ns: int | None
+    message_end_time_ns: int | None
+    duration_ns: int | None
+    distribution: list[int] | None
+
+
+def _topics_to_channel_table_data(
+    topics_payload: Sequence[_IndexedTopicPayload],
+    schema_dim_rows: Sequence[tuple[int, str | None, str | None, int | None]],
+    file_duration_ns: int | None,
+) -> ChannelTableData:
+    """Adapt index-DB rows into the channel-table shape.
+
+    The standalone ``pymcap-cli info`` command builds this dict from a fresh
+    file read; we build the same shape from cached index rows so the channel
+    table looks identical without duplicating the renderer.
+
+    Each channel's ``schema_id`` is the index's ``schema_pk_id`` (or ``-1``
+    when the channel has no schema), and we expose one ``SchemaInfo`` row per
+    distinct ``schema_pk_id`` so the renderer's ``schema_map`` lookup hits.
+    """
+    schemas: list[SchemaInfo] = [
+        {"id": pk, "name": name or "", "encoding": enc or "", "data": ""}
+        for pk, name, enc, _sz in schema_dim_rows
+    ]
+    channels: list[ChannelInfo] = [
+        {
+            "id": entry["channel_id"],
+            "topic": entry["topic"],
+            "schema_id": entry["schema_pk_id"] if entry["schema_pk_id"] is not None else -1,
+            "message_count": entry["message_count"] or 0,
+            "size_bytes": entry["uncompressed_size_bytes"],
+            "duration_ns": entry["duration_ns"],
+            "message_start_time": entry["message_start_time_ns"],
+            "message_end_time": entry["message_end_time_ns"],
+            "message_distribution": entry["distribution"] or [],
+            "estimated_sizes": True,
+        }
+        for entry in topics_payload
+    ]
+    return {
+        "statistics": {"duration_ns": file_duration_ns or 0},
+        "schemas": schemas,
+        "channels": channels,
+    }
+
+
 def _resolve_db(db: Path | None) -> Path:
     return (db or default_db_path()).expanduser()
+
+
+def _print_db_needs_migration(exc: IndexDbNeedsMigrationError) -> None:
+    console.print(
+        "[red]Error:[/] "
+        f"index DB at {exc.db_path} is schema v{exc.current_version}; "
+        f"this pymcap-cli expects v{exc.expected_version}. "
+        f"Run `pymcap-cli index scan <path> --db {exc.db_path}` to migrate it."
+    )
 
 
 def _path_prefix_where(path: Path) -> tuple[str, tuple[str | int, ...]]:
@@ -144,6 +285,14 @@ def _path_prefix_where(path: Path) -> tuple[str, tuple[str | int, ...]]:
         "WHERE (abs_path = ? OR substr(abs_path, 1, ?) = ?)",
         (resolved, len(child_prefix), child_prefix),
     )
+
+
+def _optional_path_filter_params(path: Path | None) -> tuple[str | None, str, int, str]:
+    if path is None:
+        return None, "", 0, ""
+    resolved = str(path.expanduser().resolve())
+    child_prefix = resolved if resolved.endswith(os.sep) else f"{resolved}{os.sep}"
+    return resolved, resolved, len(child_prefix), child_prefix
 
 
 def _format_count(n: int) -> str:
@@ -387,48 +536,73 @@ def status_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    where = ""
-    params: tuple[str | int, ...] = ()
-    if folder is not None:
-        where, params = _path_prefix_where(folder)
+    path_filter_params = _optional_path_filter_params(folder)
 
-    with open_db(db_path, read_only=True) as conn:
-        files = conn.execute(
-            f"SELECT COUNT(DISTINCT abs_path) FROM current_file {where}",  # noqa: S608
-            params,
-        ).fetchone()[0]
-        with_content = conn.execute(
-            f"SELECT COUNT(DISTINCT abs_path) FROM current_file {where} "  # noqa: S608
-            f"{'AND' if where else 'WHERE'} summary_fingerprint IS NOT NULL",
-            params,
-        ).fetchone()[0]
-        contents_sql = f"SELECT COUNT(*) FROM content WHERE summary_fingerprint IN (SELECT summary_fingerprint FROM current_file {where})"  # noqa: S608, E501
-        contents = conn.execute(contents_sql, params).fetchone()[0]
-        errors = conn.execute(
-            f"SELECT COUNT(*) FROM scan_error {where}",  # noqa: S608
-            params,
-        ).fetchone()[0]
-        totals_sql = (
-            "SELECT COALESCE(SUM(c.message_count),0), COALESCE(SUM(cf.size_bytes),0) "
-            "FROM current_file cf "
-            "JOIN content c ON c.content_id = cf.content_id"
-        )
-        if where:
-            totals_sql += " WHERE (abs_path = ? OR substr(abs_path, 1, ?) = ?)"
-        total_messages, total_bytes = conn.execute(totals_sql, params).fetchone()
-        error_breakdown = conn.execute(
-            f"SELECT error_kind, COUNT(*) FROM scan_error {where} GROUP BY error_kind ORDER BY error_kind",  # noqa: S608, E501
-            params,
-        ).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            files = conn.execute(
+                "SELECT COUNT(DISTINCT abs_path) FROM current_file "
+                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
+                path_filter_params,
+            ).fetchone()[0]
+            with_content = conn.execute(
+                "SELECT COUNT(DISTINCT abs_path) FROM current_file "
+                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
+                "AND summary_fingerprint IS NOT NULL",
+                path_filter_params,
+            ).fetchone()[0]
+            contents = conn.execute(
+                "SELECT COUNT(*) FROM content "
+                "WHERE summary_fingerprint IN ("
+                "  SELECT summary_fingerprint FROM current_file "
+                "  WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)"
+                ")",
+                path_filter_params,
+            ).fetchone()[0]
+            errors = conn.execute(
+                "SELECT COUNT(*) FROM scan_error "
+                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
+                path_filter_params,
+            ).fetchone()[0]
+            totals_sql = (
+                "SELECT COALESCE(SUM(c.message_count),0), COALESCE(SUM(cf.size_bytes),0) "
+                "FROM current_file cf "
+                "JOIN content c ON c.content_id = cf.content_id "
+                "WHERE (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?)"
+            )
+            total_messages, total_bytes = conn.execute(totals_sql, path_filter_params).fetchone()
+            error_breakdown = conn.execute(
+                "SELECT error_kind, COUNT(*) FROM scan_error "
+                "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
+                "GROUP BY error_kind ORDER BY error_kind",
+                path_filter_params,
+            ).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     coverage = f"{with_content:,} / {files:,}" if files else "0 / 0"
     if files:
         coverage += f"  [dim]({with_content * 100 // files}%)[/]"
 
+    # Sum of the main DB file plus the WAL/SHM sidecars. WAL can dominate the
+    # apparent on-disk footprint between checkpoints, so showing the total
+    # avoids a "but ls says X" surprise.
+    sidecars = (
+        db_path,
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    )
+    db_size_bytes = sum(s.stat().st_size for s in sidecars if s.exists())
+
     table = Table(title="Index status", show_header=False)
     table.add_column(style="bold blue")
     table.add_column()
     table.add_row("DB", f"[green]{db_path}[/]")
+    table.add_row(
+        "DB size",
+        f"[yellow]{bytes_to_human(db_size_bytes)}[/]  [dim]({db_size_bytes:,} B)[/]",
+    )
     if folder is not None:
         table.add_row("Filter", f"[green]{folder}[/]")
     table.add_row("Files tracked", f"[green]{files:,}[/]")
@@ -515,7 +689,7 @@ def _build_path_tree(
             rel = os.path.relpath(abs_path, root_prefix) if root_prefix else abs_path
         except ValueError:
             rel = abs_path
-        parts = [p for p in rel.split(os.sep) if p and p != "."]
+        parts = [p for p in Path(rel).parts if p not in ("", os.sep, ".")]
         # Last component is the filename — only its ancestor directories
         # get nodes.
         chain = [root]
@@ -616,7 +790,10 @@ def tree_cmd(
     max_depth: Annotated[
         int,
         Parameter(
-            help="Limit how many directory levels to render. Aggregates still cover everything below.",
+            help=(
+                "Limit how many directory levels to render. "
+                "Aggregates still cover everything below."
+            ),
         ),
     ] = 4,
     min_files: Annotated[
@@ -639,50 +816,59 @@ def tree_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    where = ""
-    params: tuple[str | int, ...] = ()
-    if folder is not None:
-        where, params = _path_prefix_where(folder)
+    path_filter_params = _optional_path_filter_params(folder)
+    time_filter_params = (SANE_EPOCH_NS, SANE_EPOCH_NS)
 
-    with open_db(db_path, read_only=True) as conn:
-        files = conn.execute(
-            f"""SELECT cf.abs_path, cf.size_bytes, c.message_count,
-                       {_EFF_START_SQL} AS eff_start,
-                       {_EFF_END_SQL}   AS eff_end
-                FROM current_file cf
-                JOIN content c ON c.content_id = cf.content_id
-                {where}""",  # noqa: S608
-            params,
-        ).fetchall()
-        # One row per file. The per-content aggregate (~56k content rows on a
-        # representative corpus) collapses what would otherwise be a
-        # row-per-(file, topic) fan-out (~1.5M rows) and is the dominant cost
-        # of the tree. Members are comma-joined; see ``_build_path_tree``.
-        topics = conn.execute(
-            f"""SELECT cf.abs_path, agg.names
-                FROM current_file cf
-                JOIN (
-                    SELECT cc.content_id, GROUP_CONCAT(DISTINCT t.name) AS names
-                    FROM content_channel cc
-                    JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id
-                    JOIN topic t         ON t.topic_id          = sig.topic_id
-                    GROUP BY cc.content_id
-                ) agg ON agg.content_id = cf.content_id
-                {where}""",  # noqa: S608
-            params,
-        ).fetchall()
-        schema_rows = conn.execute(
-            f"""SELECT cf.abs_path, agg.hashes
-                FROM current_file cf
-                JOIN (
-                    SELECT cs.content_id, GROUP_CONCAT(DISTINCT s.schema_hash) AS hashes
-                    FROM content_schema cs
-                    JOIN schema s ON s.schema_pk_id = cs.schema_pk_id
-                    GROUP BY cs.content_id
-                ) agg ON agg.content_id = cf.content_id
-                {where}""",  # noqa: S608
-            params,
-        ).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            files = conn.execute(
+                """SELECT cf.abs_path, cf.size_bytes, c.message_count,
+                          CASE WHEN c.message_start_time >= ?
+                               THEN c.message_start_time ELSE c.sane_message_start_time END
+                               AS eff_start,
+                          CASE WHEN c.message_start_time >= ?
+                               THEN c.message_end_time ELSE c.sane_message_end_time END
+                               AS eff_end
+                    FROM current_file cf
+                    JOIN content c ON c.content_id = cf.content_id
+                    WHERE (? IS NULL OR cf.abs_path = ?
+                           OR substr(cf.abs_path, 1, ?) = ?)""",
+                (*time_filter_params, *path_filter_params),
+            ).fetchall()
+            # One row per file. The per-content aggregate (~56k content rows on a
+            # representative corpus) collapses what would otherwise be a
+            # row-per-(file, topic) fan-out (~1.5M rows) and is the dominant cost
+            # of the tree. Members are comma-joined; see ``_build_path_tree``.
+            topics = conn.execute(
+                """SELECT cf.abs_path, agg.names
+                    FROM current_file cf
+                    JOIN (
+                        SELECT cc.content_id, GROUP_CONCAT(DISTINCT t.name) AS names
+                        FROM content_channel cc
+                        JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id
+                        JOIN topic t         ON t.topic_id          = sig.topic_id
+                        GROUP BY cc.content_id
+                    ) agg ON agg.content_id = cf.content_id
+                    WHERE (? IS NULL OR cf.abs_path = ?
+                           OR substr(cf.abs_path, 1, ?) = ?)""",
+                path_filter_params,
+            ).fetchall()
+            schema_rows = conn.execute(
+                """SELECT cf.abs_path, agg.hashes
+                    FROM current_file cf
+                    JOIN (
+                        SELECT cs.content_id, GROUP_CONCAT(DISTINCT s.schema_hash) AS hashes
+                        FROM content_schema cs
+                        JOIN schema s ON s.schema_pk_id = cs.schema_pk_id
+                        GROUP BY cs.content_id
+                    ) agg ON agg.content_id = cf.content_id
+                    WHERE (? IS NULL OR cf.abs_path = ?
+                           OR substr(cf.abs_path, 1, ?) = ?)""",
+                path_filter_params,
+            ).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     if not files:
         console.print("[dim]No indexed files match.[/]")
@@ -815,12 +1001,13 @@ def query_cmd(
     params: list[str | int] = []
     if channel_filtered:
         sql = (
-            "SELECT cf.abs_path, "
+            "SELECT cf.abs_path, "  # noqa: S608
             "COALESCE(SUM(cc.message_count), 0) AS messages, "
             "COUNT(DISTINCT cc.channel_id) AS channels, "
             f"{_EFF_START_SQL} AS eff_start, "
             f"{_EFF_END_SQL}   AS eff_end, "
-            "cf.size_bytes "
+            "cf.size_bytes, "
+            "c.summary_fingerprint "
             "FROM current_file cf "
             "JOIN content c           ON c.content_id        = cf.content_id "
             "JOIN content_channel cc  ON cc.content_id       = cf.content_id "
@@ -851,10 +1038,11 @@ def query_cmd(
         sql += f"GROUP BY cf.abs_path ORDER BY {order_by} LIMIT ?"
     else:
         sql = (
-            "SELECT cf.abs_path, c.message_count, c.channel_count, "
+            "SELECT cf.abs_path, c.message_count, c.channel_count, "  # noqa: S608
             f"{_EFF_START_SQL} AS eff_start, "
             f"{_EFF_END_SQL}   AS eff_end, "
-            "cf.size_bytes "
+            "cf.size_bytes, "
+            "c.summary_fingerprint "
             "FROM current_file cf "
             "JOIN content c ON c.content_id = cf.content_id "
         )
@@ -876,11 +1064,17 @@ def query_cmd(
         sql += f"ORDER BY {order_by} LIMIT ?"
     params.append(limit)
 
-    with open_db(db_path, read_only=True) as conn:
-        sql_rows = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            sql_rows = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     rows: list[dict[str, object]] = [
         {
+            "short_id": _short_id_from_fingerprint(fp),
+            "summary_fingerprint": fp,
             "path": path,
             "messages": msgs,
             "channels": channels,
@@ -889,7 +1083,7 @@ def query_cmd(
             "duration_ns": _safe_duration_ns(start, end),
             "size_bytes": size,
         }
-        for path, msgs, channels, start, end, size in sql_rows
+        for path, msgs, channels, start, end, size, fp in sql_rows
     ]
 
     if format == "table":
@@ -922,6 +1116,7 @@ def query_cmd(
     msg_header = "Matched msgs" if channel_filtered else "Messages"
     ch_header = "Matched ch." if channel_filtered else "Channels"
     table = Table()
+    table.add_column("ID", style="dim", no_wrap=True)
     table.add_column("Path", overflow="fold")
     table.add_column(msg_header, justify="right", style="green")
     table.add_column(ch_header, justify="right", style="green")
@@ -935,7 +1130,9 @@ def query_cmd(
         end = row["end_time_ns"]
         duration_ns = row["duration_ns"]
         duration_str = _format_duration_ns(0, duration_ns) if isinstance(duration_ns, int) else "-"
+        short_id = row["short_id"] if isinstance(row["short_id"], str) and row["short_id"] else "-"
         table.add_row(
+            short_id,
             _format_parts_with_colors(str(row["path"])),
             f"{msgs:,}" if isinstance(msgs, int) else "-",
             f"{channels:,}" if isinstance(channels, int) else "-",
@@ -1009,8 +1206,12 @@ def topics_cmd(
     sql += f"GROUP BY t.name HAVING files >= ? ORDER BY {order_by} LIMIT ?"
     params.extend([min_files, limit])
 
-    with open_db(db_path, read_only=True) as conn:
-        sql_rows = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            sql_rows = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     rows: list[dict[str, object]] = [
         {
@@ -1125,8 +1326,12 @@ def schemas_cmd(
     )
     params.extend([min_files, limit])
 
-    with open_db(db_path, read_only=True) as conn:
-        sql_rows = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            sql_rows = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     rows: list[dict[str, object]] = [
         {
@@ -1236,8 +1441,12 @@ def duplicates_cmd(
     )
     params.extend([min_copies, min_bytes, limit])
 
-    with open_db(db_path, read_only=True) as conn:
-        sql_rows = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            sql_rows = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     groups: list[dict[str, object]] = [
         {
@@ -1368,7 +1577,9 @@ def sessions_cmd(
         "       COALESCE(newc.n, 0) AS new_content, "
         "       COALESCE(errs.n, 0) AS errors "
         "FROM scan_session s "
-        "LEFT JOIN (SELECT session_id, COUNT(*) AS n FROM file_observation GROUP BY session_id) obs "
+        "LEFT JOIN ("
+        "  SELECT session_id, COUNT(*) AS n FROM file_observation GROUP BY session_id"
+        ") obs "
         "  ON obs.session_id = s.id "
         "LEFT JOIN (SELECT first_seen_session AS session_id, COUNT(*) AS n FROM content "
         "           WHERE first_seen_session IS NOT NULL GROUP BY first_seen_session) newc "
@@ -1381,8 +1592,12 @@ def sessions_cmd(
     sql += "ORDER BY s.id DESC LIMIT ?"
     params.append(limit)
 
-    with open_db(db_path, read_only=True) as conn:
-        rows_sql = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            rows_sql = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     rows: list[dict[str, object]] = [
         {
@@ -1534,8 +1749,12 @@ def errors_cmd(
     sql += "ORDER BY se.observed_at DESC, se.id DESC LIMIT ?"
     params.append(limit)
 
-    with open_db(db_path, read_only=True) as conn:
-        rows_sql = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            rows_sql = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     rows: list[dict[str, object]] = [
         {
@@ -1621,41 +1840,50 @@ def timeline_cmd(
 
     Buckets are based on each file's ``message_start_time``. Files with a
     sub-2000 start are skipped (same gate the rest of ``index`` uses for
-    duration math), so a single mis-clocked file can't poison the chart.
+    duration math), so a single bad-clocked file can't poison the chart.
     """
     db_path = _resolve_db(db)
     if not db_path.exists():
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    where: list[str] = [f"c.message_start_time >= {SANE_EPOCH_NS}"]
-    params: list[str | int] = []
-    if folder is not None:
-        clause, prefix_params = _path_prefix_where(folder)
-        where.append(clause.removeprefix("WHERE "))
-        params.extend(prefix_params)
-    if since is not None:
-        where.append("c.message_start_time >= ?")
-        params.append(_parse_time_or_exit(since, "since"))
-    if until is not None:
-        where.append("c.message_start_time <= ?")
-        params.append(_parse_time_or_exit(until, "until"))
+    path_filter_params = _optional_path_filter_params(folder)
+    since_ns = _parse_time_or_exit(since, "since") if since is not None else None
+    until_ns = _parse_time_or_exit(until, "until") if until is not None else None
 
     bucket_fmt = _TIMELINE_BUCKET_FORMAT[bucket]
     sql = (
-        f"SELECT strftime('{bucket_fmt}', c.message_start_time / 1000000000, 'unixepoch') AS bucket, "
+        "SELECT "
+        "strftime(?, c.message_start_time / 1000000000, 'unixepoch') "
+        "AS bucket, "
         "       COUNT(DISTINCT cf.abs_path)        AS files, "
         "       COALESCE(SUM(c.message_count), 0) AS messages, "
         "       COALESCE(SUM(cf.size_bytes), 0)   AS size_bytes "
         "FROM current_file cf "
         "JOIN content c ON c.content_id = cf.content_id "
-        "WHERE " + " AND ".join(where) + " "
+        "WHERE c.message_start_time >= ? "
+        "AND (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?) "
+        "AND (? IS NULL OR c.message_start_time >= ?) "
+        "AND (? IS NULL OR c.message_start_time <= ?) "
         "GROUP BY bucket ORDER BY bucket ASC LIMIT ?"
     )
-    params.append(limit)
+    params: list[str | int | None] = [
+        bucket_fmt,
+        SANE_EPOCH_NS,
+        *path_filter_params,
+        since_ns,
+        since_ns,
+        until_ns,
+        until_ns,
+        limit,
+    ]
 
-    with open_db(db_path, read_only=True) as conn:
-        rows = conn.execute(sql, params).fetchall()
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            rows = conn.execute(sql, params).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     if not rows:
         console.print("[yellow]No data in range[/]")
@@ -1671,7 +1899,7 @@ def timeline_cmd(
     table.add_column("Messages", justify="right", style="green")
     table.add_column("Size", justify="right", style="yellow")
     for label, files, messages, size in rows:
-        bar = "█" * max(1, int(round(bar_width * files / max_files))) if files else ""
+        bar = "█" * max(1, round(bar_width * files / max_files)) if files else ""
         table.add_row(
             str(label),
             f"{files:,}",
@@ -1696,72 +1924,67 @@ def info_cmd(
         Parameter(name=["--db"], help="Override the sidecar DB path."),
     ] = None,
 ) -> int:
-    """Show everything the index knows about TARGET (path or summary fingerprint)."""
+    """Show everything the index knows about TARGET (path, fingerprint, or short id)."""
     db_path = _resolve_db(db)
     if not db_path.exists():
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    abs_path: str | None = None
-    summary_fp: str | None = None
-    candidate = Path(target).expanduser()
-    if candidate.exists() or os.sep in target:
-        abs_path = str(candidate.resolve())
-    else:
-        summary_fp = target
-
-    with open_db(db_path, read_only=True) as conn:
-        if abs_path is not None:
-            row = conn.execute(
-                "SELECT summary_fingerprint FROM current_file WHERE abs_path = ?",
-                (abs_path,),
-            ).fetchone()
-            if row is None or row[0] is None:
-                console.print(f"[red]Error:[/] no indexed content for {abs_path}")
-                return 1
-            summary_fp = row[0]
-        else:
-            row = conn.execute(
-                "SELECT 1 FROM content WHERE summary_fingerprint = ?", (summary_fp,)
-            ).fetchone()
-            if row is None:
-                console.print(f"[red]Error:[/] unknown summary fingerprint {summary_fp}")
+    try:
+        with open_db(db_path, read_only=True) as conn:
+            summary_fp, abs_path, err = _resolve_target_to_summary_fp(conn, target)
+            if err is not None or summary_fp is None:
+                console.print(f"[red]Error:[/] {err}")
                 return 1
 
-        content = conn.execute(
-            "SELECT size_bytes, library, profile, message_count, schema_count, channel_count, "
-            "       attachment_count, metadata_count, chunk_count, "
-            "       message_start_time, message_end_time, first_seen_at, "
-            "       compression, compressed_size_bytes, uncompressed_size_bytes "
-            "FROM content WHERE summary_fingerprint = ?",
-            (summary_fp,),
-        ).fetchone()
-        topic_rows = conn.execute(
-            "SELECT t.name AS topic, s.name AS schema_name, "
-            "       sig.message_encoding, cc.message_count "
-            "FROM content_channel cc "
-            "JOIN content c       ON c.content_id        = cc.content_id "
-            "JOIN channel_sig sig ON sig.channel_sig_id  = cc.channel_sig_id "
-            "JOIN topic t         ON t.topic_id          = sig.topic_id "
-            "LEFT JOIN schema s   ON s.schema_pk_id      = sig.schema_pk_id "
-            "WHERE c.summary_fingerprint = ? "
-            "ORDER BY cc.message_count DESC NULLS LAST, t.name",
-            (summary_fp,),
-        ).fetchall()
-        observation_rows = conn.execute(
-            "SELECT fo.abs_path, fo.observed_at, fo.session_id, "
-            "       fo.file_fingerprint, c.summary_fingerprint "
-            "FROM file_observation fo "
-            "LEFT JOIN content c ON c.content_id = fo.content_id "
-            "WHERE c.summary_fingerprint = ? OR fo.abs_path = ? "
-            "ORDER BY fo.observed_at DESC LIMIT 20",
-            (summary_fp, abs_path or ""),
-        ).fetchall()
-        error_rows = conn.execute(
-            "SELECT abs_path, observed_at, error_kind, error_message "
-            "FROM scan_error WHERE abs_path = ? ORDER BY observed_at DESC LIMIT 10",
-            (abs_path or "",),
-        ).fetchall()
+            content = conn.execute(
+                "SELECT size_bytes, library, profile, message_count, schema_count, "
+                "       channel_count, attachment_count, metadata_count, chunk_count, "
+                "       message_start_time, message_end_time, first_seen_at, "
+                "       compression, compressed_size_bytes, uncompressed_size_bytes "
+                "FROM content WHERE summary_fingerprint = ?",
+                (summary_fp,),
+            ).fetchone()
+            topic_rows = conn.execute(
+                "SELECT cc.channel_id, t.name AS topic, "
+                "       sig.schema_pk_id, sig.message_encoding, "
+                "       cc.message_count, cc.uncompressed_size_bytes, "
+                "       cc.message_start_time, cc.message_end_time, "
+                "       cc.distribution_blob "
+                "FROM content_channel cc "
+                "JOIN content c       ON c.content_id        = cc.content_id "
+                "JOIN channel_sig sig ON sig.channel_sig_id  = cc.channel_sig_id "
+                "JOIN topic t         ON t.topic_id          = sig.topic_id "
+                "WHERE c.summary_fingerprint = ? "
+                "ORDER BY cc.message_count DESC NULLS LAST, t.name",
+                (summary_fp,),
+            ).fetchall()
+            schema_dim_rows = conn.execute(
+                "SELECT DISTINCT s.schema_pk_id, s.name, s.encoding, s.schema_size "
+                "FROM content_channel cc "
+                "JOIN content c       ON c.content_id        = cc.content_id "
+                "JOIN channel_sig sig ON sig.channel_sig_id  = cc.channel_sig_id "
+                "JOIN schema s        ON s.schema_pk_id      = sig.schema_pk_id "
+                "WHERE c.summary_fingerprint = ?",
+                (summary_fp,),
+            ).fetchall()
+            observation_rows = conn.execute(
+                "SELECT obs.abs_path, obs.observed_at, obs.session_id, "
+                "       obs.file_fingerprint, c.summary_fingerprint "
+                "FROM file_observation obs "
+                "LEFT JOIN content c ON c.content_id = obs.content_id "
+                "WHERE c.summary_fingerprint = ? OR obs.abs_path = ? "
+                "ORDER BY obs.observed_at DESC LIMIT 20",
+                (summary_fp, abs_path or ""),
+            ).fetchall()
+            error_rows = conn.execute(
+                "SELECT abs_path, observed_at, error_kind, error_message "
+                "FROM scan_error WHERE abs_path = ? ORDER BY observed_at DESC LIMIT 10",
+                (abs_path or "",),
+            ).fetchall()
+    except IndexDbNeedsMigrationError as exc:
+        _print_db_needs_migration(exc)
+        return 1
 
     (
         size_bytes,
@@ -1783,6 +2006,7 @@ def info_cmd(
 
     identity = {
         "summary_fingerprint": summary_fp,
+        "short_id": _short_id_from_fingerprint(summary_fp),
         "path": abs_path,
         "size_bytes": size_bytes,
         "library": library,
@@ -1801,14 +2025,34 @@ def info_cmd(
         "uncompressed_size_bytes": uncompressed_size_bytes,
         "first_seen_at_ns": first_seen_at,
     }
-    topics_payload = [
+    schema_name_by_pk_id: dict[int, str | None] = {
+        pk_id: name for pk_id, name, _enc, _sz in schema_dim_rows
+    }
+    topics_payload: list[_IndexedTopicPayload] = [
         {
+            "channel_id": ch_id,
             "topic": topic,
-            "schema": schema_name,
+            "schema_pk_id": schema_pk_id,
+            "schema": schema_name_by_pk_id.get(schema_pk_id) if schema_pk_id is not None else None,
             "encoding": encoding,
             "message_count": msg_count,
+            "uncompressed_size_bytes": ch_bytes,
+            "message_start_time_ns": ch_start,
+            "message_end_time_ns": ch_end,
+            "duration_ns": _safe_duration_ns(ch_start, ch_end),
+            "distribution": unpack_distribution_blob(dist_blob),
         }
-        for topic, schema_name, encoding, msg_count in topic_rows
+        for (
+            ch_id,
+            topic,
+            schema_pk_id,
+            encoding,
+            msg_count,
+            ch_bytes,
+            ch_start,
+            ch_end,
+            dist_blob,
+        ) in topic_rows
     ]
     observations_payload = [
         {
@@ -1848,13 +2092,19 @@ def info_cmd(
     identity_table.add_column(style="bold blue")
     identity_table.add_column()
     identity_table.add_row("Summary fingerprint:", f"[dim]{summary_fp}[/]")
+    short_id = _short_id_from_fingerprint(summary_fp)
+    if short_id:
+        identity_table.add_row("Short ID:", f"[bold green]{short_id}[/]")
     if abs_path is not None:
         identity_table.add_row("Path:", _format_parts_with_colors(abs_path))
     if size_bytes is not None:
-        identity_table.add_row(
-            "Size:",
-            f"[green]{bytes_to_human(size_bytes)}[/] [dim]({size_bytes:,} B)[/]",
-        )
+        size_cell = f"[green]{bytes_to_human(size_bytes)}[/] [dim]({size_bytes:,} B)[/]"
+        if isinstance(duration_ns, int) and duration_ns > 0:
+            bps = size_bytes / (duration_ns / 1_000_000_000)
+            size_cell += (
+                f" [red]{bytes_to_human(bps)}/s[/] [orange1]{bytes_to_human(bps * 3600)}/h[/]"
+            )
+        identity_table.add_row("Size:", size_cell)
     else:
         identity_table.add_row("Size:", "-")
     identity_table.add_row("Library:", f"[yellow]{library or '-'}[/]")
@@ -1891,21 +2141,18 @@ def info_cmd(
     console.print(identity_table)
 
     if topics_payload:
-        topic_table = Table(title=f"Topics ({len(topics_payload):,})")
-        topic_table.add_column("Topic", overflow="fold")
-        topic_table.add_column("Schema", overflow="fold")
-        topic_table.add_column("Encoding", style="yellow")
-        topic_table.add_column("Messages", justify="right", style="green")
-        for entry in topics_payload:
-            msgs = entry["message_count"]
-            schema_name = entry["schema"]
-            topic_table.add_row(
-                _format_parts_with_colors(str(entry["topic"])),
-                _format_schema_with_link(str(schema_name)) if schema_name else "-",
-                str(entry["encoding"] or "-"),
-                _format_count(int(msgs)) if isinstance(msgs, int) else "-",
+        console.print(f"[bold cyan]Topics ({len(topics_payload):,})[/]")
+        # ``responsive=False`` so the distribution sparkline (the main reason
+        # we store ``content_channel.distribution_blob``) renders regardless
+        # of terminal width.
+        console.print(
+            display_channels_table(
+                _topics_to_channel_table_data(topics_payload, schema_dim_rows, duration_ns),
+                console,
+                responsive=False,
+                index_duration=True,
             )
-        console.print(topic_table)
+        )
 
     if observations_payload:
         obs_table = Table(title=f"Observations ({len(observations_payload):,})")

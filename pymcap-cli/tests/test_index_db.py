@@ -9,6 +9,7 @@ import pytest
 from pymcap_cli.index import migrations
 from pymcap_cli.index.db import (
     CURRENT_SCHEMA_VERSION,
+    IndexDbNeedsMigrationError,
     connect,
     default_db_path,
     finish_session,
@@ -37,7 +38,9 @@ def test_connect_creates_db_and_applies_schema(tmp_path: Path) -> None:
             "content_channel",
             "schema",
             "content_schema",
-            "content_chunk",
+            "topic",
+            "channel_sig",
+            "channel_metadata",
             "file_observation",
             "scan_error",
         }.issubset(tables)
@@ -48,11 +51,8 @@ def test_connect_creates_db_and_applies_schema(tmp_path: Path) -> None:
         }
         assert "current_file" in views
 
-        # schema_migrations row inserted for v1.
-        migrations = conn.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall()
-        assert migrations == [(1,)]
+        applied = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+        assert applied == [(version,) for version in range(1, CURRENT_SCHEMA_VERSION + 1)]
 
 
 def test_reopen_is_idempotent(tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ def test_reopen_is_idempotent(tmp_path: Path) -> None:
         pass
     with open_db(db_path) as conn:
         migrations = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
-        assert migrations == 1
+        assert migrations == CURRENT_SCHEMA_VERSION
 
 
 def test_session_lifecycle(tmp_path: Path) -> None:
@@ -97,6 +97,49 @@ def test_default_db_path_under_cache_dir() -> None:
     path = default_db_path()
     assert path.name == "index.sqlite"
     assert "pymcap-cli" in path.parts
+
+
+def test_read_only_open_rejects_pending_migrations_without_mutating(tmp_path: Path) -> None:
+    """Read commands should not mutate an older DB just to apply migrations."""
+    db_path = tmp_path / "index.sqlite"
+
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        raw.execute("PRAGMA foreign_keys=OFF")
+        v1_version, v1_apply, v1_desc = sorted(migrations._discover())[0]
+        assert v1_version == 1, "expected migration 0001 to be the first"
+        raw.execute("BEGIN")
+        v1_apply(raw)
+        raw.execute(
+            "INSERT INTO schema_migrations(version, applied_at, description) VALUES (?, 0, ?)",
+            (v1_version, v1_desc),
+        )
+        raw.execute(f"PRAGMA user_version = {v1_version}")
+        raw.execute("COMMIT")
+    finally:
+        raw.close()
+
+    # Verify the on-disk DB is at v1 before the read-only open.
+    probe = sqlite3.connect(db_path)
+    try:
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        probe.close()
+
+    with pytest.raises(IndexDbNeedsMigrationError) as excinfo:
+        connect(db_path, read_only=True)
+
+    assert excinfo.value.current_version == 1
+    assert excinfo.value.expected_version == CURRENT_SCHEMA_VERSION
+
+    # Still v1 after the failed read-only open.
+    probe = sqlite3.connect(db_path)
+    try:
+        assert probe.execute("PRAGMA user_version").fetchone()[0] == 1
+        applied = probe.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+        assert applied == [(1,)]
+    finally:
+        probe.close()
 
 
 def test_failed_migration_rolls_back_schema_change(

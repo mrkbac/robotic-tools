@@ -25,6 +25,7 @@ import logging
 import os
 import queue
 import stat
+import struct
 import threading
 import time
 import zlib
@@ -35,12 +36,13 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 import xxhash
-from small_mcap import McapError, get_header, get_summary, rebuild_summary
+from small_mcap import McapError, get_header, read_info_approximate, rebuild_summary
 
 from pymcap_cli.index import SANE_EPOCH_NS
 from pymcap_cli.index.db import finish_session, start_session
 from pymcap_cli.index.fingerprint import fingerprint_stream
 from pymcap_cli.index.summary_fingerprint import compute_schema_hash_map, summary_fingerprint
+from pymcap_cli.types.info_data import collect_channel_metrics
 
 if TYPE_CHECKING:
     import sqlite3
@@ -56,21 +58,25 @@ class _SummaryUnavailableError(Exception):
 
 # Per-process state for worker pool — populated once by ``_worker_init`` in
 # each child process, then read by ``_process_file_task`` for every job.
-_WORKER_FILE_FP_CACHE: dict[str, str] = {}
-_WORKER_KNOWN_SUMMARY_FPS: set[str] = set()
+@dataclass(slots=True)
+class _WorkerState:
+    file_fp_cache: dict[str, str] = field(default_factory=dict)
+    known_summary_fps: set[str] = field(default_factory=set)
+
+
+_WORKER_STATE = _WorkerState()
 
 
 def _worker_init(file_fp_cache: dict[str, str], known_summary_fps: set[str]) -> None:
-    global _WORKER_FILE_FP_CACHE, _WORKER_KNOWN_SUMMARY_FPS
-    _WORKER_FILE_FP_CACHE = file_fp_cache
-    _WORKER_KNOWN_SUMMARY_FPS = known_summary_fps
+    _WORKER_STATE.file_fp_cache = file_fp_cache
+    _WORKER_STATE.known_summary_fps = known_summary_fps
 
 
 def _process_file_task(inp: _ScanInput, rebuild_missing: bool) -> _ScanResult:
     return _process_file(
         inp,
-        file_fp_cache=_WORKER_FILE_FP_CACHE,
-        known_summary_fps=_WORKER_KNOWN_SUMMARY_FPS,
+        file_fp_cache=_WORKER_STATE.file_fp_cache,
+        known_summary_fps=_WORKER_STATE.known_summary_fps,
         rebuild_missing=rebuild_missing,
     )
 
@@ -104,6 +110,29 @@ class _ScanInput:
 
 
 @dataclass(slots=True)
+class _ChannelRow:
+    channel_id: int
+    topic: str
+    schema_id: int
+    message_encoding: str
+    metadata: str | None
+    message_count: int | None
+    uncompressed_size_bytes: int | None
+    message_start_time: int | None
+    message_end_time: int | None
+    distribution_blob: bytes | None
+
+
+@dataclass(slots=True)
+class _SchemaRow:
+    schema_id: int
+    name: str
+    encoding: str
+    schema_size: int
+    schema_hash: str
+
+
+@dataclass(slots=True)
 class _ContentRow:
     summary_fingerprint: str
     size_bytes: int
@@ -130,8 +159,8 @@ class _ContentRow:
     compressed_size_bytes: int | None
     uncompressed_size_bytes: int | None
     scan_kind: str
-    channels: list[dict] = field(default_factory=list)
-    schemas: list[dict] = field(default_factory=list)
+    channels: list[_ChannelRow] = field(default_factory=list)
+    schemas: list[_SchemaRow] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -396,23 +425,31 @@ def _current_paths_for_root(conn: sqlite3.Connection, root: Path, *, recurse: bo
 def _load_summary_info(f: IO[bytes], *, rebuild_missing: bool) -> tuple[RebuildInfo, str]:
     """Return (info, scan_kind). ``info.summary.statistics`` is guaranteed non-None.
 
-    Tries the native summary first (fast). Rebuilds the full data section only
-    when the caller opts in with ``rebuild_missing``.
+    Uses :func:`small_mcap.read_info_approximate` on the fast path: that reads
+    the native summary plus the per-chunk MessageIndex records via random-
+    access seek (no data-section walk), giving us approximate per-channel
+    uncompressed sizes and per-channel timestamps for free. Falls through to
+    a full data-section rebuild only when the caller opts in with
+    ``rebuild_missing``.
     """
-    from small_mcap.rebuild import RebuildInfo as _RebuildInfo  # noqa: PLC0415
-
+    # Probe the header first. A missing / malformed MCAP header is a
+    # "corrupt" classification — letting ``McapError`` propagate keeps the
+    # outer error mapping in ``_process_file`` honest. After this we treat
+    # exceptions from the summary / MessageIndex reads as "no usable summary"
+    # rather than "corrupt".
     f.seek(0)
-    header = get_header(f)
+    get_header(f)
+    f.seek(0)
     try:
-        summary = get_summary(f)
+        info = read_info_approximate(f)
     except (McapError, AssertionError):
-        summary = None
+        info = None
 
-    if summary is not None and summary.statistics is not None and header is not None:
-        return _RebuildInfo(header=header, summary=summary), "summary"
+    if info is not None and info.summary.statistics is not None:
+        return info, "summary"
 
     if not rebuild_missing:
-        if summary is not None and summary.statistics is None:
+        if info is not None and info.summary.statistics is None:
             raise _SummaryUnavailableError("MCAP summary is missing Statistics")
         raise _SummaryUnavailableError("MCAP has no readable summary section")
 
@@ -420,10 +457,40 @@ def _load_summary_info(f: IO[bytes], *, rebuild_missing: bool) -> tuple[RebuildI
     result = rebuild_summary(
         f,
         validate_crc=False,
-        calculate_channel_sizes=False,
+        calculate_channel_sizes=True,
         exact_sizes=False,
     )
     return result, "rebuilt"
+
+
+_DISTRIBUTION_HEADER_STRUCT = struct.Struct("<H")
+
+
+def _pack_distribution_counts(counts: list[int]) -> bytes:
+    for count in counts:
+        if count < 0 or count > 0xFFFFFFFF:
+            raise ValueError("distribution bin count does not fit uint32")
+    raw = _DISTRIBUTION_HEADER_STRUCT.pack(len(counts))
+    if counts:
+        raw += struct.pack(f"<{len(counts)}I", *counts)
+    return zlib.compress(raw, 6)
+
+
+def unpack_distribution_blob(blob: bytes | None) -> list[int] | None:
+    """Unpack a zlib-compressed per-channel activity histogram."""
+    if not blob:
+        return None
+    raw = zlib.decompress(blob)
+    if len(raw) < _DISTRIBUTION_HEADER_STRUCT.size:
+        raise ValueError("distribution blob is missing its header")
+    (bucket_count,) = _DISTRIBUTION_HEADER_STRUCT.unpack(raw[: _DISTRIBUTION_HEADER_STRUCT.size])
+    body = raw[_DISTRIBUTION_HEADER_STRUCT.size :]
+    expected_body_size = bucket_count * 4
+    if len(body) != expected_body_size:
+        raise ValueError("distribution blob length does not match its header")
+    if bucket_count == 0:
+        return []
+    return list(struct.unpack(f"<{bucket_count}I", body))
 
 
 def _build_content_row(
@@ -437,27 +504,39 @@ def _build_content_row(
     summary = info.summary
     stats = summary.statistics
     channel_message_counts = stats.channel_message_counts if stats is not None else {}
+    channel_sizes = info.channel_sizes or {}
+    file_start = stats.message_start_time if stats is not None else 0
+    file_end = stats.message_end_time if stats is not None else 0
+    metrics = collect_channel_metrics(info, file_start, max(file_end - file_start, 0))
 
     channels = [
-        {
-            "channel_id": ch.id,
-            "topic": ch.topic,
-            "schema_id": ch.schema_id,
-            "message_encoding": ch.message_encoding,
-            "metadata": json.dumps(ch.metadata) if ch.metadata else None,
-            "message_count": channel_message_counts.get(ch.id),
-        }
+        _ChannelRow(
+            channel_id=ch.id,
+            topic=ch.topic,
+            schema_id=ch.schema_id,
+            message_encoding=ch.message_encoding,
+            metadata=json.dumps(ch.metadata) if ch.metadata else None,
+            message_count=channel_message_counts.get(ch.id),
+            uncompressed_size_bytes=channel_sizes.get(ch.id),
+            message_start_time=metrics.message_start_time.get(ch.id),
+            message_end_time=metrics.message_end_time.get(ch.id),
+            distribution_blob=(
+                _pack_distribution_counts(distribution)
+                if (distribution := metrics.per_channel_distributions.get(ch.id)) is not None
+                else None
+            ),
+        )
         for ch in summary.channels.values()
     ]
 
     schemas = [
-        {
-            "schema_id": sc.id,
-            "name": sc.name,
-            "encoding": sc.encoding,
-            "schema_size": len(sc.data),
-            "schema_hash": schema_hash_by_id[sc.id],
-        }
+        _SchemaRow(
+            schema_id=sc.id,
+            name=sc.name,
+            encoding=sc.encoding,
+            schema_size=len(sc.data),
+            schema_hash=schema_hash_by_id[sc.id],
+        )
         for sc in summary.schemas.values()
     ]
 
@@ -695,13 +774,13 @@ def _insert_content(
 
     # ``schema`` dimension table — one row per canonical schema hash.
     for sc in content.schemas:
-        sh = sc["schema_hash"]
+        sh = sc.schema_hash
         if sh in schema_pk_id_cache:
             continue
         conn.execute(
             "INSERT OR IGNORE INTO schema(schema_hash, name, encoding, schema_size) "
             "VALUES (?, ?, ?, ?)",
-            (sh, sc["name"], sc["encoding"], sc["schema_size"]),
+            (sh, sc.name, sc.encoding, sc.schema_size),
         )
         row = conn.execute(
             "SELECT schema_pk_id FROM schema WHERE schema_hash = ?", (sh,)
@@ -711,12 +790,12 @@ def _insert_content(
     # Map file-local schema_id → canonical schema_pk_id (NULL when the
     # channel declares no schema, i.e. schema_id == 0 in MCAP).
     schema_pk_id_by_local: dict[int, int | None] = {
-        sc["schema_id"]: schema_pk_id_cache[sc["schema_hash"]] for sc in content.schemas
+        sc.schema_id: schema_pk_id_cache[sc.schema_hash] for sc in content.schemas
     }
 
     # ``topic`` dimension table — one row per channel topic string.
     for ch in content.channels:
-        topic = ch["topic"]
+        topic = ch.topic
         if topic in topic_id_cache:
             continue
         conn.execute("INSERT OR IGNORE INTO topic(name) VALUES (?)", (topic,))
@@ -749,12 +828,14 @@ def _insert_content(
     # (topic, schema, encoding, metadata) tuple that repeats heavily across
     # files. Now keyed by the small INTEGER ``metadata_id`` from
     # ``channel_metadata`` rather than the raw blob.
-    channel_rows: list[tuple[int, int, int, int | None]] = []
+    channel_rows: list[
+        tuple[int, int, int, int | None, int | None, int | None, int | None, bytes | None]
+    ] = []
     for ch in content.channels:
-        topic_id = topic_id_cache[ch["topic"]]
-        schema_pk_id = schema_pk_id_by_local.get(ch["schema_id"])
-        encoding = ch["message_encoding"]
-        metadata_id = _intern_metadata(ch["metadata"])
+        topic_id = topic_id_cache[ch.topic]
+        schema_pk_id = schema_pk_id_by_local.get(ch.schema_id)
+        encoding = ch.message_encoding
+        metadata_id = _intern_metadata(ch.metadata)
         sig_key = (
             topic_id,
             schema_pk_id if schema_pk_id is not None else 0,
@@ -779,22 +860,33 @@ def _insert_content(
             ).fetchone()
             sig_id = row[0]
             channel_sig_cache[sig_key] = sig_id
-        channel_rows.append((content_id, ch["channel_id"], sig_id, ch["message_count"]))
+        channel_rows.append(
+            (
+                content_id,
+                ch.channel_id,
+                sig_id,
+                ch.message_count,
+                ch.uncompressed_size_bytes,
+                ch.message_start_time,
+                ch.message_end_time,
+                ch.distribution_blob,
+            )
+        )
 
     conn.executemany(
         """INSERT INTO content_channel
-           (content_id, channel_id, channel_sig_id, message_count)
-           VALUES (?, ?, ?, ?)""",
+           (content_id, channel_id, channel_sig_id, message_count,
+            uncompressed_size_bytes,
+            message_start_time, message_end_time,
+            distribution_blob)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         channel_rows,
     )
     conn.executemany(
         """INSERT INTO content_schema
            (content_id, schema_id, schema_pk_id)
            VALUES (?, ?, ?)""",
-        [
-            (content_id, sc["schema_id"], schema_pk_id_cache[sc["schema_hash"]])
-            for sc in content.schemas
-        ],
+        [(content_id, sc.schema_id, schema_pk_id_cache[sc.schema_hash]) for sc in content.schemas],
     )
     return content_id
 
@@ -808,13 +900,15 @@ def _update_content_aggregates(
 
     Used by ``scan(..., force_rebuild=True)`` to backfill columns that landed
     in a later migration (e.g. ``compression`` / ``compressed_size_bytes`` /
-    ``uncompressed_size_bytes`` from 0005) on rows that were inserted before
-    those columns existed and therefore still hold ``NULL``.
+    ``uncompressed_size_bytes`` from 0005, per-channel size, time range, and
+    distribution from 0006) on rows that were inserted before those columns
+    existed and therefore still hold ``NULL``.
 
-    Counts / fingerprints / per-channel data are deliberately NOT updated —
-    a file whose byte content changed would land on a different
+    Counts / fingerprints / channel_sig membership are deliberately NOT
+    updated — a file whose byte content changed would land on a different
     ``summary_fingerprint`` and become a new ``content`` row instead of
-    overwriting this one.
+    overwriting this one. Per-channel aggregates ARE refreshed in place on
+    the existing ``(content_id, channel_id)`` rows.
     """
     conn.execute(
         "UPDATE content "
@@ -833,6 +927,25 @@ def _update_content_aggregates(
             content_id,
         ),
     )
+    conn.executemany(
+        "UPDATE content_channel "
+        "   SET uncompressed_size_bytes  = ?, "
+        "       message_start_time       = ?, "
+        "       message_end_time         = ?, "
+        "       distribution_blob        = ? "
+        " WHERE content_id = ? AND channel_id = ?",
+        [
+            (
+                ch.uncompressed_size_bytes,
+                ch.message_start_time,
+                ch.message_end_time,
+                ch.distribution_blob,
+                content_id,
+                ch.channel_id,
+            )
+            for ch in content.channels
+        ],
+    )
 
 
 def _existing_summary_fingerprints(conn: sqlite3.Connection) -> set[str]:
@@ -848,10 +961,10 @@ def _existing_file_to_summary(conn: sqlite3.Connection) -> dict[str, str]:
     return {
         row[0]: row[1]
         for row in conn.execute(
-            "SELECT DISTINCT fo.file_fingerprint, c.summary_fingerprint "
-            "FROM file_observation fo "
-            "JOIN content c ON c.content_id = fo.content_id "
-            "WHERE fo.content_id IS NOT NULL"
+            "SELECT DISTINCT obs.file_fingerprint, c.summary_fingerprint "
+            "FROM file_observation obs "
+            "JOIN content c ON c.content_id = obs.content_id "
+            "WHERE obs.content_id IS NOT NULL"
         )
     }
 

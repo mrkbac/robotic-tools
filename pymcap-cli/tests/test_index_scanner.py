@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.index import scanner as index_scanner
 from pymcap_cli.index.db import open_db
-from pymcap_cli.index.scanner import scan
+from pymcap_cli.index.scanner import scan, unpack_distribution_blob
 from small_mcap import rebuild_summary
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap, create_simple_mcap
@@ -58,9 +58,10 @@ def test_force_rebuild_refreshes_existing_aggregates(tmp_path: Path) -> None:
             "    compressed_size_bytes = NULL, "
             "    uncompressed_size_bytes = NULL"
         )
-        assert conn.execute(
-            "SELECT COUNT(*) FROM content WHERE compression IS NULL"
-        ).fetchone()[0] == 2
+        assert (
+            conn.execute("SELECT COUNT(*) FROM content WHERE compression IS NULL").fetchone()[0]
+            == 2
+        )
 
     # ``--retry-errors`` alone would NOT touch these rows (no error to
     # retry), and a plain rescan would stat-skip both files. ``force_rebuild``
@@ -109,13 +110,13 @@ def test_rescan_skips_unchanged_via_stat(tmp_path: Path, monkeypatch) -> None:
         scan(tmp_path, conn, pymcap_cli_version="test")
 
     summary_calls = {"n": 0}
-    original = index_scanner.get_summary
+    original = index_scanner.read_info_approximate
 
-    def _counting_get_summary(*args, **kwargs):
+    def _counting_read_info(*args, **kwargs):
         summary_calls["n"] += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(index_scanner, "get_summary", _counting_get_summary)
+    monkeypatch.setattr(index_scanner, "read_info_approximate", _counting_read_info)
 
     with open_db(db) as conn:
         stats = scan(tmp_path, conn, pymcap_cli_version="test")
@@ -296,6 +297,83 @@ def test_multi_topic_records_channels_and_chunks(tmp_path: Path) -> None:
         assert conn.execute("SELECT MAX(chunk_count) FROM content").fetchone()[0] >= 1
         schemas = conn.execute("SELECT name FROM schema").fetchall()
         assert len(schemas) == 1
+
+
+def test_per_channel_stats_populated(tmp_path: Path) -> None:
+    """``content_channel`` carries per-channel size and time range after v6."""
+    p = tmp_path / "multi.mcap"
+    p.write_bytes(create_multi_topic_mcap(["/a", "/b"], messages_per_topic=20))
+    db = tmp_path / "index.sqlite"
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test")
+        rows = conn.execute(
+            "SELECT t.name, cc.message_count, cc.uncompressed_size_bytes, "
+            "       cc.message_start_time, cc.message_end_time "
+            "FROM content_channel cc "
+            "JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id "
+            "JOIN topic t ON t.topic_id = sig.topic_id "
+            "ORDER BY t.name"
+        ).fetchall()
+        assert len(rows) == 2
+        for topic, msg_count, size_bytes, start_ns, end_ns in rows:
+            assert msg_count == 20, topic
+            # ``read_info_approximate`` populates approximate uncompressed sizes
+            # from MessageIndex offset deltas. Just assert it's a positive int.
+            assert isinstance(size_bytes, int), topic
+            assert size_bytes > 0, topic
+            assert isinstance(start_ns, int), topic
+            assert isinstance(end_ns, int), topic
+            assert end_ns >= start_ns, topic
+
+
+def test_per_channel_distribution_blob_round_trip(tmp_path: Path) -> None:
+    """``distribution_blob`` packs the shared info histogram and unpacks back."""
+    p = tmp_path / "rec.mcap"
+    p.write_bytes(create_multi_topic_mcap(["/foo"], messages_per_topic=64))
+    db = tmp_path / "index.sqlite"
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test")
+        blob, msg_count = conn.execute(
+            "SELECT cc.distribution_blob, cc.message_count "
+            "FROM content_channel cc "
+            "JOIN channel_sig sig ON sig.channel_sig_id = cc.channel_sig_id "
+            "JOIN topic t ON t.topic_id = sig.topic_id WHERE t.name = '/foo'"
+        ).fetchone()
+    assert blob is not None
+    bins = unpack_distribution_blob(blob)
+    assert bins is not None
+    assert 20 <= len(bins) <= 80
+    assert sum(bins) == msg_count
+
+
+def test_force_rebuild_backfills_per_channel_stats(tmp_path: Path) -> None:
+    """Existing rows with NULL per-channel stats get repopulated on --force-rebuild."""
+    p = tmp_path / "rec.mcap"
+    p.write_bytes(create_multi_topic_mcap(["/x", "/y"], messages_per_topic=15))
+    db = tmp_path / "index.sqlite"
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test")
+        # Simulate a pre-v6 row by nulling the new columns.
+        conn.execute(
+            "UPDATE content_channel SET uncompressed_size_bytes = NULL, "
+            "message_start_time = NULL, message_end_time = NULL, "
+            "distribution_blob = NULL"
+        )
+        null_before = conn.execute(
+            "SELECT COUNT(*) FROM content_channel "
+            "WHERE uncompressed_size_bytes IS NULL OR distribution_blob IS NULL"
+        ).fetchone()[0]
+        assert null_before == 2
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test", force_rebuild=True)
+        null_after = conn.execute(
+            "SELECT COUNT(*) FROM content_channel "
+            "WHERE uncompressed_size_bytes IS NULL OR distribution_blob IS NULL"
+        ).fetchone()[0]
+        assert null_after == 0
 
 
 def test_identical_schemas_are_deduplicated_across_content(tmp_path: Path) -> None:

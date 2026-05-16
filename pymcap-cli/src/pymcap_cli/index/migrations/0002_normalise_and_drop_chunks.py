@@ -1,3 +1,4 @@
+# ruff: noqa: S608
 """V2 schema — normalise wide TEXT FKs to INTEGER surrogates and drop ``content_chunk``.
 
 What this migration does:
@@ -164,11 +165,11 @@ INSERT INTO file_observation_v2 (
   file_fingerprint, content_id, is_deleted,
   session_id, observed_at, extra
 )
-SELECT fo.id, fo.abs_path, fo.size_bytes, fo.mtime_ns, fo.inode,
-       fo.file_fingerprint, c.content_id, fo.is_deleted,
-       fo.session_id, fo.observed_at, fo.extra
-FROM file_observation fo
-LEFT JOIN content_v2 c ON c.summary_fingerprint = fo.summary_fingerprint;
+SELECT obs.id, obs.abs_path, obs.size_bytes, obs.mtime_ns, obs.inode,
+       obs.file_fingerprint, c.content_id, obs.is_deleted,
+       obs.session_id, obs.observed_at, obs.extra
+FROM file_observation obs
+LEFT JOIN content_v2 c ON c.summary_fingerprint = obs.summary_fingerprint;
 """
 
 _DROP_OLD = """

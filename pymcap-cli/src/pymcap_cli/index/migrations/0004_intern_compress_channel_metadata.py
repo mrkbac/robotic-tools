@@ -105,8 +105,7 @@ def apply(conn: sqlite3.Connection) -> None:
 
     # Stream old rows into the new shape, resolving metadata_id per row.
     src = conn.execute(
-        "SELECT channel_sig_id, topic_id, schema_pk_id, message_encoding, metadata "
-        "FROM channel_sig"
+        "SELECT channel_sig_id, topic_id, schema_pk_id, message_encoding, metadata FROM channel_sig"
     )
     rebuilt: list[tuple[int, int, int | None, str | None, int | None]] = []
     for sig_id, topic_id, schema_pk_id, encoding, meta in src:

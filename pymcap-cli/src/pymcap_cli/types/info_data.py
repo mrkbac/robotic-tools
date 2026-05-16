@@ -50,6 +50,20 @@ class ChannelStatistics:
     intervals: list[int] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class ChannelMetrics:
+    """Shared per-channel timing and distribution metrics."""
+
+    channel_durations: dict[int, int] = field(default_factory=dict)
+    channel_intervals: dict[int, list[int]] = field(default_factory=dict)
+    global_message_counts: list[int] = field(default_factory=list)
+    per_channel_distributions: dict[int, list[int]] = field(default_factory=dict)
+    message_start_time: dict[int, int] = field(default_factory=dict)
+    message_end_time: dict[int, int] = field(default_factory=dict)
+    bucket_count: int = 0
+    bucket_duration_ns: int = 0
+
+
 def _calculate_chunk_overlaps(chunk_indexes: list[ChunkIndex]) -> tuple[int, int]:
     if len(chunk_indexes) <= 1:
         return 0, 0
@@ -287,6 +301,46 @@ def _calculate_optimal_bucket_count(duration_ns: int) -> int:
     return best_bucket_count
 
 
+def collect_channel_metrics(info: RebuildInfo, start_time: int, duration_ns: int) -> ChannelMetrics:
+    """Collect shared per-channel timing and distribution metrics.
+
+    Both the standalone ``info`` command and the sidecar index use this so
+    channel durations and distribution bars stay consistent.
+    """
+    bucket_count = _calculate_optimal_bucket_count(duration_ns)
+    bucket_duration_ns = duration_ns // bucket_count if duration_ns > 0 else 0
+    if not info.chunk_information:
+        return ChannelMetrics(
+            global_message_counts=[0] * bucket_count,
+            bucket_count=bucket_count,
+            bucket_duration_ns=bucket_duration_ns,
+        )
+
+    (
+        channel_durations,
+        channel_intervals,
+        global_message_counts,
+        per_channel_distributions,
+        message_start_time,
+        message_end_time,
+    ) = _collect_channel_statistics(
+        info,
+        start_time,
+        bucket_count,
+        bucket_duration_ns,
+    )
+    return ChannelMetrics(
+        channel_durations=channel_durations,
+        channel_intervals=channel_intervals,
+        global_message_counts=global_message_counts,
+        per_channel_distributions=per_channel_distributions,
+        message_start_time=message_start_time,
+        message_end_time=message_end_time,
+        bucket_count=bucket_count,
+        bucket_duration_ns=bucket_duration_ns,
+    )
+
+
 def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoOutput:
     """Transform MCAP Info object into a JSON-serializable dictionary.
 
@@ -324,43 +378,15 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
     # Calculate chunk overlaps
     max_concurrent, overlap_size = _calculate_chunk_overlaps(summary.chunk_indexes)
 
-    # Calculate optimal bucket count for distributions
-    bucket_count = _calculate_optimal_bucket_count(duration_ns)
-    bucket_duration_ns = duration_ns // bucket_count if duration_ns > 0 else 0
-
-    # Single-pass collection of all channel statistics and distributions
-    channel_durations: dict[int, int] = {}
-    channel_intervals: dict[int, list[int]] = {}
-    global_message_counts: list[int] = []
-    per_channel_distributions: dict[int, list[int]] = {}
-    message_start_time: dict[int, int] = {}
-    message_end_time: dict[int, int] = {}
-    interval_stats: dict[int, IntervalStatsResult] = {}
-
-    if info.chunk_information:
-        (
-            channel_durations,
-            channel_intervals,
-            global_message_counts,
-            per_channel_distributions,
-            message_start_time,
-            message_end_time,
-        ) = _collect_channel_statistics(
-            info,
-            statistics_rec.message_start_time,
-            bucket_count,
-            bucket_duration_ns,
-        )
-        interval_stats = _calculate_interval_stats(channel_intervals)
-    else:
-        global_message_counts = [0] * bucket_count
+    metrics = collect_channel_metrics(info, statistics_rec.message_start_time, duration_ns)
+    interval_stats = _calculate_interval_stats(metrics.channel_intervals)
 
     # Build message distribution from collected data
-    max_count = max(global_message_counts) if global_message_counts else 0
+    max_count = max(metrics.global_message_counts) if metrics.global_message_counts else 0
     message_distribution: MessageDistribution = {
-        "bucket_count": bucket_count,
-        "bucket_duration_ns": bucket_duration_ns,
-        "message_counts": global_message_counts,
+        "bucket_count": metrics.bucket_count,
+        "bucket_duration_ns": metrics.bucket_duration_ns,
+        "message_counts": metrics.global_message_counts,
         "max_count": max_count,
     }
 
@@ -410,11 +436,11 @@ def info_to_dict(info: RebuildInfo, file_path: str, file_size: int) -> McapInfoO
         channel_id = channel.id
         count = statistics_rec.channel_message_counts.get(channel_id, 0)
         channel_size = info.channel_sizes.get(channel_id) if info.channel_sizes else None
-        ch_duration_ns = channel_durations.get(channel_id)
-        ch_distribution = per_channel_distributions.get(channel_id, [])
+        ch_duration_ns = metrics.channel_durations.get(channel_id)
+        ch_distribution = metrics.per_channel_distributions.get(channel_id, [])
         ch_interval_stats = interval_stats.get(channel_id)
-        ch_first_time = message_start_time.get(channel_id)
-        ch_last_time = message_end_time.get(channel_id)
+        ch_first_time = metrics.message_start_time.get(channel_id)
+        ch_last_time = metrics.message_end_time.get(channel_id)
 
         output["channels"].append(
             _build_channel_dict(
