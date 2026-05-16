@@ -601,7 +601,18 @@ def tree_cmd(
 
 @index_app.command(name="query")
 def query_cmd(
+    folder: Annotated[
+        Path | None,
+        Parameter(help="Optional path prefix to restrict results to."),
+    ] = None,
     *,
+    sort_by: Annotated[
+        Literal["path", "duration", "messages", "size", "start"],
+        Parameter(
+            name=["--sort-by"],
+            help="Sort results (descending except for ``path``).",
+        ),
+    ] = "path",
     topic: Annotated[
         str | None,
         Parameter(name=["--topic"], help="Match files containing this topic."),
@@ -662,6 +673,23 @@ def query_cmd(
     if until is not None:
         window_end = _parse_time_or_exit(until, "until")
 
+    order_by = {
+        "path": "cf.abs_path",
+        "duration": "(c.message_end_time - c.message_start_time) DESC",
+        "messages": "messages DESC" if (topic is not None or schema is not None) else "c.message_count DESC",
+        "size": "cf.size_bytes DESC",
+        "start": "c.message_start_time DESC",
+    }[sort_by]
+
+    folder_clause = ""
+    folder_params: tuple[str | int, ...] = ()
+    if folder is not None:
+        folder_where, folder_params = _path_prefix_where(folder)
+        # _path_prefix_where returns ``WHERE ...`` — re-tag as inline conjunct.
+        folder_clause = folder_where.removeprefix("WHERE ").replace(
+            "abs_path", "cf.abs_path"
+        )
+
     channel_filtered = topic is not None or schema is not None
     params: list[str | int] = []
     if channel_filtered:
@@ -669,7 +697,7 @@ def query_cmd(
             "SELECT cf.abs_path, "
             "COALESCE(SUM(cc.message_count), 0) AS messages, "
             "COUNT(DISTINCT cc.channel_id) AS channels, "
-            "c.message_start_time, c.message_end_time "
+            "c.message_start_time, c.message_end_time, cf.size_bytes "
             "FROM current_file cf "
             "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint "
             "JOIN content_channel cc ON cc.summary_fingerprint = c.summary_fingerprint "
@@ -696,12 +724,15 @@ def query_cmd(
         if window_start is not None:
             where.append("c.message_end_time >= ?")
             params.append(window_start)
+        if folder_clause:
+            where.append(folder_clause)
+            params.extend(folder_params)
         sql += "WHERE " + " AND ".join(where) + " "
-        sql += "GROUP BY cf.abs_path ORDER BY cf.abs_path LIMIT ?"
+        sql += f"GROUP BY cf.abs_path ORDER BY {order_by} LIMIT ?"
     else:
         sql = (
             "SELECT cf.abs_path, c.message_count, c.channel_count, "
-            "c.message_start_time, c.message_end_time "
+            "c.message_start_time, c.message_end_time, cf.size_bytes "
             "FROM current_file cf "
             "JOIN content c ON c.summary_fingerprint = cf.summary_fingerprint "
         )
@@ -715,9 +746,12 @@ def query_cmd(
         if window_start is not None:
             where.append("c.message_end_time >= ?")
             params.append(window_start)
+        if folder_clause:
+            where.append(folder_clause)
+            params.extend(folder_params)
         if where:
             sql += "WHERE " + " AND ".join(where) + " "
-        sql += "ORDER BY cf.abs_path LIMIT ?"
+        sql += f"ORDER BY {order_by} LIMIT ?"
     params.append(limit)
 
     with open_db(db_path, read_only=True) as conn:
@@ -731,8 +765,9 @@ def query_cmd(
             "start_time_ns": start,
             "end_time_ns": end,
             "duration_ns": (end - start) if (start and end and end > start) else None,
+            "size_bytes": size,
         }
-        for path, msgs, channels, start, end in sql_rows
+        for path, msgs, channels, start, end, size in sql_rows
     ]
 
     if format == "table":
