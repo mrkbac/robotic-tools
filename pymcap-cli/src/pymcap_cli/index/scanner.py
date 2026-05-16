@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
@@ -141,13 +142,19 @@ def _iter_mcap_files(
     *,
     recurse: bool,
     on_dir_done: Callable[[int], None] | None = None,
-) -> Iterator[Path]:
-    """Yield ``.mcap`` files under ``root`` as they are discovered.
+) -> Iterator[tuple[Path, os.stat_result | None]]:
+    """Yield ``(path, stat_result | None)`` for every ``.mcap`` under ``root``.
 
-    Streaming so callers can start processing the first files while the
+    Streaming, so callers can start processing the first files while the
     walker keeps going — important when ``root`` is on a slow mount.
     ``follow_symlinks=False`` on directory descent matches
     :meth:`Path.rglob`'s default and skips venv / cache symlinks.
+
+    The walker calls ``entry.stat()`` once per ``.mcap`` and hands the result
+    back to the caller, so the main loop does not need a second ``stat`` per
+    file. This roughly halves stat syscalls on filesystems where
+    ``DirEntry.is_file()`` would have triggered its own stat (slow remote
+    mounts, FUSE, NFS with ``DT_UNKNOWN`` dirents).
 
     ``on_dir_done`` is called with the running directory count every time
     a directory finishes scanning, so the caller can drive a progress UI
@@ -155,7 +162,7 @@ def _iter_mcap_files(
     """
     if root.is_file():
         if root.suffix == ".mcap":
-            yield root.resolve()
+            yield root.resolve(), None
         return
     if not root.is_dir():
         return
@@ -172,10 +179,11 @@ def _iter_mcap_files(
                 if not entry.name.endswith(".mcap"):
                     continue
                 try:
-                    if entry.is_file():
-                        yield Path(entry.path)
+                    st = entry.stat()
                 except OSError:
                     continue
+                if stat.S_ISREG(st.st_mode):
+                    yield Path(entry.path), st
         if on_dir_done is not None:
             on_dir_done(1)
         return
@@ -193,10 +201,14 @@ def _iter_mcap_files(
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(entry.path)
-                    elif entry.name.endswith(".mcap") and entry.is_file():
-                        yield Path(entry.path)
+                        continue
+                    if not entry.name.endswith(".mcap"):
+                        continue
+                    st = entry.stat()
                 except OSError:
                     continue
+                if stat.S_ISREG(st.st_mode):
+                    yield Path(entry.path), st
         dirs_done += 1
         if on_dir_done is not None and dirs_done % 200 == 0:
             on_dir_done(dirs_done)
@@ -795,21 +807,26 @@ def scan(
             initializer=_worker_init,
             initargs=(file_fp_cache_snapshot, known_summary_fps_snapshot),
         ) as pool:
-            for path in _iter_mcap_files(root, recurse=recurse, on_dir_done=_on_dir_done):
+            for path, walker_st in _iter_mcap_files(
+                root, recurse=recurse, on_dir_done=_on_dir_done
+            ):
                 stats.discovered += 1
                 _ensure_session()
                 abs_path = str(path)
                 current_paths.discard(abs_path)
-                try:
-                    st = path.stat()
-                except OSError as exc:
-                    stats.errored += 1
-                    _bump_error_kind(stats, "io")
-                    inp = _ScanInput(path=path, size_bytes=0, mtime_ns=0, inode=0)
-                    _record_scan_error(inp, "io", str(exc))
-                    if progress is not None:
-                        progress(stats)
-                    continue
+                if walker_st is not None:
+                    st: os.stat_result | None = walker_st
+                else:
+                    try:
+                        st = path.stat()
+                    except OSError as exc:
+                        stats.errored += 1
+                        _bump_error_kind(stats, "io")
+                        inp = _ScanInput(path=path, size_bytes=0, mtime_ns=0, inode=0)
+                        _record_scan_error(inp, "io", str(exc))
+                        if progress is not None:
+                            progress(stats)
+                        continue
                 inp = _ScanInput(
                     path=path,
                     size_bytes=st.st_size,
