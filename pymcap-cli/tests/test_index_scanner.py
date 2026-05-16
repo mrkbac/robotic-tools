@@ -43,6 +43,40 @@ def _truncate_after_data_section(path: Path) -> None:
         stream.truncate(info.next_offset)
 
 
+def test_force_rebuild_refreshes_existing_aggregates(tmp_path: Path) -> None:
+    """``scan(force_rebuild=True)`` backfills derived columns on existing rows."""
+    files = _make_mcap_tree(tmp_path, count=2)
+    db = tmp_path / "index.sqlite"
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test")
+        assert _count(conn, "content") == 2
+        # Simulate pre-0005 state: blow away the derived compression columns.
+        conn.execute(
+            "UPDATE content "
+            "SET compression = NULL, "
+            "    compressed_size_bytes = NULL, "
+            "    uncompressed_size_bytes = NULL"
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM content WHERE compression IS NULL"
+        ).fetchone()[0] == 2
+
+    # ``--retry-errors`` alone would NOT touch these rows (no error to
+    # retry), and a plain rescan would stat-skip both files. ``force_rebuild``
+    # is the path that re-reads them.
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test", force_rebuild=True)
+        n_missing = conn.execute(
+            "SELECT COUNT(*) FROM content WHERE compression IS NULL"
+        ).fetchone()[0]
+        assert n_missing == 0
+        # Row count unchanged — ``force_rebuild`` updates, doesn't duplicate.
+        assert _count(conn, "content") == 2
+        # File count unchanged too.
+        assert len(files) == 2
+
+
 def test_first_scan_indexes_all(tmp_path: Path) -> None:
     files = _make_mcap_tree(tmp_path, count=3)
     db = tmp_path / "index.sqlite"

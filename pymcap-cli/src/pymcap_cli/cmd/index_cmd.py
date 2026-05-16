@@ -268,6 +268,17 @@ def scan_cmd(
             ),
         ),
     ] = False,
+    force_rebuild: Annotated[
+        bool,
+        Parameter(
+            name=["--force-rebuild"],
+            help=(
+                "Re-read every discovered file end-to-end and refresh the "
+                "derived columns on its ``content`` row (compression, sane "
+                "times, …). Use after a migration that adds new aggregates."
+            ),
+        ),
+    ] = False,
     root_only: Annotated[
         bool,
         Parameter(name=["--root-only"], help="Do not recurse into subfolders."),
@@ -342,6 +353,7 @@ def scan_cmd(
                 recurse=not root_only,
                 retry_errors=retry_errors,
                 rebuild_missing=rebuild_missing,
+                force_rebuild=force_rebuild,
                 progress=_progress,
             )
 

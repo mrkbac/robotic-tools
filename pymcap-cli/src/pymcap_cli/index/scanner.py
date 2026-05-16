@@ -807,6 +807,42 @@ def _insert_content(
     return content_id
 
 
+def _update_content_aggregates(
+    conn: sqlite3.Connection,
+    content_id: int,
+    content: _ContentRow,
+) -> None:
+    """Refresh the *derived* columns on an existing ``content`` row.
+
+    Used by ``scan(..., force_rebuild=True)`` to backfill columns that landed
+    in a later migration (e.g. ``compression`` / ``compressed_size_bytes`` /
+    ``uncompressed_size_bytes`` from 0005) on rows that were inserted before
+    those columns existed and therefore still hold ``NULL``.
+
+    Counts / fingerprints / per-channel data are deliberately NOT updated —
+    a file whose byte content changed would land on a different
+    ``summary_fingerprint`` and become a new ``content`` row instead of
+    overwriting this one.
+    """
+    conn.execute(
+        "UPDATE content "
+        "   SET sane_message_start_time = ?, "
+        "       sane_message_end_time   = ?, "
+        "       compression             = ?, "
+        "       compressed_size_bytes   = ?, "
+        "       uncompressed_size_bytes = ? "
+        " WHERE content_id = ?",
+        (
+            content.sane_message_start_time,
+            content.sane_message_end_time,
+            content.compression,
+            content.compressed_size_bytes,
+            content.uncompressed_size_bytes,
+            content_id,
+        ),
+    )
+
+
 def _existing_summary_fingerprints(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT summary_fingerprint FROM content")}
 
@@ -837,12 +873,18 @@ def scan(
     recurse: bool = True,
     retry_errors: bool = False,
     rebuild_missing: bool = False,
+    force_rebuild: bool = False,
     progress: ScanProgressCallback | None = None,
 ) -> ScanStats:
     """Scan ``root`` and update ``conn``.
 
     The connection is used exclusively by this function; do not share it with
     concurrent writers.
+
+    ``force_rebuild=True`` bypasses every short-circuit so each file is
+    re-read end-to-end and the catalog's per-content aggregates (compression,
+    sane times, etc.) get refreshed in place. Slower than a normal scan, but
+    needed after a migration that adds derived columns.
     """
     stats = ScanStats()
     current_paths = _current_paths_for_root(conn, root, recurse=recurse)
@@ -918,6 +960,11 @@ def scan(
         elif result.summary_fingerprint is not None and result.content is not None:
             if _content_exists(conn, result.summary_fingerprint):
                 content_id = _resolve_content_id(result.summary_fingerprint)
+                if force_rebuild:
+                    # Refresh the columns that get computed at scan time
+                    # (post-0005 added compression aggregates; existing rows
+                    # may have NULLs that we want to fill in).
+                    _update_content_aggregates(conn, content_id, result.content)
                 _record_observation(
                     conn,
                     result.inp,
@@ -954,8 +1001,17 @@ def scan(
     try:
         known_summary_fps = _existing_summary_fingerprints(conn)
         file_fp_cache = _existing_file_to_summary(conn)
-        file_fp_cache_snapshot = dict(file_fp_cache)
-        known_summary_fps_snapshot = set(known_summary_fps)
+        if force_rebuild:
+            # Workers must NOT short-circuit on the byte fingerprint cache or
+            # the summary-fingerprint cache, otherwise they'd return a
+            # ``_ScanResult`` without ``content`` and there'd be nothing to
+            # refresh. Hand them empty snapshots so every file goes through
+            # the full read + ``_build_content_row`` path.
+            file_fp_cache_snapshot: dict[str, str] = {}
+            known_summary_fps_snapshot: set[str] = set()
+        else:
+            file_fp_cache_snapshot = dict(file_fp_cache)
+            known_summary_fps_snapshot = set(known_summary_fps)
 
         max_workers = max(1, jobs)
         max_pending = max_workers * 4
@@ -1011,12 +1067,16 @@ def scan(
                     mtime_ns=st.st_mtime_ns,
                     inode=st.st_ino,
                 )
-                if _stat_skip(conn, inp):
+                if not force_rebuild and _stat_skip(conn, inp):
                     stats.stat_skipped += 1
                     if progress is not None:
                         progress(stats)
                     continue
-                if not retry_errors and _error_skip(conn, inp, rebuild_missing=rebuild_missing):
+                if (
+                    not force_rebuild
+                    and not retry_errors
+                    and _error_skip(conn, inp, rebuild_missing=rebuild_missing)
+                ):
                     stats.error_skipped += 1
                     if progress is not None:
                         progress(stats)
