@@ -27,6 +27,8 @@
 
 - Python 3.10+ type syntax: `list`, `dict`, `set`, `tuple`, `X | None`.
 - Use `from __future__ import annotations` in new modules; add to existing only when it actually helps.
+  Exception: command modules under `cmd/` rely on `cyclopts.Annotated[...]` parameter metadata at
+  runtime, so the future-import must stay out of them.
 - Avoid `Any`, bare `object`, `hasattr`, `getattr` — use concrete types, `Protocol`, or `TypeVar`.
 - Imports top-level (rare exceptions: cyclic break, optional dep). Prefer direct imports over broad module imports.
 - No module-level side effects; modules must import cleanly.

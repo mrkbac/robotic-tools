@@ -1,7 +1,5 @@
 """Serve a tiny HTML browser for ROS2 message definitions."""
 
-from __future__ import annotations
-
 import html
 import logging
 import threading

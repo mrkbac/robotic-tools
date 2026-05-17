@@ -1,7 +1,5 @@
 """List all ROS2 messages defined by a package."""
 
-from __future__ import annotations
-
 import logging
 import sys
 from pathlib import Path

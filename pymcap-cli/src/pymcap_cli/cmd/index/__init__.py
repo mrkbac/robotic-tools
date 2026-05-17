@@ -5,8 +5,6 @@ cyclopts assembler. Shared helpers and constants live in
 :mod:`pymcap_cli.cmd.index._helpers`.
 """
 
-from __future__ import annotations
-
 import logging
 
 from cyclopts import App

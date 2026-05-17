@@ -1,7 +1,5 @@
 """``pymcap-cli index sessions`` — list scan_session rows."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Annotated
 

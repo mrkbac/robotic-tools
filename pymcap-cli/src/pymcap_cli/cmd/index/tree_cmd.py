@@ -1,7 +1,5 @@
 """``pymcap-cli index tree`` — directory-tree breakdown of indexed data."""
 
-from __future__ import annotations
-
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -34,7 +32,7 @@ class _PathNode:
     duration_ns: int = 0
     topics: set[str] = field(default_factory=set)
     schemas: set[str] = field(default_factory=set)
-    children: dict[str, _PathNode] = field(default_factory=dict)
+    children: "dict[str, _PathNode]" = field(default_factory=dict)
 
 
 def _format_seconds_short(secs: float) -> str:

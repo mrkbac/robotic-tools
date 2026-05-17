@@ -1,7 +1,5 @@
 """Grouped ``msg`` subcommands: resolve, list, and browse ROS2 messages."""
 
-from __future__ import annotations
-
 from cyclopts import App
 
 from pymcap_cli.cmd.msg import def_cmd, list_cmd, serve_cmd

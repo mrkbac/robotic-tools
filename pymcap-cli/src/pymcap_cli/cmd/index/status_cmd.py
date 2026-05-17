@@ -1,7 +1,5 @@
 """``pymcap-cli index status`` — coverage stats for the sidecar DB."""
 
-from __future__ import annotations
-
 import sqlite3
 from pathlib import Path
 from typing import Annotated

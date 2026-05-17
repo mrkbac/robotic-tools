@@ -1,7 +1,5 @@
 """``pymcap-cli index scan`` — walk a folder and index every .mcap."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Annotated
 

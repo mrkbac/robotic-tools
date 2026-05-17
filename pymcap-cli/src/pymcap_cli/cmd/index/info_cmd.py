@@ -1,14 +1,15 @@
 """``pymcap-cli index info`` — everything the index knows about a target."""
 
-from __future__ import annotations
-
 import json as _json
 import zlib
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from cyclopts import Parameter
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from pymcap_cli.types.qos import QosProfile
 
 from pymcap_cli.cmd.index._helpers import (
     _describe_error_kind,
@@ -30,7 +31,6 @@ from pymcap_cli.core.qos import parse_qos_profiles
 from pymcap_cli.display.display_utils import _format_parts_with_colors, display_channels_table
 from pymcap_cli.index.db import IndexDbNeedsMigrationError, open_db
 from pymcap_cli.index.scanner import unpack_distribution_blob
-from pymcap_cli.types.qos import QosProfile
 from pymcap_cli.utils import bytes_to_human
 
 

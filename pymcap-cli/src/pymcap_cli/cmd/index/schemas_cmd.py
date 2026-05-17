@@ -1,7 +1,5 @@
 """``pymcap-cli index schemas`` — schema-level rollup."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Annotated, Literal
 

@@ -1,7 +1,5 @@
 """Resolve and print ROS2 message definitions."""
 
-from __future__ import annotations
-
 import logging
 import sys
 from pathlib import Path

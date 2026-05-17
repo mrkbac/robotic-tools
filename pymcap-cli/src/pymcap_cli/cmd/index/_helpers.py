@@ -1,7 +1,5 @@
 """Shared helpers, constants, and SQL fragments for ``pymcap-cli index``."""
 
-from __future__ import annotations
-
 import importlib.metadata
 import json as _json
 import os
