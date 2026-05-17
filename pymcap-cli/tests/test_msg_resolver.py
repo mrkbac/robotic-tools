@@ -4,24 +4,29 @@ import json
 import time
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
 import pytest
 import yaml
 from pymcap_cli.core.msg_resolver import (
+    _ARCHIVE_FALLBACK_ENV,
     ROS2Distro,
     _DistroIndex,
     _download,
-    _extract_pkg_name,
+    _download_text,
     _fetch_distro_index,
+    _get_msg_def,
     _git_url_to_zip,
     _parse_distro_yaml,
+    _RepoRelease,
     _RepoSource,
     _resolve_and_download_repo,
+    _resolve_remote_msg_def,
+    _ResponseTooLargeError,
 )
 
-# Minimal distribution.yaml structure for testing
-SAMPLE_DISTRO_DATA: dict[str, object] = {
+SAMPLE_DISTRO_DATA = {
     "type": "distribution",
     "version": 2,
     "repositories": {
@@ -38,6 +43,7 @@ SAMPLE_DISTRO_DATA: dict[str, object] = {
                     "geometry_msgs",
                     "nav_msgs",
                 ],
+                "tags": {"release": "release/humble/{package}/{version}"},
                 "url": "https://github.com/ros2-gbp/common_interfaces-release.git",
                 "version": "4.9.1-1",
             },
@@ -49,6 +55,7 @@ SAMPLE_DISTRO_DATA: dict[str, object] = {
                 "version": "humble",
             },
             "release": {
+                "tags": {"release": "release/humble/{package}/{version}"},
                 "url": "https://github.com/ros2-gbp/unique_identifier_msgs-release.git",
                 "version": "2.3.2-1",
             },
@@ -61,11 +68,11 @@ SAMPLE_DISTRO_DATA: dict[str, object] = {
             },
             "release": {
                 "packages": ["control_msgs"],
+                "tags": {"release": "release/humble/{package}/{version}"},
                 "url": "https://github.com/ros2-gbp/control_msgs-release.git",
                 "version": "5.0.0-1",
             },
         },
-        # Repo with no release section but has source
         "some_custom_msgs": {
             "source": {
                 "type": "git",
@@ -73,7 +80,6 @@ SAMPLE_DISTRO_DATA: dict[str, object] = {
                 "version": "main",
             },
         },
-        # Repo with non-git source (e.g., hg) — should be skipped
         "hg_repo": {
             "source": {
                 "type": "hg",
@@ -81,9 +87,9 @@ SAMPLE_DISTRO_DATA: dict[str, object] = {
                 "version": "default",
             },
         },
-        # Repo with no source — only release
         "release_only_pkg": {
             "release": {
+                "tags": {"release": "release/humble/{package}/{version}"},
                 "url": "https://github.com/ros2-gbp/release_only-release.git",
                 "version": "1.0.0-1",
             },
@@ -92,6 +98,24 @@ SAMPLE_DISTRO_DATA: dict[str, object] = {
 }
 
 SAMPLE_RAW_YAML = yaml.dump(SAMPLE_DISTRO_DATA).encode()
+
+
+def _mock_response(
+    data: bytes = b"",
+    *,
+    status: int = 200,
+    headers: dict[str, str] | None = None,
+) -> MagicMock:
+    """Context-manager mock for ``urlopen`` returning ``data``."""
+    body = BytesIO(data)
+    response = MagicMock(
+        status=status,
+        headers=headers if headers is not None else {"Content-Length": str(len(data))},
+    )
+    response.read = body.read
+    response.__enter__.return_value = response
+    response.__exit__.return_value = None
+    return response
 
 
 class TestParseDistroYaml:
@@ -106,7 +130,6 @@ class TestParseDistroYaml:
     def test_single_package_repo_with_no_packages_list(self) -> None:
         index = _parse_distro_yaml(SAMPLE_DISTRO_DATA)
 
-        # unique_identifier_msgs has release but no packages list
         assert index.pkg_to_repo["unique_identifier_msgs"] == "unique_identifier_msgs"
 
     def test_single_package_repo_with_packages_list(self) -> None:
@@ -117,7 +140,6 @@ class TestParseDistroYaml:
     def test_repo_with_source_but_no_release(self) -> None:
         index = _parse_distro_yaml(SAMPLE_DISTRO_DATA)
 
-        # Should map repo key as package name
         assert index.pkg_to_repo["some_custom_msgs"] == "some_custom_msgs"
 
     def test_source_url_and_version(self) -> None:
@@ -126,6 +148,14 @@ class TestParseDistroYaml:
         source = index.repo_to_source["common_interfaces"]
         assert source.url == "https://github.com/ros2/common_interfaces.git"
         assert source.version == "humble"
+
+    def test_release_url_version_and_tag_template(self) -> None:
+        index = _parse_distro_yaml(SAMPLE_DISTRO_DATA)
+
+        release = index.repo_to_release["common_interfaces"]
+        assert release.url == "https://github.com/ros2-gbp/common_interfaces-release.git"
+        assert release.version == "4.9.1-1"
+        assert release.tag_template == "release/humble/{package}/{version}"
 
     def test_non_git_source_skipped(self) -> None:
         index = _parse_distro_yaml(SAMPLE_DISTRO_DATA)
@@ -136,9 +166,8 @@ class TestParseDistroYaml:
     def test_release_only_repo(self) -> None:
         index = _parse_distro_yaml(SAMPLE_DISTRO_DATA)
 
-        # No source, so not in repo_to_source
         assert "release_only_pkg" not in index.repo_to_source
-        # Has release but no packages list — maps repo key as package name
+        assert "release_only_pkg" in index.repo_to_release
         assert index.pkg_to_repo["release_only_pkg"] == "release_only_pkg"
 
     def test_empty_repositories(self) -> None:
@@ -167,23 +196,8 @@ class TestGitUrlToZip:
         assert result == "https://github.com/ros2/common_interfaces/archive/refs/heads/jazzy.zip"
 
 
-class TestExtractPkgName:
-    def test_two_parts(self) -> None:
-        assert _extract_pkg_name("sensor_msgs/Image") == "sensor_msgs"
-
-    def test_three_parts(self) -> None:
-        assert _extract_pkg_name("sensor_msgs/msg/Image") == "sensor_msgs"
-
-    def test_single_part(self) -> None:
-        assert _extract_pkg_name("sensor_msgs") is None
-
-    def test_empty(self) -> None:
-        assert _extract_pkg_name("") is None
-
-
 class TestFetchDistroIndex:
     def test_caches_to_disk(self, tmp_path: Path) -> None:
-        """Verify fetched index is cached as JSON on disk."""
         with patch("pymcap_cli.core.msg_resolver._download") as mock_dl:
             mock_dl.side_effect = lambda _url, buf: buf.write(SAMPLE_RAW_YAML)
 
@@ -191,25 +205,22 @@ class TestFetchDistroIndex:
 
         assert index is not None
         assert index.pkg_to_repo["std_msgs"] == "common_interfaces"
-
-        # Check cached files exist
         assert (tmp_path / "_distribution.yaml").exists()
         assert (tmp_path / "_distro_index.json").exists()
         assert (tmp_path / "_distro_index_timestamp").exists()
 
     def test_uses_cached_index_within_ttl(self, tmp_path: Path) -> None:
-        """Verify cached index is returned without network fetch when fresh."""
-        cached_index = _DistroIndex(
-            pkg_to_repo={"cached_pkg": "cached_repo"},
-            repo_to_source={
-                "cached_repo": _RepoSource(url="https://github.com/ex/r.git", version="v1")
-            },
-        )
         index_data = {
-            "pkg_to_repo": cached_index.pkg_to_repo,
+            "pkg_to_repo": {"cached_pkg": "cached_repo"},
             "repo_to_source": {
-                k: {"url": v.url, "version": v.version}
-                for k, v in cached_index.repo_to_source.items()
+                "cached_repo": {"url": "https://github.com/ex/r.git", "version": "v1"},
+            },
+            "repo_to_release": {
+                "cached_repo": {
+                    "url": "https://github.com/ex/r-release.git",
+                    "version": "1.0.0-1",
+                    "tag_template": "release/humble/{package}/{version}",
+                },
             },
         }
         (tmp_path / "_distro_index.json").write_text(json.dumps(index_data))
@@ -221,9 +232,9 @@ class TestFetchDistroIndex:
         mock_dl.assert_not_called()
         assert index is not None
         assert index.pkg_to_repo["cached_pkg"] == "cached_repo"
+        assert index.repo_to_release["cached_repo"].version == "1.0.0-1"
 
     def test_refetches_when_ttl_expired(self, tmp_path: Path) -> None:
-        """Verify stale cache triggers a re-fetch."""
         (tmp_path / "_distro_index.json").write_text(
             json.dumps({"pkg_to_repo": {}, "repo_to_source": {}})
         )
@@ -238,7 +249,6 @@ class TestFetchDistroIndex:
         assert "std_msgs" in index.pkg_to_repo
 
     def test_returns_none_on_network_failure(self, tmp_path: Path) -> None:
-        """Verify graceful degradation on network failure with no cache."""
         with patch(
             "pymcap_cli.core.msg_resolver._download", side_effect=ValueError("network error")
         ):
@@ -247,7 +257,6 @@ class TestFetchDistroIndex:
         assert index is None
 
     def test_uses_stale_cache_on_network_failure(self, tmp_path: Path) -> None:
-        """Verify stale cache is used as last resort when network fails."""
         cached_data = {
             "pkg_to_repo": {"stale_pkg": "stale_repo"},
             "repo_to_source": {
@@ -268,7 +277,6 @@ class TestFetchDistroIndex:
 
 class TestResolveAndDownloadRepo:
     def test_downloads_correct_repo(self, tmp_path: Path) -> None:
-        """Verify only the needed repo is downloaded."""
         index = _DistroIndex(
             pkg_to_repo={"sensor_msgs": "common_interfaces"},
             repo_to_source={
@@ -328,6 +336,165 @@ class TestResolveAndDownloadRepo:
         assert result is None
 
 
+class TestRemoteMsgResolution:
+    def test_release_raw_file_is_used_before_source(self, tmp_path: Path) -> None:
+        index = _DistroIndex(
+            pkg_to_repo={"sensor_msgs": "common_interfaces"},
+            repo_to_source={
+                "common_interfaces": _RepoSource(
+                    url="https://github.com/ros2/common_interfaces.git",
+                    version="humble",
+                )
+            },
+            repo_to_release={
+                "common_interfaces": _RepoRelease(
+                    url="https://github.com/ros2-gbp/common_interfaces-release.git",
+                    version="4.9.1-1",
+                    tag_template="release/humble/{package}/{version}",
+                )
+            },
+        )
+
+        with (
+            patch("pymcap_cli.core.msg_resolver._get_distro_index", return_value=index),
+            patch(
+                "pymcap_cli.core.msg_resolver._download_text",
+                return_value="std_msgs/Header header\nuint8[] data\n",
+            ) as mock_download,
+        ):
+            result = _resolve_remote_msg_def("sensor_msgs/msg/Image", ROS2Distro.HUMBLE, tmp_path)
+
+        assert result == ("std_msgs/Header header\nuint8[] data\n", ["std_msgs/Header"])
+        mock_download.assert_called_once_with(
+            "https://raw.githubusercontent.com/ros2-gbp/common_interfaces-release/"
+            "release/humble/sensor_msgs/4.9.1-1/msg/Image.msg"
+        )
+        assert (
+            tmp_path
+            / "_remote_msgs"
+            / "common_interfaces"
+            / "release_humble_sensor_msgs_4.9.1-1"
+            / "sensor_msgs"
+            / "msg"
+            / "Image.msg"
+        ).exists()
+
+    def test_source_fast_paths_are_used_when_release_misses(self, tmp_path: Path) -> None:
+        index = _DistroIndex(
+            pkg_to_repo={"custom_msgs": "custom_msgs"},
+            repo_to_source={
+                "custom_msgs": _RepoSource(
+                    url="https://github.com/acme/custom_msgs.git",
+                    version="main",
+                )
+            },
+            repo_to_release={
+                "custom_msgs": _RepoRelease(
+                    url="https://github.com/acme/custom_msgs-release.git",
+                    version="1.0.0-1",
+                    tag_template="release/humble/{package}/{version}",
+                )
+            },
+        )
+
+        with (
+            patch("pymcap_cli.core.msg_resolver._get_distro_index", return_value=index),
+            patch(
+                "pymcap_cli.core.msg_resolver._download_text",
+                side_effect=[None, None, "float64 value\n"],
+            ) as mock_download,
+        ):
+            result = _resolve_remote_msg_def("custom_msgs/Reading", ROS2Distro.HUMBLE, tmp_path)
+
+        assert result == ("float64 value\n", [])
+        assert [call.args[0] for call in mock_download.call_args_list] == [
+            "https://raw.githubusercontent.com/acme/custom_msgs-release/"
+            "release/humble/custom_msgs/1.0.0-1/msg/Reading.msg",
+            "https://raw.githubusercontent.com/acme/custom_msgs/main/custom_msgs/msg/Reading.msg",
+            "https://raw.githubusercontent.com/acme/custom_msgs/main/msg/Reading.msg",
+        ]
+
+    def test_oversized_response_propagates_instead_of_falling_through(self, tmp_path: Path) -> None:
+        """An oversized .msg response is a real bug (e.g. HTML error page),
+        not a tier-fallthrough miss — make sure we surface it."""
+        index = _DistroIndex(
+            pkg_to_repo={"sensor_msgs": "common_interfaces"},
+            repo_to_source={
+                "common_interfaces": _RepoSource(
+                    url="https://github.com/ros2/common_interfaces.git",
+                    version="humble",
+                )
+            },
+            repo_to_release={
+                "common_interfaces": _RepoRelease(
+                    url="https://github.com/ros2-gbp/common_interfaces-release.git",
+                    version="4.9.1-1",
+                    tag_template="release/humble/{package}/{version}",
+                )
+            },
+        )
+
+        with (
+            patch("pymcap_cli.core.msg_resolver._get_distro_index", return_value=index),
+            patch(
+                "pymcap_cli.core.msg_resolver._download_text",
+                side_effect=_ResponseTooLargeError("response is larger than 1048576 bytes"),
+            ),
+            pytest.raises(_ResponseTooLargeError, match="larger than"),
+        ):
+            _resolve_remote_msg_def("sensor_msgs/msg/Image", ROS2Distro.HUMBLE, tmp_path)
+
+    def test_get_msg_def_does_not_use_archive_fallback_by_default(self, tmp_path: Path) -> None:
+        index = _DistroIndex(
+            pkg_to_repo={"sensor_msgs": "common_interfaces"},
+            repo_to_source={
+                "common_interfaces": _RepoSource(
+                    url="https://github.com/ros2/common_interfaces.git",
+                    version="humble",
+                )
+            },
+        )
+
+        with (
+            patch("pymcap_cli.core.msg_resolver._get_cache_dir", return_value=tmp_path),
+            patch("pymcap_cli.core.msg_resolver._get_distro_index", return_value=index),
+            patch("pymcap_cli.core.msg_resolver._download_text", return_value=None),
+            patch("pymcap_cli.core.msg_resolver._resolve_and_download_repo") as mock_archive,
+            patch.dict("os.environ", {_ARCHIVE_FALLBACK_ENV: ""}, clear=False),
+        ):
+            result = _get_msg_def("sensor_msgs/Image", ROS2Distro.HUMBLE, [])
+
+        assert result is None
+        mock_archive.assert_not_called()
+
+    def test_get_msg_def_uses_archive_fallback_when_enabled(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "common_interfaces"
+
+        def create_archive_cache(
+            _pkg_name: str,
+            _distro: ROS2Distro,
+            _cache_dir: Path,
+        ) -> Path:
+            msg_dir = repo_dir / "sensor_msgs" / "msg"
+            msg_dir.mkdir(parents=True)
+            (msg_dir / "Image.msg").write_text("uint8[] data\n", encoding="utf-8")
+            return repo_dir
+
+        with (
+            patch("pymcap_cli.core.msg_resolver._get_cache_dir", return_value=tmp_path),
+            patch("pymcap_cli.core.msg_resolver._resolve_remote_msg_def", return_value=None),
+            patch(
+                "pymcap_cli.core.msg_resolver._resolve_and_download_repo",
+                side_effect=create_archive_cache,
+            ) as mock_archive,
+            patch.dict("os.environ", {_ARCHIVE_FALLBACK_ENV: "1"}, clear=False),
+        ):
+            result = _get_msg_def("sensor_msgs/Image", ROS2Distro.HUMBLE, [])
+
+        assert result == ("uint8[] data\n", [])
+        mock_archive.assert_called_once_with("sensor_msgs", ROS2Distro.HUMBLE, tmp_path)
+
+
 class TestDownload:
     def test_rejects_non_github_urls(self) -> None:
         buf = BytesIO()
@@ -336,7 +503,33 @@ class TestDownload:
 
     def test_accepts_raw_githubusercontent(self) -> None:
         buf = BytesIO()
-        # Should not raise ValueError for the URL prefix check
-        # (will raise ValueError wrapping URLError for the actual download)
-        with pytest.raises(ValueError, match="Network error"):
+        with (
+            patch(
+                "pymcap_cli.core.msg_resolver.urlopen",
+                side_effect=URLError("boom"),
+            ),
+            pytest.raises(ValueError, match="Network error"),
+        ):
             _download("https://raw.githubusercontent.com/ros/rosdistro/master/test.yaml", buf)
+
+
+class TestDownloadText:
+    def test_rejects_oversized_content_length(self) -> None:
+        with (
+            patch(
+                "pymcap_cli.core.msg_resolver.urlopen",
+                return_value=_mock_response(headers={"Content-Length": str(1024 * 1024 + 1)}),
+            ),
+            pytest.raises(_ResponseTooLargeError, match="larger than"),
+        ):
+            _download_text("https://raw.githubusercontent.com/owner/repo/ref/msg/Foo.msg")
+
+    def test_rejects_oversized_stream_without_content_length(self) -> None:
+        with (
+            patch(
+                "pymcap_cli.core.msg_resolver.urlopen",
+                return_value=_mock_response(data=b"x" * (1024 * 1024 + 1), headers={}),
+            ),
+            pytest.raises(_ResponseTooLargeError, match="larger than"),
+        ):
+            _download_text("https://raw.githubusercontent.com/owner/repo/ref/msg/Foo.msg")

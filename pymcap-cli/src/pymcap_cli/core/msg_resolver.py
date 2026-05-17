@@ -7,23 +7,39 @@ import shutil
 import tempfile
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from urllib.error import URLError
+from typing import cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import urlopen
 from zipfile import ZipFile
 
 import platformdirs
 import yaml
-from ros_parser.ros2_msg import parse_message_file
+from ros_parser.ros2_msg import parse_message_string
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_URL_PREFIXES = ("https://github.com/", "https://raw.githubusercontent.com/")
+_ALLOWED_URL_PREFIXES = (
+    "https://github.com/",
+    "https://raw.githubusercontent.com/",
+)
 _DISTRO_INDEX_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+_MAX_MSG_BYTES = 1024 * 1024
+_ARCHIVE_FALLBACK_ENV = "PYMCAP_CLI_MSG_ARCHIVE_FALLBACK"
+
+
+class _ResponseTooLargeError(Exception):
+    """Raised when a remote .msg response exceeds ``_MAX_MSG_BYTES``.
+
+    Distinct from network/HTTP errors so callers don't silently treat a
+    suspiciously huge response (e.g. an HTML error page) as a missing
+    file and fall through to the next resolution tier.
+    """
 
 
 class ROS2Distro(str, Enum):
@@ -38,14 +54,22 @@ class ROS2Distro(str, Enum):
 
 @dataclass(frozen=True)
 class _RepoSource:
-    url: str  # e.g. "https://github.com/ros2/common_interfaces.git"
-    version: str  # e.g. "humble"
+    url: str
+    version: str
+
+
+@dataclass(frozen=True)
+class _RepoRelease:
+    url: str
+    version: str
+    tag_template: str
 
 
 @dataclass(frozen=True)
 class _DistroIndex:
-    pkg_to_repo: dict[str, str]  # "sensor_msgs" -> "common_interfaces"
-    repo_to_source: dict[str, _RepoSource]  # "common_interfaces" -> _RepoSource(...)
+    pkg_to_repo: dict[str, str]
+    repo_to_source: dict[str, _RepoSource]
+    repo_to_release: dict[str, _RepoRelease] = field(default_factory=dict)
 
 
 def _download(url: str, buffer: BytesIO) -> None:
@@ -60,6 +84,37 @@ def _download(url: str, buffer: BytesIO) -> None:
                 msg = f"Failed to download {url}: {response.status} {response.reason}"
                 raise ValueError(msg)
             buffer.write(response.read())
+    except URLError as e:
+        msg = f"Network error downloading {url}: {e}"
+        raise ValueError(msg) from e
+
+
+def _download_text(url: str, *, max_bytes: int = _MAX_MSG_BYTES) -> str | None:
+    """Download a small UTF-8 text file, returning None for 404s."""
+    if not url.startswith(_ALLOWED_URL_PREFIXES):
+        msg = f"URL must start with one of {_ALLOWED_URL_PREFIXES}"
+        raise ValueError(msg)
+
+    try:
+        with urlopen(url) as response:  # noqa: S310
+            if response.status != 200:
+                return None
+
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > max_bytes:
+                msg = f"Refusing to download {url}: response is larger than {max_bytes} bytes"
+                raise _ResponseTooLargeError(msg)
+
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                msg = f"Refusing to download {url}: response is larger than {max_bytes} bytes"
+                raise _ResponseTooLargeError(msg)
+            return raw.decode("utf-8")
+    except HTTPError as e:
+        if e.code == 404:
+            return None
+        msg = f"HTTP error downloading {url}: {e.code} {e.reason}"
+        raise ValueError(msg) from e
     except URLError as e:
         msg = f"Network error downloading {url}: {e}"
         raise ValueError(msg) from e
@@ -108,43 +163,105 @@ def _parse_distro_yaml(data: dict[str, object]) -> _DistroIndex:
     """Parse distribution.yaml data into a _DistroIndex."""
     pkg_to_repo: dict[str, str] = {}
     repo_to_source: dict[str, _RepoSource] = {}
+    repo_to_release: dict[str, _RepoRelease] = {}
 
     repositories = data.get("repositories", {})
     if not isinstance(repositories, dict):
-        return _DistroIndex(pkg_to_repo={}, repo_to_source={})
+        return _DistroIndex(pkg_to_repo={}, repo_to_source={}, repo_to_release={})
 
     for repo_key, repo_data in repositories.items():
         if not isinstance(repo_key, str) or not isinstance(repo_data, dict):
             continue
-        repo_data_dict: dict[str, object] = repo_data  # type: ignore[assignment]
+        repo_data_dict = cast("dict[str, object]", repo_data)
 
-        # Extract source info
         source_raw = repo_data_dict.get("source")
         if isinstance(source_raw, dict):
-            source_dict: dict[str, object] = source_raw  # type: ignore[assignment]
+            source_dict = cast("dict[str, object]", source_raw)
             if source_dict.get("type") == "git":
                 url = source_dict.get("url", "")
                 version = source_dict.get("version", "")
                 if isinstance(url, str) and isinstance(version, str) and url and version:
                     repo_to_source[repo_key] = _RepoSource(url=url, version=version)
 
-        # Map packages to this repo
+        # Release repositories expose package roots, which lets us fetch msg files
+        # directly without knowing the source layout.
         release_raw = repo_data_dict.get("release")
         if isinstance(release_raw, dict):
-            release_dict: dict[str, object] = release_raw  # type: ignore[assignment]
+            release_dict = cast("dict[str, object]", release_raw)
+            url = release_dict.get("url", "")
+            version = release_dict.get("version", "")
+            tags_raw = release_dict.get("tags")
+            tag_template = ""
+            if isinstance(tags_raw, dict):
+                tags_dict = cast("dict[str, object]", tags_raw)
+                release_tag = tags_dict.get("release", "")
+                if isinstance(release_tag, str):
+                    tag_template = release_tag
+            if (
+                isinstance(url, str)
+                and isinstance(version, str)
+                and url
+                and version
+                and tag_template
+            ):
+                repo_to_release[repo_key] = _RepoRelease(
+                    url=url,
+                    version=version,
+                    tag_template=tag_template,
+                )
+
             packages = release_dict.get("packages")
             if isinstance(packages, list):
                 for pkg in packages:
                     if isinstance(pkg, str):
                         pkg_to_repo[pkg] = repo_key
             else:
-                # Single-package repo: repo name is the package name
                 pkg_to_repo[repo_key] = repo_key
         elif repo_key in repo_to_source:
-            # No release section but has source — assume repo name is package name
             pkg_to_repo[repo_key] = repo_key
 
-    return _DistroIndex(pkg_to_repo=pkg_to_repo, repo_to_source=repo_to_source)
+    return _DistroIndex(
+        pkg_to_repo=pkg_to_repo,
+        repo_to_source=repo_to_source,
+        repo_to_release=repo_to_release,
+    )
+
+
+def _distro_index_from_json(index_data: dict[str, object]) -> _DistroIndex:
+    """Build a _DistroIndex from cached JSON we wrote ourselves.
+
+    Trusts the on-disk shape; ``_fetch_distro_index`` catches the
+    broad set of errors (``KeyError``, ``TypeError``, ``ValueError``,
+    ``json.JSONDecodeError``) and re-fetches on any mismatch.
+    """
+    sources = {
+        repo: _RepoSource(url=v["url"], version=v["version"])
+        for repo, v in cast("dict[str, dict[str, str]]", index_data["repo_to_source"]).items()
+    }
+    releases = {
+        repo: _RepoRelease(url=v["url"], version=v["version"], tag_template=v["tag_template"])
+        for repo, v in cast(
+            "dict[str, dict[str, str]]", index_data.get("repo_to_release", {})
+        ).items()
+    }
+    return _DistroIndex(
+        pkg_to_repo=cast("dict[str, str]", index_data["pkg_to_repo"]),
+        repo_to_source=sources,
+        repo_to_release=releases,
+    )
+
+
+def _distro_index_to_json(index: _DistroIndex) -> dict[str, object]:
+    return {
+        "pkg_to_repo": index.pkg_to_repo,
+        "repo_to_source": {
+            k: {"url": v.url, "version": v.version} for k, v in index.repo_to_source.items()
+        },
+        "repo_to_release": {
+            k: {"url": v.url, "version": v.version, "tag_template": v.tag_template}
+            for k, v in index.repo_to_release.items()
+        },
+    }
 
 
 def _fetch_distro_index(distro: ROS2Distro, cache_dir: Path) -> _DistroIndex | None:
@@ -159,14 +276,8 @@ def _fetch_distro_index(distro: ROS2Distro, cache_dir: Path) -> _DistroIndex | N
             cached_ts = float(timestamp_path.read_text().strip())
             if (time.time() - cached_ts) < _DISTRO_INDEX_TTL_SECONDS:
                 index_data = json.loads(index_path.read_text())
-                return _DistroIndex(
-                    pkg_to_repo=index_data["pkg_to_repo"],
-                    repo_to_source={
-                        k: _RepoSource(url=v["url"], version=v["version"])
-                        for k, v in index_data["repo_to_source"].items()
-                    },
-                )
-        except (ValueError, KeyError, json.JSONDecodeError):
+                return _distro_index_from_json(index_data)
+        except (ValueError, KeyError, json.JSONDecodeError, TypeError):
             logger.debug("Cached distro index is corrupted, re-fetching")
 
     # Fetch distribution.yaml
@@ -181,14 +292,8 @@ def _fetch_distro_index(distro: ROS2Distro, cache_dir: Path) -> _DistroIndex | N
         if index_path.exists():
             try:
                 index_data = json.loads(index_path.read_text())
-                return _DistroIndex(
-                    pkg_to_repo=index_data["pkg_to_repo"],
-                    repo_to_source={
-                        k: _RepoSource(url=v["url"], version=v["version"])
-                        for k, v in index_data["repo_to_source"].items()
-                    },
-                )
-            except (KeyError, json.JSONDecodeError):
+                return _distro_index_from_json(index_data)
+            except (ValueError, KeyError, json.JSONDecodeError, TypeError):
                 pass
         return None
 
@@ -204,16 +309,9 @@ def _fetch_distro_index(distro: ROS2Distro, cache_dir: Path) -> _DistroIndex | N
 
     distro_index = _parse_distro_yaml(data)
 
-    # Cache to disk
     cache_dir.mkdir(parents=True, exist_ok=True)
     yaml_path.write_bytes(raw_yaml)
-    index_data = {
-        "pkg_to_repo": distro_index.pkg_to_repo,
-        "repo_to_source": {
-            k: {"url": v.url, "version": v.version} for k, v in distro_index.repo_to_source.items()
-        },
-    }
-    index_path.write_text(json.dumps(index_data))
+    index_path.write_text(json.dumps(_distro_index_to_json(distro_index)))
     timestamp_path.write_text(str(time.time()))
 
     return distro_index
@@ -227,7 +325,6 @@ def _get_distro_index(distro: ROS2Distro, cache_dir: Path) -> _DistroIndex | Non
 
 def _git_url_to_zip(git_url: str, version: str) -> str:
     """Convert a git URL to a GitHub ZIP download URL."""
-    # "https://github.com/ros2/common_interfaces.git" -> "https://github.com/ros2/common_interfaces"
     base = git_url.removesuffix(".git")
     return f"{base}/archive/refs/heads/{version}.zip"
 
@@ -237,6 +334,193 @@ def _ensure_repo_cached(cache_dir: Path, repo_name: str, zip_url: str) -> Path:
     repo_dir = cache_dir / repo_name
     _download_and_extract(zip_url, repo_dir)
     return repo_dir
+
+
+def _is_archive_fallback_enabled() -> bool:
+    value = os.environ.get(_ARCHIVE_FALLBACK_ENV, "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _remote_msg_cache_dir(cache_dir: Path) -> Path:
+    return cache_dir / "_remote_msgs"
+
+
+def _cache_component(value: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in value)
+
+
+def _message_parts(msg_type: str) -> tuple[str, str] | None:
+    parts = msg_type.split("/")
+    if len(parts) == 3 and parts[1] == "msg":
+        return parts[0], parts[2]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+
+    logger.warning(f"Invalid message type format: {msg_type}")
+    return None
+
+
+def _github_repo_parts(git_url: str) -> tuple[str, str] | None:
+    base = git_url.removesuffix(".git").removesuffix("/")
+    prefix = "https://github.com/"
+    if not base.startswith(prefix):
+        return None
+
+    parts = base[len(prefix) :].split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return parts[0], parts[1]
+
+
+def _github_raw_url(owner: str, repo: str, ref: str, path: str) -> str:
+    quoted_path = quote(path, safe="/")
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{quoted_path}"
+
+
+def _repo_cache_dir(cache_dir: Path, repo_name: str, ref: str) -> Path:
+    ref_key = _cache_component(ref)
+    return _remote_msg_cache_dir(cache_dir) / _cache_component(repo_name) / ref_key
+
+
+def _cache_remote_msg(
+    cache_dir: Path,
+    repo_name: str,
+    ref: str,
+    pkg_name: str,
+    msg_name: str,
+    msg_text: str,
+) -> Path:
+    msg_path = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name / "msg" / f"{msg_name}.msg"
+    msg_path.parent.mkdir(parents=True, exist_ok=True)
+    msg_path.write_text(msg_text, encoding="utf-8")
+    return msg_path
+
+
+def _extract_dependencies(pkg_name: str, msg_text: str) -> list[str]:
+    msg_def = parse_message_string(msg_text, context_package_name=pkg_name)
+    return [
+        f"{f.type.package_name}/{f.type.type_name}"
+        for f in msg_def.fields
+        if not f.type.is_primitive
+        and f.type.package_name
+        and f.type.package_name != "builtin_interfaces"
+    ]
+
+
+def _read_msg_path(msg_path: Path, pkg_name: str) -> tuple[str, list[str]] | None:
+    try:
+        msg_text = msg_path.read_text(encoding="utf-8")
+        dependencies = _extract_dependencies(pkg_name, msg_text)
+    except Exception:
+        logger.exception(f"Failed to parse {msg_path}")
+        return None
+
+    return msg_text, dependencies
+
+
+def _fetch_raw_msg_to_cache(
+    cache_dir: Path,
+    repo_name: str,
+    ref: str,
+    pkg_name: str,
+    msg_name: str,
+    url: str,
+) -> tuple[str, list[str]] | None:
+    try:
+        msg_text = _download_text(url)
+    except ValueError:
+        logger.debug(f"Failed to fetch remote message definition from {url}", exc_info=True)
+        return None
+    if msg_text is None:
+        return None
+
+    msg_path = _cache_remote_msg(cache_dir, repo_name, ref, pkg_name, msg_name, msg_text)
+    return _read_msg_path(msg_path, pkg_name)
+
+
+def _expanded_release_ref(release: _RepoRelease, pkg_name: str, distro: ROS2Distro) -> str:
+    return (
+        release.tag_template.replace("{package}", pkg_name)
+        .replace("{version}", release.version)
+        .replace("{distro}", distro.value)
+    )
+
+
+def _fetch_release_msg_def(
+    cache_dir: Path,
+    repo_name: str,
+    release: _RepoRelease,
+    pkg_name: str,
+    msg_name: str,
+    distro: ROS2Distro,
+) -> tuple[str, list[str]] | None:
+    repo = _github_repo_parts(release.url)
+    if repo is None:
+        return None
+
+    owner, github_repo = repo
+    ref = _expanded_release_ref(release, pkg_name, distro)
+    url = _github_raw_url(owner, github_repo, ref, f"msg/{msg_name}.msg")
+    return _fetch_raw_msg_to_cache(cache_dir, repo_name, ref, pkg_name, msg_name, url)
+
+
+def _fetch_source_fast_path_msg_def(
+    cache_dir: Path,
+    repo_name: str,
+    source: _RepoSource,
+    pkg_name: str,
+    msg_name: str,
+) -> tuple[str, list[str]] | None:
+    repo = _github_repo_parts(source.url)
+    if repo is None:
+        return None
+
+    owner, github_repo = repo
+    candidate_paths = (f"{pkg_name}/msg/{msg_name}.msg", f"msg/{msg_name}.msg")
+    for path in candidate_paths:
+        url = _github_raw_url(owner, github_repo, source.version, path)
+        result = _fetch_raw_msg_to_cache(
+            cache_dir,
+            repo_name,
+            source.version,
+            pkg_name,
+            msg_name,
+            url,
+        )
+        if result is not None:
+            return result
+    return None
+
+
+def _resolve_remote_msg_def(
+    msg_type: str,
+    distro: ROS2Distro,
+    cache_dir: Path,
+) -> tuple[str, list[str]] | None:
+    parts = _message_parts(msg_type)
+    if parts is None:
+        return None
+    pkg_name, msg_name = parts
+
+    index = _get_distro_index(distro, cache_dir)
+    if index is None:
+        return None
+
+    repo_name = index.pkg_to_repo.get(pkg_name)
+    if repo_name is None:
+        return None
+
+    release = index.repo_to_release.get(repo_name)
+    if release is not None:
+        result = _fetch_release_msg_def(cache_dir, repo_name, release, pkg_name, msg_name, distro)
+        if result is not None:
+            return result
+
+    source = index.repo_to_source.get(repo_name)
+    if source is None:
+        return None
+
+    return _fetch_source_fast_path_msg_def(cache_dir, repo_name, source, pkg_name, msg_name)
 
 
 def _resolve_and_download_repo(pkg_name: str, distro: ROS2Distro, cache_dir: Path) -> Path | None:
@@ -283,77 +567,65 @@ def _get_ament_prefix_paths() -> tuple[Path, ...]:
 
 
 @lru_cache
-def _rglob_first(folder: tuple[Path, ...], pattern: str) -> Path | None:
-    """Search for first file matching pattern in folder hierarchy."""
-    for f in folder:
+def _get_msg_def_disk(msg_type: str, folders: tuple[Path, ...]) -> tuple[str, list[str]] | None:
+    """Get message definition from disk by ``rglob``-ing each folder.
+
+    Used for user-supplied roots (``extra_paths`` + ``AMENT_PREFIX_PATH``)
+    where we don't know how deep the workspace nests packages.
+    """
+    parts = _message_parts(msg_type)
+    if parts is None:
+        return None
+    pkg_name, msg_name = parts
+
+    pattern = f"**/{pkg_name}/msg/{msg_name}.msg"
+    for f in folders:
         if not f.exists():
             continue
-        matches = list(f.rglob(pattern))
-        if matches:
-            return matches[0]
+        msg_path = next(f.rglob(pattern), None)
+        if msg_path is not None:
+            logger.debug(f"Found {msg_type} at {msg_path}")
+            return _read_msg_path(msg_path, pkg_name)
     return None
 
 
-@lru_cache
-def _get_msg_def_disk(msg_type: str, folders: tuple[Path, ...]) -> tuple[str, list[str]] | None:
-    """Get message definition from disk by searching in folders."""
-    parts = msg_type.split("/")
+def _lookup_cached_remote_msg(
+    cache_dir: Path,
+    distro: ROS2Distro,
+    pkg_name: str,
+    msg_name: str,
+) -> tuple[str, list[str]] | None:
+    """Probe ``_remote_msgs/<repo>/<ref>/<pkg>/msg/<Name>.msg`` deterministically.
 
-    # Handle both formats: "package/MessageName" and "package/msg/MessageName"
-    if len(parts) == 3 and parts[1] == "msg":
-        # Format: package/msg/MessageName -> extract package and MessageName
-        pkg_name, _, msg_name = parts
-    elif len(parts) == 2:
-        # Format: package/MessageName
-        pkg_name, msg_name = parts
-    else:
-        logger.warning(f"Invalid message type format: {msg_type}")
+    Uses the distro index to derive each candidate ref (release tag and
+    source version) — no full-tree scan needed.
+    """
+    index = _get_distro_index(distro, cache_dir)
+    if index is None:
+        return None
+    repo_name = index.pkg_to_repo.get(pkg_name)
+    if repo_name is None:
         return None
 
-    # Search for .msg file
-    msg_path = _rglob_first(folders, f"**/{pkg_name}/msg/{msg_name}.msg")
-    if msg_path is None:
-        return None
+    refs: list[str] = []
+    release = index.repo_to_release.get(repo_name)
+    if release is not None:
+        refs.append(_expanded_release_ref(release, pkg_name, distro))
+    source = index.repo_to_source.get(repo_name)
+    if source is not None:
+        refs.append(source.version)
 
-    logger.debug(f"Found {msg_type} at {msg_path}")
-
-    # Parse message file
-    try:
-        msg_def = parse_message_file(msg_path)
-    except Exception:
-        logger.exception(f"Failed to parse {msg_path}")
-        return None
-
-    # Read raw text
-    with msg_path.open(encoding="utf-8") as msg_file:
-        msg_text = msg_file.read()
-
-    # Extract dependencies
-    dependencies = []
-    for field in msg_def.fields:
-        f_type = field.type
-        if f_type.is_primitive:
-            continue
-
-        # builtin_interfaces are expected to be known by the parser
-        if f_type.package_name == "builtin_interfaces":
-            continue
-
-        # Skip if no package name (local types)
-        if not f_type.package_name:
-            continue
-
-        dependencies.append(f"{f_type.package_name}/{f_type.type_name}")
-
-    return (msg_text, dependencies)
-
-
-def _extract_pkg_name(msg_type: str) -> str | None:
-    """Extract package name from a message type string."""
-    parts = msg_type.split("/")
-    if len(parts) in (2, 3):
-        return parts[0]
+    for ref in refs:
+        msg_path = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name / "msg" / f"{msg_name}.msg"
+        if msg_path.is_file():
+            return _read_msg_path(msg_path, pkg_name)
     return None
+
+
+def _archive_cached_repo_dirs(cache_dir: Path) -> tuple[Path, ...]:
+    if not cache_dir.exists():
+        return ()
+    return tuple(d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith("_"))
 
 
 def _get_msg_def(
@@ -364,36 +636,45 @@ def _get_msg_def(
     """Get message definition with caching and multiple search paths.
 
     Search priority:
-    1. User-provided extra paths + AMENT_PREFIX_PATH
-    2. Already-cached repos in cache_dir
-    3. Dynamic resolution via rosdistro index (downloads only the needed repo)
+    1. User-provided extra paths + AMENT_PREFIX_PATH (rglob)
+    2. Per-message remote cache (_remote_msgs) at the rosdistro-derived ref
+    3. Already-extracted repos in cache_dir (from archive fallback)
+    4. Targeted remote resolution via rosdistro release/source metadata
+    5. Optional archive fallback when PYMCAP_CLI_MSG_ARCHIVE_FALLBACK is enabled
     """
+    parts = _message_parts(msg_type)
+    if parts is None:
+        return None
+    pkg_name, msg_name = parts
+
     cache_dir = _get_cache_dir(distro)
     ament_paths = _get_ament_prefix_paths()
 
-    # 1. Try local paths first (extra_paths + AMENT_PREFIX_PATH)
     result = _get_msg_def_disk(msg_type, (*extra_paths, *ament_paths))
     if result is not None:
         return result
 
-    # 2. Try already-cached repos
-    if cache_dir.exists():
-        cached_repos = tuple(
-            d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith("_")
-        )
-        if cached_repos:
-            result = _get_msg_def_disk(msg_type, cached_repos)
-            if result is not None:
-                return result
+    result = _lookup_cached_remote_msg(cache_dir, distro, pkg_name, msg_name)
+    if result is not None:
+        return result
 
-    # 3. Dynamic resolution: resolve package -> repo, download just that repo
-    pkg_name = _extract_pkg_name(msg_type)
-    if pkg_name is not None:
-        repo_dir = _resolve_and_download_repo(pkg_name, distro, cache_dir)
-        if repo_dir is not None:
-            return _get_msg_def_disk(msg_type, (repo_dir,))
+    archive_repos = _archive_cached_repo_dirs(cache_dir)
+    if archive_repos:
+        result = _get_msg_def_disk(msg_type, archive_repos)
+        if result is not None:
+            return result
 
-    return None
+    result = _resolve_remote_msg_def(msg_type, distro, cache_dir)
+    if result is not None:
+        return result
+
+    if not _is_archive_fallback_enabled():
+        return None
+
+    repo_dir = _resolve_and_download_repo(pkg_name, distro, cache_dir)
+    if repo_dir is None:
+        return None
+    return _get_msg_def_disk(msg_type, (repo_dir,))
 
 
 @lru_cache
