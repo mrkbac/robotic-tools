@@ -8,6 +8,45 @@ User-facing notes for releases.
 
 ### pymcap-cli
 
+- New `msg-def` command resolves a ROS2 message type to its complete `.msg`
+  definition, including dependencies. Interactive terminals get colored
+  schema rendering; redirected stdout remains raw `.msg` text for piping.
+- New `msg-list` command prints all `.msg` types defined by a package
+  (e.g. `pymcap-cli msg-list sensor_msgs`). The release-branch zip used to
+  resolve the listing also warms the per-message cache, so subsequent
+  `msg-def` calls for the same package are offline.
+- `index scan` is significantly faster on large directory trees and slow
+  remote mounts by reusing directory-entry stat data, walking directories in
+  parallel, and streaming live progress while scanning.
+- `index tree` adds a directory-oriented view of indexed recordings, and
+  `index query` adds folder filtering plus richer sort keys for path, start,
+  end, size, messages, duration, discovery time, observation time, and file
+  modification time.
+- `index topics` and `index schemas` now expose richer per-channel statistics
+  and sorting, using shared channel-stat rendering with the main `info`
+  output.
+- New `index sessions`, `index errors`, and `index timeline` subcommands help
+  inspect recording groups, failed scans, and capture activity over time.
+- The index database schema was migrated to compact interned channel/schema
+  tables with compressed channel metadata, stored compression aggregates, and
+  consolidated v7 schema records. Existing indexes are migrated forward by the
+  normal index database machinery.
+- `index --force-rebuild` refreshes derived rows for already-indexed content,
+  and index queries avoid more unnecessary joins for faster result rendering.
+- Index duration math now ignores clearly invalid pre-2000 message timestamps,
+  falls back to chunk time ranges when message start times are bogus, and caps
+  displayed durations at 30 days to avoid clock-desync outliers.
+
+---
+
+## pymcap-cli 0.12.0, mcap-codec-support 0.5.0
+
+Headline: `pymcap-cli` adds `tf-get`, payload-aware comparison for `diff`
+and `duplicates`, and a consolidated `process` pipeline for streaming MCAP
+transforms.
+
+### pymcap-cli 0.12.0
+
 - New `tf-get` command looks up the transform between two TF frames from
   `/tf_static` and `/tf` in an MCAP file. It prints the composed
   translation/rotation and the traversal path used to resolve the lookup.

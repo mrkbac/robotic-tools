@@ -13,8 +13,7 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.error import URLError
 from urllib.request import urlopen
 from zipfile import ZipFile
 
@@ -29,17 +28,6 @@ _ALLOWED_URL_PREFIXES = (
     "https://raw.githubusercontent.com/",
 )
 _DISTRO_INDEX_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
-_MAX_MSG_BYTES = 1024 * 1024
-_ARCHIVE_FALLBACK_ENV = "PYMCAP_CLI_MSG_ARCHIVE_FALLBACK"
-
-
-class _ResponseTooLargeError(Exception):
-    """Raised when a remote .msg response exceeds ``_MAX_MSG_BYTES``.
-
-    Distinct from network/HTTP errors so callers don't silently treat a
-    suspiciously huge response (e.g. an HTML error page) as a missing
-    file and fall through to the next resolution tier.
-    """
 
 
 class ROS2Distro(str, Enum):
@@ -89,44 +77,13 @@ def _download(url: str, buffer: BytesIO) -> None:
         raise ValueError(msg) from e
 
 
-def _download_text(url: str, *, max_bytes: int = _MAX_MSG_BYTES) -> str | None:
-    """Download a small UTF-8 text file, returning None for 404s."""
-    if not url.startswith(_ALLOWED_URL_PREFIXES):
-        msg = f"URL must start with one of {_ALLOWED_URL_PREFIXES}"
-        raise ValueError(msg)
-
-    try:
-        with urlopen(url) as response:  # noqa: S310
-            if response.status != 200:
-                return None
-
-            content_length = response.headers.get("Content-Length")
-            if content_length is not None and int(content_length) > max_bytes:
-                msg = f"Refusing to download {url}: response is larger than {max_bytes} bytes"
-                raise _ResponseTooLargeError(msg)
-
-            raw = response.read(max_bytes + 1)
-            if len(raw) > max_bytes:
-                msg = f"Refusing to download {url}: response is larger than {max_bytes} bytes"
-                raise _ResponseTooLargeError(msg)
-            return raw.decode("utf-8")
-    except HTTPError as e:
-        if e.code == 404:
-            return None
-        msg = f"HTTP error downloading {url}: {e.code} {e.reason}"
-        raise ValueError(msg) from e
-    except URLError as e:
-        msg = f"Network error downloading {url}: {e}"
-        raise ValueError(msg) from e
-
-
 def _download_and_extract(url: str, target_dir: Path) -> None:
     """Download and extract zip file to target directory, flattening the structure."""
     # Assume already downloaded if not empty
     if target_dir.exists() and any(target_dir.iterdir()):
         return
 
-    logger.info(f"Downloading {url} to {target_dir}")
+    logger.debug(f"Downloading {url} to {target_dir}")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # Download and extract to temp directory first
@@ -323,24 +280,6 @@ def _get_distro_index(distro: ROS2Distro, cache_dir: Path) -> _DistroIndex | Non
     return _fetch_distro_index(distro, cache_dir)
 
 
-def _git_url_to_zip(git_url: str, version: str) -> str:
-    """Convert a git URL to a GitHub ZIP download URL."""
-    base = git_url.removesuffix(".git")
-    return f"{base}/archive/refs/heads/{version}.zip"
-
-
-def _ensure_repo_cached(cache_dir: Path, repo_name: str, zip_url: str) -> Path:
-    """Download a single repo on demand if not already cached."""
-    repo_dir = cache_dir / repo_name
-    _download_and_extract(zip_url, repo_dir)
-    return repo_dir
-
-
-def _is_archive_fallback_enabled() -> bool:
-    value = os.environ.get(_ARCHIVE_FALLBACK_ENV, "")
-    return value.lower() in {"1", "true", "yes", "on"}
-
-
 def _remote_msg_cache_dir(cache_dir: Path) -> Path:
     return cache_dir / "_remote_msgs"
 
@@ -372,28 +311,9 @@ def _github_repo_parts(git_url: str) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-def _github_raw_url(owner: str, repo: str, ref: str, path: str) -> str:
-    quoted_path = quote(path, safe="/")
-    return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{quoted_path}"
-
-
 def _repo_cache_dir(cache_dir: Path, repo_name: str, ref: str) -> Path:
     ref_key = _cache_component(ref)
     return _remote_msg_cache_dir(cache_dir) / _cache_component(repo_name) / ref_key
-
-
-def _cache_remote_msg(
-    cache_dir: Path,
-    repo_name: str,
-    ref: str,
-    pkg_name: str,
-    msg_name: str,
-    msg_text: str,
-) -> Path:
-    msg_path = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name / "msg" / f"{msg_name}.msg"
-    msg_path.parent.mkdir(parents=True, exist_ok=True)
-    msg_path.write_text(msg_text, encoding="utf-8")
-    return msg_path
 
 
 def _extract_dependencies(pkg_name: str, msg_text: str) -> list[str]:
@@ -418,26 +338,6 @@ def _read_msg_path(msg_path: Path, pkg_name: str) -> tuple[str, list[str]] | Non
     return msg_text, dependencies
 
 
-def _fetch_raw_msg_to_cache(
-    cache_dir: Path,
-    repo_name: str,
-    ref: str,
-    pkg_name: str,
-    msg_name: str,
-    url: str,
-) -> tuple[str, list[str]] | None:
-    try:
-        msg_text = _download_text(url)
-    except ValueError:
-        logger.debug(f"Failed to fetch remote message definition from {url}", exc_info=True)
-        return None
-    if msg_text is None:
-        return None
-
-    msg_path = _cache_remote_msg(cache_dir, repo_name, ref, pkg_name, msg_name, msg_text)
-    return _read_msg_path(msg_path, pkg_name)
-
-
 def _expanded_release_ref(release: _RepoRelease, pkg_name: str, distro: ROS2Distro) -> str:
     return (
         release.tag_template.replace("{package}", pkg_name)
@@ -446,112 +346,23 @@ def _expanded_release_ref(release: _RepoRelease, pkg_name: str, distro: ROS2Dist
     )
 
 
-def _fetch_release_msg_def(
-    cache_dir: Path,
-    repo_name: str,
-    release: _RepoRelease,
-    pkg_name: str,
-    msg_name: str,
-    distro: ROS2Distro,
-) -> tuple[str, list[str]] | None:
-    repo = _github_repo_parts(release.url)
-    if repo is None:
-        return None
-
-    owner, github_repo = repo
-    ref = _expanded_release_ref(release, pkg_name, distro)
-    url = _github_raw_url(owner, github_repo, ref, f"msg/{msg_name}.msg")
-    return _fetch_raw_msg_to_cache(cache_dir, repo_name, ref, pkg_name, msg_name, url)
-
-
-def _fetch_source_fast_path_msg_def(
-    cache_dir: Path,
-    repo_name: str,
-    source: _RepoSource,
-    pkg_name: str,
-    msg_name: str,
-) -> tuple[str, list[str]] | None:
-    repo = _github_repo_parts(source.url)
-    if repo is None:
-        return None
-
-    owner, github_repo = repo
-    candidate_paths = (f"{pkg_name}/msg/{msg_name}.msg", f"msg/{msg_name}.msg")
-    for path in candidate_paths:
-        url = _github_raw_url(owner, github_repo, source.version, path)
-        result = _fetch_raw_msg_to_cache(
-            cache_dir,
-            repo_name,
-            source.version,
-            pkg_name,
-            msg_name,
-            url,
-        )
-        if result is not None:
-            return result
-    return None
-
-
-def _resolve_remote_msg_def(
-    msg_type: str,
-    distro: ROS2Distro,
-    cache_dir: Path,
-) -> tuple[str, list[str]] | None:
-    parts = _message_parts(msg_type)
-    if parts is None:
-        return None
-    pkg_name, msg_name = parts
-
-    index = _get_distro_index(distro, cache_dir)
-    if index is None:
-        return None
-
-    repo_name = index.pkg_to_repo.get(pkg_name)
-    if repo_name is None:
-        return None
-
-    release = index.repo_to_release.get(repo_name)
-    if release is not None:
-        result = _fetch_release_msg_def(cache_dir, repo_name, release, pkg_name, msg_name, distro)
-        if result is not None:
-            return result
-
-    source = index.repo_to_source.get(repo_name)
-    if source is None:
-        return None
-
-    return _fetch_source_fast_path_msg_def(cache_dir, repo_name, source, pkg_name, msg_name)
-
-
-def _resolve_and_download_repo(pkg_name: str, distro: ROS2Distro, cache_dir: Path) -> Path | None:
-    """Resolve a package to its source repo and download it."""
-    index = _get_distro_index(distro, cache_dir)
-    if index is None:
-        return None
-
-    repo_name = index.pkg_to_repo.get(pkg_name)
-    if repo_name is None:
-        return None
-
-    source = index.repo_to_source.get(repo_name)
-    if source is None:
-        return None
-
-    zip_url = _git_url_to_zip(source.url, source.version)
-    try:
-        return _ensure_repo_cached(cache_dir, repo_name, zip_url)
-    except ValueError:
-        logger.warning(f"Failed to download repo {repo_name} for package {pkg_name}")
-        return None
-
-
 def _get_cache_dir(distro: ROS2Distro) -> Path:
-    """Get cache directory for a specific ROS2 distribution."""
-    return platformdirs.user_cache_path(
-        appname="pymcap_cli_msg_def",
-        ensure_exists=True,
-        version=distro.value,
+    """Get cache directory for a specific ROS2 distribution.
+
+    The ``version`` segment is the cache schema generation, bumped
+    whenever the on-disk layout changes so legacy state from older
+    releases doesn't poison a new one.
+    """
+    cache_dir = (
+        platformdirs.user_cache_path(
+            appname="pymcap_cli_msg_def",
+            ensure_exists=True,
+            version="v2",
+        )
+        / distro.value
     )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 @lru_cache
@@ -595,10 +406,10 @@ def _lookup_cached_remote_msg(
     pkg_name: str,
     msg_name: str,
 ) -> tuple[str, list[str]] | None:
-    """Probe ``_remote_msgs/<repo>/<ref>/<pkg>/msg/<Name>.msg`` deterministically.
+    """Probe ``_remote_msgs/<repo>/<release-ref>/<pkg>/msg/<Name>.msg``.
 
-    Uses the distro index to derive each candidate ref (release tag and
-    source version) — no full-tree scan needed.
+    Uses the distro index to derive the release ref; returns ``None``
+    if no release entry exists or the file isn't cached yet.
     """
     index = _get_distro_index(distro, cache_dir)
     if index is None:
@@ -606,26 +417,15 @@ def _lookup_cached_remote_msg(
     repo_name = index.pkg_to_repo.get(pkg_name)
     if repo_name is None:
         return None
-
-    refs: list[str] = []
     release = index.repo_to_release.get(repo_name)
-    if release is not None:
-        refs.append(_expanded_release_ref(release, pkg_name, distro))
-    source = index.repo_to_source.get(repo_name)
-    if source is not None:
-        refs.append(source.version)
+    if release is None:
+        return None
 
-    for ref in refs:
-        msg_path = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name / "msg" / f"{msg_name}.msg"
-        if msg_path.is_file():
-            return _read_msg_path(msg_path, pkg_name)
+    ref = _expanded_release_ref(release, pkg_name, distro)
+    msg_path = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name / "msg" / f"{msg_name}.msg"
+    if msg_path.is_file():
+        return _read_msg_path(msg_path, pkg_name)
     return None
-
-
-def _archive_cached_repo_dirs(cache_dir: Path) -> tuple[Path, ...]:
-    if not cache_dir.exists():
-        return ()
-    return tuple(d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith("_"))
 
 
 def _get_msg_def(
@@ -636,11 +436,10 @@ def _get_msg_def(
     """Get message definition with caching and multiple search paths.
 
     Search priority:
-    1. User-provided extra paths + AMENT_PREFIX_PATH (rglob)
-    2. Per-message remote cache (_remote_msgs) at the rosdistro-derived ref
-    3. Already-extracted repos in cache_dir (from archive fallback)
-    4. Targeted remote resolution via rosdistro release/source metadata
-    5. Optional archive fallback when PYMCAP_CLI_MSG_ARCHIVE_FALLBACK is enabled
+
+    1. User-provided extra paths + ``AMENT_PREFIX_PATH`` (rglob).
+    2. Per-message remote cache populated by an earlier release-zip fetch.
+    3. Fresh release-zip download (also warms the per-message cache).
     """
     parts = _message_parts(msg_type)
     if parts is None:
@@ -658,23 +457,129 @@ def _get_msg_def(
     if result is not None:
         return result
 
-    archive_repos = _archive_cached_repo_dirs(cache_dir)
-    if archive_repos:
-        result = _get_msg_def_disk(msg_type, archive_repos)
-        if result is not None:
-            return result
+    if _ensure_release_pkg_cached(cache_dir, distro, pkg_name) is None:
+        return None
+    return _lookup_cached_remote_msg(cache_dir, distro, pkg_name, msg_name)
 
-    result = _resolve_remote_msg_def(msg_type, distro, cache_dir)
-    if result is not None:
-        return result
 
-    if not _is_archive_fallback_enabled():
+def _list_msgs_in_pkg_dir(pkg_dir: Path) -> list[str]:
+    """Return sorted message stems found under ``<pkg_dir>/msg/*.msg``."""
+    msg_dir = pkg_dir / "msg"
+    if not msg_dir.is_dir():
+        return []
+    return sorted(p.stem for p in msg_dir.glob("*.msg") if p.is_file())
+
+
+def _release_tag_zip_url(
+    release: _RepoRelease,
+    pkg_name: str,
+    distro: ROS2Distro,
+) -> str | None:
+    repo = _github_repo_parts(release.url)
+    if repo is None:
+        return None
+    owner, github_repo = repo
+    ref = _expanded_release_ref(release, pkg_name, distro)
+    return f"https://github.com/{owner}/{github_repo}/archive/refs/tags/{ref}.zip"
+
+
+def _ensure_release_pkg_cached(
+    cache_dir: Path,
+    distro: ROS2Distro,
+    pkg_name: str,
+) -> Path | None:
+    """Download and extract the rosdistro release branch for ``pkg_name``.
+
+    Returns the package-root directory
+    (``_remote_msgs/<repo>/<ref>/<pkg>``) so callers can list
+    ``msg/*.msg`` directly. Subsequent ``_lookup_cached_remote_msg``
+    calls hit disk for free.
+
+    Returns ``None`` if the package has no rosdistro release entry or
+    the download fails.
+    """
+    index = _get_distro_index(distro, cache_dir)
+    if index is None:
+        return None
+    repo_name = index.pkg_to_repo.get(pkg_name)
+    if repo_name is None:
+        return None
+    release = index.repo_to_release.get(repo_name)
+    if release is None:
         return None
 
-    repo_dir = _resolve_and_download_repo(pkg_name, distro, cache_dir)
-    if repo_dir is None:
+    zip_url = _release_tag_zip_url(release, pkg_name, distro)
+    if zip_url is None:
         return None
-    return _get_msg_def_disk(msg_type, (repo_dir,))
+
+    ref = _expanded_release_ref(release, pkg_name, distro)
+    pkg_dir = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name
+    if pkg_dir.is_dir():
+        return pkg_dir
+
+    # Extract into a sibling temp dir, then atomically rename into place so
+    # an interrupted run never leaves a half-populated pkg_dir behind.
+    pkg_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=pkg_dir.parent, prefix=f".{pkg_name}.tmp.") as tmp:
+        tmp_pkg = Path(tmp) / pkg_name
+        try:
+            _download_and_extract(zip_url, tmp_pkg)
+        except ValueError:
+            logger.debug(f"Failed to fetch release branch zip from {zip_url}", exc_info=True)
+            return None
+        tmp_pkg.replace(pkg_dir)
+    return pkg_dir
+
+
+def _find_pkg_dir_in_folders(folders: tuple[Path, ...], pkg_name: str) -> list[Path]:
+    """Locate every ``<pkg_name>/msg`` directory under any of ``folders``.
+
+    Returns the *parent* dir (the package root) for each match. Multiple
+    matches let workspace overlays add messages to a package.
+    """
+    seen: list[Path] = []
+    for f in folders:
+        if not f.exists():
+            continue
+        for msg_dir in f.rglob(f"{pkg_name}/msg"):
+            if msg_dir.is_dir():
+                pkg_dir = msg_dir.parent
+                if pkg_dir not in seen:
+                    seen.append(pkg_dir)
+    return seen
+
+
+def list_package_messages(
+    package_name: str,
+    distro: ROS2Distro = ROS2Distro.HUMBLE,
+    extra_paths: tuple[Path, ...] = (),
+) -> list[str] | None:
+    """List all ROS2 ``.msg`` types defined by ``package_name``.
+
+    Returns the message names without the ``.msg`` suffix (e.g.
+    ``["Image", "CompressedImage", ...]``), sorted and deduplicated.
+    Returns ``None`` if the package can't be located, ``[]`` if it
+    exists but defines no messages.
+
+    Search priority:
+
+    1. User-provided extra paths + ``AMENT_PREFIX_PATH`` (union across roots).
+    2. Release-branch zip via rosdistro (also warms the per-message cache).
+    """
+    cache_dir = _get_cache_dir(distro)
+    ament_paths = _get_ament_prefix_paths()
+
+    local_pkg_dirs = _find_pkg_dir_in_folders((*extra_paths, *ament_paths), package_name)
+    if local_pkg_dirs:
+        names: set[str] = set()
+        for pkg_dir in local_pkg_dirs:
+            names.update(_list_msgs_in_pkg_dir(pkg_dir))
+        return sorted(names)
+
+    pkg_dir = _ensure_release_pkg_cached(cache_dir, distro, package_name)
+    if pkg_dir is None:
+        return None
+    return _list_msgs_in_pkg_dir(pkg_dir)
 
 
 @lru_cache
