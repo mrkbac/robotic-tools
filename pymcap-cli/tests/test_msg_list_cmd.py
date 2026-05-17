@@ -1,4 +1,4 @@
-"""Tests for `pymcap-cli msg-list`."""
+"""Tests for `pymcap-cli msg list`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cli import app
-from pymcap_cli.cmd import msg_list_cmd
+from pymcap_cli.cmd.msg import list_cmd as msg_list_cmd
 from pymcap_cli.core.msg_resolver import ROS2Distro
 
 if TYPE_CHECKING:
@@ -82,9 +82,9 @@ def test_msg_list_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        app(["msg-list", "--help"])
+        app(["msg", "list", "--help"])
 
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert exc_info.value.code == 0
-    assert "Usage: pymcap-cli msg-list" in output
+    assert "Usage: pymcap-cli msg list" in output

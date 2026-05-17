@@ -1,4 +1,4 @@
-"""Tests for `pymcap-cli msg-serve`."""
+"""Tests for `pymcap-cli msg serve`."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 from pymcap_cli.cli import app
-from pymcap_cli.cmd import msg_serve_cmd
-from pymcap_cli.cmd.msg_serve_cmd import _make_handler, _route
+from pymcap_cli.cmd.msg import serve_cmd as msg_serve_cmd
+from pymcap_cli.cmd.msg.serve_cmd import _make_handler, _route
 from pymcap_cli.core.msg_resolver import PackageInfo, ROS2Distro
 from pymcap_cli.display.schema_html import render_msg_definition_html
 
@@ -227,9 +227,9 @@ def test_msg_serve_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        app(["msg-serve", "--help"])
+        app(["msg", "serve", "--help"])
 
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert exc_info.value.code == 0
-    assert "Usage: pymcap-cli msg-serve" in output
+    assert "Usage: pymcap-cli msg serve" in output

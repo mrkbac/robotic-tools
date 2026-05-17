@@ -2,7 +2,7 @@
 
 Mirrors :mod:`pymcap_cli.display.schema_render` (which produces Rich
 ``Text``) but emits ``<span class="...">`` tokens, and turns every
-``<pkg>/<Type>`` reference into a hyperlink so the ``msg-serve`` UI
+``<pkg>/<Type>`` reference into a hyperlink so the ``msg serve`` UI
 can drill in.
 """
 

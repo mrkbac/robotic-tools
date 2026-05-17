@@ -26,9 +26,6 @@ from pymcap_cli.cmd import (
     info_json_cmd,
     list_cmd,
     merge_cmd,
-    msg_def_cmd,
-    msg_list_cmd,
-    msg_serve_cmd,
     process_cmd,
     rechunk_cmd,
     records_cmd,
@@ -40,6 +37,7 @@ from pymcap_cli.cmd import (
     tftree_cmd,
     topic_chunks_cmd,
 )
+from pymcap_cli.cmd import msg as msg_pkg
 from pymcap_cli.log_setup import ERR, setup_logging
 
 CommandFunction: TypeAlias = Callable[..., int]
@@ -197,7 +195,7 @@ rosdecompress = _load_optional_command(
     install_command="uv add 'pymcap-cli[video,pointcloud]'",
 )
 index_app = _load_optional_app(
-    "pymcap_cli.cmd.index_cmd",
+    "pymcap_cli.cmd.index",
     "index_app",
     expected_missing_modules=("xxhash",),
     message="Index command requires the 'xxhash' extra "
@@ -228,9 +226,8 @@ app.command(name="diff", group=inspect_group)(diff_cmd.diff_cmd)
 app.command(name="duplicates", group=inspect_group)(duplicates_cmd.duplicates)
 app.command(name="info", group=inspect_group)(info_cmd.info)
 app.command(name="info-json", group=inspect_group)(info_json_cmd.info_json)
-app.command(name="msg-def", group=inspect_group)(msg_def_cmd.msg_def)
-app.command(name="msg-list", group=inspect_group)(msg_list_cmd.msg_list)
-app.command(name="msg-serve", group=inspect_group)(msg_serve_cmd.msg_serve)
+msg_pkg.msg_app.group = (inspect_group,)
+app.command(msg_pkg.msg_app, name="msg")
 index_app.group = (inspect_group,)
 app.command(index_app, name="index")
 get_cmd.get_app.group = (inspect_group,)

@@ -662,7 +662,7 @@ def get_message_text(
 
     Unlike :func:`get_message_definition`, this does NOT recurse into
     dependencies — useful when callers want to display one message at
-    a time (e.g. the `msg-serve` web view) and link to dependencies
+    a time (e.g. the `msg serve` web view) and link to dependencies
     separately.
     """
     return _get_msg_def(msg_type, distro, list(extra_paths))

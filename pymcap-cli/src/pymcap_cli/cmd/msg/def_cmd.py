@@ -51,7 +51,7 @@ def msg_def(
         return 0
     except Exception as exc:
         ERR.print(f"[red]Error:[/red] failed to resolve {msg_type!r}: {exc}")
-        logger.exception("msg-def failed")
+        logger.exception("msg def failed")
         return 1
 
     if definition is None:

@@ -8,18 +8,19 @@ User-facing notes for releases.
 
 ### pymcap-cli
 
-- New `msg-def` command resolves a ROS2 message type to its complete `.msg`
-  definition, including dependencies. Interactive terminals get colored
-  schema rendering; redirected stdout remains raw `.msg` text for piping.
-- New `msg-list` command prints all `.msg` types defined by a package
-  (e.g. `pymcap-cli msg-list sensor_msgs`). The release-branch zip used to
-  resolve the listing also warms the per-message cache, so subsequent
-  `msg-def` calls for the same package are offline.
-- New `msg-serve` command hosts a small local web UI for the rosdistro: a
-  package index, per-package message lists, and syntax-highlighted
-  definitions with hyperlinked cross-references. Light/dark themes, fluid
-  layout, same release-zip cache as `msg-list` — each click downloads at
-  most one package.
+- New `msg` command group (`pymcap-cli msg def`, `msg list`, `msg serve`):
+  - `msg def` resolves a ROS2 message type to its complete `.msg` definition,
+    including dependencies. Interactive terminals get colored schema rendering;
+    redirected stdout remains raw `.msg` text for piping.
+  - `msg list` prints all `.msg` types defined by a package
+    (e.g. `pymcap-cli msg list sensor_msgs`). The release-branch zip used to
+    resolve the listing also warms the per-message cache, so subsequent
+    `msg def` calls for the same package are offline.
+  - `msg serve` hosts a small local web UI for the rosdistro: a package
+    index, per-package message lists with repo/source/release info cards,
+    and syntax-highlighted definitions with hyperlinked cross-references
+    plus a Copy button. Light/dark themes via `prefers-color-scheme`, fluid
+    responsive layout, same release-zip cache as `msg list`.
 - `index scan` is significantly faster on large directory trees and slow
   remote mounts by reusing directory-entry stat data, walking directories in
   parallel, and streaming live progress while scanning.

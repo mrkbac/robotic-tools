@@ -41,7 +41,7 @@ def msg_list(
 
     Looks in user-supplied paths and ``AMENT_PREFIX_PATH`` first, then
     falls back to downloading the rosdistro release branch (also warms
-    the per-message cache for subsequent ``msg-def`` calls).
+    the per-message cache for subsequent ``msg def`` calls).
     """
     try:
         names = list_package_messages(
@@ -54,7 +54,7 @@ def msg_list(
         return 0
     except Exception as exc:
         ERR.print(f"[red]Error:[/red] failed to list messages for {package_name!r}: {exc}")
-        logger.exception("msg-list failed")
+        logger.exception("msg list failed")
         return 1
 
     if names is None:

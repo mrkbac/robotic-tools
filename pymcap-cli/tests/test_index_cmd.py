@@ -11,14 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from pymcap_cli.cmd.index_cmd import (
-    _MAX_PLAUSIBLE_DURATION_NS,
-    SANE_EPOCH_NS,
-    _format_compression_cell,
-    _format_duration_ns,
-    _format_ts_ns,
-    _path_prefix_where,
-    _safe_duration_ns,
+from pymcap_cli.cmd.index import (
     duplicates_cmd,
     errors_cmd,
     index_app,
@@ -30,6 +23,15 @@ from pymcap_cli.cmd.index_cmd import (
     status_cmd,
     timeline_cmd,
     topics_cmd,
+)
+from pymcap_cli.cmd.index._helpers import (
+    _MAX_PLAUSIBLE_DURATION_NS,
+    SANE_EPOCH_NS,
+    _format_compression_cell,
+    _format_duration_ns,
+    _format_ts_ns,
+    _path_prefix_where,
+    _safe_duration_ns,
 )
 from pymcap_cli.index.db import CURRENT_SCHEMA_VERSION, open_db
 from rich.text import Text

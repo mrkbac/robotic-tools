@@ -1,4 +1,4 @@
-"""Tests for `pymcap-cli msg-def`."""
+"""Tests for `pymcap-cli msg def`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cli import app
-from pymcap_cli.cmd import msg_def_cmd
+from pymcap_cli.cmd.msg import def_cmd as msg_def_cmd
 from pymcap_cli.core.msg_resolver import ROS2Distro
 
 if TYPE_CHECKING:
@@ -93,10 +93,10 @@ def test_msg_def_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        app(["msg-def", "--help"])
+        app(["msg", "def", "--help"])
 
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert exc_info.value.code == 0
-    assert "Usage: pymcap-cli msg-def" in output
+    assert "Usage: pymcap-cli msg def" in output
     assert "Print a resolved ROS2" in output
