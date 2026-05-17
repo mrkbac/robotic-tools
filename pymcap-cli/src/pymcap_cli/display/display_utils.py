@@ -683,8 +683,7 @@ def display_channels_table(
             hz = _hz_value(channel, use_median, index_duration, global_dur_sec)
             row.append(f"{hz:.2f}")
         if show_size:
-            size = channel.get("size_bytes") or 0
-            row.append(bytes_to_human(size))
+            row.append(bytes_to_human(channel.get("size_bytes")))
         if show_percent:
             size = channel.get("size_bytes") or 0
             percentage = (size / total_size * 100) if total_size > 0 else 0

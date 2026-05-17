@@ -653,6 +653,9 @@ def test_info_table_reuses_channel_renderer(tmp_path: Path) -> None:
     assert "Topics" in output
     assert "/x" in output
     assert "/y" in output
+    topics_section = output.split("Topics (2)", 1)[1]
+    assert "0 bytes" not in topics_section
+    assert "N/A" in topics_section
 
 
 def test_info_unknown_target_errors(tmp_path: Path) -> None:
