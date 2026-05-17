@@ -2,7 +2,8 @@
 
 import enum
 import hashlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from enum import IntEnum
 from functools import lru_cache
 from typing import TypedDict
 
@@ -15,6 +16,7 @@ from rich.text import Text
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.types.info_types import ChannelInfo, McapInfoOutput, SchemaInfo
+from pymcap_cli.types.qos import History, QosProfile
 from pymcap_cli.utils import bytes_to_human
 
 
@@ -148,6 +150,7 @@ class ChannelTableColumn(enum.IntFlag):
     BPS = enum.auto()
     B_PER_MSG = enum.auto()
     DISTRIBUTION = enum.auto()
+    QOS = enum.auto()
 
 
 class DistributionBar(JupyterMixin):
@@ -482,6 +485,7 @@ def display_channels_table(
     use_median: bool = False,
     tree: bool = False,
     terminal_width: int | None = None,
+    qos_by_channel_id: Mapping[int, list[QosProfile]] | None = None,
 ) -> Table:
     """Build and return a channels table with configurable columns and sorting.
 
@@ -511,6 +515,7 @@ def display_channels_table(
             | ChannelTableColumn.BPS
             | ChannelTableColumn.B_PER_MSG
             | ChannelTableColumn.DISTRIBUTION
+            | ChannelTableColumn.QOS
         )
 
     # Compute global duration for derived values
@@ -562,6 +567,11 @@ def display_channels_table(
             and bool(columns & ChannelTableColumn.DISTRIBUTION)
         )
         show_schema = effective_width >= 160 and bool(columns & ChannelTableColumn.SCHEMA)
+        show_qos = (
+            effective_width >= 120
+            and bool(qos_by_channel_id)
+            and bool(columns & ChannelTableColumn.QOS)
+        )
     else:
         # Always show requested columns
         show_size = bool(columns & ChannelTableColumn.SIZE)
@@ -572,6 +582,7 @@ def display_channels_table(
             bool(columns & ChannelTableColumn.DISTRIBUTION) and has_distribution_data
         )
         show_schema = bool(columns & ChannelTableColumn.SCHEMA)
+        show_qos = bool(qos_by_channel_id) and bool(columns & ChannelTableColumn.QOS)
 
     # Calculate total size for percentage column
     total_size = sum(ch.get("size_bytes") or 0 for ch in data["channels"]) if show_percent else 0
@@ -597,6 +608,8 @@ def display_channels_table(
         channels_table.add_column("B/msg", justify="right", style="magenta")
     if show_distribution:
         channels_table.add_column("Distribution")
+    if show_qos:
+        channels_table.add_column("QoS")
     # Populate rows
     sorted_channels = sorted(data["channels"], key=get_sort_key, reverse=reverse)
     if tree:
@@ -661,6 +674,8 @@ def display_channels_table(
                         hrow.append(DistributionBar(agg_dist, width=bar_width))
                     else:
                         hrow.append("")
+                if show_qos:
+                    hrow.append("")
 
             channels_table.add_row(*hrow, end_section=False)
             continue
@@ -698,6 +713,40 @@ def display_channels_table(
             # Use fixed bar width in watch mode to prevent jitter
             bar_width = max(20, effective_width // 4) if terminal_width is not None else None
             row.append(DistributionBar(distribution, width=bar_width))
+        if show_qos:
+            row.append(_format_channel_qos(channel["id"], qos_by_channel_id))
         channels_table.add_row(*row)
 
     return channels_table
+
+
+def _format_channel_qos(
+    channel_id: int,
+    qos_by_channel_id: Mapping[int, list[QosProfile]] | None,
+) -> str:
+    if qos_by_channel_id is None:
+        return "-"
+    profiles = qos_by_channel_id.get(channel_id) or []
+    if not profiles:
+        return "-"
+    rendered = {_format_qos_compact(p) for p in profiles}
+    if len(rendered) == 1:
+        return rendered.pop()
+    return f"[yellow]mixed ({len(rendered)})[/]"
+
+
+def _format_qos_compact(profile: QosProfile) -> str:
+    """One-line ``RELIABLE/VOLATILE/KEEP_LAST(10)`` style summary, coloured."""
+    parts = [_colored_policy(profile.reliability), _colored_policy(profile.durability)]
+    if profile.history is History.KEEP_LAST:
+        parts.append(_colored_policy(profile.history, override=f"KEEP_LAST({profile.depth})"))
+    elif profile.history is History.KEEP_ALL or profile.history is not History.SYSTEM_DEFAULT:
+        parts.append(_colored_policy(profile.history))
+    return "/".join(parts)
+
+
+def _colored_policy(value: IntEnum | int, *, override: str | None = None) -> str:
+    """Render a policy value with a stable per-value colour."""
+    label = override or (value.name if isinstance(value, IntEnum) else f"UNKNOWN({value})")
+    key = value.name if isinstance(value, IntEnum) else f"unknown:{value}"
+    return f"[{_text_to_color(key)}]{label}[/]"

@@ -5,10 +5,75 @@ import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, cast
 
+import yaml
 from lz4.frame import decompress as lz4_decompress
 from small_mcap.records import MAGIC, MAGIC_SIZE, Opcode
+
+from pymcap_cli.types.qos import Durability, History, Liveliness, Reliability
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+
+_QOS_POLICY_FIELDS: tuple[
+    tuple[str, type[Reliability | Durability | History | Liveliness]],
+    ...,
+] = (
+    ("reliability", Reliability),
+    ("durability", Durability),
+    ("history", History),
+    ("liveliness", Liveliness),
+)
+
+
+def _qos_issues(metadata: Mapping[str, str] | None) -> list[str]:
+    """Return human-readable problems with a channel's QoS metadata.
+
+    Empty list when ``offered_qos_profiles`` is missing or parses cleanly.
+    Tolerant parsing lives in :mod:`pymcap_cli.core.qos`; this is the
+    paranoid sibling that doctor uses to surface malformed profiles.
+    """
+    if not metadata:
+        return []
+    raw = metadata.get("offered_qos_profiles")
+    if not raw:
+        return []
+    try:
+        loaded = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        return [f"offered_qos_profiles YAML is malformed: {exc}"]
+    if not isinstance(loaded, list):
+        return [f"offered_qos_profiles must be a YAML list, got {type(loaded).__name__}"]
+
+    issues: list[str] = []
+    for index, entry in enumerate(loaded):
+        if not isinstance(entry, dict):
+            issues.append(f"profile #{index} is not a dict")
+            continue
+        entry_dict = cast("dict[str, object]", entry)
+        for field_name, enum_cls in _QOS_POLICY_FIELDS:
+            value = entry_dict.get(field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                issues.append(f"profile #{index}: {field_name} is a bool (expected int or str)")
+                continue
+            if isinstance(value, int):
+                try:
+                    enum_cls(value)
+                except ValueError:
+                    issues.append(f"profile #{index}: unknown {field_name} code {value}")
+            elif isinstance(value, str):
+                if value.strip().upper() not in enum_cls.__members__:
+                    issues.append(f"profile #{index}: unknown {field_name} name {value.strip()!r}")
+            else:
+                issues.append(
+                    f"profile #{index}: {field_name} has unexpected type {type(value).__name__}"
+                )
+    return issues
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -149,6 +214,7 @@ class FindingCode(str, Enum):
     INDEXED_SCHEMA_MISSING_FROM_SUMMARY = auto()
     INDEX_SECTION_PRESENT_WITHOUT_SUMMARY = auto()
     INVALID_OPCODE_ZERO = auto()
+    INVALID_QOS_PROFILE = auto()
     INVALID_UTF8 = auto()
     LARGE_CHUNK = auto()
     MESSAGE_BEFORE_CHANNEL = auto()
@@ -228,6 +294,7 @@ _WARNING_CODES: frozenset[FindingCode] = frozenset(
         FindingCode.CHANNEL_TOPIC_DUPLICATE,
         FindingCode.CHANNEL_TOPIC_EMPTY,
         FindingCode.CHUNK_COMPRESSION_INEFFICIENT,
+        FindingCode.INVALID_QOS_PROFILE,
         FindingCode.DUPLICATE_CHANNEL,
         FindingCode.DUPLICATE_MAP_KEY,
         FindingCode.DUPLICATE_SCHEMA,
@@ -1644,6 +1711,14 @@ class McapDoctor:
             self._emit(
                 FindingCode.UNKNOWN_SCHEMA_ID,
                 f"Channel {channel.channel_id} references unknown Schema {channel.schema_id}",
+                offset=frame.offset,
+                section=frame.section,
+                record=frame.record_name,
+            )
+        for issue in _qos_issues(channel.metadata.values):
+            self._emit(
+                FindingCode.INVALID_QOS_PROFILE,
+                f"Channel {channel.channel_id} ({channel.topic}): {issue}",
                 offset=frame.offset,
                 section=frame.section,
                 record=frame.record_name,

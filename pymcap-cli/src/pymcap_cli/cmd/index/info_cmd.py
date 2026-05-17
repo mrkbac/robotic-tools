@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import zlib
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -25,9 +26,11 @@ from pymcap_cli.cmd.index._helpers import (
     _topics_to_channel_table_data,
     console,
 )
+from pymcap_cli.core.qos import parse_qos_profiles
 from pymcap_cli.display.display_utils import _format_parts_with_colors, display_channels_table
 from pymcap_cli.index.db import IndexDbNeedsMigrationError, open_db
 from pymcap_cli.index.scanner import unpack_distribution_blob
+from pymcap_cli.types.qos import QosProfile
 from pymcap_cli.utils import bytes_to_human
 
 
@@ -73,11 +76,13 @@ def info_cmd(
                 "       sig.schema_id, sig.message_encoding, "
                 "       cc.message_count, cc.uncompressed_size_bytes, "
                 "       cc.message_start_time_ns, cc.message_end_time_ns, "
-                "       cc.distribution_blob "
+                "       cc.distribution_blob, "
+                "       cm.metadata_json_zlib "
                 "FROM content_channel cc "
                 "JOIN content c       ON c.id        = cc.content_id "
                 "JOIN channel_signature sig ON sig.id  = cc.channel_signature_id "
                 "JOIN topic t         ON t.id          = sig.topic_id "
+                "LEFT JOIN channel_metadata cm ON cm.id = sig.channel_metadata_id "
                 "WHERE c.summary_fingerprint = ? "
                 "ORDER BY cc.message_count DESC NULLS LAST, t.name",
                 (summary_fp,),
@@ -179,8 +184,24 @@ def info_cmd(
             ch_start,
             ch_end,
             dist_blob,
+            _metadata_zlib,
         ) in topic_rows
     ]
+    qos_by_channel_id: dict[int, list[QosProfile]] = {}
+    for row in topic_rows:
+        channel_id = row[0]
+        metadata_zlib = row[-1]
+        if not metadata_zlib:
+            continue
+        try:
+            metadata = _json.loads(zlib.decompress(metadata_zlib))
+        except (zlib.error, _json.JSONDecodeError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        profiles = parse_qos_profiles(metadata)
+        if profiles:
+            qos_by_channel_id[channel_id] = profiles
     observations_payload = [
         {
             "path": obs_path,
@@ -275,6 +296,7 @@ def info_cmd(
                 console,
                 responsive=False,
                 index_duration=True,
+                qos_by_channel_id=qos_by_channel_id,
             )
         )
 

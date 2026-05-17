@@ -18,9 +18,11 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from small_mcap import McapError, rebuild_summary
+from small_mcap.records import Summary
 
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.qos import parse_qos_profiles
 from pymcap_cli.display.display_utils import (
     ChannelTableColumn,
     DistributionBar,
@@ -29,6 +31,7 @@ from pymcap_cli.display.display_utils import (
 from pymcap_cli.types.info_data import info_to_dict
 from pymcap_cli.types.info_link import ScanMode, generate_link
 from pymcap_cli.types.info_types import McapInfoOutput
+from pymcap_cli.types.qos import QosProfile
 from pymcap_cli.utils import bytes_to_human, read_or_rebuild_info
 
 logger = logging.getLogger(__name__)
@@ -196,6 +199,7 @@ def _build_channels_table(
     use_median: bool,
     tree: bool,
     terminal_width: int | None = None,
+    qos_by_channel_id: dict[int, list[QosProfile]] | None = None,
 ) -> Table:
     """Build channels table renderable."""
     return display_channels_table(
@@ -212,13 +216,29 @@ def _build_channels_table(
             | ChannelTableColumn.BPS
             | ChannelTableColumn.B_PER_MSG
             | ChannelTableColumn.DISTRIBUTION
+            | ChannelTableColumn.QOS
         ),
         responsive=True,
         index_duration=index_duration,
         use_median=use_median,
         tree=tree,
         terminal_width=terminal_width,
+        qos_by_channel_id=qos_by_channel_id,
     )
+
+
+def _qos_from_summary(summary: Summary) -> dict[int, list[QosProfile]]:
+    """Pull QoS profiles out of an MCAP summary's channel metadata.
+
+    Returns an empty dict for non-ROS2 MCAPs (or anywhere the channel
+    metadata doesn't carry ``offered_qos_profiles``).
+    """
+    out: dict[int, list[QosProfile]] = {}
+    for channel_id, channel in summary.channels.items():
+        profiles = parse_qos_profiles(channel.metadata)
+        if profiles:
+            out[channel_id] = profiles
+    return out
 
 
 def _build_info_display(
@@ -230,6 +250,7 @@ def _build_info_display(
     use_median: bool,
     tree: bool,
     terminal_width: int | None = None,
+    qos_by_channel_id: dict[int, list[QosProfile]] | None = None,
 ) -> Group:
     """Assemble all info sections into a single renderable."""
     parts: list[RenderableType] = [_build_file_info_and_summary(data)]
@@ -241,7 +262,14 @@ def _build_info_display(
     parts.append(_build_compression_table(data, has_chunk_info))
     parts.append(
         _build_channels_table(
-            data, sort_key, reverse, index_duration, use_median, tree, terminal_width
+            data,
+            sort_key,
+            reverse,
+            index_duration,
+            use_median,
+            tree,
+            terminal_width,
+            qos_by_channel_id=qos_by_channel_id,
         )
     )
 
@@ -630,10 +658,19 @@ def info(
             )
             console.print()
 
+        qos_by_channel_id = _qos_from_summary(info_data.summary)
+
         # Display all sections
         console.print(
             _build_info_display(
-                data, has_chunk_info, sort.value, reverse, index_duration, median, tree
+                data,
+                has_chunk_info,
+                sort.value,
+                reverse,
+                index_duration,
+                median,
+                tree,
+                qos_by_channel_id=qos_by_channel_id,
             )
         )
 
