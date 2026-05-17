@@ -256,26 +256,23 @@ def _print_db_needs_migration(exc: IndexDbNeedsMigrationError) -> None:
     )
 
 
-def _path_prefix_where(path: Path) -> tuple[str, tuple[str | int, ...]]:
-    """Build a prefix-match WHERE clause that is safe against LIKE wildcards.
-
-    Uses ``substr(abs_path, 1, ?) = ?`` so paths containing ``_`` or ``%`` do
-    not accidentally match unrelated siblings.
-    """
+def _path_prefix_bounds(path: Path) -> tuple[str, str]:
     resolved = str(path.expanduser().resolve())
-    child_prefix = resolved if resolved.endswith(os.sep) else f"{resolved}{os.sep}"
-    return (
-        "WHERE (abs_path = ? OR substr(abs_path, 1, ?) = ?)",
-        (resolved, len(child_prefix), child_prefix),
-    )
+    upper = resolved[:-1] + chr(ord(resolved[-1]) + 1)
+    return resolved, upper
 
 
-def _optional_path_filter_params(path: Path | None) -> tuple[str | None, str, int, str]:
+def _path_prefix_where(path: Path) -> tuple[str, tuple[str, str]]:
+    """Build an indexable literal path-prefix WHERE clause."""
+    lower, upper = _path_prefix_bounds(path)
+    return "WHERE (abs_path >= ? AND abs_path < ?)", (lower, upper)
+
+
+def _optional_path_filter_params(path: Path | None) -> tuple[str | None, str, str]:
     if path is None:
-        return None, "", 0, ""
-    resolved = str(path.expanduser().resolve())
-    child_prefix = resolved if resolved.endswith(os.sep) else f"{resolved}{os.sep}"
-    return resolved, resolved, len(child_prefix), child_prefix
+        return None, "", ""
+    lower, upper = _path_prefix_bounds(path)
+    return lower, lower, upper
 
 
 SqlValue = str | int | None
@@ -414,7 +411,7 @@ def _describe_error_kind(kind: str) -> str:
     return _ERROR_KIND_LABEL.get(kind, kind)
 
 
-def _path_prefix_predicate(path: Path) -> tuple[str, tuple[str | int, ...]]:
+def _path_prefix_predicate(path: Path) -> tuple[str, tuple[str, str]]:
     """Same shape as ``_path_prefix_where`` but without the leading ``WHERE``."""
     where, params = _path_prefix_where(path)
     return where.removeprefix("WHERE "), params

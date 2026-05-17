@@ -11,7 +11,7 @@ from rich.tree import Tree
 
 from pymcap_cli.cmd.index._helpers import (
     _format_count,
-    _optional_path_filter_params,
+    _path_prefix_predicate,
     _print_db_needs_migration,
     _resolve_db,
     _safe_duration_ns,
@@ -20,6 +20,16 @@ from pymcap_cli.cmd.index._helpers import (
 from pymcap_cli.index import SANE_EPOCH_NS
 from pymcap_cli.index.db import IndexDbNeedsMigrationError, open_db
 from pymcap_cli.utils import bytes_to_human
+
+_TreeRow = tuple[
+    str,
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+    str | None,
+    str | None,
+]
 
 
 @dataclass
@@ -64,9 +74,7 @@ def _format_node_stats(node: _PathNode) -> str:
 
 
 def _build_path_tree(
-    files: Sequence[tuple[str, int | None, int | None, int | None, int | None]],
-    topics: Sequence[tuple[str, str | None]],
-    schemas: Sequence[tuple[str, str | None]],
+    rows: Sequence[_TreeRow],
     root_prefix: str,
 ) -> _PathNode:
     """Group rows by their path prefix and accumulate stats up the chain."""
@@ -90,30 +98,20 @@ def _build_path_tree(
         chain_cache[abs_path] = chain
         return chain
 
-    for abs_path, size, msg_count, ts_start, ts_end in files:
+    for abs_path, size, msg_count, ts_start, ts_end, topics, schemas in rows:
         chain = _chain_for(abs_path)
         size_v = size or 0
         msg_v = msg_count or 0
         dur_v = _safe_duration_ns(ts_start, ts_end) or 0
+        topic_members = topics.split(",") if topics else ()
+        schema_members = schemas.split(",") if schemas else ()
         for node in chain:
             node.file_count += 1
             node.size_bytes += size_v
             node.message_count += msg_v
             node.duration_ns += dur_v
-
-    for abs_path, joined in topics:
-        if not joined:
-            continue
-        members = joined.split(",")
-        for node in _chain_for(abs_path):
-            node.topics.update(members)
-
-    for abs_path, joined in schemas:
-        if not joined:
-            continue
-        members = joined.split(",")
-        for node in _chain_for(abs_path):
-            node.schemas.update(members)
+            node.topics.update(topic_members)
+            node.schemas.update(schema_members)
 
     return root
 
@@ -200,57 +198,99 @@ def tree_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    path_filter_params = _optional_path_filter_params(folder)
+    path_clause = ""
+    path_params: tuple[str, ...] = ()
+    if folder is not None:
+        predicate, path_params = _path_prefix_predicate(folder)
+        path_clause = f"WHERE {predicate.replace('abs_path', 'cf.abs_path')}"
+
     time_filter_params = (SANE_EPOCH_NS, SANE_EPOCH_NS)
 
     try:
         with open_db(db_path, read_only=True) as conn:
-            files = conn.execute(
-                """SELECT cf.abs_path, cf.size_bytes, c.message_count,
-                          CASE WHEN c.message_start_time_ns >= ?
-                               THEN c.message_start_time_ns ELSE c.sane_message_start_time_ns END
-                               AS eff_start,
-                          CASE WHEN c.message_start_time_ns >= ?
-                               THEN c.message_end_time_ns ELSE c.sane_message_end_time_ns END
-                               AS eff_end
-                    FROM current_file cf
-                    JOIN content c ON c.id = cf.content_id
-                    WHERE (? IS NULL OR cf.abs_path = ?
-                           OR substr(cf.abs_path, 1, ?) = ?)""",
-                (*time_filter_params, *path_filter_params),
-            ).fetchall()
-            topics = conn.execute(
-                """SELECT cf.abs_path, agg.names
-                    FROM current_file cf
-                    JOIN (
-                        SELECT cc.content_id, GROUP_CONCAT(DISTINCT t.name) AS names
-                        FROM content_channel cc
-                        JOIN channel_signature sig ON sig.id = cc.channel_signature_id
-                        JOIN topic t         ON t.id          = sig.topic_id
-                        GROUP BY cc.content_id
-                    ) agg ON agg.content_id = cf.content_id
-                    WHERE (? IS NULL OR cf.abs_path = ?
-                           OR substr(cf.abs_path, 1, ?) = ?)""",
-                path_filter_params,
-            ).fetchall()
-            schema_rows = conn.execute(
-                """SELECT cf.abs_path, agg.hashes
-                    FROM current_file cf
-                    JOIN (
-                        SELECT cs.content_id, GROUP_CONCAT(DISTINCT s.schema_hash) AS hashes
-                        FROM content_schema cs
-                        JOIN schema s ON s.id = cs.schema_id
-                        GROUP BY cs.content_id
-                    ) agg ON agg.content_id = cf.content_id
-                    WHERE (? IS NULL OR cf.abs_path = ?
-                           OR substr(cf.abs_path, 1, ?) = ?)""",
-                path_filter_params,
-            ).fetchall()
+            use_correlated_labels = False
+            if folder is not None:
+                probe_rows = conn.execute(
+                    f"SELECT 1 FROM current_file cf {path_clause} LIMIT 1001",  # noqa: S608
+                    path_params,
+                ).fetchall()
+                use_correlated_labels = len(probe_rows) <= 1000
+
+            if use_correlated_labels:
+                rows = conn.execute(
+                    f"""SELECT cf.abs_path, cf.size_bytes, c.message_count,
+                               CASE WHEN c.message_start_time_ns >= ?
+                                    THEN c.message_start_time_ns
+                                    ELSE c.sane_message_start_time_ns END AS eff_start,
+                               CASE WHEN c.message_start_time_ns >= ?
+                                    THEN c.message_end_time_ns
+                                    ELSE c.sane_message_end_time_ns END AS eff_end,
+                               (
+                                 SELECT GROUP_CONCAT(DISTINCT t.name)
+                                   FROM content_channel cc
+                                   JOIN channel_signature sig
+                                     ON sig.id = cc.channel_signature_id
+                                   JOIN topic t ON t.id = sig.topic_id
+                                  WHERE cc.content_id = cf.content_id
+                               ) AS topic_names,
+                               (
+                                 SELECT GROUP_CONCAT(DISTINCT s.schema_hash)
+                                   FROM content_schema cs
+                                   JOIN schema s ON s.id = cs.schema_id
+                                  WHERE cs.content_id = cf.content_id
+                               ) AS schema_hashes
+                          FROM current_file cf
+                          JOIN content c ON c.id = cf.content_id
+                          {path_clause}""",  # noqa: S608
+                    (*time_filter_params, *path_params),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""WITH matched AS MATERIALIZED (
+                          SELECT cf.abs_path, cf.size_bytes, cf.content_id, c.message_count,
+                                 CASE WHEN c.message_start_time_ns >= ?
+                                      THEN c.message_start_time_ns
+                                      ELSE c.sane_message_start_time_ns END AS eff_start,
+                                 CASE WHEN c.message_start_time_ns >= ?
+                                      THEN c.message_end_time_ns
+                                      ELSE c.sane_message_end_time_ns END AS eff_end
+                            FROM current_file cf
+                            JOIN content c ON c.id = cf.content_id
+                            {path_clause}
+                        ),
+                        matched_content AS MATERIALIZED (
+                          SELECT DISTINCT content_id FROM matched WHERE content_id IS NOT NULL
+                        ),
+                        topic_names AS MATERIALIZED (
+                          SELECT cc.content_id, GROUP_CONCAT(DISTINCT t.name) AS names
+                            FROM matched_content mc
+                            JOIN content_channel cc ON cc.content_id = mc.content_id
+                            JOIN channel_signature sig ON sig.id = cc.channel_signature_id
+                            JOIN topic t ON t.id = sig.topic_id
+                           GROUP BY cc.content_id
+                        ),
+                        schema_hashes AS MATERIALIZED (
+                          SELECT cs.content_id, GROUP_CONCAT(DISTINCT s.schema_hash) AS hashes
+                            FROM matched_content mc
+                            JOIN content_schema cs ON cs.content_id = mc.content_id
+                            JOIN schema s ON s.id = cs.schema_id
+                           GROUP BY cs.content_id
+                        )
+                        SELECT matched.abs_path, matched.size_bytes, matched.message_count,
+                               matched.eff_start, matched.eff_end,
+                               topic_names.names, schema_hashes.hashes
+                          FROM matched
+                          LEFT JOIN topic_names
+                            ON topic_names.content_id = matched.content_id
+                          LEFT JOIN schema_hashes
+                            ON schema_hashes.content_id = matched.content_id""",  # noqa: S608
+                    (*time_filter_params, *path_params),
+                ).fetchall()
     except IndexDbNeedsMigrationError as exc:
         _print_db_needs_migration(exc)
         return 1
 
-    if not files:
+    if not rows:
         console.print("[dim]No indexed files match.[/]")
         return 0
 
@@ -258,11 +298,11 @@ def tree_cmd(
         root_prefix = str(folder.expanduser().resolve())
     else:
         try:
-            root_prefix = os.path.commonpath([row[0] for row in files])
+            root_prefix = os.path.commonpath([row[0] for row in rows])
         except ValueError:
             root_prefix = ""
 
-    root_node = _build_path_tree(files, topics, schema_rows, root_prefix)
+    root_node = _build_path_tree(rows, root_prefix)
     rendered = _render_path_tree(
         root_node,
         root_label=root_prefix or "(all)",

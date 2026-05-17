@@ -62,12 +62,13 @@ def topics_cmd(
 
     sql = (
         "SELECT t.name AS topic, "
-        "       COUNT(DISTINCT cf.abs_path)        AS files, "
-        "       COALESCE(SUM(cc.message_count), 0) AS messages, "
+        "       SUM(cfc.file_count)                AS files, "
+        "       COALESCE(SUM(COALESCE(cc.message_count, 0) * cfc.file_count), 0) "
+        "                                             AS messages, "
         "       COUNT(DISTINCT sig.schema_id)   AS schemas, "
         "       MIN(s.name)                        AS schema_name "
-        "FROM current_file cf "
-        "JOIN content_channel cc ON cc.content_id      = cf.content_id "
+        "FROM content_current_file_count cfc "
+        "JOIN content_channel cc ON cc.content_id      = cfc.content_id "
         "JOIN channel_signature sig    ON sig.id = cc.channel_signature_id "
         "JOIN topic t            ON t.id         = sig.topic_id "
         "LEFT JOIN schema s      ON s.id     = sig.schema_id "

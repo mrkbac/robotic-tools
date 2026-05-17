@@ -196,6 +196,10 @@ def test_deleted_file_is_removed_from_current_file(tmp_path: Path) -> None:
             (str(p.resolve()),),
         ).fetchone()
         assert current is None
+        current_counts = conn.execute(
+            "SELECT content_id, file_count FROM content_current_file_count"
+        ).fetchall()
+        assert current_counts == []
         tombstone = conn.execute(
             "SELECT obs.is_deleted FROM file_observation obs "
             "JOIN file_path fp ON fp.id = obs.file_path_id "
@@ -217,6 +221,10 @@ def test_duplicate_file_in_same_scan_reuses_single_content_row(tmp_path: Path) -
         assert stats.fingerprint_reused == 1
         assert _count(conn, "content") == 1
         assert _count(conn, "file_observation") == 2
+        current_counts = conn.execute(
+            "SELECT file_count FROM content_current_file_count"
+        ).fetchall()
+        assert current_counts == [(2,)]
 
 
 def test_corrupt_file_records_scan_error(tmp_path: Path) -> None:
@@ -240,6 +248,7 @@ def test_corrupt_file_records_scan_error(tmp_path: Path) -> None:
             (str(bad.resolve()),),
         ).fetchone()
         assert current == (str(bad.resolve()), None)
+        assert _count(conn, "content_current_file_count") == 0
 
 
 def test_error_file_skipped_on_rescan(tmp_path: Path) -> None:

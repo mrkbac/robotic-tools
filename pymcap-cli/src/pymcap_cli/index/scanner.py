@@ -425,9 +425,10 @@ def _current_paths_for_root(conn: sqlite3.Connection, root: Path, *, recurse: bo
 
     root_str = str(root)
     child_prefix = root_str if root_str.endswith(os.sep) else f"{root_str}{os.sep}"
+    child_upper = child_prefix[:-1] + chr(ord(child_prefix[-1]) + 1)
     rows = conn.execute(
-        "SELECT abs_path FROM current_file WHERE abs_path = ? OR substr(abs_path, 1, ?) = ?",
-        (root_str, len(child_prefix), child_prefix),
+        "SELECT abs_path FROM current_file WHERE abs_path = ? OR (abs_path >= ? AND abs_path < ?)",
+        (root_str, child_prefix, child_upper),
     ).fetchall()
     paths = {row[0] for row in rows}
     if recurse:
@@ -707,6 +708,7 @@ def _record_observation(
     session_id: int,
 ) -> None:
     file_path_id = intern_file_path(conn, str(inp.path))
+    previous_content_id = _current_content_id_for_file_path_id(conn, file_path_id)
     conn.execute(
         """INSERT INTO file_observation
            (file_path_id, size_bytes, mtime_ns, inode, file_fingerprint,
@@ -723,6 +725,61 @@ def _record_observation(
             time.time_ns(),
         ),
     )
+    _update_content_current_file_count(conn, previous_content_id, content_id)
+
+
+def _current_content_id_for_file_path_id(
+    conn: sqlite3.Connection,
+    file_path_id: int,
+) -> int | None:
+    row = conn.execute(
+        "SELECT content_id FROM file_observation WHERE file_path_id = ? ORDER BY id DESC LIMIT 1",
+        (file_path_id,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def _increment_content_current_file_count(
+    conn: sqlite3.Connection,
+    content_id: int | None,
+) -> None:
+    if content_id is None:
+        return
+    conn.execute(
+        "INSERT INTO content_current_file_count(content_id, file_count) "
+        "VALUES (?, 1) "
+        "ON CONFLICT(content_id) DO UPDATE SET file_count = file_count + 1",
+        (content_id,),
+    )
+
+
+def _decrement_content_current_file_count(
+    conn: sqlite3.Connection,
+    content_id: int | None,
+) -> None:
+    if content_id is None:
+        return
+    conn.execute(
+        "DELETE FROM content_current_file_count WHERE content_id = ? AND file_count <= 1",
+        (content_id,),
+    )
+    conn.execute(
+        "UPDATE content_current_file_count "
+        "SET file_count = file_count - 1 "
+        "WHERE content_id = ? AND file_count > 1",
+        (content_id,),
+    )
+
+
+def _update_content_current_file_count(
+    conn: sqlite3.Connection,
+    previous_content_id: int | None,
+    content_id: int | None,
+) -> None:
+    if previous_content_id == content_id:
+        return
+    _decrement_content_current_file_count(conn, previous_content_id)
+    _increment_content_current_file_count(conn, content_id)
 
 
 def _record_error(
@@ -752,6 +809,7 @@ def _record_error(
 
 def _record_deletion(conn: sqlite3.Connection, abs_path: str, session_id: int) -> None:
     file_path_id = intern_file_path(conn, abs_path)
+    previous_content_id = _current_content_id_for_file_path_id(conn, file_path_id)
     conn.execute(
         """INSERT INTO file_observation
            (file_path_id, size_bytes, mtime_ns, inode, file_fingerprint,
@@ -759,6 +817,7 @@ def _record_deletion(conn: sqlite3.Connection, abs_path: str, session_id: int) -
            VALUES (?, 0, 0, NULL, '', NULL, 1, ?, ?)""",
         (file_path_id, session_id, time.time_ns()),
     )
+    _update_content_current_file_count(conn, previous_content_id, None)
 
 
 def _insert_content(

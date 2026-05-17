@@ -8,8 +8,8 @@ from rich.table import Table
 
 from pymcap_cli.cmd.index._helpers import (
     _format_count,
-    _optional_path_filter_params,
     _parse_time_or_exit,
+    _path_prefix_predicate,
     _print_db_needs_migration,
     _resolve_db,
     console,
@@ -58,13 +58,18 @@ def timeline_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    path_filter_params = _optional_path_filter_params(folder)
+    path_clause = ""
+    path_params: tuple[str, ...] = ()
+    if folder is not None:
+        predicate, path_params = _path_prefix_predicate(folder)
+        path_clause = f"AND ({predicate.replace('abs_path', 'cf.abs_path')}) "
+
     since_ns = _parse_time_or_exit(since, "since") if since is not None else None
     until_ns = _parse_time_or_exit(until, "until") if until is not None else None
 
     bucket_fmt = _TIMELINE_BUCKET_FORMAT[bucket]
     sql = (
-        "SELECT "
+        "SELECT "  # noqa: S608
         "strftime(?, c.message_start_time_ns / 1000000000, 'unixepoch') "
         "AS bucket, "
         "       COUNT(DISTINCT cf.abs_path)        AS files, "
@@ -73,7 +78,7 @@ def timeline_cmd(
         "FROM current_file cf "
         "JOIN content c ON c.id = cf.content_id "
         "WHERE c.message_start_time_ns >= ? "
-        "AND (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?) "
+        f"{path_clause}"
         "AND (? IS NULL OR c.message_start_time_ns >= ?) "
         "AND (? IS NULL OR c.message_start_time_ns <= ?) "
         "GROUP BY bucket ORDER BY bucket ASC LIMIT ?"
@@ -81,7 +86,7 @@ def timeline_cmd(
     params: list[str | int | None] = [
         bucket_fmt,
         SANE_EPOCH_NS,
-        *path_filter_params,
+        *path_params,
         since_ns,
         since_ns,
         until_ns,

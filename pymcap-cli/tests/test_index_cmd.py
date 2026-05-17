@@ -186,15 +186,18 @@ def test_path_prefix_filter_does_not_match_sibling_prefix(tmp_path: Path) -> Non
     folder = tmp_path / "foo"
     where, params = _path_prefix_where(folder)
 
-    expected_prefix = f"{folder.resolve()}{os.sep}"
-    assert where == "WHERE (abs_path = ? OR substr(abs_path, 1, ?) = ?)"
-    assert params == (str(folder.resolve()), len(expected_prefix), expected_prefix)
+    expected_prefix = str(folder.resolve())
+    expected_upper = expected_prefix[:-1] + chr(ord(expected_prefix[-1]) + 1)
+    assert where == "WHERE (abs_path >= ? AND abs_path < ?)"
+    assert params == (expected_prefix, expected_upper)
 
 
 def test_path_prefix_filter_handles_filesystem_root() -> None:
     _where, params = _path_prefix_where(Path(os.sep))
 
-    assert params == (os.sep, len(os.sep), os.sep)
+    root = str(Path(os.sep).resolve())
+    root_upper = root[:-1] + chr(ord(root[-1]) + 1)
+    assert params == (root, root_upper)
 
 
 def test_format_ts_ns_zero_returns_dash() -> None:
@@ -867,13 +870,16 @@ def test_query_time_range_overlap(tmp_path: Path) -> None:
     assert _json.loads(output) == []
 
 
-def test_status_with_underscore_folder_does_not_match_siblings(tmp_path: Path) -> None:
-    """LIKE wildcards in path must not leak between siblings: foo_bar / fooXbar."""
+def test_status_with_underscore_folder_uses_literal_prefix(tmp_path: Path) -> None:
+    """Path filters are literal prefixes, not LIKE patterns or directory-only matches."""
     target = tmp_path / "foo_bar"
+    prefixed = tmp_path / "foo_bar1"
     sibling = tmp_path / "fooXbar"
     target.mkdir()
+    prefixed.mkdir()
     sibling.mkdir()
     (target / "rec.mcap").write_bytes(create_multi_topic_mcap(["/a"], messages_per_topic=3))
+    (prefixed / "rec.mcap").write_bytes(create_multi_topic_mcap(["/c"], messages_per_topic=3))
     (sibling / "rec.mcap").write_bytes(create_multi_topic_mcap(["/b"], messages_per_topic=3))
 
     db = tmp_path / "index.sqlite"
@@ -887,4 +893,7 @@ def test_status_with_underscore_folder_does_not_match_siblings(tmp_path: Path) -
         ).fetchall()
 
     paths = {row[0] for row in rows}
-    assert paths == {str((target / "rec.mcap").resolve())}
+    assert paths == {
+        str((target / "rec.mcap").resolve()),
+        str((prefixed / "rec.mcap").resolve()),
+    }

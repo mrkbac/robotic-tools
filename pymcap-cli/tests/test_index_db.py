@@ -36,6 +36,7 @@ def test_connect_creates_db_and_applies_schema(tmp_path: Path) -> None:
             "scan_session",
             "content",
             "content_channel",
+            "content_current_file_count",
             "schema",
             "content_schema",
             "topic",
@@ -62,6 +63,38 @@ def test_reopen_is_idempotent(tmp_path: Path) -> None:
     with open_db(db_path) as conn:
         migrations = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
         assert migrations == CURRENT_SCHEMA_VERSION
+
+
+def test_current_file_view_uses_correlated_latest_lookup(tmp_path: Path) -> None:
+    db_path = tmp_path / "index.sqlite"
+    with open_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'current_file'"
+        ).fetchone()
+
+    assert row is not None
+    view_sql = row[0]
+    assert "GROUP BY file_path_id" not in view_sql
+    assert "SELECT MAX(inner_obs.id)" in view_sql
+    assert "WHERE inner_obs.file_path_id = fp.id" in view_sql
+
+
+def test_current_file_exact_lookup_plan_does_not_materialize_latest(tmp_path: Path) -> None:
+    db_path = tmp_path / "index.sqlite"
+    with open_db(db_path) as conn:
+        plan = "\n".join(
+            str(row)
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT summary_fingerprint FROM current_file WHERE abs_path = ?",
+                (str(tmp_path / "rec.mcap"),),
+            ).fetchall()
+        )
+
+    assert "MATERIALIZE" not in plan
+    assert "GROUP BY" not in plan
+    assert "file_path" in plan
+    assert "CORRELATED SCALAR SUBQUERY" in plan
 
 
 def test_session_lifecycle(tmp_path: Path) -> None:

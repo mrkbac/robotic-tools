@@ -60,7 +60,7 @@ def info_cmd(
                 return 1
 
             content = conn.execute(
-                "SELECT c.size_bytes, lib.name, prof.name, "
+                "SELECT c.id, c.size_bytes, lib.name, prof.name, "
                 "       c.message_count, c.schema_count, c.channel_count, "
                 "       c.attachment_count, c.metadata_count, c.chunk_count, "
                 "       c.message_start_time_ns, c.message_end_time_ns, c.first_seen_at_ns, "
@@ -97,14 +97,26 @@ def info_cmd(
                 (summary_fp,),
             ).fetchall()
             observation_rows = conn.execute(
+                "WITH content_obs AS ("
+                "  SELECT obs.id FROM file_observation obs "
+                "  WHERE obs.content_id = ? "
+                "  ORDER BY obs.observed_at_ns DESC, obs.id DESC LIMIT 20"
+                "), path_obs AS ("
+                "  SELECT obs.id FROM file_observation obs "
+                "  JOIN file_path fp ON fp.id = obs.file_path_id "
+                "  WHERE fp.value = ? "
+                "  ORDER BY obs.observed_at_ns DESC, obs.id DESC LIMIT 20"
+                "), candidate_obs AS ("
+                "  SELECT id FROM content_obs UNION SELECT id FROM path_obs"
+                ") "
                 "SELECT fp.value AS abs_path, obs.observed_at_ns, obs.scan_session_id, "
                 "       obs.file_fingerprint, c.summary_fingerprint "
-                "FROM file_observation obs "
+                "FROM candidate_obs co "
+                "JOIN file_observation obs ON obs.id = co.id "
                 "JOIN file_path fp ON fp.id = obs.file_path_id "
                 "LEFT JOIN content c ON c.id = obs.content_id "
-                "WHERE c.summary_fingerprint = ? OR fp.value = ? "
-                "ORDER BY obs.observed_at_ns DESC LIMIT 20",
-                (summary_fp, abs_path or ""),
+                "ORDER BY obs.observed_at_ns DESC, obs.id DESC LIMIT 20",
+                (content[0], abs_path or ""),
             ).fetchall()
             error_rows = conn.execute(
                 "SELECT fp.value AS abs_path, se.observed_at_ns, se.error_kind, se.error_message "
@@ -119,6 +131,7 @@ def info_cmd(
         return 1
 
     (
+        _content_id,
         size_bytes,
         library,
         profile,

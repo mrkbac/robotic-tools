@@ -15,7 +15,7 @@ from pymcap_cli.cmd.index._helpers import (
     _format_optional_count,
     _format_ts_ns,
     _format_user_version,
-    _optional_path_filter_params,
+    _path_prefix_predicate,
     _resolve_db,
     _status_fetchall,
     _status_fetchone,
@@ -43,7 +43,17 @@ def status_cmd(
         console.print(f"[red]Error:[/] no index DB at {db_path}")
         return 1
 
-    path_filter_params = _optional_path_filter_params(folder)
+    current_file_where = ""
+    current_file_params: tuple[str, ...] = ()
+    scan_error_where = ""
+    scan_error_params: tuple[str, ...] = ()
+    if folder is not None:
+        predicate, prefix_params = _path_prefix_predicate(folder)
+        current_file_where = f"WHERE {predicate.replace('abs_path', 'cf.abs_path')}"
+        scan_error_where = f"WHERE {predicate.replace('abs_path', 'fp.value')}"
+        current_file_params = prefix_params
+        scan_error_params = prefix_params
+
     warnings: list[str] = []
     topic_count: int | None = None
     schema_count: int | None = None
@@ -62,53 +72,35 @@ def status_cmd(
     try:
         user_version = _status_int(conn, "User version", "PRAGMA user_version", (), warnings) or 0
 
-        files = _status_int(
+        summary_sql = (
+            "SELECT COUNT(DISTINCT cf.abs_path), "  # noqa: S608
+            "       COUNT(DISTINCT CASE WHEN cf.content_id IS NOT NULL THEN cf.abs_path END), "
+            "       COUNT(DISTINCT cf.content_id), "
+            "       COALESCE(SUM(cf.size_bytes), 0), "
+            "       COALESCE(SUM(c.message_count), 0) "
+            "FROM current_file cf "
+            "LEFT JOIN content c ON c.id = cf.content_id "
+            f"{current_file_where}"
+        )
+        summary_row = _status_fetchone(
             conn,
-            "Files tracked",
-            "SELECT COUNT(DISTINCT abs_path) FROM current_file "
-            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
-            path_filter_params,
+            "Summary metrics",
+            summary_sql,
+            current_file_params,
             warnings,
         )
-
-        with_content = _status_int(
-            conn,
-            "Files with summary",
-            "SELECT COUNT(DISTINCT abs_path) FROM current_file "
-            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
-            "AND content_id IS NOT NULL",
-            path_filter_params,
-            warnings,
-        )
-
-        contents = _status_int(
-            conn,
-            "Distinct content rows",
-            "SELECT COUNT(DISTINCT content_id) FROM current_file "
-            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?) "
-            "AND content_id IS NOT NULL",
-            path_filter_params,
-            warnings,
-        )
-
-        total_bytes = _status_int(
-            conn,
-            "Total bytes",
-            "SELECT COALESCE(SUM(size_bytes),0) FROM current_file "
-            "WHERE (? IS NULL OR abs_path = ? OR substr(abs_path, 1, ?) = ?)",
-            path_filter_params,
-            warnings,
-        )
-
-        total_messages = _status_int(
-            conn,
-            "Total messages",
-            "SELECT COALESCE(SUM(c.message_count),0) "
-            "FROM current_file cf JOIN content c ON c.id = cf.content_id "
-            "WHERE (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?)",
-            path_filter_params,
-            warnings,
-        )
+        if summary_row is None:
+            files = None
+            with_content = None
+            contents = None
+            total_bytes = None
+            total_messages = None
+        else:
+            files = int(summary_row[0] or 0)
+            with_content = int(summary_row[1] or 0)
+            contents = int(summary_row[2] or 0)
+            total_bytes = int(summary_row[3] or 0)
+            total_messages = int(summary_row[4] or 0)
 
         if folder is None:
             errors = _status_int(
@@ -130,40 +122,49 @@ def status_cmd(
                 )
             ]
         else:
+            scan_error_count_sql = (
+                "SELECT COUNT(*) FROM scan_error se "  # noqa: S608
+                "JOIN file_path fp ON fp.id = se.file_path_id "
+                f"{scan_error_where}"
+            )
             errors = _status_int(
                 conn,
                 "Scan errors recorded",
-                "SELECT COUNT(*) FROM scan_error se "
-                "JOIN file_path fp ON fp.id = se.file_path_id "
-                "WHERE (? IS NULL OR fp.value = ? OR substr(fp.value, 1, ?) = ?)",
-                path_filter_params,
+                scan_error_count_sql,
+                scan_error_params,
                 warnings,
+            )
+            scan_error_breakdown_sql = (
+                "SELECT se.error_kind, COUNT(*) FROM scan_error se "  # noqa: S608
+                "JOIN file_path fp ON fp.id = se.file_path_id "
+                f"{scan_error_where} "
+                "GROUP BY se.error_kind ORDER BY se.error_kind"
             )
             error_breakdown = [
                 (str(kind), int(count or 0))
                 for kind, count in _status_fetchall(
                     conn,
                     "Scan error breakdown",
-                    "SELECT se.error_kind, COUNT(*) FROM scan_error se "
-                    "JOIN file_path fp ON fp.id = se.file_path_id "
-                    "WHERE (? IS NULL OR fp.value = ? OR substr(fp.value, 1, ?) = ?) "
-                    "GROUP BY se.error_kind ORDER BY se.error_kind",
-                    path_filter_params,
+                    scan_error_breakdown_sql,
+                    scan_error_params,
                     warnings,
                 )
             ]
 
-        shape_row = _status_fetchone(
-            conn,
-            "Dataset shape",
-            "SELECT COUNT(DISTINCT sig.topic_id), "
+        shape_sql = (
+            "SELECT COUNT(DISTINCT sig.topic_id), "  # noqa: S608
             "       COUNT(DISTINCT sig.schema_id), "
             "       COUNT(*) "
             "FROM current_file cf "
             "JOIN content_channel cc ON cc.content_id = cf.content_id "
             "JOIN channel_signature sig ON sig.id = cc.channel_signature_id "
-            "WHERE (? IS NULL OR cf.abs_path = ? OR substr(cf.abs_path, 1, ?) = ?)",
-            path_filter_params,
+            f"{current_file_where}"
+        )
+        shape_row = _status_fetchone(
+            conn,
+            "Dataset shape",
+            shape_sql,
+            current_file_params,
             warnings,
         )
         if shape_row is not None:
