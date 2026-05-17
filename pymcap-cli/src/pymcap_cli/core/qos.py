@@ -2,13 +2,21 @@
 
 ROS 2 bag recorders stash QoS profiles into the channel metadata
 under the key ``offered_qos_profiles`` (and sometimes
-``subscribed_qos_profiles``), as a YAML-serialised list of
-profile dicts. Older recorders write numeric enum codes; newer ones
-write lowercase strings. Durations come as ``{sec, nsec}`` (legacy)
-or ``{sec, nanosec}`` (modern) and use ``int64.max`` ns as the
+``subscribed_qos_profiles``), as a YAML-serialised list of profile
+dicts. Both numeric and string policy forms exist in the wild
+because ``rosbag2_storage`` branches on a metadata-version field
+when serialising policy enums (see
+``rosbag2_storage/src/rosbag2_storage/qos.cpp``):
+
+- ``version < 9`` writes the raw ``static_cast<int>(policy)`` value.
+- ``version >= 9`` writes the lowercase string name via
+  ``rmw_qos_*_policy_to_str``.
+
+Durations come as ``{sec, nsec}`` (legacy) or ``{sec, nanosec}``
+(modern) and use ``int64.max`` ns or ``{0, 0}`` as the
 "unset / infinite" sentinel.
 
-This module normalises both shapes into a :class:`QosProfile`
+This module normalises every shape into a :class:`QosProfile`
 dataclass; the dataclass and policy enums live in
 :mod:`pymcap_cli.types.qos`. Rendering happens in
 :mod:`pymcap_cli.display.display_utils`.

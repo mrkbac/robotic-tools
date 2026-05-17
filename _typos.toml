@@ -1,3 +1,7 @@
 [default.extend-identifiers]
 # Real name in typeshed; do not "correct" to WritableBuffer.
 WriteableBuffer = "WriteableBuffer"
+
+[default.extend-words]
+# ``fo`` is a SQL alias for ``file_observation`` in migration 0007; not a typo.
+fo = "fo"
