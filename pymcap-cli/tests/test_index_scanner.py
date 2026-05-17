@@ -127,6 +127,31 @@ def test_rescan_skips_unchanged_via_stat(tmp_path: Path, monkeypatch) -> None:
         assert summary_calls["n"] == 0
 
 
+def test_load_summary_info_default_does_not_read_message_indexes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "rec.mcap"
+    path.write_bytes(create_multi_topic_mcap(["/a", "/b"], messages_per_topic=5))
+
+    def _fail_read_info_approximate(*_args, **_kwargs):
+        pytest.fail("read_info_approximate should be opt-in for index scans")
+
+    monkeypatch.setattr(index_scanner, "read_info_approximate", _fail_read_info_approximate)
+
+    with path.open("rb") as stream:
+        info, scan_kind = index_scanner._load_summary_info(
+            stream,
+            rebuild_missing=False,
+            read_message_indexes=False,
+        )
+
+    assert scan_kind == "summary"
+    assert info.summary.statistics is not None
+    assert info.channel_sizes is None
+    assert info.chunk_information is None
+
+
 def test_moved_file_reuses_fingerprint(tmp_path: Path) -> None:
     p = tmp_path / "orig.mcap"
     p.write_bytes(create_simple_mcap(num_messages=5))
@@ -172,9 +197,9 @@ def test_deleted_file_is_removed_from_current_file(tmp_path: Path) -> None:
         ).fetchone()
         assert current is None
         tombstone = conn.execute(
-            "SELECT fo.is_deleted FROM file_observation fo "
-            "JOIN file_path fp ON fp.id = fo.file_path_id "
-            "WHERE fp.value = ? ORDER BY fo.id DESC LIMIT 1",
+            "SELECT obs.is_deleted FROM file_observation obs "
+            "JOIN file_path fp ON fp.id = obs.file_path_id "
+            "WHERE fp.value = ? ORDER BY obs.id DESC LIMIT 1",
             (str(p.resolve()),),
         ).fetchone()
         assert tombstone == (1,)
@@ -267,6 +292,17 @@ def test_summaryless_file_rebuild_requires_opt_in(tmp_path: Path) -> None:
         assert stats.errored == 0
         scan_kind = conn.execute("SELECT scan_kind FROM content").fetchone()[0]
         assert scan_kind == "rebuilt"
+        channel_metrics = conn.execute(
+            "SELECT uncompressed_size_bytes, message_start_time_ns, "
+            "       message_end_time_ns, distribution_blob "
+            "FROM content_channel"
+        ).fetchall()
+        assert channel_metrics
+        for size_bytes, start_ns, end_ns, distribution_blob in channel_metrics:
+            assert isinstance(size_bytes, int)
+            assert isinstance(start_ns, int)
+            assert isinstance(end_ns, int)
+            assert distribution_blob is not None
 
 
 def test_corrupt_rescan_clears_current_fingerprint(tmp_path: Path) -> None:
@@ -304,6 +340,22 @@ def test_multi_topic_records_channels_and_chunks(tmp_path: Path) -> None:
         assert len(schemas) == 1
 
 
+def test_default_scan_leaves_message_index_metrics_unknown(tmp_path: Path) -> None:
+    p = tmp_path / "multi.mcap"
+    p.write_bytes(create_multi_topic_mcap(["/a", "/b"], messages_per_topic=20))
+    db = tmp_path / "index.sqlite"
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test")
+        rows = conn.execute(
+            "SELECT uncompressed_size_bytes, message_start_time_ns, "
+            "       message_end_time_ns, distribution_blob "
+            "FROM content_channel"
+        ).fetchall()
+        assert rows
+        assert all(row == (None, None, None, None) for row in rows)
+
+
 def test_per_channel_stats_populated(tmp_path: Path) -> None:
     """``content_channel`` carries per-channel size and time range after v6."""
     p = tmp_path / "multi.mcap"
@@ -311,7 +363,7 @@ def test_per_channel_stats_populated(tmp_path: Path) -> None:
     db = tmp_path / "index.sqlite"
 
     with open_db(db) as conn:
-        scan(tmp_path, conn, pymcap_cli_version="test")
+        scan(tmp_path, conn, pymcap_cli_version="test", read_message_indexes=True)
         rows = conn.execute(
             "SELECT t.name, cc.message_count, cc.uncompressed_size_bytes, "
             "       cc.message_start_time_ns, cc.message_end_time_ns "
@@ -338,7 +390,7 @@ def test_per_channel_distribution_blob_round_trip(tmp_path: Path) -> None:
     p.write_bytes(create_multi_topic_mcap(["/foo"], messages_per_topic=64))
     db = tmp_path / "index.sqlite"
     with open_db(db) as conn:
-        scan(tmp_path, conn, pymcap_cli_version="test")
+        scan(tmp_path, conn, pymcap_cli_version="test", read_message_indexes=True)
         blob, msg_count = conn.execute(
             "SELECT cc.distribution_blob, cc.message_count "
             "FROM content_channel cc "
@@ -359,7 +411,7 @@ def test_force_rebuild_backfills_per_channel_stats(tmp_path: Path) -> None:
     db = tmp_path / "index.sqlite"
 
     with open_db(db) as conn:
-        scan(tmp_path, conn, pymcap_cli_version="test")
+        scan(tmp_path, conn, pymcap_cli_version="test", read_message_indexes=True)
         # Simulate a pre-v6 row by nulling the new columns.
         conn.execute(
             "UPDATE content_channel SET uncompressed_size_bytes = NULL, "
@@ -373,12 +425,43 @@ def test_force_rebuild_backfills_per_channel_stats(tmp_path: Path) -> None:
         assert null_before == 2
 
     with open_db(db) as conn:
-        scan(tmp_path, conn, pymcap_cli_version="test", force_rebuild=True)
+        scan(
+            tmp_path,
+            conn,
+            pymcap_cli_version="test",
+            force_rebuild=True,
+            read_message_indexes=True,
+        )
         null_after = conn.execute(
             "SELECT COUNT(*) FROM content_channel "
             "WHERE uncompressed_size_bytes IS NULL OR distribution_blob IS NULL"
         ).fetchone()[0]
         assert null_after == 0
+
+
+def test_force_rebuild_summary_only_preserves_channel_metrics(tmp_path: Path) -> None:
+    p = tmp_path / "rec.mcap"
+    p.write_bytes(create_multi_topic_mcap(["/x", "/y"], messages_per_topic=15))
+    db = tmp_path / "index.sqlite"
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test", read_message_indexes=True)
+        before = conn.execute(
+            "SELECT mcap_channel_id, uncompressed_size_bytes, message_start_time_ns, "
+            "       message_end_time_ns, distribution_blob "
+            "FROM content_channel ORDER BY mcap_channel_id"
+        ).fetchall()
+        assert before
+        assert all(row[1] is not None and row[4] is not None for row in before)
+
+    with open_db(db) as conn:
+        scan(tmp_path, conn, pymcap_cli_version="test", force_rebuild=True)
+        after = conn.execute(
+            "SELECT mcap_channel_id, uncompressed_size_bytes, message_start_time_ns, "
+            "       message_end_time_ns, distribution_blob "
+            "FROM content_channel ORDER BY mcap_channel_id"
+        ).fetchall()
+        assert after == before
 
 
 def test_identical_schemas_are_deduplicated_across_content(tmp_path: Path) -> None:

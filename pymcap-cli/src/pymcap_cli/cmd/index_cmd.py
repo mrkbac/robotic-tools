@@ -509,14 +509,24 @@ def scan_cmd(
             ),
         ),
     ] = False,
+    read_message_indexes: Annotated[
+        bool,
+        Parameter(
+            name=["--read-message-indexes"],
+            help=(
+                "Read per-chunk MessageIndex records for per-channel size, time, "
+                "and distribution metrics. Slower on files with many chunks."
+            ),
+        ),
+    ] = False,
     force_rebuild: Annotated[
         bool,
         Parameter(
             name=["--force-rebuild"],
             help=(
-                "Re-read every discovered file end-to-end and refresh the "
-                "derived columns on its ``content`` row (compression, sane "
-                "times, …). Use after a migration that adds new aggregates."
+                "Re-read every discovered file and refresh the derived columns "
+                "on its ``content`` row (compression, sane times, …). Combine "
+                "with --read-message-indexes to refresh per-channel metrics."
             ),
         ),
     ] = False,
@@ -594,6 +604,7 @@ def scan_cmd(
                 recurse=not root_only,
                 retry_errors=retry_errors,
                 rebuild_missing=rebuild_missing,
+                read_message_indexes=read_message_indexes,
                 force_rebuild=force_rebuild,
                 progress=_progress,
             )

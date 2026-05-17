@@ -12,8 +12,9 @@ pool of I/O workers. Worker work per file:
   5. Byte-cache hit: ``file_fingerprint`` already seen with a known
      ``summary_fingerprint`` => alias to the existing content row without
      opening / rebuilding the summary.
-  6. Otherwise: load the MCAP summary natively. Files without usable summary
-     statistics are skipped unless ``rebuild_missing`` is enabled.
+  6. Otherwise: load the MCAP header + tail summary natively. Per-chunk
+     MessageIndex reads are opt-in. Files without usable summary statistics
+     are skipped unless ``rebuild_missing`` is enabled.
   7. Content hit: ``summary_fingerprint`` already in ``content`` => alias;
      otherwise insert content + child rows in one transaction.
 """
@@ -36,7 +37,14 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 import xxhash
-from small_mcap import McapError, get_header, read_info_approximate, rebuild_summary
+from small_mcap import (
+    McapError,
+    RebuildInfo,
+    get_header,
+    get_summary,
+    read_info_approximate,
+    rebuild_summary,
+)
 
 from pymcap_cli.index import SANE_EPOCH_NS
 from pymcap_cli.index.db import finish_session, intern_file_path, start_session
@@ -46,8 +54,6 @@ from pymcap_cli.types.info_data import collect_channel_metrics
 
 if TYPE_CHECKING:
     import sqlite3
-
-    from small_mcap.rebuild import RebuildInfo
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +78,17 @@ def _worker_init(file_fp_cache: dict[str, str], known_summary_fps: set[str]) -> 
     _WORKER_STATE.known_summary_fps = known_summary_fps
 
 
-def _process_file_task(inp: _ScanInput, rebuild_missing: bool) -> _ScanResult:
+def _process_file_task(
+    inp: _ScanInput,
+    rebuild_missing: bool,
+    read_message_indexes: bool,
+) -> _ScanResult:
     return _process_file(
         inp,
         file_fp_cache=_WORKER_STATE.file_fp_cache,
         known_summary_fps=_WORKER_STATE.known_summary_fps,
         rebuild_missing=rebuild_missing,
+        read_message_indexes=read_message_indexes,
     )
 
 
@@ -366,9 +377,9 @@ def _iter_mcap_files_parallel(
 
 def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
     row = conn.execute(
-        """SELECT fo.size_bytes, fo.mtime_ns, fo.content_id
-           FROM file_observation fo JOIN file_path fp ON fp.id = fo.file_path_id
-           WHERE fp.value = ? ORDER BY fo.id DESC LIMIT 1""",
+        """SELECT obs.size_bytes, obs.mtime_ns, obs.content_id
+           FROM file_observation obs JOIN file_path fp ON fp.id = obs.file_path_id
+           WHERE fp.value = ? ORDER BY obs.id DESC LIMIT 1""",
         (str(inp.path),),
     ).fetchone()
     if row is None:
@@ -424,15 +435,19 @@ def _current_paths_for_root(conn: sqlite3.Connection, root: Path, *, recurse: bo
     return {path for path in paths if Path(path).parent == root}
 
 
-def _load_summary_info(f: IO[bytes], *, rebuild_missing: bool) -> tuple[RebuildInfo, str]:
+def _load_summary_info(
+    f: IO[bytes],
+    *,
+    rebuild_missing: bool,
+    read_message_indexes: bool,
+) -> tuple[RebuildInfo, str]:
     """Return (info, scan_kind). ``info.summary.statistics`` is guaranteed non-None.
 
-    Uses :func:`small_mcap.read_info_approximate` on the fast path: that reads
-    the native summary plus the per-chunk MessageIndex records via random-
-    access seek (no data-section walk), giving us approximate per-channel
-    uncompressed sizes and per-channel timestamps for free. Falls through to
-    a full data-section rebuild only when the caller opts in with
-    ``rebuild_missing``.
+    The default fast path reads only the native header and tail summary. The
+    caller can opt into :func:`small_mcap.read_info_approximate`, which also
+    reads per-chunk MessageIndex records by random-access seek for approximate
+    per-channel sizes and timestamps. Falls through to a full data-section
+    rebuild only when the caller opts in with ``rebuild_missing``.
     """
     # Probe the header first. A missing / malformed MCAP header is a
     # "corrupt" classification — letting ``McapError`` propagate keeps the
@@ -440,18 +455,31 @@ def _load_summary_info(f: IO[bytes], *, rebuild_missing: bool) -> tuple[RebuildI
     # exceptions from the summary / MessageIndex reads as "no usable summary"
     # rather than "corrupt".
     f.seek(0)
-    get_header(f)
-    f.seek(0)
-    try:
-        info = read_info_approximate(f)
-    except (McapError, AssertionError):
-        info = None
+    header = get_header(f)
+    summary_has_no_statistics = False
 
-    if info is not None and info.summary.statistics is not None:
-        return info, "summary"
+    if read_message_indexes:
+        f.seek(0)
+        try:
+            info = read_info_approximate(f)
+        except (McapError, AssertionError):
+            info = None
+
+        if info is not None and info.summary.statistics is not None:
+            return info, "summary"
+        summary_has_no_statistics = info is not None and info.summary.statistics is None
+    else:
+        try:
+            summary = get_summary(f)
+        except (McapError, AssertionError):
+            summary = None
+
+        if summary is not None and summary.statistics is not None:
+            return RebuildInfo(header=header, summary=summary), "summary"
+        summary_has_no_statistics = summary is not None and summary.statistics is None
 
     if not rebuild_missing:
-        if info is not None and info.summary.statistics is None:
+        if summary_has_no_statistics:
             raise _SummaryUnavailableError("MCAP summary is missing Statistics")
         raise _SummaryUnavailableError("MCAP has no readable summary section")
 
@@ -605,6 +633,7 @@ def _process_file(
     file_fp_cache: dict[str, str],
     known_summary_fps: set[str],
     rebuild_missing: bool,
+    read_message_indexes: bool,
 ) -> _ScanResult:
     """Worker step. Computes file_fingerprint, then either reuses the cached
     summary_fingerprint (byte-cache hit) or loads/rebuilds the summary and
@@ -623,7 +652,11 @@ def _process_file(
             )
 
         with inp.path.open("rb") as f:
-            info, scan_kind = _load_summary_info(f, rebuild_missing=rebuild_missing)
+            info, scan_kind = _load_summary_info(
+                f,
+                rebuild_missing=rebuild_missing,
+                read_message_indexes=read_message_indexes,
+            )
         schema_hash_by_id = compute_schema_hash_map(info.summary)
         summary_fp = summary_fingerprint(info, schema_hash_by_id=schema_hash_by_id)
 
@@ -927,6 +960,8 @@ def _update_content_aggregates(
     conn: sqlite3.Connection,
     content_id: int,
     content: _ContentRow,
+    *,
+    update_channel_metrics: bool,
 ) -> None:
     """Refresh the *derived* columns on an existing ``content`` row.
 
@@ -940,7 +975,8 @@ def _update_content_aggregates(
     updated — a file whose byte content changed would land on a different
     ``summary_fingerprint`` and become a new ``content`` row instead of
     overwriting this one. Per-channel aggregates ARE refreshed in place on
-    the existing ``(content_id, channel_id)`` rows.
+    the existing ``(content_id, channel_id)`` rows only when the current scan
+    actually read or rebuilt per-channel metrics.
     """
     conn.execute(
         "UPDATE content "
@@ -959,24 +995,35 @@ def _update_content_aggregates(
             content_id,
         ),
     )
-    conn.executemany(
-        "UPDATE content_channel "
-        "   SET uncompressed_size_bytes = ?, "
-        "       message_start_time_ns   = ?, "
-        "       message_end_time_ns     = ?, "
-        "       distribution_blob       = ? "
-        " WHERE content_id = ? AND mcap_channel_id = ?",
-        [
-            (
-                ch.uncompressed_size_bytes,
-                ch.message_start_time,
-                ch.message_end_time,
-                ch.distribution_blob,
-                content_id,
-                ch.channel_id,
-            )
-            for ch in content.channels
-        ],
+    if update_channel_metrics:
+        conn.executemany(
+            "UPDATE content_channel "
+            "   SET uncompressed_size_bytes = ?, "
+            "       message_start_time_ns   = ?, "
+            "       message_end_time_ns     = ?, "
+            "       distribution_blob       = ? "
+            " WHERE content_id = ? AND mcap_channel_id = ?",
+            [
+                (
+                    ch.uncompressed_size_bytes,
+                    ch.message_start_time,
+                    ch.message_end_time,
+                    ch.distribution_blob,
+                    content_id,
+                    ch.channel_id,
+                )
+                for ch in content.channels
+            ],
+        )
+
+
+def _content_has_channel_metrics(content: _ContentRow) -> bool:
+    return any(
+        ch.uncompressed_size_bytes is not None
+        or ch.message_start_time is not None
+        or ch.message_end_time is not None
+        or ch.distribution_blob is not None
+        for ch in content.channels
     )
 
 
@@ -1010,6 +1057,7 @@ def scan(
     recurse: bool = True,
     retry_errors: bool = False,
     rebuild_missing: bool = False,
+    read_message_indexes: bool = False,
     force_rebuild: bool = False,
     progress: ScanProgressCallback | None = None,
 ) -> ScanStats:
@@ -1019,9 +1067,10 @@ def scan(
     concurrent writers.
 
     ``force_rebuild=True`` bypasses every short-circuit so each file is
-    re-read end-to-end and the catalog's per-content aggregates (compression,
-    sane times, etc.) get refreshed in place. Slower than a normal scan, but
-    needed after a migration that adds derived columns.
+    re-read and the catalog's per-content aggregates (compression, sane
+    times, etc.) get refreshed in place. Per-channel metrics are refreshed
+    only when this scan reads MessageIndex records or rebuilds a missing
+    summary.
     """
     stats = ScanStats()
     current_paths = _current_paths_for_root(conn, root, recurse=recurse)
@@ -1103,7 +1152,12 @@ def scan(
                     # Refresh the columns that get computed at scan time
                     # (post-0005 added compression aggregates; existing rows
                     # may have NULLs that we want to fill in).
-                    _update_content_aggregates(conn, content_id, result.content)
+                    _update_content_aggregates(
+                        conn,
+                        content_id,
+                        result.content,
+                        update_channel_metrics=_content_has_channel_metrics(result.content),
+                    )
                 _record_observation(
                     conn,
                     result.inp,
@@ -1222,7 +1276,14 @@ def scan(
                     if progress is not None:
                         progress(stats)
                     continue
-                pending.add(pool.submit(_process_file_task, inp, rebuild_missing))
+                pending.add(
+                    pool.submit(
+                        _process_file_task,
+                        inp,
+                        rebuild_missing,
+                        read_message_indexes,
+                    )
+                )
                 if len(pending) >= max_pending:
                     _drain_one_or_more()
 

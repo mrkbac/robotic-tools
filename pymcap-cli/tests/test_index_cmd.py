@@ -65,6 +65,36 @@ def test_scan_status_query_roundtrip(tmp_path: Path) -> None:
     assert query_cmd(topic="/foo", db=db) == 0
 
 
+def test_scan_cmd_read_message_indexes_populates_channel_metrics(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    db = tmp_path / "index.sqlite"
+    db_with_indexes = tmp_path / "index-with-message-indexes.sqlite"
+
+    assert scan_cmd(tmp_path, db=db) == 0
+    with open_db(db) as conn:
+        default_rows = conn.execute(
+            "SELECT uncompressed_size_bytes, message_start_time_ns, "
+            "       message_end_time_ns, distribution_blob "
+            "FROM content_channel"
+        ).fetchall()
+        assert default_rows
+        assert all(row == (None, None, None, None) for row in default_rows)
+
+    assert scan_cmd(tmp_path, db=db_with_indexes, read_message_indexes=True) == 0
+    with open_db(db_with_indexes) as conn:
+        indexed_rows = conn.execute(
+            "SELECT uncompressed_size_bytes, message_start_time_ns, "
+            "       message_end_time_ns, distribution_blob "
+            "FROM content_channel"
+        ).fetchall()
+        assert indexed_rows
+        for size_bytes, start_ns, end_ns, distribution_blob in indexed_rows:
+            assert isinstance(size_bytes, int)
+            assert isinstance(start_ns, int)
+            assert isinstance(end_ns, int)
+            assert distribution_blob is not None
+
+
 def test_status_handles_extensionless_db_path(tmp_path: Path) -> None:
     _seed(tmp_path)
     db = tmp_path / "index"
