@@ -422,9 +422,11 @@ def _lookup_cached_remote_msg(
         return None
 
     ref = _expanded_release_ref(release, pkg_name, distro)
-    msg_path = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name / "msg" / f"{msg_name}.msg"
-    if msg_path.is_file():
-        return _read_msg_path(msg_path, pkg_name)
+    pkg_dir = _repo_cache_dir(cache_dir, repo_name, ref) / pkg_name
+    for subdir in _MSG_SUBDIRS:
+        candidate = pkg_dir / subdir / f"{msg_name}.msg"
+        if candidate.is_file():
+            return _read_msg_path(candidate, pkg_name)
     return None
 
 
@@ -462,12 +464,25 @@ def _get_msg_def(
     return _lookup_cached_remote_msg(cache_dir, distro, pkg_name, msg_name)
 
 
+# Subdirectories that may hold a package's .msg files inside its source tree.
+# Most packages use ``msg/``; dual-ROS sources like ``foxglove_msgs`` use ``ros2/``.
+_MSG_SUBDIRS: tuple[str, ...] = ("msg", "ros2")
+
+
 def _list_msgs_in_pkg_dir(pkg_dir: Path) -> list[str]:
-    """Return sorted message stems found under ``<pkg_dir>/msg/*.msg``."""
-    msg_dir = pkg_dir / "msg"
-    if not msg_dir.is_dir():
-        return []
-    return sorted(p.stem for p in msg_dir.glob("*.msg") if p.is_file())
+    """Return sorted message stems found under any known msg subdirectory.
+
+    Covers the conventional ``<pkg>/msg/`` layout and the dual-ROS
+    ``<pkg>/ros2/`` layout (used by ``foxglove_msgs`` and other
+    packages that ship ROS1 + ROS2 from a single repo).
+    """
+    names: set[str] = set()
+    for subdir in _MSG_SUBDIRS:
+        d = pkg_dir / subdir
+        if not d.is_dir():
+            continue
+        names.update(p.stem for p in d.glob("*.msg") if p.is_file())
+    return sorted(names)
 
 
 def _release_tag_zip_url(
@@ -580,6 +595,77 @@ def list_package_messages(
     if pkg_dir is None:
         return None
     return _list_msgs_in_pkg_dir(pkg_dir)
+
+
+def list_distro_packages(distro: ROS2Distro = ROS2Distro.HUMBLE) -> list[str] | None:
+    """Return all package names known to the rosdistro index, sorted.
+
+    Pure index lookup — no per-package downloads. Returns ``None`` if
+    the distro index can't be fetched (offline, no cache).
+    """
+    cache_dir = _get_cache_dir(distro)
+    index = _get_distro_index(distro, cache_dir)
+    if index is None:
+        return None
+    return sorted(index.pkg_to_repo)
+
+
+@dataclass(frozen=True)
+class PackageInfo:
+    """Rosdistro metadata for a single package, sourced from distribution.yaml."""
+
+    name: str
+    repo_name: str | None
+    source_url: str | None
+    source_version: str | None
+    release_url: str | None
+    release_version: str | None
+    release_tag: str | None
+
+
+def get_package_info(
+    package_name: str,
+    distro: ROS2Distro = ROS2Distro.HUMBLE,
+) -> PackageInfo | None:
+    """Return rosdistro metadata for ``package_name``.
+
+    Pure index lookup — no per-package downloads. Returns ``None`` if
+    the distro index can't be fetched or the package isn't listed.
+    """
+    cache_dir = _get_cache_dir(distro)
+    index = _get_distro_index(distro, cache_dir)
+    if index is None:
+        return None
+    repo_name = index.pkg_to_repo.get(package_name)
+    if repo_name is None:
+        return None
+
+    source = index.repo_to_source.get(repo_name)
+    release = index.repo_to_release.get(repo_name)
+    return PackageInfo(
+        name=package_name,
+        repo_name=repo_name,
+        source_url=source.url if source else None,
+        source_version=source.version if source else None,
+        release_url=release.url if release else None,
+        release_version=release.version if release else None,
+        release_tag=_expanded_release_ref(release, package_name, distro) if release else None,
+    )
+
+
+def get_message_text(
+    msg_type: str,
+    distro: ROS2Distro = ROS2Distro.HUMBLE,
+    extra_paths: tuple[Path, ...] = (),
+) -> tuple[str, list[str]] | None:
+    """Resolve a message to its raw ``.msg`` text and direct dependencies.
+
+    Unlike :func:`get_message_definition`, this does NOT recurse into
+    dependencies — useful when callers want to display one message at
+    a time (e.g. the `msg-serve` web view) and link to dependencies
+    separately.
+    """
+    return _get_msg_def(msg_type, distro, list(extra_paths))
 
 
 @lru_cache

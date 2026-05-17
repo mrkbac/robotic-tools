@@ -15,6 +15,11 @@ User-facing notes for releases.
   (e.g. `pymcap-cli msg-list sensor_msgs`). The release-branch zip used to
   resolve the listing also warms the per-message cache, so subsequent
   `msg-def` calls for the same package are offline.
+- New `msg-serve` command hosts a small local web UI for the rosdistro: a
+  package index, per-package message lists, and syntax-highlighted
+  definitions with hyperlinked cross-references. Light/dark themes, fluid
+  layout, same release-zip cache as `msg-list` — each click downloads at
+  most one package.
 - `index scan` is significantly faster on large directory trees and slow
   remote mounts by reusing directory-entry stat data, walking directories in
   parallel, and streaming live progress while scanning.
