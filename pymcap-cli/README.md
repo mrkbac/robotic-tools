@@ -17,8 +17,14 @@ uvx pymcap-cli info data.mcap
 # Or add to your project
 uv add pymcap-cli
 
-# With video support (for video and roscompress commands)
-uv add pymcap-cli[video]
+# With video support (for video generation and ROS image compression)
+uv add "pymcap-cli[video]"
+
+# With ROS image and point-cloud compression support
+uv add "pymcap-cli[video,pointcloud]"
+
+# Add Draco point-cloud compression support
+uv add "pymcap-cli[video,pointcloud,draco]"
 ```
 
 ## Why pymcap-cli over the official Go CLI?
@@ -99,6 +105,16 @@ pymcap-cli cat recording.mcap --bytes base64   # base64-encoded
 pymcap-cli cat recording.mcap --bytes skip     # omit binary fields
 ```
 
+### `doctor` — MCAP Container Validation
+
+Check an MCAP file structure against the MCAP container specification, with
+summary, index, chunk, message-order, and advisory findings.
+
+```bash
+pymcap-cli doctor data.mcap
+pymcap-cli doctor data.mcap --strict-message-order --show-all
+```
+
 ### `tftree` — TF Transform Tree
 
 Visualize the ROS TF transform tree with colored static/dynamic transforms, translation and rotation values.
@@ -115,6 +131,16 @@ pymcap-cli tftree data.mcap
 
 # Show only static transforms
 pymcap-cli tftree data.mcap --static-only
+```
+
+### `tf-get` — TF Transform Lookup
+
+Resolve the transform from a source frame into a target frame using `/tf_static`
+and `/tf`. Without `--at`, dynamic edges use their latest sample.
+
+```bash
+pymcap-cli tf-get data.mcap map base_link
+pymcap-cli tf-get data.mcap odom base_link --at 2024-01-01T10:00:00Z
 ```
 
 ### `tf-export` — TF Tree to URDF / SDF / JSON
@@ -317,7 +343,7 @@ Filter messages by topic patterns (simpler version of `process`).
 
 ```bash
 # Include specific topics
-pymcap-cli filter data.mcap -o filtered.mcap --include-topics "/camera/image" "/lidar/points"
+pymcap-cli filter data.mcap -o filtered.mcap --topics "/camera/image" "/lidar/points"
 
 # Exclude topics
 pymcap-cli filter data.mcap -o filtered.mcap --exclude-topics "/debug.*" "/test.*"
@@ -348,22 +374,27 @@ List various record types in an MCAP file.
 pymcap-cli list channels data.mcap
 pymcap-cli list chunks data.mcap
 pymcap-cli list schemas data.mcap
+pymcap-cli list schema data.mcap --name sensor_msgs/msg/Image
 pymcap-cli list attachments data.mcap
 pymcap-cli list metadata data.mcap
 ```
 
-### `msg-def` — Resolve ROS2 Message Definitions
+### `msg` — ROS2 Message Definitions
 
-Print a complete ROS2 `.msg` definition, including dependent message
-definitions. Interactive terminals use colored schema rendering; redirected
-stdout stays raw `.msg` text.
+Resolve, list, and browse ROS2 `.msg` definitions. `msg def` prints complete
+definitions including dependencies; `msg list` lists package message types; and
+`msg serve` starts a local browser UI.
 
 ```bash
 # Resolve a standard ROS2 message
-pymcap-cli msg-def sensor_msgs/msg/Image --distro humble
+pymcap-cli msg def sensor_msgs/msg/Image --distro humble
 
 # Include custom package roots before AMENT_PREFIX_PATH and the user cache
-pymcap-cli msg-def my_robot_msgs/msg/Status -I ./install/share
+pymcap-cli msg def my_robot_msgs/msg/Status -I ./install/share
+
+# List messages in a package or browse definitions locally
+pymcap-cli msg list sensor_msgs --distro jazzy
+pymcap-cli msg serve --distro jazzy --no-browser
 ```
 
 Missing standard packages are resolved from rosdistro/GitHub and cached under
@@ -418,6 +449,24 @@ pymcap-cli duplicates /data/recordings --all
 pymcap-cli duplicates /data/recordings --rebuild-missing
 ```
 
+### `index` — Sidecar Catalog
+
+Maintain a sidecar SQLite catalog of MCAP summaries for fast lookup across
+large recording trees. Requires the `xxhash` extra.
+
+```bash
+# Scan a tree and skip unchanged files on later runs
+pymcap-cli index scan /data/recordings
+
+# Coverage and directory-level rollups
+pymcap-cli index status /data/recordings
+pymcap-cli index tree /data/recordings --max-depth 3
+
+# Query by topic/schema/time and inspect catalog-wide topics
+pymcap-cli index query /data/recordings --topic /camera/front --format json
+pymcap-cli index topics /camera --sort-by messages
+```
+
 ### `records` — Raw Record Dump
 
 Print every MCAP record in file order using its `repr`. Useful for inspecting
@@ -438,22 +487,26 @@ pymcap-cli topic-chunks data.mcap
 
 ### `video` — Video Generation
 
-Generate MP4 videos from image topics using hardware-accelerated encoding. Requires the `video` extra.
+Generate one MP4 per image topic using hardware-accelerated encoding. Requires
+the `video` extra.
 
 ```bash
 # Basic video generation
-pymcap-cli video data.mcap --topic /camera/front --output front.mp4
+pymcap-cli video data.mcap --topic /camera/front --output ./videos
 
 # With quality preset
-pymcap-cli video data.mcap --topic /camera/rear --output rear.mp4 --quality high
+pymcap-cli video data.mcap --topic /camera/rear --output ./videos --quality high
 
 # Use specific codec and encoder
-pymcap-cli video data.mcap --topic /lidar/image --output lidar.mp4 --codec h265 --encoder videotoolbox
+pymcap-cli video data.mcap --topic /lidar/image --output ./videos --codec h265 --encoder videotoolbox
 ```
 
-### `roscompress` — ROS Image Compression
+### `roscompress` — ROS Image and Point-Cloud Compression
 
-Compress ROS MCAP files by converting CompressedImage/Image topics to CompressedVideo format and PointCloud2 topics to Cloudini or Draco compressed point clouds.
+Compress ROS MCAP files by converting CompressedImage/Image topics to
+CompressedVideo format and PointCloud2 topics to Cloudini or Draco compressed
+point clouds. Requires the `video` and `pointcloud` extras; Draco compression
+also requires the `draco` extra.
 
 ```bash
 # Basic compression
@@ -468,7 +521,7 @@ pymcap-cli roscompress data.mcap -o compressed.mcap --pc-format draco --pc-schem
 
 ### `rosdecompress` — ROS Decompression
 
-Decompress CompressedVideo, CompressedPointCloud2, and Foxglove CompressedPointCloud topics back to standard ROS formats.
+Decompress CompressedVideo, CompressedPointCloud2, and Foxglove CompressedPointCloud topics back to standard ROS formats. Requires the `video` and `pointcloud` extras.
 
 ```bash
 # Decompress to CompressedImage (JPEG)
@@ -563,6 +616,22 @@ pymcap-cli export-geo data.mcap -o ./geo --format gpx --mode track --stride 5
 pymcap-cli export-geo data.mcap -o ./geo --include-no-fix
 ```
 
+### `bridge` — Live Foxglove Bridge
+
+Inspect, stream, or record live topics from a Foxglove WebSocket bridge. Requires
+the `bridge` extra.
+
+```bash
+# Inspect advertised channels
+pymcap-cli bridge localhost:8765
+
+# Stream decoded messages
+pymcap-cli bridge cat localhost:8765 --topics /tf --limit 10
+
+# Record all advertised topics to MCAP
+pymcap-cli bridge record localhost:8765 --all -o live.mcap
+```
+
 ### Shell Autocompletion
 
 ```bash
@@ -589,9 +658,9 @@ pymcap-cli process full_log.mcap -o camera.mcap \
 # Recover corrupt file and compress in one pass
 pymcap-cli process corrupt.mcap -o recovered.mcap --recovery-mode --compression lz4
 
-# Fast filtering with chunk copying (up to 10x faster)
+# Fast filtering with automatic chunk copying when possible
 pymcap-cli process 100gb_file.mcap -o filtered.mcap \
-  -y "/lidar.*" --chunk-copying --compression zstd
+  -y "/lidar.*" --compression zstd
 
 # Optimize for topic-specific playback
 pymcap-cli rechunk robot_log.mcap -o optimized.mcap \
@@ -611,14 +680,14 @@ pymcap-cli rechunk robot_log.mcap -o optimized.mcap \
 
 ```bash
 # Setup development environment
-uv sync
+uv sync --all-groups --all-extras --all-packages
 
 # Run locally during development
 uv run pymcap-cli --help
 
 # Format and lint code
-uv run pre-commit run --all-files
+pre-commit run --all-files
 
 # Run tests
-uv run pytest pymcap-cli/tests
+uv run pytest pymcap-cli/tests -m "not benchmark" --no-cov -q
 ```
