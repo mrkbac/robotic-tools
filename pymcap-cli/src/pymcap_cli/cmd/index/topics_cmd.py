@@ -67,15 +67,18 @@ def topics_cmd(
         "                                             AS messages, "
         "       COUNT(DISTINCT sig.schema_id)   AS schemas, "
         "       MIN(s.name)                        AS schema_name "
-        "FROM content_current_file_count cfc "
-        "JOIN content_channel cc ON cc.content_id      = cfc.content_id "
-        "JOIN channel_signature sig    ON sig.id = cc.channel_signature_id "
-        "JOIN topic t            ON t.id         = sig.topic_id "
+        "FROM topic t "
+        "CROSS JOIN channel_signature sig INDEXED BY channel_signature_topic_id "
+        "CROSS JOIN content_channel cc INDEXED BY content_channel_sig_content_msg "
+        "CROSS JOIN content_current_file_count cfc "
         "LEFT JOIN schema s      ON s.id     = sig.schema_id "
+        "WHERE sig.topic_id = t.id "
+        "  AND cc.channel_signature_id = sig.id "
+        "  AND cfc.content_id = cc.content_id "
     )
     params: list[str | int] = []
     if prefix is not None:
-        sql += "WHERE t.name LIKE ? ESCAPE '\\' "
+        sql += "AND t.name LIKE ? ESCAPE '\\' "
         params.append(_like_prefix_param(prefix))
     sql += f"GROUP BY t.name HAVING files >= ? ORDER BY {order_by} LIMIT ?"
     params.extend([min_files, limit])

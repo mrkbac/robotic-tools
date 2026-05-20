@@ -33,6 +33,7 @@ from pymcap_cli.cmd.index._helpers import (
     _path_prefix_where,
     _safe_duration_ns,
 )
+from pymcap_cli.cmd.index.tree_cmd import _build_path_tree
 from pymcap_cli.index.db import CURRENT_SCHEMA_VERSION, open_db
 from rich.text import Text
 from small_mcap import CompressionType, McapWriter
@@ -50,6 +51,34 @@ QuerySort = Literal[
     "messages",
     "duration",
 ]
+
+
+def test_tree_build_aggregates_stats() -> None:
+    root = _build_path_tree(
+        [
+            (
+                "/root/a/rec.mcap",
+                100,
+                10,
+                42,
+                SANE_EPOCH_NS,
+                SANE_EPOCH_NS + 1,
+            )
+        ],
+        "/root",
+        channel_masks={42: 0b1011},
+    )
+
+    assert root.file_count == 1
+    assert root.size_bytes == 100
+    assert root.message_count == 10
+    assert root.channel_mask == 0b1011
+    assert root.channel_mask.bit_count() == 3
+    assert root.duration_ns == 1
+    child = root.children["a"]
+    assert child.file_count == 1
+    assert child.message_count == 10
+    assert child.channel_mask == 0b1011
 
 
 def _seed(tmp_path: Path) -> Path:

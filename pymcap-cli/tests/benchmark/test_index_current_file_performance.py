@@ -116,6 +116,11 @@ def index_benchmark_db(tmp_path_factory) -> Path:
                 ),
             )
             conn.executemany(
+                "INSERT INTO content_schema(content_id, mcap_schema_id, schema_id) "
+                "VALUES (?, ?, ?)",
+                ((content_id, 1, schema_id) for content_id in range(1, _PATH_COUNT + 1)),
+            )
+            conn.executemany(
                 "INSERT INTO file_path(value) VALUES (?)",
                 ((_bench_path(index),) for index in range(_PATH_COUNT)),
             )
