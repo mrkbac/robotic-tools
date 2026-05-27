@@ -12,6 +12,7 @@ from cyclopts import App
 from pymcap_cli.cmd.index.duplicates_cmd import duplicates_cmd
 from pymcap_cli.cmd.index.errors_cmd import errors_cmd
 from pymcap_cli.cmd.index.info_cmd import info_cmd
+from pymcap_cli.cmd.index.migrate_cmd import migrate_cmd
 from pymcap_cli.cmd.index.query_cmd import query_cmd
 from pymcap_cli.cmd.index.scan_cmd import scan_cmd
 from pymcap_cli.cmd.index.schemas_cmd import schemas_cmd
@@ -39,3 +40,4 @@ index_app.command(sessions_cmd, name="sessions")
 index_app.command(errors_cmd, name="errors")
 index_app.command(timeline_cmd, name="timeline")
 index_app.command(info_cmd, name="info")
+index_app.command(migrate_cmd, name="migrate")
