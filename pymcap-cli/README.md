@@ -465,7 +465,21 @@ pymcap-cli index tree /data/recordings --max-depth 3
 # Query by topic/schema/time and inspect catalog-wide topics
 pymcap-cli index query /data/recordings --topic /camera/front --format json
 pymcap-cli index topics /camera --sort-by messages
+
+# Apply pending schema migrations to an existing catalog
+pymcap-cli index migrate
+
+# Browse the catalog in a local Datasette web UI (dashboards, charts, cross-links)
+pymcap-cli index serve
 ```
+
+`index serve` launches [Datasette](https://datasette.io/) against the sidecar DB
+with bundled dashboards, canned queries, and a render plugin. It needs the
+`serve` extra (`pip install 'pymcap-cli[serve]'`; in this workspace, use
+`uv run --package pymcap-cli --extra serve pymcap-cli index serve`). Datasette
+runs from the same environment so the plugin resolves. Use `--db` to point at a
+non-default catalog, `--port` to change the port (default 8001), and
+`--no-browser` to skip auto-open.
 
 ### `records` — Raw Record Dump
 

@@ -16,6 +16,7 @@ from pymcap_cli.cmd.index.migrate_cmd import migrate_cmd
 from pymcap_cli.cmd.index.query_cmd import query_cmd
 from pymcap_cli.cmd.index.scan_cmd import scan_cmd
 from pymcap_cli.cmd.index.schemas_cmd import schemas_cmd
+from pymcap_cli.cmd.index.serve_cmd import index_serve
 from pymcap_cli.cmd.index.sessions_cmd import sessions_cmd
 from pymcap_cli.cmd.index.status_cmd import status_cmd
 from pymcap_cli.cmd.index.timeline_cmd import timeline_cmd
@@ -41,3 +42,4 @@ index_app.command(errors_cmd, name="errors")
 index_app.command(timeline_cmd, name="timeline")
 index_app.command(info_cmd, name="info")
 index_app.command(migrate_cmd, name="migrate")
+index_app.command(index_serve, name="serve")

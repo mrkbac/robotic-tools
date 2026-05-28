@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}pymcap-cli index{% endblock %}
+
+{% block content %}
+<h1>pymcap-cli index</h1>
+<p style="opacity:.8">
+  Read-only catalog of scanned MCAP files.
+  <a href="/-/dashboards"><strong>Dashboards &rarr;</strong></a>
+  &middot; curated views below &middot;
+  <a href="/index">browse all raw tables &rarr;</a>
+</p>
+
+<div style="display:flex;flex-wrap:wrap;gap:1em;margin:.5em 0 1.5em">
+  {% for label, slug in [
+      ("Overview","overview"), ("Files","files"), ("Storage","storage"),
+      ("Errors","errors-explorer"), ("Topics & schemas","topics-schemas"),
+  ] %}
+  <a href="/-/dashboards/{{ slug }}"
+     style="padding:.3em .8em;border:1px solid #ccc;border-radius:6px;text-decoration:none">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div style="display:flex;flex-wrap:wrap;gap:3em">
+  <div>
+    <h2>Overview</h2>
+    <ul>
+      <li><a href="/index/status">Status</a> — catalog summary</li>
+      <li><a href="/index/timeline">Timeline</a> — per day/week/month/year</li>
+      <li><a href="/index/sessions">Sessions</a> — scan history</li>
+      <li><a href="/index/errors">Errors</a> — scan failures</li>
+    </ul>
+  </div>
+  <div>
+    <h2>Browse</h2>
+    <ul>
+      <li><a href="/index/topics">Topics</a></li>
+      <li><a href="/index/schemas">Schemas</a></li>
+      <li><a href="/index/duplicates">Duplicates</a></li>
+    </ul>
+  </div>
+  <div>
+    <h2>Find files</h2>
+    <ul>
+      <li><a href="/index/tree">Tree</a> — directory rollup</li>
+      <li><a href="/index/files_by_topic">By topic</a></li>
+      <li><a href="/index/files_by_folder">By folder prefix</a></li>
+      <li><a href="/index/files_by_fingerprint">By fingerprint</a></li>
+      <li><a href="/index/file_channels">Channels in one file</a></li>
+    </ul>
+  </div>
+  <div>
+    <h2>Raw tables</h2>
+    <ul>
+      <li><a href="/index/content">content</a></li>
+      <li><a href="/index/content_channel">content_channel</a></li>
+      <li><a href="/index/channel_metadata">channel_metadata</a></li>
+      <li><a href="/index">all tables &rarr;</a></li>
+    </ul>
+  </div>
+</div>
+{% endblock %}

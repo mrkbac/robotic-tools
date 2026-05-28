@@ -1,0 +1,26 @@
+{% extends "query.html" %}
+
+{% block extra_head %}
+{{ super() }}
+<script>
+  // Auto-enable the datasette-vega bar chart. vega reads location.hash on
+  // DOMContentLoaded; this <head> script runs earlier, so the chart is drawn
+  // on first load. Skip if the user already chose a chart (hash has g.mark).
+  if (!location.hash.includes("g.mark")) {
+    location.hash =
+      "g.mark=bar&g.x_column=bucket&g.x_type=ordinal" +
+      "&g.y_column=files&g.y_type=quantitative";
+  }
+</script>
+{% endblock %}
+
+{% block content %}
+<p style="margin:0 0 1em">
+  <strong>Group by:</strong>
+  <a href="?bucket=day">day</a> ·
+  <a href="?bucket=week">week</a> ·
+  <a href="?bucket=month">month</a> ·
+  <a href="?bucket=year">year</a>
+</p>
+{{ super() }}
+{% endblock %}

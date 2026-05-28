@@ -1,0 +1,724 @@
+title: pymcap-cli index
+description_html: |
+  Read-only browser for the <code>pymcap-cli index</code> sidecar catalog.
+
+databases:
+  index:
+    # FK columns render readable labels instead of bare integer ids.
+    tables:
+      topic: { label_column: name }
+      schema: { label_column: name }
+      library: { label_column: name }
+      profile: { label_column: name }
+      file_path: { label_column: value }
+
+    queries:
+      # ---- status : one-row catalog summary (mirrors `index status`) --------
+      status:
+        title: Status — catalog summary
+        hide_sql: true
+        sql: |
+          SELECT
+            (SELECT COUNT(*) FROM current_file)                          AS files,
+            (SELECT COUNT(*) FROM current_file WHERE content_id NOT NULL) AS files_with_content,
+            (SELECT COUNT(DISTINCT content_id) FROM current_file)        AS distinct_content,
+            (SELECT COALESCE(SUM(size_bytes),0) FROM current_file)       AS total_bytes,
+            (SELECT COALESCE(SUM(c.message_count),0)
+               FROM current_file cf JOIN content c ON c.id=cf.content_id) AS total_messages,
+            (SELECT COUNT(*) FROM topic)                                 AS topics,
+            (SELECT COUNT(*) FROM schema)                                AS schemas,
+            (SELECT COUNT(*) FROM scan_error)                            AS errors,
+            (SELECT COUNT(*) FROM scan_session)                          AS sessions,
+            (SELECT MAX(finished_at_ns) FROM scan_session)               AS last_scan_finished_ns
+
+      # ---- topics : one row per topic (mirrors `index topics`) -------------
+      topics:
+        title: Topics — files, messages, schemas per topic
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/files_by_topic',
+                        'params', json_object('topic', t.name),
+                        'label', t.name)                       AS topic,
+            COUNT(DISTINCT cf.abs_path)                         AS files,
+            COALESCE(SUM(cc.message_count),0)                   AS messages,
+            COUNT(DISTINCT csig.schema_id)                      AS schemas
+          FROM topic t
+          JOIN channel_signature csig ON csig.topic_id = t.id
+          JOIN content_channel cc     ON cc.channel_signature_id = csig.id
+          JOIN current_file cf        ON cf.content_id = cc.content_id
+          GROUP BY t.name
+          ORDER BY files DESC, messages DESC
+          LIMIT 500
+
+      # ---- schemas : one row per schema (mirrors `index schemas`) ----------
+      schemas:
+        title: Schemas — files, topics, messages per schema
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/files_by_schema',
+                        'params', json_object('schema', s.name),
+                        'label', s.name)                         AS schema,
+            s.encoding                                          AS encoding,
+            COUNT(DISTINCT cf.abs_path)                         AS files,
+            COUNT(DISTINCT csig.topic_id)                       AS topics,
+            COALESCE(SUM(cc.message_count),0)                   AS messages
+          FROM schema s
+          JOIN channel_signature csig ON csig.schema_id = s.id
+          JOIN content_channel cc     ON cc.channel_signature_id = csig.id
+          JOIN current_file cf        ON cf.content_id = cc.content_id
+          GROUP BY s.id
+          ORDER BY files DESC, messages DESC
+          LIMIT 500
+
+      # ---- duplicates : same file_fingerprint in 2+ places -----------------
+      duplicates:
+        title: Duplicates — identical files by fingerprint
+        hide_sql: true
+        sql: |
+          SELECT
+            cf.file_fingerprint                                 AS file_fingerprint,
+            MIN(cf.size_bytes)                                  AS size_bytes,
+            COUNT(*)                                            AS copies,
+            MIN(cf.size_bytes) * (COUNT(*) - 1)                 AS reclaimable_bytes,
+            GROUP_CONCAT(cf.abs_path, CHAR(10))                 AS paths
+          FROM current_file cf
+          WHERE cf.content_id NOT NULL
+          GROUP BY cf.file_fingerprint
+          HAVING copies >= 2
+          ORDER BY reclaimable_bytes DESC
+          LIMIT 200
+
+      # ---- timeline : recordings per bucket (mirrors `index timeline`) -----
+      # :bucket = day | week | month | year (default day). Datasette binds a
+      # missing param as '' (not NULL), so NULLIF()/COALESCE picks the default.
+      # The query-index-timeline.html template auto-enables the bar chart.
+      timeline:
+        title: Timeline — recordings per day / week / month / year
+        hide_sql: true
+        sql: |
+          WITH params AS (SELECT COALESCE(NULLIF(:bucket, ''), 'day') AS sel)
+          SELECT
+            CASE params.sel
+              WHEN 'year'  THEN strftime('%Y',       c.message_start_time_ns/1000000000, 'unixepoch')
+              WHEN 'month' THEN strftime('%Y-%m',    c.message_start_time_ns/1000000000, 'unixepoch')
+              WHEN 'week'  THEN strftime('%Y-W%W',   c.message_start_time_ns/1000000000, 'unixepoch')
+              ELSE              strftime('%Y-%m-%d', c.message_start_time_ns/1000000000, 'unixepoch')
+            END                                              AS bucket,
+            COUNT(DISTINCT cf.abs_path)                      AS files,
+            COALESCE(SUM(c.message_count), 0)                AS messages,
+            COALESCE(SUM(cf.size_bytes), 0)                  AS size_bytes
+          FROM current_file cf
+          JOIN content c ON c.id = cf.content_id, params
+          WHERE c.message_start_time_ns >= 946684800000000000
+          GROUP BY bucket
+          ORDER BY bucket DESC
+          LIMIT 2000
+
+      # ---- sessions : scan history (mirrors `index sessions`) --------------
+      sessions:
+        title: Sessions — scan history
+        hide_sql: true
+        sql: |
+          SELECT
+            s.id                                                AS id,
+            s.started_at_ns                                     AS started_at_ns,
+            s.finished_at_ns                                    AS finished_at_ns,
+            CASE WHEN s.finished_at_ns > s.started_at_ns
+                 THEN s.finished_at_ns - s.started_at_ns END    AS duration_ns,
+            json_object('href','/index/files_by_folder',
+                        'params', json_object('folder', fp.value),
+                        'label', fp.value)                       AS root,
+            s.pymcap_cli_version                                AS version,
+            (SELECT COUNT(*) FROM file_observation o WHERE o.scan_session_id=s.id) AS observations,
+            (SELECT COUNT(*) FROM content c WHERE c.first_seen_scan_session_id=s.id) AS new_content,
+            (SELECT COUNT(*) FROM scan_error e WHERE e.scan_session_id=s.id)        AS errors
+          FROM scan_session s
+          JOIN file_path fp ON fp.id = s.root_file_path_id
+          ORDER BY s.id DESC
+          LIMIT 200
+
+      # ---- errors : scan failures (mirrors `index errors`) -----------------
+      errors:
+        title: Errors — files that failed to scan
+        hide_sql: true
+        sql: |
+          SELECT
+            se.id                                               AS id,
+            se.observed_at_ns                                   AS observed_at_ns,
+            fp.value                                            AS path,
+            se.error_kind                                       AS error_kind,
+            se.error_message                                    AS message,
+            se.size_bytes                                       AS size_bytes,
+            se.scan_session_id                                  AS session
+          FROM scan_error se
+          JOIN file_path fp ON fp.id = se.file_path_id
+          ORDER BY se.observed_at_ns DESC, se.id DESC
+          LIMIT 500
+
+      # ---- files_by_topic : the old /query filtered by topic ---------------
+      files_by_topic:
+        title: Files containing a topic
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/file_channels',
+                        'params', json_object('path', cf.abs_path),
+                        'label', cf.abs_path)                   AS path,
+            json_object('href','/index/files_by_fingerprint',
+                        'params', json_object('fingerprint', c.summary_fingerprint),
+                        'label', substr(c.summary_fingerprint, 4, 8)) AS short_id,
+            SUM(cc.message_count)                               AS messages,
+            COUNT(DISTINCT cc.mcap_channel_id)                  AS channels,
+            CASE WHEN c.message_start_time_ns >= 946684800000000000
+                 THEN c.message_start_time_ns
+                 ELSE c.sane_message_start_time_ns END          AS start_time_ns,
+            CASE WHEN c.message_start_time_ns >= 946684800000000000
+                 THEN c.message_end_time_ns - c.message_start_time_ns
+                 ELSE c.sane_message_end_time_ns - c.sane_message_start_time_ns END AS duration_ns,
+            c.size_bytes                                        AS size_bytes
+          FROM current_file cf
+          JOIN content c              ON c.id = cf.content_id
+          JOIN content_channel cc     ON cc.content_id = cf.content_id
+          JOIN channel_signature csig ON csig.id = cc.channel_signature_id
+          JOIN topic t                ON t.id = csig.topic_id
+          WHERE t.name = :topic
+          GROUP BY cf.abs_path
+          ORDER BY c.size_bytes DESC
+          LIMIT 500
+
+      # ---- files_by_schema : files using a schema --------------------------
+      files_by_schema:
+        title: Files using a schema
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/file_channels',
+                        'params', json_object('path', cf.abs_path),
+                        'label', cf.abs_path)                   AS path,
+            json_object('href','/index/files_by_fingerprint',
+                        'params', json_object('fingerprint', c.summary_fingerprint),
+                        'label', substr(c.summary_fingerprint, 4, 8)) AS short_id,
+            SUM(cc.message_count)                               AS messages,
+            COUNT(DISTINCT cc.mcap_channel_id)                  AS channels,
+            c.size_bytes                                        AS size_bytes
+          FROM current_file cf
+          JOIN content c              ON c.id = cf.content_id
+          JOIN content_channel cc     ON cc.content_id = cf.content_id
+          JOIN channel_signature csig ON csig.id = cc.channel_signature_id
+          JOIN schema s               ON s.id = csig.schema_id
+          WHERE s.name = :schema
+          GROUP BY cf.abs_path
+          ORDER BY c.size_bytes DESC
+          LIMIT 500
+
+      # ---- files_by_folder : the old /folder prefix browse -----------------
+      files_by_folder:
+        title: Files under a folder prefix
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/file_channels',
+                        'params', json_object('path', cf.abs_path),
+                        'label', cf.abs_path)                   AS path,
+            json_object('href','/index/files_by_fingerprint',
+                        'params', json_object('fingerprint', c.summary_fingerprint),
+                        'label', substr(c.summary_fingerprint, 4, 8)) AS short_id,
+            c.message_count                                     AS messages,
+            c.channel_count                                     AS channels,
+            CASE WHEN c.message_start_time_ns >= 946684800000000000
+                 THEN c.message_start_time_ns
+                 ELSE c.sane_message_start_time_ns END          AS start_time_ns,
+            cf.size_bytes                                       AS size_bytes
+          FROM current_file cf
+          JOIN content c ON c.id = cf.content_id
+          WHERE cf.abs_path LIKE :folder || '%'
+          ORDER BY cf.size_bytes DESC
+          LIMIT 500
+
+      # ---- tree : recursive directory rollup (mirrors `index tree`) --------
+      # Walks each file's path forward from :root, emitting one row per
+      # ancestor directory, then GROUPs by directory. Every file contributes a
+      # row at each of its ancestor dirs, so COUNT/SUM grouped by dir gives the
+      # recursive rollup. ORDER BY dir renders parents before children.
+      # COUNT(*) (not DISTINCT) is safe: a file emits one row per ancestor dir.
+      tree:
+        title: Tree — directory rollup of files / messages / channels / size
+        hide_sql: true
+        sql: |
+          WITH RECURSIVE
+          -- Datasette binds missing named params as '' (not NULL) and URL params
+          -- arrive as text: NULLIF('')→default, CAST keeps numerics, root normalised
+          -- to end in '/', pruned during the walk (lvl < max_depth).
+          -- Everything here is ADDITIVE (files / messages / channels / size all SUM
+          -- up the tree), so it stays O(files × depth) and fast even on large
+          -- catalogs. `channels` = SUM(content.channel_count): channel ids are already
+          -- unique per file, so this is a plain sum — no per-folder DISTINCT walk
+          -- (counting DISTINCT topics/schemas would be O(channels × depth) ≈ 20s+ on a
+          -- 1.5M-channel catalog, so they are intentionally left out of this rollup).
+          params AS (
+            SELECT
+              raw.r || CASE WHEN substr(raw.r, -1) = '/' THEN '' ELSE '/' END AS root,
+              CAST(COALESCE(NULLIF(:max_depth, ''), 6) AS INTEGER) AS max_depth,
+              CAST(COALESCE(NULLIF(:min_files, ''), 1) AS INTEGER) AS min_files
+            FROM (SELECT COALESCE(NULLIF(:root, ''), '/') AS r) raw
+          ),
+          files AS (
+            SELECT cf.abs_path AS path, cf.size_bytes AS size_bytes,
+                   c.message_count AS msgs, c.channel_count AS chans
+            FROM current_file cf
+            JOIN content c ON c.id = cf.content_id, params
+            WHERE cf.abs_path LIKE params.root || '%'
+          ),
+          walk(path, size_bytes, msgs, chans, dir, name, lvl, rest) AS (
+            SELECT f.path, f.size_bytes, f.msgs, f.chans, params.root, '', 0,
+                   substr(f.path, length(params.root) + 1)
+            FROM files f, params
+            UNION ALL
+            SELECT path, size_bytes, msgs, chans,
+                   dir || substr(rest, 1, instr(rest, '/')),
+                   substr(rest, 1, instr(rest, '/') - 1),
+                   lvl + 1, substr(rest, instr(rest, '/') + 1)
+            FROM walk, params
+            WHERE instr(rest, '/') > 0 AND walk.lvl < params.max_depth
+          )
+          SELECT
+            json_object(
+              'href',  '/index/files_by_folder',
+              'params', json_object('folder', dir),
+              'label', CASE WHEN lvl = 0 THEN dir
+                            ELSE substr('· · · · · · · · · · · · · · ', 1, 2 * (lvl - 1)) || name
+                       END
+            )                                  AS folder,
+            COUNT(*)                           AS files,
+            SUM(msgs)                          AS messages,
+            SUM(chans)                         AS channels,
+            SUM(size_bytes)                    AS size_bytes
+          FROM walk, params
+          GROUP BY dir
+          HAVING files >= params.min_files
+          ORDER BY dir
+          LIMIT 5000
+
+      # ---- files_by_fingerprint : the old /query?fingerprint ---------------
+      files_by_fingerprint:
+        title: Files by summary fingerprint (full s1:... or short id)
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/file_channels',
+                        'params', json_object('path', cf.abs_path),
+                        'label', cf.abs_path)                   AS path,
+            c.summary_fingerprint                               AS summary_fingerprint,
+            cf.size_bytes                                       AS size_bytes
+          FROM current_file cf
+          JOIN content c ON c.id = cf.content_id
+          WHERE c.summary_fingerprint LIKE 's1:' || replace(:fingerprint, 's1:', '') || '%'
+          ORDER BY cf.abs_path
+          LIMIT 500
+
+      # ---- file_channels : per-file channel rollup (the old file detail) ---
+      file_channels:
+        title: Channels in one file (with activity sparkline)
+        hide_sql: true
+        sql: |
+          SELECT
+            json_object('href','/index/files_by_topic',
+                        'params', json_object('topic', t.name),
+                        'label', t.name)                         AS topic,
+            CASE WHEN s.name IS NOT NULL
+                 THEN json_object('href','/index/files_by_schema',
+                                  'params', json_object('schema', s.name),
+                                  'label', s.name) END           AS schema,
+            csig.message_encoding                               AS encoding,
+            cc.message_count                                    AS messages,
+            cc.uncompressed_size_bytes                          AS size_bytes,
+            cc.message_start_time_ns                            AS start_time_ns,
+            CASE WHEN cc.message_end_time_ns > cc.message_start_time_ns
+                 THEN cc.message_end_time_ns - cc.message_start_time_ns END AS duration_ns,
+            cc.distribution_blob                                AS distribution_blob
+          FROM current_file cf
+          JOIN content_channel cc     ON cc.content_id = cf.content_id
+          JOIN channel_signature csig ON csig.id = cc.channel_signature_id
+          JOIN topic t                ON t.id = csig.topic_id
+          LEFT JOIN schema s          ON s.id = csig.schema_id
+          WHERE cf.abs_path = :path
+          ORDER BY cc.message_count DESC NULLS LAST, t.name
+          LIMIT 1000
+
+# Declarative dashboards (metric cards + charts + filterable tables) via
+# datasette-dashboards. All config, no Python. Index: /-/dashboards
+plugins:
+  datasette-dashboards:
+
+    # ============================ OVERVIEW ============================
+    overview:
+      title: Overview
+      description: Catalog at a glance
+      settings:
+        allow_fullscreen: true
+      layout:
+        - [files, messages]
+        - [topics, errors]
+        - [top-topics, top-topics]
+        - [recordings-per-day, errors-by-kind]
+      charts:
+        files:
+          title: Files
+          db: index
+          query: SELECT COUNT(*) AS n FROM current_file
+          library: metric
+          display: { field: n }
+        messages:
+          title: Messages
+          db: index
+          query: |
+            SELECT COALESCE(SUM(c.message_count),0) AS n
+            FROM current_file cf JOIN content c ON c.id = cf.content_id
+          library: metric
+          display: { field: n }
+        topics:
+          title: Topics
+          db: index
+          query: SELECT COUNT(*) AS n FROM topic
+          library: metric
+          display: { field: n }
+        errors:
+          title: Errors
+          db: index
+          query: SELECT COUNT(*) AS n FROM scan_error
+          library: metric
+          display: { field: n }
+        top-topics:
+          title: Top topics by message count
+          db: index
+          query: |
+            SELECT t.name AS topic, COALESCE(SUM(cc.message_count),0) AS messages
+            FROM topic t
+            JOIN channel_signature csig ON csig.topic_id = t.id
+            JOIN content_channel cc     ON cc.channel_signature_id = csig.id
+            JOIN current_file cf        ON cf.content_id = cc.content_id
+            GROUP BY t.name ORDER BY messages DESC LIMIT 15
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: messages, type: quantitative }
+              y: { field: topic, type: nominal, sort: "-x" }
+        recordings-per-day:
+          title: Recordings per day
+          db: index
+          query: |
+            SELECT strftime('%Y-%m-%d', c.message_start_time_ns/1000000000, 'unixepoch') AS day,
+                   COUNT(DISTINCT cf.abs_path) AS files
+            FROM current_file cf JOIN content c ON c.id = cf.content_id
+            WHERE c.message_start_time_ns >= 946684800000000000
+            GROUP BY day ORDER BY day
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: day, type: ordinal }
+              y: { field: files, type: quantitative }
+        errors-by-kind:
+          title: Errors by kind
+          db: index
+          query: SELECT error_kind AS kind, COUNT(*) AS count FROM scan_error GROUP BY error_kind ORDER BY count DESC
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: count, type: quantitative }
+              y: { field: kind, type: nominal, sort: "-x" }
+
+    # ======================= FILES (filter + show) ====================
+    files:
+      title: Files
+      description: Filter and browse indexed files
+      settings:
+        allow_fullscreen: true
+      filters:
+        folder:
+          name: Path contains
+          type: text
+        topic:
+          name: Has topic
+          type: select
+          db: index
+          query: SELECT DISTINCT name FROM topic ORDER BY name
+        min_size_mb:
+          name: Min size (MB)
+          type: number
+          default: 0
+        time_start:
+          name: From date
+          type: date
+        time_end:
+          name: To date
+          type: date
+      layout:
+        - [match-count, total-size]
+        - [files-table, files-table]
+      charts:
+        match-count:
+          title: Matching files
+          db: index
+          query: |
+            SELECT COUNT(*) AS n
+            FROM current_file cf JOIN content c ON c.id = cf.content_id
+            WHERE TRUE
+            [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+            [[ AND cf.size_bytes >= :min_size_mb * 1048576 ]]
+            [[ AND EXISTS (SELECT 1 FROM content_channel cc JOIN channel_signature csig ON csig.id = cc.channel_signature_id JOIN topic t ON t.id = csig.topic_id WHERE cc.content_id = cf.content_id AND t.name = :topic) ]]
+            [[ AND c.message_start_time_ns >= CAST(strftime('%s', :time_start) AS INTEGER) * 1000000000 ]]
+            [[ AND c.message_start_time_ns <  (CAST(strftime('%s', :time_end) AS INTEGER) + 86400) * 1000000000 ]]
+          library: metric
+          display: { field: n }
+        total-size:
+          title: Total size
+          db: index
+          query: |
+            SELECT round(COALESCE(SUM(cf.size_bytes),0)/1048576.0, 1) AS mb
+            FROM current_file cf JOIN content c ON c.id = cf.content_id
+            WHERE TRUE
+            [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+            [[ AND cf.size_bytes >= :min_size_mb * 1048576 ]]
+            [[ AND EXISTS (SELECT 1 FROM content_channel cc JOIN channel_signature csig ON csig.id = cc.channel_signature_id JOIN topic t ON t.id = csig.topic_id WHERE cc.content_id = cf.content_id AND t.name = :topic) ]]
+            [[ AND c.message_start_time_ns >= CAST(strftime('%s', :time_start) AS INTEGER) * 1000000000 ]]
+            [[ AND c.message_start_time_ns <  (CAST(strftime('%s', :time_end) AS INTEGER) + 86400) * 1000000000 ]]
+          library: metric
+          display: { field: mb, suffix: " MB" }
+        files-table:
+          title: Files
+          db: index
+          query: |
+            SELECT cf.abs_path AS path,
+                   round(cf.size_bytes/1048576.0, 2) || ' MB' AS size,
+                   c.message_count AS messages,
+                   strftime('%Y-%m-%d %H:%M:%S',
+                            c.message_start_time_ns/1000000000, 'unixepoch') AS start
+            FROM current_file cf JOIN content c ON c.id = cf.content_id
+            WHERE TRUE
+            [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+            [[ AND cf.size_bytes >= :min_size_mb * 1048576 ]]
+            [[ AND EXISTS (SELECT 1 FROM content_channel cc JOIN channel_signature csig ON csig.id = cc.channel_signature_id JOIN topic t ON t.id = csig.topic_id WHERE cc.content_id = cf.content_id AND t.name = :topic) ]]
+            [[ AND c.message_start_time_ns >= CAST(strftime('%s', :time_start) AS INTEGER) * 1000000000 ]]
+            [[ AND c.message_start_time_ns <  (CAST(strftime('%s', :time_end) AS INTEGER) + 86400) * 1000000000 ]]
+            ORDER BY cf.size_bytes DESC
+            LIMIT 200
+          library: table
+          display: {}
+
+    # ============================ STORAGE =============================
+    storage:
+      title: Storage
+      description: Disk usage, growth over time, and duplicates
+      settings:
+        allow_fullscreen: true
+      filters:
+        folder:
+          name: Path contains
+          type: text
+      layout:
+        - [total-gb, distinct-files]
+        - [size-per-day, size-per-day]
+        - [largest-files, duplicates-table]
+      charts:
+        total-gb:
+          title: Total size
+          db: index
+          query: |
+            SELECT round(COALESCE(SUM(cf.size_bytes),0)/1073741824.0, 2) AS gb
+            FROM current_file cf
+            WHERE TRUE [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+          library: metric
+          display: { field: gb, suffix: " GB" }
+        distinct-files:
+          title: Files
+          db: index
+          query: |
+            SELECT COUNT(*) AS n FROM current_file cf
+            WHERE TRUE [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+          library: metric
+          display: { field: n }
+        size-per-day:
+          title: MB recorded per day
+          db: index
+          query: |
+            SELECT strftime('%Y-%m-%d', c.message_start_time_ns/1000000000, 'unixepoch') AS day,
+                   round(SUM(cf.size_bytes)/1048576.0, 1) AS mb
+            FROM current_file cf JOIN content c ON c.id = cf.content_id
+            WHERE c.message_start_time_ns >= 946684800000000000
+            [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+            GROUP BY day ORDER BY day
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: day, type: ordinal }
+              y: { field: mb, type: quantitative }
+        largest-files:
+          title: Largest files
+          db: index
+          query: |
+            SELECT cf.abs_path AS path,
+                   round(cf.size_bytes/1048576.0, 1) || ' MB' AS size
+            FROM current_file cf
+            WHERE cf.content_id NOT NULL
+            [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+            ORDER BY cf.size_bytes DESC LIMIT 20
+          library: table
+          display: {}
+        duplicates-table:
+          title: Duplicates (reclaimable)
+          db: index
+          query: |
+            SELECT substr(cf.file_fingerprint, 1, 16) || '...' AS fingerprint,
+                   COUNT(*) AS copies,
+                   round(MIN(cf.size_bytes)*(COUNT(*)-1)/1048576.0, 1) || ' MB' AS reclaimable
+            FROM current_file cf
+            WHERE cf.content_id NOT NULL
+            [[ AND cf.abs_path LIKE '%' || :folder || '%' ]]
+            GROUP BY cf.file_fingerprint
+            HAVING copies >= 2
+            ORDER BY MIN(cf.size_bytes)*(COUNT(*)-1) DESC LIMIT 20
+          library: table
+          display: {}
+
+    # ===================== ERRORS (filterable) ========================
+    errors-explorer:
+      title: Errors
+      description: Scan failures, filterable by kind and path
+      settings:
+        allow_fullscreen: true
+      filters:
+        kind:
+          name: Error kind
+          type: select
+          db: index
+          query: SELECT DISTINCT error_kind FROM scan_error ORDER BY error_kind
+        folder:
+          name: Path contains
+          type: text
+      layout:
+        - [error-count, kind-count]
+        - [by-kind, by-kind]
+        - [errors-table, errors-table]
+      charts:
+        error-count:
+          title: Errors
+          db: index
+          query: |
+            SELECT COUNT(*) AS n FROM scan_error se
+            JOIN file_path fp ON fp.id = se.file_path_id
+            WHERE TRUE
+            [[ AND se.error_kind = :kind ]]
+            [[ AND fp.value LIKE '%' || :folder || '%' ]]
+          library: metric
+          display: { field: n }
+        kind-count:
+          title: Distinct kinds
+          db: index
+          query: SELECT COUNT(DISTINCT error_kind) AS n FROM scan_error
+          library: metric
+          display: { field: n }
+        by-kind:
+          title: Errors by kind
+          db: index
+          query: |
+            SELECT se.error_kind AS kind, COUNT(*) AS count
+            FROM scan_error se JOIN file_path fp ON fp.id = se.file_path_id
+            WHERE TRUE
+            [[ AND se.error_kind = :kind ]]
+            [[ AND fp.value LIKE '%' || :folder || '%' ]]
+            GROUP BY se.error_kind ORDER BY count DESC
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: count, type: quantitative }
+              y: { field: kind, type: nominal, sort: "-x" }
+        errors-table:
+          title: Errors
+          db: index
+          query: |
+            SELECT fp.value AS path, se.error_kind AS kind,
+                   se.error_message AS message, se.size_bytes || ' B' AS size
+            FROM scan_error se JOIN file_path fp ON fp.id = se.file_path_id
+            WHERE TRUE
+            [[ AND se.error_kind = :kind ]]
+            [[ AND fp.value LIKE '%' || :folder || '%' ]]
+            ORDER BY se.id DESC LIMIT 200
+          library: table
+          display: {}
+
+    # ===================== TOPICS & SCHEMAS ===========================
+    topics-schemas:
+      title: Topics & schemas
+      description: What's recorded across the catalog
+      settings:
+        allow_fullscreen: true
+      layout:
+        - [topic-count, schema-count]
+        - [top-topics, top-schemas]
+        - [topics-table, topics-table]
+      charts:
+        topic-count:
+          title: Topics
+          db: index
+          query: SELECT COUNT(*) AS n FROM topic
+          library: metric
+          display: { field: n }
+        schema-count:
+          title: Schemas
+          db: index
+          query: SELECT COUNT(*) AS n FROM schema
+          library: metric
+          display: { field: n }
+        top-topics:
+          title: Top topics by messages
+          db: index
+          query: |
+            SELECT t.name AS topic, COALESCE(SUM(cc.message_count),0) AS messages
+            FROM topic t
+            JOIN channel_signature csig ON csig.topic_id = t.id
+            JOIN content_channel cc     ON cc.channel_signature_id = csig.id
+            JOIN current_file cf        ON cf.content_id = cc.content_id
+            GROUP BY t.name ORDER BY messages DESC LIMIT 15
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: messages, type: quantitative }
+              y: { field: topic, type: nominal, sort: "-x" }
+        top-schemas:
+          title: Top schemas by files
+          db: index
+          query: |
+            SELECT s.name AS schema, COUNT(DISTINCT cf.abs_path) AS files
+            FROM schema s
+            JOIN channel_signature csig ON csig.schema_id = s.id
+            JOIN content_channel cc     ON cc.channel_signature_id = csig.id
+            JOIN current_file cf        ON cf.content_id = cc.content_id
+            GROUP BY s.name ORDER BY files DESC LIMIT 15
+          library: vega-lite
+          display:
+            mark: { type: bar, tooltip: true }
+            encoding:
+              x: { field: files, type: quantitative }
+              y: { field: schema, type: nominal, sort: "-x" }
+        topics-table:
+          title: Topics
+          db: index
+          query: |
+            SELECT t.name AS topic,
+                   COUNT(DISTINCT cf.abs_path) AS files,
+                   COALESCE(SUM(cc.message_count),0) AS messages
+            FROM topic t
+            JOIN channel_signature csig ON csig.topic_id = t.id
+            JOIN content_channel cc     ON cc.channel_signature_id = csig.id
+            JOIN current_file cf        ON cf.content_id = cc.content_id
+            GROUP BY t.name ORDER BY messages DESC LIMIT 50
+          library: table
+          display: {}
