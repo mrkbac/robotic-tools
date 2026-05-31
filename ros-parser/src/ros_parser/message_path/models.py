@@ -1,11 +1,13 @@
+import array
 import contextlib
+import difflib
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from operator import neg
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ros_parser.models import Field, MessageDefinition, Type
 
@@ -20,6 +22,58 @@ class FieldResolutionError(MessagePathError):
 
 class ValidationError(Exception):
     """Error raised when a message path is invalid for a given message definition."""
+
+
+# Sentinel for "attribute absent" so field access can avoid try/except getattr.
+_MISSING = object()
+
+# Types treated as numeric arrays for element-wise math modifiers. ``str`` is
+# intentionally excluded; decoded numeric arrays are ``memoryview``/``bytes``.
+_ARRAY_TYPES = (list, tuple, memoryview, bytearray, bytes, array.array)
+
+
+def _lookup_field(obj: Any, name: str) -> Any:
+    """Resolve a field by dict key or attribute, returning ``_MISSING`` if absent.
+
+    The branch order is correctness-critical, not just a fast path:
+
+    1. plain ``dict`` — subscript (collision-safe for keys named like dict methods);
+    2. dataclass — attribute access, skipping the ``Mapping`` ABC ``isinstance`` cost
+       (decoded ROS messages are slotted dataclasses, the hot case);
+    3. any other ``Mapping`` — subscript *before* attribute access, so a key that
+       shadows a method name (e.g. ``keys``/``items``) yields the value, not the
+       bound method;
+    4. any other object — attribute access.
+    """
+    if type(obj) is dict:
+        return cast("dict[str, Any]", obj)[name] if name in obj else _MISSING
+    if getattr(type(obj), "__dataclass_fields__", None) is not None:
+        return getattr(obj, name, _MISSING)
+    if isinstance(obj, Mapping):
+        return cast("Mapping[str, Any]", obj)[name] if name in obj else _MISSING
+    return getattr(obj, name, _MISSING)
+
+
+def _available_fields(obj: object) -> list[str]:
+    """Best-effort list of field/key names on an object, for error suggestions."""
+    dataclass_fields = getattr(type(obj), "__dataclass_fields__", None)
+    if dataclass_fields is not None:
+        return list(dataclass_fields)
+    if isinstance(obj, Mapping):
+        return [str(key) for key in obj]
+    return []
+
+
+def _field_not_found_message(obj: object, name: str) -> str:
+    """Build a 'field not found' message with a 'did you mean' hint when possible."""
+    base = f"Field '{name}' not found on object of type '{type(obj).__name__}'"
+    available = _available_fields(obj)
+    if not available:
+        return base
+    close = difflib.get_close_matches(name, available, n=1)
+    if close:
+        return f"{base}. Did you mean '{close[0]}'?"
+    return f"{base}. Available fields: {', '.join(available)}"
 
 
 class ComparisonOperator(Enum):
@@ -72,25 +126,11 @@ class FieldAccess(Action):
 
     def apply(self, obj: Any, variables: _VariableStore) -> Any:  # noqa: ARG002
         """Access a field from an object, supporting both attribute and dict-like access."""
-        # Try dict/mapping access first
-        if isinstance(obj, Mapping):
-            if self.field_name in obj:
-                return obj[self.field_name]
-            raise MessagePathError(
-                f"Field '{self.field_name}' not found in mapping with keys: {list(obj.keys())}"
-            )
-
-        # Try attribute access for objects
-        try:
-            return getattr(obj, self.field_name)
-        except AttributeError:
-            pass
-
-        # If we get here, the field doesn't exist
-        obj_type = type(obj).__name__
-        raise MessagePathError(
-            f"Field '{self.field_name}' not found on object of type '{obj_type}'"
-        )
+        name = self.field_name
+        value = _lookup_field(obj, name)
+        if value is not _MISSING:
+            return value
+        raise MessagePathError(_field_not_found_message(obj, name))
 
     def validate(
         self,
@@ -247,32 +287,33 @@ class FilterFieldRef:
     """A reference to a field path used as a value in filter comparisons (cross-field)."""
 
     field_path: str
+    _parts: tuple[str, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._parts = tuple(self.field_path.split("."))
 
     def resolve(self, obj: Any) -> Any:
         """Resolve the field path against an object."""
-        return _resolve_field_path(obj, self.field_path)
+        return _resolve_parts(obj, self._parts)
 
 
 FilterValue = int | float | str | bool | Variable | FilterFieldRef
 
 
-def _resolve_field_path(obj: Any, field_path: str) -> Any:
-    """Extract field value from nested field path (e.g., 'pose.x')."""
+def _resolve_parts(obj: Any, parts: tuple[str, ...]) -> Any:
+    """Extract a value by walking pre-split field-path parts (e.g. ('pose', 'x'))."""
     value = obj
-    for part in field_path.split("."):
-        if isinstance(value, Mapping):
-            if part not in value:
-                raise FieldResolutionError(f"Field '{part}' not found in mapping")
-            value = value[part]
-        else:
-            try:
-                value = getattr(value, part)
-            except AttributeError:
-                obj_type = type(value).__name__
-                raise FieldResolutionError(
-                    f"Field '{part}' not found on object of type '{obj_type}'"
-                ) from None
+    for part in parts:
+        nxt = _lookup_field(value, part)
+        if nxt is _MISSING:
+            raise FieldResolutionError(_field_not_found_message(value, part))
+        value = nxt
     return value
+
+
+def _resolve_field_path(obj: Any, field_path: str) -> Any:
+    """Extract field value from a dotted field path (e.g. 'pose.x')."""
+    return _resolve_parts(obj, tuple(field_path.split(".")))
 
 
 def _resolve_filter_value(val: FilterValue, obj: Any, variables: _VariableStore) -> Any:
@@ -322,9 +363,13 @@ class Comparison(FilterExpression):
     field_path: str
     operator: ComparisonOperator
     value: FilterValue
+    _parts: tuple[str, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._parts = tuple(self.field_path.split("."))
 
     def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
-        field_value = _resolve_field_path(obj, self.field_path)
+        field_value = _resolve_parts(obj, self._parts)
         compare_value = _resolve_filter_value(self.value, obj, variables)
         return _compare(field_value, self.operator, compare_value)
 
@@ -335,9 +380,13 @@ class InExpression(FilterExpression):
 
     field_path: str
     values: list[FilterValue]
+    _parts: tuple[str, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._parts = tuple(self.field_path.split("."))
 
     def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
-        field_value = _resolve_field_path(obj, self.field_path)
+        field_value = _resolve_parts(obj, self._parts)
         resolved = [_resolve_filter_value(v, obj, variables) for v in self.values]
         return field_value in resolved
 
@@ -443,16 +492,79 @@ class Filter(Action):
                 self._validate_expression(child, validate_type, validate_msgdef, all_definitions)
 
 
+# --- Math modifier framework -------------------------------------------------
+# Each modifier registers its metadata (kind, input requirements, return type)
+# right next to its implementation via the @modifier decorator, so the rules live
+# with the consumer instead of in separate parallel tables.
+
+_FLOAT64_TYPE = Type(type_name="float64", package_name=None)
+_INT64_TYPE = Type(type_name="int64", package_name=None)
+
+_EULER_RETURN_DEF = MessageDefinition(
+    name="EulerAngles",
+    fields_all=[Field(type=_FLOAT64_TYPE, name=n) for n in ("roll", "pitch", "yaw")],
+)
+_QUAT_RETURN_DEF = MessageDefinition(
+    name="Quaternion",
+    fields_all=[Field(type=_FLOAT64_TYPE, name=n) for n in ("x", "y", "z", "w")],
+)
+
+
+# How a modifier is dispatched/validated:
+#   scalar     numeric in → numeric out, applied element-wise over arrays
+#   object     operates on a whole message value (norm, rpy, to_sec, ...)
+#   timeseries needs history; raises without a TransformContext
+ModifierKind = Literal["scalar", "object", "timeseries"]
+
+
+@dataclass(frozen=True)
+class _Modifier:
+    """How a math modifier is dispatched and validated."""
+
+    func: Callable[..., Any]
+    kind: ModifierKind = "scalar"
+    requires_fields: tuple[str, ...] = ()
+    requires_array: bool = False
+    return_type: "Type | None" = None
+    return_def: "MessageDefinition | None" = None
+
+
+_MODIFIERS: dict[str, _Modifier] = {}
+
+
+def modifier(
+    name: str,
+    *,
+    kind: ModifierKind = "scalar",
+    requires_fields: tuple[str, ...] = (),
+    requires_array: bool = False,
+    return_type: "Type | None" = None,
+    return_def: "MessageDefinition | None" = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Register a math modifier and its metadata, co-located with the function."""
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        _MODIFIERS[name] = _Modifier(
+            func, kind, requires_fields, requires_array, return_type, return_def
+        )
+        return func
+
+    return decorator
+
+
+@modifier("add")
 def _add(value: float, *args: float) -> float:
     """Add multiple values."""
     return value + sum(args)
 
 
+@modifier("sub")
 def _sub(value: float, *args: float) -> float:
     """Subtract multiple values from the initial value."""
     return value - sum(args)
 
 
+@modifier("mul")
 def _mul(value: float, *args: float) -> float:
     """Multiply by multiple values."""
     result = value
@@ -461,6 +573,7 @@ def _mul(value: float, *args: float) -> float:
     return result
 
 
+@modifier("div")
 def _div(value: float, divisor: float) -> float:
     """Divide by multiple values with zero check."""
     if divisor == 0:
@@ -468,6 +581,7 @@ def _div(value: float, divisor: float) -> float:
     return value / divisor
 
 
+@modifier("round")
 def _round_with_arg(value: float, precision: float | None = None) -> int | float:
     """Round with optional precision argument."""
     if precision is None:
@@ -475,21 +589,25 @@ def _round_with_arg(value: float, precision: float | None = None) -> int | float
     return round(value, int(precision))
 
 
+@modifier("min")
 def _min(*args: float) -> float:
     """Return minimum of values."""
     return min(args)
 
 
+@modifier("max")
 def _max(*args: float) -> float:
     """Return maximum of values."""
     return max(args)
 
 
+@modifier("wrap_angle")
 def _wrap_angle(value: float) -> float:
     """Wrap angle to [-pi, pi] range."""
     return (value + math.pi) % (2 * math.pi) - math.pi
 
 
+@modifier("sign")
 def _sign(value: float) -> int:
     """Return the sign of a numeric value: 1, -1, or 0."""
     if value > 0:
@@ -499,7 +617,20 @@ def _sign(value: float) -> int:
     return 0
 
 
-_FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
+@modifier("clamp")
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """Clamp a value to the inclusive [lo, hi] range."""
+    if lo > hi:
+        raise MessagePathError(f"clamp requires lo <= hi, got lo={lo}, hi={hi}")
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
+
+
+# Stdlib numeric functions have no extra metadata; register them in bulk.
+for _name, _builtin in {
     "abs": abs,
     "acos": math.acos,
     "asin": math.asin,
@@ -512,26 +643,19 @@ _FUNCTIONS_NO_ARGS: dict[str, Callable[..., Any]] = {
     "log2": math.log2,
     "log10": math.log10,
     "negative": neg,
-    "sign": _sign,
     "sin": math.sin,
     "sqrt": math.sqrt,
     "tan": math.tan,
     "trunc": math.trunc,
-    "add": _add,
-    "sub": _sub,
-    "mul": _mul,
-    "div": _div,
-    "round": _round_with_arg,
-    "min": _min,
-    "max": _max,
     "degrees": math.degrees,
     "radians": math.radians,
-    "wrap_angle": _wrap_angle,
-}
-
-TIMESERIES_OPS: set[str] = {"delta", "derivative", "timedelta"}
+}.items():
+    _MODIFIERS[_name] = _Modifier(_builtin)
 
 
+@modifier("delta", kind="timeseries")
+@modifier("derivative", kind="timeseries")
+@modifier("timedelta", kind="timeseries")
 def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
     """Sentinel for time-series functions. Raises when called without TransformContext."""
     raise MessagePathError(
@@ -540,25 +664,15 @@ def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
     )
 
 
-for _op in TIMESERIES_OPS:
-    _FUNCTIONS_NO_ARGS[_op] = _timeseries_sentinel
-
-
 def _get_field(obj: Any, name: str) -> Any:
-    """Get a field from an object, trying mapping access first, then attribute access."""
-    if isinstance(obj, Mapping):
-        try:
-            return obj[name]
-        except KeyError:
-            raise MessagePathError(f"Field '{name}' not found in mapping") from None
-    try:
-        return getattr(obj, name)
-    except AttributeError:
-        raise MessagePathError(
-            f"Field '{name}' not found on object of type '{type(obj).__name__}'"
-        ) from None
+    """Get a field from an object, supporting both dict and attribute access."""
+    value = _lookup_field(obj, name)
+    if value is not _MISSING:
+        return value
+    raise MessagePathError(_field_not_found_message(obj, name))
 
 
+@modifier("norm", kind="object", requires_fields=("x", "y", "z"), return_type=_FLOAT64_TYPE)
 def _norm(obj: Any) -> float:
     """Euclidean norm of object with x/y/z fields."""
     try:
@@ -589,6 +703,7 @@ class Quaternion:
     w: float
 
 
+@modifier("rpy", kind="object", requires_fields=("x", "y", "z", "w"), return_def=_EULER_RETURN_DEF)
 def _quaternion_to_euler(obj: Any) -> EulerAngles:
     """Convert quaternion (x,y,z,w) to EulerAngles(roll, pitch, yaw)."""
     try:
@@ -613,6 +728,7 @@ def _quaternion_to_euler(obj: Any) -> EulerAngles:
     return EulerAngles(roll=roll, pitch=pitch, yaw=yaw)
 
 
+@modifier("quat", kind="object", requires_fields=("x", "y", "z"), return_def=_QUAT_RETURN_DEF)
 def _euler_to_quaternion(obj: Any) -> Quaternion:
     """Convert (roll, pitch, yaw) stored as (x, y, z) to Quaternion(x, y, z, w)."""
     try:
@@ -636,6 +752,7 @@ def _euler_to_quaternion(obj: Any) -> Quaternion:
     return Quaternion(x=qx, y=qy, z=qz, w=qw)
 
 
+@modifier("magnitude", kind="object", requires_array=True, return_type=_FLOAT64_TYPE)
 def _magnitude(obj: Any) -> float:
     """L2 norm of a list/array/sequence of numbers."""
     if isinstance(obj, (list, tuple)):
@@ -648,34 +765,26 @@ def _magnitude(obj: Any) -> float:
         raise MessagePathError("magnitude requires a list or array of numbers") from e
 
 
-_OBJECT_FUNCTIONS: dict[str, Callable[..., Any]] = {
-    "norm": _norm,
-    "rpy": _quaternion_to_euler,
-    "quat": _euler_to_quaternion,
-    "magnitude": _magnitude,
-}
+@modifier("to_sec", kind="object", requires_fields=("sec", "nanosec"), return_type=_FLOAT64_TYPE)
+def _to_sec(obj: Any) -> float:
+    """Convert a Time/Duration {sec, nanosec} to float seconds."""
+    try:
+        sec = _get_field(obj, "sec")
+        nanosec = _get_field(obj, "nanosec")
+    except MessagePathError:
+        raise MessagePathError("to_sec requires an object with sec, nanosec fields") from None
+    return sec + nanosec * 1e-9
 
-_FLOAT64_TYPE = Type(type_name="float64", package_name=None)
 
-_OBJECT_FUNCTION_RETURN_TYPES: dict[str, MessageDefinition] = {
-    "rpy": MessageDefinition(
-        name="EulerAngles",
-        fields_all=[
-            Field(type=_FLOAT64_TYPE, name="roll"),
-            Field(type=_FLOAT64_TYPE, name="pitch"),
-            Field(type=_FLOAT64_TYPE, name="yaw"),
-        ],
-    ),
-    "quat": MessageDefinition(
-        name="Quaternion",
-        fields_all=[
-            Field(type=_FLOAT64_TYPE, name="x"),
-            Field(type=_FLOAT64_TYPE, name="y"),
-            Field(type=_FLOAT64_TYPE, name="z"),
-            Field(type=_FLOAT64_TYPE, name="w"),
-        ],
-    ),
-}
+@modifier("to_nsec", kind="object", requires_fields=("sec", "nanosec"), return_type=_INT64_TYPE)
+def _to_nsec(obj: Any) -> int:
+    """Convert a Time/Duration {sec, nanosec} to int nanoseconds."""
+    try:
+        sec = _get_field(obj, "sec")
+        nanosec = _get_field(obj, "nanosec")
+    except MessagePathError:
+        raise MessagePathError("to_nsec requires an object with sec, nanosec fields") from None
+    return sec * 1_000_000_000 + nanosec
 
 
 @dataclass
@@ -685,6 +794,12 @@ class MathModifier(Action):
     operation: str
     arguments: list[int | float | Variable]
 
+    def _spec(self) -> _Modifier:
+        spec = _MODIFIERS.get(self.operation)
+        if spec is None:
+            raise MessagePathError(f"Unknown math modifier '{self.operation}'")
+        return spec
+
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """Apply the math operation to the object, supporting element-wise array operations."""
         # Resolve arguments (convert Variables to actual values)
@@ -693,15 +808,14 @@ class MathModifier(Action):
         ]
 
         # Object-level functions operate on the whole object (not element-wise)
-        if self.operation in _OBJECT_FUNCTIONS:
+        if self._spec().kind == "object":
             return self._apply_operation(obj, resolved_args)
 
-        # Check if obj is a sequence for element-wise operation
-        if isinstance(obj, (list, tuple)):
-            # Apply element-wise
+        # Element-wise over numeric arrays. Decoded numeric arrays are memoryview
+        # (e.g. float64[]) or bytes (uint8[]); also accept list/tuple/array/bytearray.
+        if isinstance(obj, _ARRAY_TYPES):
             result = [self._apply_operation(item, resolved_args) for item in obj]
-            # Return same type as input (list or tuple)
-            return type(obj)(result) if isinstance(obj, tuple) else result
+            return tuple(result) if isinstance(obj, tuple) else result
 
         # Apply to single value
         return self._apply_operation(obj, resolved_args)
@@ -710,16 +824,18 @@ class MathModifier(Action):
         self, value: Any, args: list[int | float]
     ) -> int | float | tuple[float, ...]:
         """Apply the math operation to a single value."""
-        # Check object-level functions first (these accept non-numeric inputs)
-        if func := _OBJECT_FUNCTIONS.get(self.operation):
+        spec = self._spec()
+
+        # Object-level functions accept non-numeric inputs (whole message values)
+        if spec.kind == "object":
             try:
-                return func(value, *args) if args else func(value)
+                return spec.func(value, *args) if args else spec.func(value)
             except MessagePathError:
                 raise
             except Exception as e:
                 raise MessagePathError(f"Error in '{self.operation}': {e!s}") from e
 
-        # Validate that value is numeric for scalar functions
+        # Scalar / time-series functions require a numeric input
         if not isinstance(value, (int, float)):
             raise MessagePathError(
                 f"Math modifier '{self.operation}' can only be applied to numeric types, "
@@ -731,18 +847,46 @@ class MathModifier(Action):
             raise MessagePathError(f"Math modifier '{self.operation}' received NaN value")
 
         try:
-            if func := _FUNCTIONS_NO_ARGS.get(self.operation):
-                result: int | float = func(value, *args)
-                return result
-
-            # Unknown operation
-            raise MessagePathError(f"Unknown math modifier '{self.operation}'")
-
+            result: int | float = spec.func(value, *args)
         except ValueError as e:
             # Math domain errors (sqrt of negative, log of negative, etc.)
             raise MessagePathError(f"Math error in '{self.operation}': {e!s}") from e
         except ZeroDivisionError as e:
             raise MessagePathError(f"Division by zero in '{self.operation}'") from e
+        return result
+
+    def _validate_object_function_input(
+        self, spec: _Modifier, current_type: "Type", current_msgdef: "MessageDefinition | None"
+    ) -> None:
+        """Validate the input type/shape for an object-level math function."""
+        op = self.operation
+        if spec.requires_array:
+            if not current_type.is_array:
+                raise ValidationError(
+                    f"Math modifier '{op}' requires an array, got '{current_type}'"
+                )
+            return
+        # norm/rpy/quat/to_sec/to_nsec need a single message value with given fields
+        required = spec.requires_fields
+        if current_type.is_array:
+            raise ValidationError(
+                f"Math modifier '{op}' cannot be applied to array type '{current_type}'"
+            )
+        if current_type.is_primitive:
+            raise ValidationError(
+                f"Math modifier '{op}' requires a message with fields {', '.join(required)}, "
+                f"got primitive '{current_type.type_name}'"
+            )
+        # Field presence is only checkable when the definition is available
+        # (external types are validated leniently elsewhere in this module).
+        if current_msgdef is not None:
+            available = {f.name for f in current_msgdef.fields}
+            missing = [name for name in required if name not in available]
+            if missing:
+                raise ValidationError(
+                    f"Math modifier '{op}' requires fields {', '.join(required)}; "
+                    f"'{current_type}' is missing {', '.join(missing)}"
+                )
 
     def validate(
         self,
@@ -751,6 +895,10 @@ class MathModifier(Action):
         all_definitions: dict[str, "MessageDefinition"],  # noqa: ARG002
     ) -> tuple["Type", "MessageDefinition | None"]:
         """Validate that the math modifier can be applied to the current type."""
+        spec = _MODIFIERS.get(self.operation)
+        if spec is None:
+            raise ValidationError(f"Unknown math modifier '{self.operation}'")
+
         # Math operations work on both single numeric values and arrays of numeric values
         working_type = current_type
 
@@ -765,18 +913,16 @@ class MathModifier(Action):
                 string_upper_bound=current_type.string_upper_bound,
             )
 
-        # Object-level functions work on complex types
-        if self.operation in _OBJECT_FUNCTIONS:
-            result_def = _OBJECT_FUNCTION_RETURN_TYPES.get(self.operation)
-            if result_def is not None:
-                result_type = Type(type_name=result_def.name or "unknown", package_name=None)
-                return result_type, result_def
-
-            # norm, magnitude → scalar float
-            return _FLOAT64_TYPE, None
+        # Object-level functions require specific input shapes (not any scalar).
+        if spec.kind == "object":
+            self._validate_object_function_input(spec, current_type, current_msgdef)
+            if spec.return_def is not None:
+                result_type = Type(type_name=spec.return_def.name or "unknown", package_name=None)
+                return result_type, spec.return_def
+            return spec.return_type or _FLOAT64_TYPE, None
 
         # Time-series functions work on numeric types, preserve type
-        if self.operation in TIMESERIES_OPS:
+        if spec.kind == "timeseries":
             return current_type, current_msgdef
 
         # Check if the base type is numeric

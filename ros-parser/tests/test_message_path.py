@@ -1,6 +1,8 @@
 """Tests for Foxglove message path parser."""
 
+import array
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import pytest
@@ -454,6 +456,60 @@ class TestExtendedFilters:
         assert result[0]["status"] == "active"
         assert result[1]["status"] == "calibrating"
 
+    def test_field_access_dict_key_shadowing_method(self):
+        """A dict key named like a dict method resolves to the value, not the method."""
+        data = {"keys": 5, "items": 9, "data": 0.9}
+        assert FieldAccess(field_name="keys").apply(data, {}) == 5
+        assert FieldAccess(field_name="items").apply(data, {}) == 9
+
+    def test_filter_field_path_dict_key_shadowing_method(self):
+        """Filter field-path resolution on a dict is not fooled by method-named keys."""
+        data = [{"items": 1}, {"items": 9}]
+        filt = Filter(
+            expression=Comparison(
+                field_path="items", operator=ComparisonOperator.GREATER_THAN, value=5
+            )
+        )
+        result = filt.apply(data, {})
+        assert result == [{"items": 9}]
+
+    def test_field_access_non_dict_mapping_key_shadowing_method(self):
+        """A non-dict Mapping key named like a method resolves to the value, not the method."""
+        data = OrderedDict([("keys", 5), ("data", 0.9)])
+        assert FieldAccess(field_name="keys").apply(data, {}) == 5
+        assert FieldAccess(field_name="data").apply(data, {}) == 0.9
+
+    def test_field_access_missing_attribute_raises(self):
+        """Missing attribute on a non-dict object raises MessagePathError."""
+
+        @dataclass
+        class Sample:
+            data: float
+
+        with pytest.raises(MessagePathError):
+            FieldAccess(field_name="nope").apply(Sample(1.0), {})
+
+    def test_field_access_error_suggests_close_match(self):
+        """A near-miss field name suggests the intended field."""
+
+        @dataclass
+        class Sample:
+            velocity: float
+
+        with pytest.raises(MessagePathError, match="Did you mean 'velocity'"):
+            FieldAccess(field_name="veloctiy").apply(Sample(1.0), {})
+
+    def test_field_access_error_lists_available_fields(self):
+        """An unrelated field name lists available fields."""
+
+        @dataclass
+        class Sample:
+            alpha: float
+            beta: float
+
+        with pytest.raises(MessagePathError, match="Available fields: alpha, beta"):
+            FieldAccess(field_name="zzz").apply(Sample(1.0, 2.0), {})
+
     def test_apply_cross_field_comparison(self):
         """Test cross-field comparison filter."""
         data = [
@@ -856,6 +912,34 @@ class TestArraySliceApply:
         result = slice_action.apply(obj, {})
         # [-3:-1] should include last 3 elements: indices -3, -2, -1 (inclusive)
         assert result == [3, 4, 5], "Negative end index should be inclusive"
+
+    def test_apply_inclusive_slice_negative_bound_matrix(self):
+        """Lock in inclusive-slice semantics across negative/open bounds."""
+        data = [0, 1, 2, 3, 4]
+
+        def inclusive(start, end):
+            n = len(data)
+            si = 0 if start is None else (start if start >= 0 else n + start)
+            ei = n - 1 if end is None else (end if end >= 0 else n + end)
+            return [data[i] for i in range(n) if si <= i <= ei]
+
+        cases = [
+            (1, 3),
+            (None, None),
+            (None, 2),
+            (2, None),
+            (-2, None),
+            (1, -1),
+            (1, -2),
+            (0, 0),
+            (-3, -1),
+            (-1, -1),
+            (2, -3),
+            (0, -1),
+        ]
+        for start, end in cases:
+            got = ArraySlice(start=start, end=end).apply(data, {})
+            assert got == inclusive(start, end), f"[{start}:{end}]"
 
     def test_apply_with_variables(self):
         """Test slice with variables."""
@@ -1445,6 +1529,62 @@ class TestMathModifierApply:
         result = modifier.apply([1.5, 2.5, 3.5], {})
         assert result == [11.5, 12.5, 13.5]
 
+    def test_element_wise_on_memoryview(self):
+        """Element-wise math must work on memoryview (float64[] decodes to this)."""
+        mv = memoryview(array.array("d", [10.0, -20.0, 30.0]))
+        result = MathModifier(operation="abs", arguments=[]).apply(mv, {})
+        assert result == [10.0, 20.0, 30.0]
+
+    def test_element_wise_on_array(self):
+        """Element-wise math must work on array.array."""
+        a = array.array("d", [1.0, 2.0, 3.0])
+        result = MathModifier(operation="mul", arguments=[2]).apply(a, {})
+        assert result == [2.0, 4.0, 6.0]
+
+    def test_element_wise_on_bytes(self):
+        """Element-wise math must work on bytes (uint8[] decodes to this)."""
+        result = MathModifier(operation="mul", arguments=[2]).apply(b"\x01\x02\x03", {})
+        assert result == [2, 4, 6]
+
+    def test_clamp_within_and_bounds(self):
+        """clamp(lo, hi) limits a value to the inclusive range."""
+        clamp = MathModifier(operation="clamp", arguments=[0, 10])
+        assert clamp.apply(15, {}) == 10
+        assert clamp.apply(-5, {}) == 0
+        assert clamp.apply(5, {}) == 5
+
+    def test_clamp_element_wise(self):
+        """clamp applies element-wise over arrays."""
+        result = MathModifier(operation="clamp", arguments=[0, 10]).apply([-3, 5, 99], {})
+        assert result == [0, 5, 10]
+
+    def test_clamp_invalid_bounds_raises(self):
+        """clamp surfaces lo > hi instead of silently swapping."""
+        with pytest.raises(MessagePathError):
+            MathModifier(operation="clamp", arguments=[10, 0]).apply(5, {})
+
+    def test_to_sec_on_time(self):
+        """to_sec converts a Time/Duration {sec, nanosec} to float seconds."""
+
+        @dataclass
+        class Time:
+            sec: int
+            nanosec: int
+
+        result = MathModifier(operation="to_sec", arguments=[]).apply(Time(2, 500000000), {})
+        assert result == 2.5
+
+    def test_to_nsec_on_time(self):
+        """to_nsec converts a Time/Duration {sec, nanosec} to int nanoseconds."""
+
+        @dataclass
+        class Time:
+            sec: int
+            nanosec: int
+
+        result = MathModifier(operation="to_nsec", arguments=[]).apply(Time(2, 500000000), {})
+        assert result == 2_500_000_000
+
     def test_error_on_non_numeric(self):
         """Test error when applying to non-numeric type."""
 
@@ -1844,10 +1984,24 @@ _POINT_MSGDEF = MessageDefinition(
     ],
 )
 
+_QUAT_TYPE = Type(type_name="Quaternion", package_name="geometry_msgs")
+_QUAT_MSGDEF = MessageDefinition(
+    name="geometry_msgs/Quaternion",
+    fields_all=[
+        Field(type=_FLOAT64_TYPE, name="x"),
+        Field(type=_FLOAT64_TYPE, name="y"),
+        Field(type=_FLOAT64_TYPE, name="z"),
+        Field(type=_FLOAT64_TYPE, name="w"),
+    ],
+)
+
 _ALL_DEFS: dict[str, MessageDefinition] = {
     "geometry_msgs/Point": _POINT_MSGDEF,
     "geometry_msgs/msg/Point": _POINT_MSGDEF,
     "Point": _POINT_MSGDEF,
+    "geometry_msgs/Quaternion": _QUAT_MSGDEF,
+    "geometry_msgs/msg/Quaternion": _QUAT_MSGDEF,
+    "Quaternion": _QUAT_MSGDEF,
 }
 
 
@@ -1929,11 +2083,48 @@ class TestMathModifierValidation:
 
     def test_validate_rpy_returns_euler_type(self):
         mod = MathModifier(operation="rpy", arguments=[])
-        result_type, result_def = mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+        result_type, result_def = mod.validate(_QUAT_TYPE, _QUAT_MSGDEF, _ALL_DEFS)
         assert result_type.type_name == "EulerAngles"
         assert result_def is not None
         field_names = [f.name for f in result_def.fields]
         assert "roll" in field_names
+
+    def test_validate_rpy_on_non_quaternion_raises(self):
+        """rpy needs x, y, z, w; a Point (x, y, z) must be rejected."""
+        mod = MathModifier(operation="rpy", arguments=[])
+        with pytest.raises(ValidationError, match="missing w"):
+            mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_to_sec_on_primitive_raises(self):
+        """to_sec needs a Time/Duration message, not a scalar."""
+        mod = MathModifier(operation="to_sec", arguments=[])
+        with pytest.raises(ValidationError, match="primitive"):
+            mod.validate(_FLOAT64_TYPE, None, _ALL_DEFS)
+
+    def test_validate_to_sec_chain_on_scalar_raises(self):
+        """to_sec returns float64; chaining to_sec again must fail validation."""
+        path = parse_message_path("/t.stamp.@to_sec.@to_sec")
+        stamp_def = MessageDefinition(
+            name="builtin_interfaces/Time",
+            fields_all=[
+                Field(type=_INT32_TYPE, name="sec"),
+                Field(type=Type(type_name="uint32", package_name=None), name="nanosec"),
+            ],
+        )
+        root = MessageDefinition(
+            name="pkg/Msg",
+            fields_all=[
+                Field(type=Type(type_name="Time", package_name="builtin_interfaces"), name="stamp")
+            ],
+        )
+        defs = {
+            **_ALL_DEFS,
+            "builtin_interfaces/Time": stamp_def,
+            "builtin_interfaces/msg/Time": stamp_def,
+            "Time": stamp_def,
+        }
+        with pytest.raises(ValidationError):
+            path.validate(root, defs)
 
     def test_validate_timeseries_preserves_type(self):
         mod = MathModifier(operation="delta", arguments=[])
