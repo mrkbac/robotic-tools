@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Add an ns offset to message log_time and publish_time per matching channel.
 
 Rules map a topic-regex to an ns offset (positive or negative). Channels
@@ -17,6 +16,8 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -49,6 +50,7 @@ class TimeOffsetProcessor(InputProcessor):
                 return offset
         return None
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
@@ -57,9 +59,11 @@ class TimeOffsetProcessor(InputProcessor):
             self._channel_offset[channel.id] = offset
         return Action.CONTINUE
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         return MessageScope.channels(set(self._channel_offset))
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         offset = self._channel_offset.get(message.channel_id)
         if offset is not None:

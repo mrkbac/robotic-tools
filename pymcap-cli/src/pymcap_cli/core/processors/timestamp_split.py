@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from typing_extensions import override
+
 from pymcap_cli.core.processors.boundary_split import BoundarySplitProcessor
 from pymcap_cli.core.processors.utils import global_time_range
 
@@ -24,6 +26,7 @@ class TimestampSplitProcessor(BoundarySplitProcessor):
             raise ValueError("split_points must not be empty")
         self.split_points = sorted(split_points)
 
+    @override
     def initialize(self, context: PipelineContext) -> None:
         time_range = global_time_range(context)
         if time_range is None:

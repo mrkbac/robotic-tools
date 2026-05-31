@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
     from av import VideoFrame
     from small_mcap import DecodedMessage
 
     from mcap_codec_support.video.common import DecompressedFrame, EncoderConfig
+
+# The frame representation differs by backend: PyAV works on ``av.VideoFrame``,
+# the ffmpeg-CLI backend on raw ``bytes``. Parameterizing keeps decode→encode
+# paired per backend instead of pretending they share one frame type.
+FrameT = TypeVar("FrameT")
 
 
 class RawImageMessage(Protocol):
@@ -28,12 +33,12 @@ class CompressedImageMsg(Protocol):
     def data(self) -> bytes | bytearray | memoryview: ...
 
 
-class VideoEncoderProtocol(Protocol):
-    """Structural interface shared by VideoEncoder and FFmpegVideoEncoder."""
+class VideoEncoderProtocol(Protocol[FrameT]):
+    """Encoder interface; ``FrameT`` is the per-backend frame type."""
 
     config: EncoderConfig
 
-    def encode(self, frame: VideoFrame) -> bytes | None: ...
+    def encode(self, frame: FrameT) -> bytes | None: ...
 
     def flush_packets(self) -> list[bytes]: ...
 
@@ -50,8 +55,13 @@ class VideoDecompressorProtocol(Protocol):
         ...
 
 
-class VideoCompressionBackend(Protocol):
-    """Backend used by roscompress for CompressedVideo output."""
+class VideoCompressionBackend(Protocol[FrameT]):
+    """Backend used by roscompress for CompressedVideo output.
+
+    ``FrameT`` ties ``decode_*`` output to the frame type ``create_encoder``'s
+    encoder consumes, so a backend can't decode to one frame type and encode
+    another.
+    """
 
     label: str
     prefetch_supported: bool
@@ -60,11 +70,9 @@ class VideoCompressionBackend(Protocol):
 
     def resolve_encoder(self, codec: str) -> str: ...
 
-    def decode_compressed(self, data: bytes) -> tuple[VideoFrame, int, int]: ...
+    def decode_compressed(self, data: bytes) -> tuple[FrameT, int, int]: ...
 
-    def decode_image(
-        self, msg: DecodedMessage, schema_name: str
-    ) -> tuple[VideoFrame, int, int]: ...
+    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[FrameT, int, int]: ...
 
     def create_encoder(
         self,
@@ -75,6 +83,13 @@ class VideoCompressionBackend(Protocol):
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
-    ) -> VideoEncoderProtocol: ...
+    ) -> VideoEncoderProtocol[FrameT]: ...
 
     def get_pix_fmt(self, topic: str) -> str | None: ...
+
+
+# A backend chosen at runtime is either the PyAV (VideoFrame) or ffmpeg-CLI
+# (bytes) flavor; this union is the honest type at that dynamic boundary.
+AnyVideoBackend: TypeAlias = (
+    "VideoCompressionBackend[VideoFrame] | VideoCompressionBackend[bytes]"
+)

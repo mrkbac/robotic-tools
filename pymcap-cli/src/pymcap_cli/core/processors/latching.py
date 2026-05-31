@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Latching processor — keep messages on transient-local topics across cuts.
 
 When ``filter`` or ``split`` would drop messages on topics like ``/tf_static``,
@@ -18,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import yaml
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -108,6 +108,7 @@ class LatchingProcessor(InputProcessor):
             return True
         return self._from_metadata and _channel_is_transient_local(channel)
 
+    @override
     def initialize(self, context: PipelineContext) -> None:
         for input_context in context.inputs:
             if input_context.summary is None:
@@ -116,9 +117,11 @@ class LatchingProcessor(InputProcessor):
                 if self._is_latched(channel):
                     self._latched_topics.add(channel.topic)
 
+    @override
     def prepare_input(self, context: InputContext) -> None:
         _ = context
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
@@ -128,11 +131,13 @@ class LatchingProcessor(InputProcessor):
             self._latched_topics.add(channel.topic)
         return Action.CONTINUE
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         # Fast-copied chunks bypass on_message — if the chunk references a
         # latched channel we must DECODE so the latch cache stays current.
         return MessageScope.channels(set(self._latched_channel_ids))
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         if message.channel_id in self._latched_channel_ids:
             previous = self._last_message.get(message.channel_id)
@@ -161,6 +166,7 @@ class LatchingProcessor(InputProcessor):
                 replay.append((channel_id, previous))
         return tuple(replay)
 
+    @override
     def on_segment_open(self, context: SegmentContext) -> Iterable[tuple[int, Message]]:
         if context.key in self._replayed_segments:
             return ()

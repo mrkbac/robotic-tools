@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Emit every matched message under both its original topic and one or more alias topics.
 
 Used for gradual consumer migration: while subscribers are being switched
@@ -24,6 +23,8 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -94,6 +95,7 @@ class TopicAliasProcessor(InputProcessor):
         if alias_ids:
             self._aliases[channel.id] = alias_ids
 
+    @override
     def prepare_input(self, context: InputContext) -> None:
         # Stash register_channel so on_channel can also register aliases
         # for channels that arrive later (streamed / unindexed files).
@@ -108,17 +110,20 @@ class TopicAliasProcessor(InputProcessor):
             remapped = context.remap_channel(channel)
             self._register_aliases_for(remapped)
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
         self._register_aliases_for(channel)
         return Action.CONTINUE
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         if context.input.stream_id not in self._streams_with_summary:
             return MessageScope.all()
         return MessageScope.channels(set(self._aliases))
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,
@@ -126,6 +131,7 @@ class TopicAliasProcessor(InputProcessor):
     ) -> ChunkDecision:
         return super().on_chunk(context, chunk)
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         yield message
         for alias_id in self._aliases.get(message.channel_id, ()):

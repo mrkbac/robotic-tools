@@ -30,6 +30,16 @@
   Exception: command modules under `cmd/` rely on `cyclopts.Annotated[...]` parameter metadata at
   runtime, so the future-import must stay out of them.
 - Avoid `Any`, bare `object`, `hasattr`, `getattr` — use concrete types, `Protocol`, or `TypeVar`.
+- Prefer `_typeshed` protocol/alias types over `Any` or over-narrow concretes for buffers, paths,
+  and streams: `ReadableBuffer`/`WriteableBuffer` (not `bytes`/`bytearray` for `readinto`-style code),
+  `StrPath`/`StrOrBytesPath` (not `str | Path`), `SupportsRead`/`SupportsWrite` (not `IO[bytes]` when
+  you only read/write). They are stub-only — import under `if TYPE_CHECKING:` and quote the annotation.
+- `ty` reads the `.py` source of pure-Python deps, so untyped *pure-Python* packages need no stub.
+  Only for compiled/extension deps (C/Rust `.so`/`.pyd` with no readable source and no `py.typed`)
+  check for a `types-xxxx` stub package and add it to the dev group — before reaching for `Any`/a cast.
+- `ty` honors bare `# type: ignore` and `# ty: ignore[rule]`, but NOT mypy-style `# type: ignore[code]`.
+  Use `# ty: ignore[rule]` (with a reason) only when a real fix isn't feasible (generated code,
+  third-party stub gaps).
 - Imports top-level (rare exceptions: cyclic break, optional dep). Prefer direct imports over broad module imports.
 - No module-level side effects; modules must import cleanly.
 - Booleans: `is_` for state, `has_` for possession, `was_` only when past tense reads naturally. Name affirmatively — `is_enabled`, not `is_disabled`.

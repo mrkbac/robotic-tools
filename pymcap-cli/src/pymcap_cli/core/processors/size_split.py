@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from typing_extensions import override
+
 from pymcap_cli.core.processors.base import ChunkContext, MessageContext, MessageScope, OutputRouter
 
 if TYPE_CHECKING:
@@ -52,14 +54,17 @@ class SizeSplitProcessor(OutputRouter):
             self._bytes_in_current += n_bytes
         return self._current_segment
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         _ = context
         return MessageScope.none()
 
+    @override
     def route_chunk(self, context: ChunkContext, chunk: Chunk | LazyChunk) -> tuple[int, ...]:
         _ = context
         return (self._advance(chunk.uncompressed_size),)
 
+    @override
     def route_message(self, context: MessageContext, message: Message) -> tuple[int, ...]:
         _ = context
         return (self._advance(len(message.data) + _MESSAGE_RECORD_OVERHEAD_BYTES),)

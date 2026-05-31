@@ -23,9 +23,9 @@ from mcap_codec_support.video import (
     FOXGLOVE_COMPRESSED_VIDEO,
     IMAGE_SCHEMAS,
     RAW_SCHEMAS,
+    AnyVideoBackend,
     EncoderConfig,
     EncoderMode,
-    VideoCompressionBackend,
     VideoEncoderError,
     calculate_downscale_dimensions,
     create_video_compression_backend,
@@ -540,7 +540,7 @@ def _handle_pointcloud(
 
 def _handle_raw_to_jpeg(
     msg: DecodedMessage,
-    backend: VideoCompressionBackend,
+    backend: AnyVideoBackend,
     decode_future: Future[Any] | None,
     encoders: dict[str, Any],
     jpeg_quality: int,
@@ -610,7 +610,7 @@ def _handle_raw_to_jpeg(
 
 def _run_compress_loop(
     messages: Iterator[tuple[DecodedMessage, Future[Any] | None]],
-    backend: VideoCompressionBackend,
+    backend: AnyVideoBackend,
     do_video: bool,
     do_jpeg: bool,
     jpeg_quality: int,

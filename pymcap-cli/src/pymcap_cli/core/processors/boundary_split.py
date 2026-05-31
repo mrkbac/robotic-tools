@@ -1,8 +1,9 @@
-# ruff: noqa: ARG002
 from __future__ import annotations
 
 import bisect
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     SPLIT_REQUIRED,
@@ -32,6 +33,7 @@ class BoundarySplitProcessor(OutputRouter):
         index = bisect.bisect_right(self.boundaries, timestamp_ns) - 1
         return max(0, min(index, self.n_segments - 1))
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,
@@ -45,6 +47,7 @@ class BoundarySplitProcessor(OutputRouter):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
+    @override
     def route_chunk(
         self, context: ChunkContext, chunk: Chunk | LazyChunk
     ) -> tuple[int, ...] | _SplitRequiredSentinel:
@@ -56,9 +59,11 @@ class BoundarySplitProcessor(OutputRouter):
             return SPLIT_REQUIRED
         return (start_segment,)
 
+    @override
     def route_message(self, context: MessageContext, message: Message) -> tuple[int, ...]:
         return (self._segment_index(message.log_time),)
 
+    @override
     def output_segments(self) -> tuple[OutputSegmentInfo, ...] | None:
         return tuple(
             OutputSegmentInfo(

@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 from __future__ import annotations
 
 import logging
@@ -13,6 +12,7 @@ from ros_parser.message_path import (
     parse_message_path,
 )
 from small_mcap import JSONDecoderFactory
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     ChannelContext,
@@ -104,6 +104,7 @@ class ExpressionSplitProcessor(OutputRouter):
         self._trailing_count = trailing_context_count
         self._tail_windows: list[_TailWindow] = []
 
+    @override
     def initialize(self, context: PipelineContext) -> None:
         for input_context in context.inputs:
             if input_context.summary is None:
@@ -116,6 +117,7 @@ class ExpressionSplitProcessor(OutputRouter):
                 )
                 self._register(channel, schema)
 
+    @override
     def on_channel(self, context: ChannelContext, channel: Channel, schema: Schema | None) -> None:
         self._register(channel, schema)
 
@@ -159,6 +161,7 @@ class ExpressionSplitProcessor(OutputRouter):
             for idx in indexes
         )
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,
@@ -168,6 +171,7 @@ class ExpressionSplitProcessor(OutputRouter):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
+    @override
     def route_chunk(
         self, context: ChunkContext, chunk: Chunk | LazyChunk
     ) -> tuple[int, ...] | _SplitRequiredSentinel:
@@ -200,6 +204,7 @@ class ExpressionSplitProcessor(OutputRouter):
             )
         )
 
+    @override
     def route_message(self, context: MessageContext, message: Message) -> tuple[int, ...]:
         dec = self._decoders.get(message.channel_id)
         ch = self.channels.get(message.channel_id)

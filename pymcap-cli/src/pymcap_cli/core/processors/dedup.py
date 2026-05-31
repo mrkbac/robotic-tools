@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Drop messages whose ``(channel_id, log_time, payload)`` has already been written.
 
 **Scope:** dedup is for *cross-input* duplicate elimination during merges.
@@ -28,6 +27,8 @@ from __future__ import annotations
 
 import bisect
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     ChunkContext,
@@ -68,6 +69,7 @@ class DedupIdenticalProcessor(InputProcessor):
         self._other_ends: list[list[int]] = []
         self._has_chunk_indexes = False
 
+    @override
     def initialize(self, context: PipelineContext) -> None:
         self._other_starts.clear()
         self._other_ends.clear()
@@ -104,6 +106,7 @@ class DedupIdenticalProcessor(InputProcessor):
             self._other_starts.append([s for s, _ in merged])
             self._other_ends.append([e for _, e in merged])
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,
@@ -130,6 +133,7 @@ class DedupIdenticalProcessor(InputProcessor):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         time_key = (message.channel_id, message.log_time)
         digest = _hash_bytes(message.data)

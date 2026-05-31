@@ -1,7 +1,8 @@
-# ruff: noqa: ARG002
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -48,9 +49,11 @@ class TopicFilterProcessor(InputProcessor):
 
         return Action.CONTINUE
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         return MessageScope.none()
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:

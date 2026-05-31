@@ -1,7 +1,8 @@
-# ruff: noqa: ARG002
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import ChunkContext, ChunkDecision, InputProcessor
 
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 class AlwaysDecodeProcessor(InputProcessor):
     """Forces all chunks to be decoded."""
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,

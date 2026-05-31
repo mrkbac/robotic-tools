@@ -6,6 +6,8 @@ import io
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.video.common import (
     DEFAULT_FPS,
@@ -29,13 +31,17 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from concurrent.futures import Future, ThreadPoolExecutor
 
+    import numpy.typing as npt
+    from av import VideoFrame
     from small_mcap import DecodedMessage
 
     from mcap_codec_support._protocols import (
+        AnyVideoBackend,
         RawImageMessage,
-        VideoCompressionBackend,
         VideoDecompressorProtocol,
     )
+    from mcap_codec_support.video.ffmpeg import FFmpegVideoEncoder
+    from mcap_codec_support.video.pyav import VideoEncoder
 
 
 class _PyAVCompressionBackend:
@@ -52,13 +58,13 @@ class _PyAVCompressionBackend:
 
         return resolve_encoder(codec)
 
-    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]:
+    def decode_compressed(self, data: bytes) -> tuple[VideoFrame, int, int]:
         from mcap_codec_support.video.pyav import decode_compressed_frame  # noqa: PLC0415
 
         frame = decode_compressed_frame(data)
         return frame, frame.width, frame.height
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[Any, int, int]:
+    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[VideoFrame, int, int]:
         if schema_name in COMPRESSED_SCHEMAS:
             return self.decode_compressed(bytes(msg.decoded_message.data))
 
@@ -77,7 +83,7 @@ class _PyAVCompressionBackend:
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
-    ) -> Any:
+    ) -> VideoEncoder:
         # PyAV reformats input frames per-frame inside VideoEncoder.encode, so
         # the protocol's pix-fmt / scale knobs are FFmpeg-CLI-only.
         del input_pix_fmt, scale
@@ -117,13 +123,13 @@ class _FfmpegCliCompressionBackend:
 
         return resolve_encoder(codec)
 
-    def decode_compressed(self, data: bytes) -> tuple[Any, int, int]:
+    def decode_compressed(self, data: bytes) -> tuple[bytes, int, int]:
         from mcap_codec_support.video.ffmpeg import probe_image_dimensions  # noqa: PLC0415
 
         width, height = probe_image_dimensions(data)
         return data, width, height
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[Any, int, int]:
+    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[bytes, int, int]:
         data = bytes(msg.decoded_message.data)
         topic = msg.channel.topic
 
@@ -150,7 +156,7 @@ class _FfmpegCliCompressionBackend:
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
-    ) -> Any:
+    ) -> FFmpegVideoEncoder:
         from mcap_codec_support.video.ffmpeg import FFmpegVideoEncoder  # noqa: PLC0415
 
         return FFmpegVideoEncoder(
@@ -167,7 +173,7 @@ class _FfmpegCliCompressionBackend:
 
 def create_video_compression_backend(
     mode: EncoderMode, codec: str, *, do_video: bool
-) -> VideoCompressionBackend:
+) -> AnyVideoBackend:
     """Select the roscompress video backend."""
     if mode is EncoderMode.FFMPEG_CLI:
         return _FfmpegCliCompressionBackend()
@@ -183,7 +189,7 @@ def create_video_compression_backend(
 
 def prefetch_image_decodes(
     messages: Iterable[DecodedMessage],
-    backend: VideoCompressionBackend,
+    backend: AnyVideoBackend,
     pool: ThreadPoolExecutor,
     prefetch: int = 8,
 ) -> Iterator[tuple[DecodedMessage, Future[Any] | None]]:
@@ -230,11 +236,12 @@ def encode_raw_image_to_jpeg(
     return buf.getvalue(), target_w, target_h
 
 
-def decode_compressed_image_to_rgb_array(data: bytes) -> Any:
-    """Decode JPEG/PNG compressed image bytes to an RGB numpy array."""
+def decode_compressed_image_to_rgb_array(data: bytes) -> npt.NDArray[np.uint8]:
+    """Decode JPEG/PNG compressed image bytes to an RGB (uint8) numpy array."""
     from mcap_codec_support.video.pyav import decode_compressed_frame  # noqa: PLC0415
 
-    return decode_compressed_frame(data).to_ndarray(format="rgb24")
+    rgb = decode_compressed_frame(data).to_ndarray(format="rgb24")
+    return np.asarray(rgb, dtype=np.uint8)
 
 
 def create_video_decompressor(

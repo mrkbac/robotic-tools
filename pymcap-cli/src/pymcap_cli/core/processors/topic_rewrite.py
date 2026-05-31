@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Rewrite ``Channel.topic`` strings via regex substitution.
 
 Rules map a topic-regex to a replacement (``re.sub`` semantics — back-
@@ -21,6 +20,8 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -46,6 +47,7 @@ class TopicRewriteProcessor(InputProcessor):
         ]
         self._rewritten_channel_ids: set[int] = set()
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
@@ -57,6 +59,7 @@ class TopicRewriteProcessor(InputProcessor):
                 break
         return Action.CONTINUE
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,

@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Keep every Nth message per channel.
 
 Rules map a topic-regex to an integer N. Channels whose topic matches a
@@ -15,6 +14,8 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -52,6 +53,7 @@ class NthMessageProcessor(InputProcessor):
                 return n
         return None
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
@@ -60,9 +62,11 @@ class NthMessageProcessor(InputProcessor):
             self._covered_n[channel.id] = n
         return Action.CONTINUE
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         return MessageScope.channels(set(self._covered_n))
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         n = self._covered_n.get(message.channel_id)
         if n is None:

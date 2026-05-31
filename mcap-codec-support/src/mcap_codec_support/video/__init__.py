@@ -1,6 +1,6 @@
 """Video MCAP factories, schema constants, and backend helpers."""
 
-from mcap_codec_support._protocols import VideoCompressionBackend
+from mcap_codec_support._protocols import AnyVideoBackend, VideoCompressionBackend
 from mcap_codec_support.video.common import (
     EncoderBackend,
     EncoderConfig,
@@ -33,6 +33,7 @@ __all__ = [
     "IMAGE",
     "IMAGE_SCHEMAS",
     "RAW_SCHEMAS",
+    "AnyVideoBackend",
     "EncoderBackend",
     "EncoderConfig",
     "EncoderMode",

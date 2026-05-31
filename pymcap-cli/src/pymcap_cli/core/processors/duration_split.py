@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Split output every N nanoseconds, anchored to the first message seen.
 
 Streaming-anchor design — no summary required. The anchor is set lazily to
@@ -10,6 +9,8 @@ dynamically. Works identically on indexed and unindexed inputs.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     SPLIT_REQUIRED,
@@ -42,6 +43,7 @@ class DurationSplitProcessor(OutputRouter):
             self._anchor_ns = timestamp_ns
         return max(0, (timestamp_ns - self._anchor_ns) // self.duration_ns)
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,
@@ -53,6 +55,7 @@ class DurationSplitProcessor(OutputRouter):
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
 
+    @override
     def route_chunk(
         self, context: ChunkContext, chunk: Chunk | LazyChunk
     ) -> tuple[int, ...] | _SplitRequiredSentinel:
@@ -62,5 +65,6 @@ class DurationSplitProcessor(OutputRouter):
             return SPLIT_REQUIRED
         return (start_seg,)
 
+    @override
     def route_message(self, context: MessageContext, message: Message) -> tuple[int, ...]:
         return (self._segment_index(message.log_time),)

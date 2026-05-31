@@ -1,9 +1,10 @@
-# ruff: noqa: ARG002
 """Concrete OutputProcessor implementations for chunk grouping."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import OutputProcessor
 
@@ -32,6 +33,7 @@ class PatternGrouper(OutputProcessor):
         self.topic_patterns = topic_patterns
         self.schema_patterns = schema_patterns or []
 
+    @override
     def chunk_group_key(
         self,
         segment_key: OutputKey,
@@ -52,6 +54,7 @@ class PatternGrouper(OutputProcessor):
 class PerChannelGrouper(OutputProcessor):
     """Give every channel its own chunk group, keyed by ``channel.id``."""
 
+    @override
     def chunk_group_key(
         self,
         segment_key: OutputKey,

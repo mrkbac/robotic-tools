@@ -1,4 +1,3 @@
-# ruff: noqa: ARG002
 """Collapse duplicate channels with identical content onto a single channel id.
 
 Two channels are "duplicates" when they share ``(topic, schema_id,
@@ -18,6 +17,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -52,6 +53,7 @@ class ChannelMergeProcessor(InputProcessor):
             frozenset(channel.metadata.items()),
         )
 
+    @override
     def on_channel(
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
@@ -68,9 +70,11 @@ class ChannelMergeProcessor(InputProcessor):
         self._redirect[channel.id] = existing_id
         return Action.CONTINUE
 
+    @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         return MessageScope.channels(set(self._redirect))
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         target = self._redirect.get(message.channel_id)
         if target is not None:

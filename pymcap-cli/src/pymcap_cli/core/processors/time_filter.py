@@ -1,7 +1,8 @@
-# ruff: noqa: ARG002
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pymcap_cli.core.processors.base import (
     Action,
@@ -46,6 +47,7 @@ class TimeFilterProcessor(InputProcessor):
         self.start_ns: int | None = start_ns if isinstance(start_ns, int) else None
         self.end_ns: int | None = end_ns if isinstance(end_ns, int) else None
 
+    @override
     def initialize(self, context: PipelineContext) -> None:
         """Resolve any RelativeTime bounds against the input summaries."""
         if not (isinstance(self._start, RelativeTime) or isinstance(self._end, RelativeTime)):
@@ -81,6 +83,7 @@ class TimeFilterProcessor(InputProcessor):
                 f"resolved end_ns ({self.end_ns})"
             )
 
+    @override
     def on_chunk(
         self,
         context: ChunkContext,
@@ -129,12 +132,14 @@ class TimeFilterProcessor(InputProcessor):
             return False
         return not (self.end_ns is not None and log_time >= self.end_ns)
 
+    @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
         inside = self._in_window(message.log_time)
         keep = inside ^ self._invert  # invert flips inside↔outside
         if keep:
             yield message
 
+    @override
     def on_attachment(self, context: InputContext, attachment: Attachment) -> Action:
         inside = self._in_window(attachment.log_time)
         keep = inside ^ self._invert
