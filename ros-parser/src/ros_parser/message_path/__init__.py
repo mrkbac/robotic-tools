@@ -7,7 +7,6 @@ from .models import (
     Comparison,
     ComparisonOperator,
     CompoundFilter,
-    EulerAngles,
     FieldAccess,
     FieldResolutionError,
     Filter,
@@ -17,10 +16,10 @@ from .models import (
     MathModifier,
     MessagePath,
     MessagePathError,
-    Quaternion,
     ValidationError,
     Variable,
 )
+from .modifiers import EulerAngles, Quaternion
 from .parser import parse_message_path
 
 __all__ = [
