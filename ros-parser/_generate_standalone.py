@@ -42,7 +42,7 @@ class DeterministicSet(_original_set):
 
 # Replace built-in set with deterministic version
 import builtins
-builtins.set = DeterministicSet  # type: ignore[misc]
+builtins.set = DeterministicSet  # ty: ignore[invalid-assignment]  # deterministic codegen
 
 # Now safe to import everything else
 import argparse

@@ -451,6 +451,9 @@ class DecoderGeneratorFactory:
             # Apply tail-from-end optimization: use len(_data) - tail_size
             # instead of _offset for the last PrimitiveGroupAction when in dynamic mode
             if tail_size is not None and i == len(fields) - 1:
+                # _compute_fixed_tail only returns non-None when the last field is
+                # a PrimitiveGroupAction (see its docstring).
+                assert isinstance(field, PrimitiveGroupAction)
                 field_vars.extend(self._generate_tail_group(field))
             else:
                 field_vars.extend(self.generate_type(field))

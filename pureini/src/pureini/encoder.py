@@ -6,6 +6,7 @@ Licensed under the Apache License, Version 2.0
 """
 
 import struct
+from typing import TYPE_CHECKING, Protocol, cast
 
 import lz4.block
 import numpy as np
@@ -14,6 +15,9 @@ from .encoding_utils import BufferView, build_field_metadata
 from .header import HeaderEncoding, encode_header
 from .jit_codec import encode_chunk_jit
 from .types import POINTS_PER_CHUNK, CompressionOption, EncodingInfo, EncodingOptions
+
+if TYPE_CHECKING:
+    from _typeshed import ReadableBuffer
 
 # Python 3.14 promoted zstd into the stdlib; older interpreters use the
 # third-party `zstandard` package (declared in pyproject as a 3.13-only dep).
@@ -25,6 +29,18 @@ except ImportError:
     import zstandard as zstd
 
     _ZSTD_IS_STDLIB = False
+
+
+class _StdlibZstdCompressor(Protocol):
+    """The 3.14 stdlib ``compression.zstd.ZstdCompressor`` surface we rely on.
+
+    ty resolves ``zstd`` to the third-party ``zstandard`` class on the 3.10
+    target, which lacks ``FLUSH_FRAME`` and the two-arg ``compress``.
+    """
+
+    FLUSH_FRAME: int
+
+    def compress(self, data: "ReadableBuffer", mode: int = ..., /) -> bytes: ...
 
 
 def _zstd_compress_bound(src_size: int) -> int:
@@ -170,13 +186,10 @@ class PointcloudEncoder:
             payload = lz4.block.compress(chunk_data, store_size=False)
         elif self.info.compression_opt == CompressionOption.ZSTD:
             if _ZSTD_IS_STDLIB:
-                # compression.zstd's streaming ZstdCompressor needs an explicit
-                # frame terminator; ty resolves zstd to the third-party class on
-                # the 3.10 target, hence the ignore.
-                payload = self._zstd_cctx.compress(
-                    chunk_data,
-                    self._zstd_cctx.FLUSH_FRAME,  # type: ignore[unresolved-attribute, too-many-positional-arguments]
-                )
+                # compression.zstd's streaming ZstdCompressor needs an explicit frame
+                # terminator (FLUSH_FRAME); see _StdlibZstdCompressor for why we cast.
+                cctx = cast("_StdlibZstdCompressor", self._zstd_cctx)
+                payload = cctx.compress(chunk_data, cctx.FLUSH_FRAME)
             else:
                 payload = self._zstd_cctx.compress(chunk_data)
         elif self.info.compression_opt == CompressionOption.NONE:

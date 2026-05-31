@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import Group, Parameter, validators
 from rich.console import Console
@@ -26,6 +26,9 @@ from pymcap_cli.types.types_manual import (
     NoClobberOption,
 )
 from pymcap_cli.utils import bytes_to_human, parse_time_arg
+
+if TYPE_CHECKING:
+    from pymcap_cli.core.processors.base import OutputRouter
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -266,7 +269,7 @@ def split(
                 return 1
 
     # Build split processors
-    processors = []
+    processors: list[OutputRouter] = []
     if duration:
         try:
             duration_ns = parse_duration_ns(duration)

@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from re import Pattern
-from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, overload
+from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, cast, overload
 
 if TYPE_CHECKING:
     from _typeshed import WriteableBuffer
@@ -211,7 +211,7 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
         return data
 
     def readinto(self, b: "WriteableBuffer") -> int | None:
-        result: int | None = self._stream.readinto(b)  # type: ignore[attr-defined]
+        result: int | None = cast("io.RawIOBase", self._stream).readinto(b)
         if result is not None and result > 0:
             self._last_position += result
             self._advance_to(self._last_position)

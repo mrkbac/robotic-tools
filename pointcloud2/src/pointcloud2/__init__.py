@@ -207,7 +207,7 @@ def dtype_from_fields(
             field_datatypes.append(datatype.str)
 
     # Create a tuple for each field containing name and data type
-    dtype_dict = {
+    dtype_dict: dict[str, list[str] | list[int] | int] = {
         "names": field_names,
         "formats": field_datatypes,
         "offsets": field_offsets,

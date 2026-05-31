@@ -226,7 +226,9 @@ def _decode_draco_payload(payload: bytes, header: Header) -> Pointcloud2Dict:
     dtype = np.dtype([(name, values.dtype) for name, values in columns])
     point_data = np.empty(point_count, dtype=dtype)
     for name, values in columns:
-        point_data[name] = values
+        # Structured-array field assignment; numpy's stubs type ``point_data`` as a
+        # plain float64 array, so they don't model string-key (field) assignment.
+        point_data[name] = values  # ty: ignore[invalid-assignment]
 
     fields: list[PointFieldDict] = [
         {"name": field.name, "offset": field.offset, "datatype": field.datatype, "count": 1}

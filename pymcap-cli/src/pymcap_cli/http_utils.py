@@ -2,9 +2,13 @@
 
 import io
 from http import HTTPStatus
+from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import ParseResult
 from urllib.request import Request, urlopen
+
+if TYPE_CHECKING:
+    from _typeshed import WriteableBuffer
 
 
 def get_http_file_size(url: str) -> int:
@@ -138,7 +142,7 @@ class HTTPRangeStream(io.RawIOBase):
         except URLError as e:
             raise OSError(f"Network error while reading from {self.url}: {e}") from e
 
-    def readinto(self, b: bytearray) -> int:  # type: ignore[override]
+    def readinto(self, b: "WriteableBuffer") -> int:
         """
         Read bytes into a pre-allocated buffer.
 
@@ -148,9 +152,10 @@ class HTTPRangeStream(io.RawIOBase):
         Returns:
             Number of bytes read
         """
-        data = self.read(len(b))
+        view = memoryview(b).cast("B")
+        data = self.read(len(view))
         n = len(data)
-        b[:n] = data
+        view[:n] = data
         return n
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:

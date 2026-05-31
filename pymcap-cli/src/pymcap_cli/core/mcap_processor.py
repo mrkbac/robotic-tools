@@ -1187,7 +1187,7 @@ class McapProcessor:
         for router in output_opts.routers:
             router.initialize(self._pipeline_context())
 
-        known_segments = list(self._iter_known_output_segments())
+        known_segments: list[tuple[OutputKey, int, int]] = list(self._iter_known_output_segments())
         if not known_segments and not output_opts.is_splitting:
             known_segments = [(0, 0, 0)]
 

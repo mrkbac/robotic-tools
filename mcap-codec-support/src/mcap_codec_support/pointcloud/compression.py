@@ -97,10 +97,12 @@ class CloudiniPointCloudCompressor:
         info = _build_encoding_info(
             msg, self._encoding_opt, self._compression_opt, self._resolution
         )
-        if self._cached_info != info:
+        encoder = self._cached_encoder
+        if self._cached_info != info or encoder is None:
             self._cached_info = info
-            self._cached_encoder = self._PointcloudEncoder(info)
-        return self._cached_encoder.encode(bytes(msg.data))  # type: ignore[union-attr]
+            encoder = self._PointcloudEncoder(info)
+            self._cached_encoder = encoder
+        return encoder.encode(bytes(msg.data))
 
 
 def _compute_position_quantization(

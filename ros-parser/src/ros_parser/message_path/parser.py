@@ -174,7 +174,7 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         )
 
 
-_parser: Any = Lark_StandAlone(transformer=MessagePathTransformer())  # type: ignore[arg-type]
+_parser: Any = Lark_StandAlone(transformer=MessagePathTransformer())  # ty: ignore[invalid-argument-type]  # generated parser stub
 
 
 def parse_message_path(path: str) -> MessagePath:
