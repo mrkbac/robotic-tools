@@ -96,7 +96,7 @@ def test_unknown_int_flows_through_raw() -> None:
     profile = parse_qos_profiles({"offered_qos_profiles": raw})[0]
     assert profile.reliability == 99
     assert not isinstance(profile.reliability, Reliability)
-    assert "UNKNOWN(99)" in _plain(_format_qos_compact(profile))
+    assert "?99" in _plain(_format_qos_compact(profile))
 
 
 def test_explicit_unknown_sentinel_maps_to_enum() -> None:
@@ -143,7 +143,7 @@ def test_format_qos_compact_includes_depth_for_keep_last() -> None:
         liveliness_lease_ns=None,
         avoid_ros_namespace_conventions=False,
     )
-    assert _plain(_format_qos_compact(profile)) == "RELIABLE/TRANSIENT_LOCAL/KEEP_LAST(20)"
+    assert _plain(_format_qos_compact(profile)) == "R/TL/KL(20)"
 
 
 def test_format_qos_compact_keep_all() -> None:
@@ -158,7 +158,7 @@ def test_format_qos_compact_keep_all() -> None:
         liveliness_lease_ns=None,
         avoid_ros_namespace_conventions=False,
     )
-    assert _plain(_format_qos_compact(profile)) == "BEST_EFFORT/VOLATILE/KEEP_ALL"
+    assert _plain(_format_qos_compact(profile)) == "BE/V/KA"
 
 
 def test_format_qos_compact_system_default_history_omitted() -> None:
@@ -173,7 +173,7 @@ def test_format_qos_compact_system_default_history_omitted() -> None:
         liveliness_lease_ns=None,
         avoid_ros_namespace_conventions=False,
     )
-    assert _plain(_format_qos_compact(profile)) == "RELIABLE/VOLATILE"
+    assert _plain(_format_qos_compact(profile)) == "R/V"
 
 
 def test_best_available_recognised() -> None:
@@ -265,9 +265,9 @@ def test_format_qos_compact_emits_colour_markup_per_value() -> None:
     # distinguishes RELIABLE topics from BEST_EFFORT etc. The exact
     # colour comes from text_to_color hashing, so just check the tags
     # wrap each policy name.
-    assert "]RELIABLE[/]" in out
-    assert "]VOLATILE[/]" in out
-    assert "]KEEP_LAST(10)[/]" in out
+    assert "]R[/]" in out
+    assert "]V[/]" in out
+    assert "]KL(10)[/]" in out
 
 
 def test_multiple_profiles_parsed_in_order() -> None:

@@ -5,3 +5,5 @@ WriteableBuffer = "WriteableBuffer"
 [default.extend-words]
 # ``fo`` is a SQL alias for ``file_observation`` in migration 0007; not a typo.
 fo = "fo"
+# ``BA`` is the QoS short code for BEST_AVAILABLE in the info channels table.
+BA = "BA"

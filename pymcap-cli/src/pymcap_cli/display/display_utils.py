@@ -16,7 +16,7 @@ from rich.text import Text
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.types.info_types import ChannelInfo, McapInfoOutput, SchemaInfo
-from pymcap_cli.types.qos import History, QosProfile
+from pymcap_cli.types.qos import Durability, History, QosProfile, Reliability
 from pymcap_cli.utils import bytes_to_human
 
 
@@ -735,18 +735,49 @@ def _format_channel_qos(
     return f"[yellow]mixed ({len(rendered)})[/]"
 
 
+_RELIABILITY_ABBR: dict[IntEnum, str] = {
+    Reliability.SYSTEM_DEFAULT: "SD",
+    Reliability.RELIABLE: "R",
+    Reliability.BEST_EFFORT: "BE",
+    Reliability.UNKNOWN: "?",
+    Reliability.BEST_AVAILABLE: "BA",
+}
+_DURABILITY_ABBR: dict[IntEnum, str] = {
+    Durability.SYSTEM_DEFAULT: "SD",
+    Durability.TRANSIENT_LOCAL: "TL",
+    Durability.VOLATILE: "V",
+    Durability.UNKNOWN: "?",
+    Durability.BEST_AVAILABLE: "BA",
+}
+_HISTORY_ABBR: dict[IntEnum, str] = {
+    History.SYSTEM_DEFAULT: "SD",
+    History.KEEP_LAST: "KL",
+    History.KEEP_ALL: "KA",
+    History.UNKNOWN: "?",
+}
+
+
+def _policy_abbr(value: IntEnum | int, table: Mapping[IntEnum, str]) -> str:
+    """Short code for a policy value; raw ints (future/garbled codes) become ``?n``."""
+    if isinstance(value, IntEnum):
+        return table.get(value, value.name)
+    return f"?{value}"
+
+
 def _format_qos_compact(profile: QosProfile) -> str:
-    """One-line ``RELIABLE/VOLATILE/KEEP_LAST(10)`` style summary, coloured."""
-    parts = [_colored_policy(profile.reliability), _colored_policy(profile.durability)]
+    """One-line ``R/V/KL(10)`` style summary, coloured."""
+    parts = [
+        _colored_policy(profile.reliability, _policy_abbr(profile.reliability, _RELIABILITY_ABBR)),
+        _colored_policy(profile.durability, _policy_abbr(profile.durability, _DURABILITY_ABBR)),
+    ]
     if profile.history is History.KEEP_LAST:
-        parts.append(_colored_policy(profile.history, override=f"KEEP_LAST({profile.depth})"))
-    elif profile.history is History.KEEP_ALL or profile.history is not History.SYSTEM_DEFAULT:
-        parts.append(_colored_policy(profile.history))
+        parts.append(_colored_policy(profile.history, f"KL({profile.depth})"))
+    elif profile.history is not History.SYSTEM_DEFAULT:
+        parts.append(_colored_policy(profile.history, _policy_abbr(profile.history, _HISTORY_ABBR)))
     return "/".join(parts)
 
 
-def _colored_policy(value: IntEnum | int, *, override: str | None = None) -> str:
-    """Render a policy value with a stable per-value colour."""
-    label = override or (value.name if isinstance(value, IntEnum) else f"UNKNOWN({value})")
+def _colored_policy(value: IntEnum | int, label: str) -> str:
+    """Render a policy ``label`` with a stable per-value colour."""
     key = value.name if isinstance(value, IntEnum) else f"unknown:{value}"
     return f"[{_text_to_color(key)}]{label}[/]"
