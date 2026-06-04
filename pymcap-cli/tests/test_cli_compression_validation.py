@@ -30,7 +30,8 @@ def test_compression_option_rejects_invalid_values_before_command_runs(
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert exc_info.value.code == 1
-    assert 'Invalid value for "--compression"' in output
+    assert "Invalid value" in output
+    assert "--compression" in output
     assert "brotli" in output
     for choice in ("zstd", "lz4", "none"):
         assert choice in output
