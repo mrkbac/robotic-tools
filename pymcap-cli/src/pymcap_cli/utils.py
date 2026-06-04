@@ -197,6 +197,12 @@ class ProgressTrackingIO(io.RawIOBase, IO[bytes]):
             self._progress.advance(self._progress_task, self._pending_delta)
             self._pending_delta = 0
 
+    def mark_read_to(self, position: int) -> None:
+        """Account for bytes read out-of-band (e.g. a worker ``os.pread`` that
+        bypassed this wrapper) so the progress bar still reaches 100%.
+        """
+        self._advance_to(position)
+
     def flush_progress(self) -> None:
         """Flush any pending progress updates."""
         if self._pending_delta > 0:

@@ -378,23 +378,23 @@ def stream_reader(
         if record is None:
             continue
 
-        if (
-            validate_crc
-            and not skip_magic
-            and isinstance(record, DataEnd)
-            and record.data_section_crc not in (0, checksum_before_read)
-        ):
-            raise CRCValidationError(
-                expected=record.data_section_crc,
-                actual=checksum_before_read,
-                record=record,
-            )
+        # Dispatch on the opcode int we already decoded; isinstance against the
+        # McapRecord ABC hits ABCMeta.__instancecheck__, which dominates the
+        # main-thread cost on index-heavy files (tens of thousands of records).
+        if validate_crc and not skip_magic and opcode == Opcode.DATA_END:
+            data_end = cast("DataEnd", record)
+            if data_end.data_section_crc not in (0, checksum_before_read):
+                raise CRCValidationError(
+                    expected=data_end.data_section_crc,
+                    actual=checksum_before_read,
+                    record=data_end,
+                )
 
-        if isinstance(record, Chunk) and not emit_chunks:
-            yield from breakup_chunk(record, validate_crc)
-        elif not emit_chunks and isinstance(record, MessageIndex):
+        if opcode == Opcode.CHUNK and not emit_chunks:
+            yield from breakup_chunk(cast("Chunk", record), validate_crc)
+        elif opcode == Opcode.MESSAGE_INDEX and not emit_chunks:
             pass  # skip when breaking up chunks
-        elif isinstance(record, Footer):
+        elif opcode == Opcode.FOOTER:
             yield record
             if not skip_magic:
                 magic = read(MAGIC_SIZE)

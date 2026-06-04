@@ -2,6 +2,7 @@
 
 import heapq
 import os
+import stat
 from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -42,6 +43,7 @@ from small_mcap import (
 
 # Private helpers — small-mcap does not re-export these at the top level.
 from small_mcap.reader import _predecompress_chunk
+from small_mcap.records import OPCODE_AND_LEN_STRUCT
 from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
@@ -140,6 +142,38 @@ def _recompress_chunk(chunk: Chunk, target: CompressionType) -> Chunk:
         compression=new_compression,
         data=new_data,
     )
+
+
+def _pread_exact(fd: int, length: int, offset: int) -> bytes:
+    """``os.pread`` that retries until ``length`` bytes are read. Positional and
+    thread-safe — it never touches the fd's own offset, so workers can read in
+    parallel while the main thread scans the same descriptor sequentially.
+    """
+    data = os.pread(fd, length, offset)
+    if len(data) == length:
+        return data
+    parts = [data]
+    got = len(data)
+    while got < length:
+        more = os.pread(fd, length - got, offset + got)
+        if not more:
+            raise EOFError(f"short read at offset {offset}: {got}/{length} bytes")
+        parts.append(more)
+        got += len(more)
+    return b"".join(parts)
+
+
+def _read_and_recompress_chunk(
+    fd: int, body_offset: int, body_length: int, target: CompressionType
+) -> Chunk:
+    """Worker-side: read a Chunk record body by absolute offset and recompress it.
+
+    Moving the (large) data read onto the worker — instead of the main thread —
+    is what keeps the pool saturated on big files, where the serial main-thread
+    read was the throughput ceiling.
+    """
+    chunk = Chunk.read(_pread_exact(fd, body_length, body_offset))
+    return _recompress_chunk(chunk, target)
 
 
 @dataclass(slots=True)
@@ -1064,19 +1098,27 @@ class McapProcessor:
             indexes: list[MessageIndex] = []
 
             for record in records:
-                if not isinstance(record, MessageIndex) and pending:
+                # MessageIndex is by far the most common record on index-heavy
+                # files (one per channel per chunk). isinstance against the
+                # McapRecord ABC hits ABCMeta.__instancecheck__ and dominated the
+                # main thread; a `type(...) is` identity check sidesteps it. The
+                # cold branches keep isinstance — negligible volume, and it lets
+                # the type checker narrow.
+                if type(record) is MessageIndex:
+                    indexes.append(record)
+                    continue
+
+                if pending:
                     yield pending
                     pending = None
 
-                if isinstance(record, Header):
-                    pass
-                elif isinstance(record, (Chunk, LazyChunk)):
+                if isinstance(record, (Chunk, LazyChunk)):
                     self.stats.chunks_processed += 1
                     pending = PendingChunk(
                         record, indexes := [], stream_id, input_stream, record.message_start_time
                     )
-                elif isinstance(record, MessageIndex):
-                    indexes.append(record)
+                elif isinstance(record, Header):
+                    pass
                 elif isinstance(record, Schema):
                     self._handle_schema_record(record, stream_id)
                 elif isinstance(record, Channel):
@@ -1495,6 +1537,22 @@ class McapProcessor:
             tuple[PendingChunk, ChunkDecision, Future[list[McapRecord]] | Future[Chunk] | None]
         ] = deque()
 
+        # Per-stream input fd for offloaded chunk reads (regular files only).
+        # None means "not a seekable regular file" — fall back to main-thread reads.
+        stream_fds: dict[int, int | None] = {}
+
+        def regular_file_fd(stream_id: int, stream: IO[bytes]) -> int | None:
+            if stream_id not in stream_fds:
+                fd: int | None = None
+                try:
+                    candidate = stream.fileno()
+                    if stat.S_ISREG(os.fstat(candidate).st_mode):
+                        fd = candidate
+                except (OSError, ValueError, AttributeError):
+                    fd = None
+                stream_fds[stream_id] = fd
+            return stream_fds[stream_id]
+
         with ThreadPoolExecutor(max_workers=max_inflight) as pool:
             target_compression = self.options.output_options.compression_type
 
@@ -1507,6 +1565,40 @@ class McapProcessor:
                     pending.chunk, pending.indexes, pending.stream_id
                 )
                 future: Future[list[McapRecord]] | Future[Chunk] | None = None
+
+                # Fast path: recompressing a still-lazy chunk from a regular
+                # file. Offload the (large) data read to the worker via os.pread
+                # so the main thread isn't the serial read bottleneck. The chunk
+                # stays a LazyChunk here — routing only needs its metadata.
+                if decision == ChunkDecision.RECOMPRESS and type(pending.chunk) is LazyChunk:
+                    fd = regular_file_fd(pending.stream_id, pending.stream)
+                    if fd is not None:
+                        record_start = pending.chunk.record_start
+                        try:
+                            opcode_and_len = _pread_exact(fd, 9, record_start)
+                        except EOFError as e:
+                            console.print(
+                                f"[yellow]Warning (stream {pending.stream_id}): "
+                                f"Failed to read chunk: {e}[/yellow]"
+                            )
+                            self.stats.errors_encountered += 1
+                            return True
+                        _opcode, record_length = OPCODE_AND_LEN_STRUCT.unpack(opcode_and_len)
+                        body_offset = record_start + 9
+                        # Keep the progress bar honest: the body bytes are read
+                        # out-of-band on a worker, bypassing the progress wrapper.
+                        if isinstance(pending.stream, ProgressTrackingIO):
+                            pending.stream.mark_read_to(body_offset + record_length)
+                        future = pool.submit(
+                            _read_and_recompress_chunk,
+                            fd,
+                            body_offset,
+                            record_length,
+                            target_compression,
+                        )
+                        queue.append((pending, decision, future))
+                        return True
+
                 if decision in (
                     ChunkDecision.DECODE,
                     ChunkDecision.DECODE_VERIFY,

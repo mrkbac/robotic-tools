@@ -461,16 +461,23 @@ class McapWriterRaw:
         chunk_start_offset = self.crc_writer.tell()
         chunk_len = chunk.write_record_to(self.crc_writer)
 
-        # Write message indexes directly to crc_writer
+        # Message indexes: serialize the whole block into one buffer and write it
+        # in a single call, computing offsets arithmetically from the byte counts
+        # write_record_to returns. Real files carry one MessageIndex per channel
+        # per chunk, so the previous per-index tell()+write() pair cost tens of
+        # thousands of syscalls; this collapses them to one write per chunk.
         message_index_offsets: dict[int, int] = {}
-        message_index_start_offset = self.crc_writer.tell()
+        message_index_start_offset = chunk_start_offset + chunk_len
+        message_index_length = 0
 
-        if self.index_types & IndexType.MESSAGE:
+        if self.index_types & IndexType.MESSAGE and message_indices:
+            index_block = io.BytesIO()
             for idx in message_indices.values():
-                message_index_offsets[idx.channel_id] = self.crc_writer.tell()
-                idx.write_record_to(self.crc_writer)
-
-        message_index_length = self.crc_writer.tell() - message_index_start_offset
+                message_index_offsets[idx.channel_id] = (
+                    message_index_start_offset + message_index_length
+                )
+                message_index_length += idx.write_record_to(index_block)
+            self.crc_writer.write(index_block.getvalue())
 
         # Store chunk index
         self.chunk_indices.append(
