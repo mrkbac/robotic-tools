@@ -73,3 +73,11 @@ DeleteSourceOption = Annotated[
         group=OUTPUT_OPTIONS_GROUP,
     ),
 ]
+
+InPlaceOption = Annotated[
+    bool,
+    Parameter(
+        name=["-i", "--in-place"],
+        group=OUTPUT_OPTIONS_GROUP,
+    ),
+]

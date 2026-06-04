@@ -126,6 +126,27 @@ def delete_source_files(sources: list[str], outputs: list[Path]) -> None:
             logger.exception(f"Failed to delete '{src}'")
 
 
+def in_place_temp_path(source: Path) -> Path:
+    """Temp output path next to ``source`` so the final rename stays on one filesystem."""
+    return source.with_name(source.name + ".tmp")
+
+
+def finalize_replace_source(*, source: Path, tmp_output: Path) -> int:
+    """Validate ``tmp_output`` and atomically replace ``source`` with it.
+
+    Returns 0 on success and 1 if validation failed (source is preserved and
+    the temp file is removed).
+    """
+    if not validate_mcap_output(tmp_output):
+        logger.error(f"[red]Output failed validation: {tmp_output}[/red]")
+        logger.error("Source file preserved — output not safe to replace source.")
+        tmp_output.unlink(missing_ok=True)
+        return 1
+    tmp_output.replace(source)
+    logger.info(f"Replaced source: {source}")
+    return 0
+
+
 def finalize_delete_source(
     *,
     sources: list[str],

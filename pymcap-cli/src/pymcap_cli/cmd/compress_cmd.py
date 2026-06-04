@@ -1,11 +1,15 @@
 """Compress command for pymcap-cli."""
 
 import logging
+from pathlib import Path
+from urllib.parse import urlparse
 
 from rich.console import Console
 
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
+    finalize_replace_source,
+    in_place_temp_path,
     resolve_overwrite_policy,
     run_processor,
 )
@@ -13,12 +17,14 @@ from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
+    OverwriteCollisionPolicy,
 )
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
     CompressionOption,
     DeleteSourceOption,
     ForceOverwriteOption,
+    InPlaceOption,
     NoClobberOption,
     OutputPathOption,
 )
@@ -29,13 +35,14 @@ console = Console()
 
 def compress(
     file: str,
-    output: OutputPathOption,
+    output: OutputPathOption | None = None,
     *,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
+    in_place: InPlaceOption = False,
 ) -> int:
     """Create a compressed copy of an MCAP file.
 
@@ -46,7 +53,7 @@ def compress(
     file
         Path to the MCAP file to compress (local file or HTTP/HTTPS URL).
     output
-        Output filename.
+        Output filename. Required unless --in-place is given.
     chunk_size
         Chunk size of output file in bytes.
     compression
@@ -58,17 +65,39 @@ def compress(
     delete_source
         Delete source file(s) after the output is validated (header + summary).
         URL inputs and any source whose path equals the output are skipped.
+    in_place
+        Compress to a temp file next to the source and, after the output is
+        validated (header + summary), atomically replace the source with it.
+        Local files only; mutually exclusive with --output and --delete-source.
 
     Examples
     --------
     ```
     pymcap-cli compress in.mcap -o out.mcap
+    pymcap-cli compress in.mcap --in-place
     ```
     """
-    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
+    if in_place:
+        if output is not None:
+            logger.error("--in-place and --output cannot be used together.")
+            return 1
+        if delete_source:
+            logger.error("--in-place and --delete-source cannot be used together.")
+            return 1
+        if urlparse(file).scheme in ("http", "https"):
+            logger.error("--in-place requires a local file, not a URL.")
+            return 1
+        output = in_place_temp_path(Path(file))
+        overwrite_policy = OverwriteCollisionPolicy.OVERWRITE
+    else:
+        if output is None:
+            logger.error("Either --output or --in-place is required.")
+            return 1
+        policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
+        if policy is None:
+            logger.error("--force and --no-clobber cannot be used together.")
+            return 1
+        overwrite_policy = policy
 
     logger.info(f"Compressing '{file}' to '{output}'")
 
@@ -89,7 +118,12 @@ def compress(
         console.print(result.stats)
     except Exception:
         logger.exception("Error during compression")
+        if in_place:
+            output.unlink(missing_ok=True)
         return 1
+
+    if in_place:
+        return finalize_replace_source(source=Path(file), tmp_output=output)
 
     if delete_source:
         return finalize_delete_source(sources=[file], outputs=[output])

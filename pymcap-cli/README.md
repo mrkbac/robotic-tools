@@ -356,6 +356,9 @@ Change MCAP file compression.
 ```bash
 pymcap-cli compress input.mcap -o output.mcap --compression zstd
 pymcap-cli compress input.mcap -o output.mcap --compression lz4
+
+# Compress in place: write to a temp file, validate it, then replace the source
+pymcap-cli compress input.mcap --in-place --compression zstd
 ```
 
 ### `du` — Disk Usage Analysis
