@@ -79,6 +79,29 @@ def test_round_trip_max_uint64_values() -> None:
     assert parsed.offsets == [big, 0, big]
 
 
+def test_read_then_write_reproduces_exact_bytes() -> None:
+    # A round-tripped index must serialize back to the identical record bytes,
+    # whether it rebuilds from arrays or re-emits the cached raw content.
+    idx = MessageIndex(channel_id=11, timestamps=[5, 6, 7], offsets=[0, 32, 64])
+    original = _serialize(idx)
+    parsed = MessageIndex.read(original[9:])
+    assert parsed._raw_content is not None  # read() cached the content
+    assert _serialize(parsed) == original
+
+
+def test_constructed_index_has_no_cached_content() -> None:
+    # Indexes built incrementally (writer/rebuild) must not carry a stale cache.
+    idx = MessageIndex(channel_id=1, timestamps=[1], offsets=[0])
+    assert idx._raw_content is None
+
+
+def test_read_write_round_trip_matches_oracle_via_raw() -> None:
+    # The raw-content fast path must produce the same bytes as the struct oracle.
+    expected = _expected_bytes(8, [100, 200], [0, 16])
+    parsed = MessageIndex.read(expected[9:])
+    assert _serialize(parsed) == expected
+
+
 def test_read_rejects_malformed_records_length() -> None:
     # channel_id=1, records_len=8 (not a multiple of 16) → only half an entry.
     payload = _HEADER.pack(1, 8) + b"\x00" * 8

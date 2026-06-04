@@ -681,8 +681,22 @@ class MessageIndex(McapRecord):
     channel_id: int
     timestamps: list[int]
     offsets: list[int]
+    # The original record content (channel_id + length prefix + entries) when
+    # this index was produced by ``read``. A pure recompress re-emits indexes
+    # unchanged, so reusing these bytes skips rebuilding the entry array — the
+    # dominant main-thread cost on index-heavy files. Only ``read`` sets it;
+    # writer/rebuild build indexes incrementally and leave it None, and nothing
+    # mutates a read() index in place, so a non-None value is always current.
+    _raw_content: bytes | None = field(default=None, compare=False, repr=False)
 
     def write_record_to(self, out: WritableBuffer) -> int:
+        raw = self._raw_content
+        if raw is not None:
+            header = OPCODE_AND_LEN_STRUCT.pack(self.OPCODE, len(raw))
+            out.write(header)
+            out.write(raw)
+            return len(header) + len(raw)
+
         num_records = len(self.timestamps)
         records_size = num_records * 16  # 2 * 8 bytes per record
         content_size = 2 + 4 + records_size  # channel_id + length prefix + records
@@ -707,8 +721,11 @@ class MessageIndex(McapRecord):
     @classmethod
     def read(cls, data: bytes | memoryview) -> "MessageIndex":
         channel_id, records_len = cls._HEADER_STRUCT.unpack_from(data, 0)
+        raw_content = bytes(data)
         if records_len == 0:
-            return cls(channel_id, [], [])
+            index = cls(channel_id, [], [])
+            index._raw_content = raw_content
+            return index
         payload = data[6 : 6 + records_len]
         if records_len % 16:
             # Malformed length: keep the struct.error the entry-wise parse raises.
@@ -717,13 +734,17 @@ class MessageIndex(McapRecord):
             for t, o in struct.iter_unpack(cls._ENTRY_STRUCT.format, payload):
                 timestamps.append(t)
                 offsets.append(o)
-            return cls(channel_id, timestamps, offsets)
+            index = cls(channel_id, timestamps, offsets)
+            index._raw_content = raw_content
+            return index
         # Bulk-decode entries via array — ~3x faster than struct.iter_unpack.
         values = array("Q")
         values.frombytes(payload)
         if sys.byteorder != "little":
             values.byteswap()
-        return cls(channel_id, values[0::2].tolist(), values[1::2].tolist())
+        index = cls(channel_id, values[0::2].tolist(), values[1::2].tolist())
+        index._raw_content = raw_content
+        return index
 
 
 @dataclass(slots=True)
