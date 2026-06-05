@@ -452,8 +452,10 @@ class McapWriterRaw:
         )
 
         for idx in message_indices.values():
-            self.statistics.channel_message_counts[idx.channel_id] += len(idx.timestamps)
-            self.statistics.message_count += len(idx.timestamps)
+            # num_entries avoids forcing a decode of read()-produced indexes.
+            count = idx.num_entries
+            self.statistics.channel_message_counts[idx.channel_id] += count
+            self.statistics.message_count += count
 
         self.statistics.chunk_count += 1
 
@@ -526,8 +528,9 @@ class McapWriterRaw:
             lazy_chunk.message_end_time, self.statistics.message_end_time
         )
         for idx in message_indices.values():
-            self.statistics.channel_message_counts[idx.channel_id] += len(idx.timestamps)
-            self.statistics.message_count += len(idx.timestamps)
+            count = idx.num_entries
+            self.statistics.channel_message_counts[idx.channel_id] += count
+            self.statistics.message_count += count
         self.statistics.chunk_count += 1
 
         # Stream-copy the entire chunk record (opcode + len + content) from input

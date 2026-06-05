@@ -102,8 +102,11 @@ def test_read_write_round_trip_matches_oracle_via_raw() -> None:
     assert _serialize(parsed) == expected
 
 
-def test_read_rejects_malformed_records_length() -> None:
+def test_malformed_records_length_raises_on_decode() -> None:
     # channel_id=1, records_len=8 (not a multiple of 16) → only half an entry.
+    # Decoding is lazy, so read() succeeds and the error surfaces on first
+    # access to the decoded entries.
     payload = _HEADER.pack(1, 8) + b"\x00" * 8
+    index = MessageIndex.read(payload)
     with pytest.raises(struct.error):
-        MessageIndex.read(payload)
+        _ = index.timestamps

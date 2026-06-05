@@ -660,7 +660,6 @@ class Message(McapRecord):
         return cls(channel_id, sequence, log_time, publish_time, data[22:])
 
 
-@dataclass(slots=True)
 class MessageIndex(McapRecord):
     """Message Index record (op=0x07) locating individual messages within a chunk.
 
@@ -672,22 +671,82 @@ class MessageIndex(McapRecord):
         channel_id: [2 bytes] The channel ID for which this index applies
         timestamps: [list[int]] Log time values for each message record
         offsets: [list[int]] Byte offsets into uncompressed chunk data for each message record
+
+    Decoding is lazy: when produced by ``read``, the original record content is
+    kept and ``timestamps`` / ``offsets`` are decoded only on first access. A
+    pure recompress never reads them (it re-emits the cached bytes and only needs
+    ``num_entries`` for statistics), so on index-heavy files this keeps the
+    decode off the main thread entirely.
     """
 
     OPCODE: ClassVar[int] = Opcode.MESSAGE_INDEX
     _HEADER_STRUCT: ClassVar[struct.Struct] = struct.Struct("<HI")
     _ENTRY_STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQ")
 
-    channel_id: int
-    timestamps: list[int]
-    offsets: list[int]
-    # The original record content (channel_id + length prefix + entries) when
-    # this index was produced by ``read``. A pure recompress re-emits indexes
-    # unchanged, so reusing these bytes skips rebuilding the entry array — the
-    # dominant main-thread cost on index-heavy files. Only ``read`` sets it;
-    # writer/rebuild build indexes incrementally and leave it None, and nothing
-    # mutates a read() index in place, so a non-None value is always current.
-    _raw_content: bytes | None = field(default=None, compare=False, repr=False)
+    __slots__ = ("_offsets", "_raw_content", "_timestamps", "channel_id")
+
+    def __init__(
+        self,
+        channel_id: int,
+        timestamps: list[int] | None = None,
+        offsets: list[int] | None = None,
+        *,
+        raw_content: bytes | None = None,
+    ) -> None:
+        self.channel_id = channel_id
+        # Either the decoded lists (writer-built indexes) or ``raw_content`` (read
+        # from a stream, decoded lazily on first timestamps/offsets access) is set.
+        self._timestamps: list[int] | None = timestamps
+        self._offsets: list[int] | None = offsets
+        self._raw_content: bytes | None = raw_content
+
+    def _decode(self) -> None:
+        raw = self._raw_content
+        assert raw is not None
+        records_len = self._HEADER_STRUCT.unpack_from(raw, 0)[1]
+        payload = memoryview(raw)[6 : 6 + records_len]
+        if records_len % 16:
+            # Malformed length: keep the struct.error the entry-wise parse raises.
+            timestamps: list[int] = []
+            offsets: list[int] = []
+            for t, o in struct.iter_unpack(self._ENTRY_STRUCT.format, payload):
+                timestamps.append(t)
+                offsets.append(o)
+            self._timestamps = timestamps
+            self._offsets = offsets
+            return
+        values = array("Q")
+        values.frombytes(payload)
+        if sys.byteorder != "little":
+            values.byteswap()
+        self._timestamps = values[0::2].tolist()
+        self._offsets = values[1::2].tolist()
+
+    @property
+    def timestamps(self) -> list[int]:
+        result = self._timestamps
+        if result is None:
+            self._decode()
+            result = self._timestamps
+            assert result is not None
+        return result
+
+    @property
+    def offsets(self) -> list[int]:
+        result = self._offsets
+        if result is None:
+            self._decode()
+            result = self._offsets
+            assert result is not None
+        return result
+
+    @property
+    def num_entries(self) -> int:
+        """Entry count without forcing a decode of the timestamp/offset lists."""
+        if self._timestamps is not None:
+            return len(self._timestamps)
+        assert self._raw_content is not None
+        return self._HEADER_STRUCT.unpack_from(self._raw_content, 0)[1] // 16
 
     def write_record_to(self, out: WritableBuffer) -> int:
         raw = self._raw_content
@@ -697,7 +756,8 @@ class MessageIndex(McapRecord):
             out.write(raw)
             return len(header) + len(raw)
 
-        num_records = len(self.timestamps)
+        timestamps = self.timestamps
+        num_records = len(timestamps)
         records_size = num_records * 16  # 2 * 8 bytes per record
         content_size = 2 + 4 + records_size  # channel_id + length prefix + records
 
@@ -709,7 +769,7 @@ class MessageIndex(McapRecord):
         # per-entry pack_into for the multi-thousand-entry indexes real files
         # carry per chunk.
         entries = array("Q", bytes(records_size))
-        entries[0::2] = array("Q", self.timestamps)
+        entries[0::2] = array("Q", timestamps)
         entries[1::2] = array("Q", self.offsets)
         if sys.byteorder != "little":
             entries.byteswap()
@@ -720,31 +780,27 @@ class MessageIndex(McapRecord):
 
     @classmethod
     def read(cls, data: bytes | memoryview) -> "MessageIndex":
-        channel_id, records_len = cls._HEADER_STRUCT.unpack_from(data, 0)
-        raw_content = bytes(data)
-        if records_len == 0:
-            index = cls(channel_id, [], [])
-            index._raw_content = raw_content
-            return index
-        payload = data[6 : 6 + records_len]
-        if records_len % 16:
-            # Malformed length: keep the struct.error the entry-wise parse raises.
-            timestamps: list[int] = []
-            offsets: list[int] = []
-            for t, o in struct.iter_unpack(cls._ENTRY_STRUCT.format, payload):
-                timestamps.append(t)
-                offsets.append(o)
-            index = cls(channel_id, timestamps, offsets)
-            index._raw_content = raw_content
-            return index
-        # Bulk-decode entries via array — ~3x faster than struct.iter_unpack.
-        values = array("Q")
-        values.frombytes(payload)
-        if sys.byteorder != "little":
-            values.byteswap()
-        index = cls(channel_id, values[0::2].tolist(), values[1::2].tolist())
-        index._raw_content = raw_content
-        return index
+        # Defer decoding: keep the raw content and parse timestamps/offsets only
+        # if they are actually accessed.
+        channel_id = cls._HEADER_STRUCT.unpack_from(data, 0)[0]
+        return cls(channel_id, raw_content=bytes(data))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MessageIndex):
+            return NotImplemented
+        return (
+            self.channel_id == other.channel_id
+            and self.timestamps == other.timestamps
+            and self.offsets == other.offsets
+        )
+
+    __hash__: ClassVar[None] = None
+
+    def __repr__(self) -> str:
+        return (
+            f"MessageIndex(channel_id={self.channel_id}, "
+            f"timestamps={self.timestamps}, offsets={self.offsets})"
+        )
 
 
 @dataclass(slots=True)
