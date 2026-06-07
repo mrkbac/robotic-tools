@@ -90,6 +90,4 @@ class VideoCompressionBackend(Protocol[FrameT]):
 
 # A backend chosen at runtime is either the PyAV (VideoFrame) or ffmpeg-CLI
 # (bytes) flavor; this union is the honest type at that dynamic boundary.
-AnyVideoBackend: TypeAlias = (
-    "VideoCompressionBackend[VideoFrame] | VideoCompressionBackend[bytes]"
-)
+AnyVideoBackend: TypeAlias = "VideoCompressionBackend[VideoFrame] | VideoCompressionBackend[bytes]"
