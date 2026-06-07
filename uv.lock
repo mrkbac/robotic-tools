@@ -685,7 +685,7 @@ wheels = [
 
 [[package]]
 name = "digitalis"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "digitalis" }
 dependencies = [
     { name = "lark" },
@@ -1532,7 +1532,7 @@ wheels = [
 
 [[package]]
 name = "mcap-codec-support"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "mcap-codec-support" }
 dependencies = [
     { name = "small-mcap" },
@@ -1622,7 +1622,7 @@ wheels = [
 
 [[package]]
 name = "mcap-ros2-support-fast"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "mcap-ros2-support-fast" }
 dependencies = [
     { name = "ros-parser" },
@@ -2219,7 +2219,7 @@ wheels = [
 
 [[package]]
 name = "pointcloud2"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "pointcloud2" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2354,7 +2354,7 @@ wheels = [
 
 [[package]]
 name = "pureini"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "pureini" }
 dependencies = [
     { name = "lz4" },
@@ -2520,7 +2520,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.13.0"
+version = "0.14.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2871,7 +2871,7 @@ dev = [
 
 [[package]]
 name = "ros-parser"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "ros-parser" }
 
 [package.dev-dependencies]
@@ -3127,7 +3127,7 @@ wheels = [
 
 [[package]]
 name = "small-mcap"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "small-mcap" }
 
 [package.optional-dependencies]
