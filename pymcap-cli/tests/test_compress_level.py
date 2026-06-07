@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.cmd._run_processor import validate_mcap_output
 from pymcap_cli.cmd.compress_cmd import compress
-from small_mcap import Channel, Message, get_summary, stream_reader
+from pymcap_cli.core import mcap_processor
+from small_mcap import Channel, CompressionType, Message, get_summary, stream_reader
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,6 +47,31 @@ def test_compress_explicit_level_produces_valid_zstd(
     assert rc == 0
     assert validate_mcap_output(out)
     assert _chunk_compressions(out) == {"zstd"}
+
+
+def test_compress_explicit_level_recompresses_existing_zstd(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A requested zstd level must apply even when input chunks are already zstd."""
+    original_compress_chunk_data = mcap_processor._compress_chunk_data
+    levels: list[int | None] = []
+
+    def spy_compress_chunk_data(
+        data: bytes | memoryview,
+        compression: CompressionType,
+        min_ratio: float = 0.05,
+        zstd_level: int | None = None,
+    ) -> tuple[bytes | memoryview, str]:
+        levels.append(zstd_level)
+        return original_compress_chunk_data(data, compression, min_ratio, zstd_level)
+
+    monkeypatch.setattr(mcap_processor, "_compress_chunk_data", spy_compress_chunk_data)
+
+    out = tmp_path / "lvl-existing-zstd.mcap"
+    rc = compress(str(simple_mcap), out, compression="zstd", compression_level=-5, force=True)
+
+    assert rc == 0
+    assert -5 in levels
 
 
 def test_compress_fast_and_level_together_errors(simple_mcap: Path, tmp_path: Path) -> None:

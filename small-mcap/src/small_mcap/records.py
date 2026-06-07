@@ -721,6 +721,7 @@ class MessageIndex(McapRecord):
             values.byteswap()
         self._timestamps = values[0::2].tolist()
         self._offsets = values[1::2].tolist()
+        self._raw_content = None
 
     @property
     def timestamps(self) -> list[int]:

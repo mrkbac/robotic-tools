@@ -89,6 +89,18 @@ def test_read_then_write_reproduces_exact_bytes() -> None:
     assert _serialize(parsed) == original
 
 
+def test_mutated_decoded_index_serializes_mutations() -> None:
+    idx = MessageIndex(channel_id=11, timestamps=[5, 6, 7], offsets=[0, 32, 64])
+    parsed = MessageIndex.read(_serialize(idx)[9:])
+
+    parsed.timestamps[1] = 60
+    parsed.offsets[1] = 320
+
+    reparsed = MessageIndex.read(_serialize(parsed)[9:])
+    assert reparsed.timestamps == [5, 60, 7]
+    assert reparsed.offsets == [0, 320, 64]
+
+
 def test_constructed_index_has_no_cached_content() -> None:
     # Indexes built incrementally (writer/rebuild) must not carry a stale cache.
     idx = MessageIndex(channel_id=1, timestamps=[1], offsets=[0])

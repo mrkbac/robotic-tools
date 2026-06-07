@@ -1387,7 +1387,11 @@ class McapProcessor:
         if not indexes:
             return ChunkDecision.DECODE
 
-        compression_mismatch = chunk.compression != output_opts.compression_type.value
+        output_compression = output_opts.compression_type
+        compression_mismatch = chunk.compression != output_compression.value
+        zstd_level_requested = (
+            output_compression == CompressionType.ZSTD and output_opts.zstd_level is not None
+        )
 
         # Single pass: check channel availability, per-channel remap, and filtering.
         has_include = False
@@ -1420,13 +1424,13 @@ class McapProcessor:
         # an input/output processor explicitly requested DECODE_VERIFY (e.g.
         # TopicRewrite mutating Channel.topic).
         if self.remapper.stream_had_remap(stream_id) or decode_verify_requested:
-            if compression_mismatch:
+            if compression_mismatch or zstd_level_requested:
                 # Verifying then fast-copying would still leave the wrong
-                # codec; fall back to full DECODE for this rare combo.
+                # codec/level; fall back to full DECODE for this rare combo.
                 return ChunkDecision.DECODE
             return ChunkDecision.DECODE_VERIFY
 
-        if compression_mismatch:
+        if compression_mismatch or zstd_level_requested:
             return ChunkDecision.RECOMPRESS
 
         return ChunkDecision.CONTINUE
