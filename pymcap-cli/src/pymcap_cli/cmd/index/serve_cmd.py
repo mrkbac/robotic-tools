@@ -8,6 +8,7 @@ Launches Datasette against the index DB from the *same* interpreter
 
 import importlib.resources
 import importlib.util
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,24 @@ def _build_datasette_argv(
 
 def _datasette_is_installed() -> bool:
     return importlib.util.find_spec("datasette") is not None
+
+
+def _create_stable_db_link(db_path: Path, db_link: Path) -> None:
+    """Create a stable Datasette DB path, falling back when symlinks are unavailable."""
+    resolved = db_path.resolve()
+    try:
+        db_link.symlink_to(resolved)
+    except OSError:
+        pass
+    else:
+        return
+
+    try:
+        db_link.hardlink_to(resolved)
+    except OSError:
+        shutil.copy2(resolved, db_link)
+    else:
+        return
 
 
 def _validate_db_readable(db_path: Path) -> bool:
@@ -144,11 +163,11 @@ def index_serve(
 
     with ExitStack() as stack:
         # Datasette names a DB by its filename stem; serve through a stable
-        # `index.sqlite` symlink so the metadata/template `/index/...` links
+        # `index.sqlite` path so the metadata/template `/index/...` links
         # resolve regardless of the real --db filename.
         tmp = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         db_link = tmp / "index.sqlite"
-        db_link.symlink_to(db_path.resolve())
+        _create_stable_db_link(db_path, db_link)
 
         assets = stack.enter_context(
             importlib.resources.as_file(

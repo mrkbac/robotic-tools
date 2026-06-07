@@ -119,6 +119,40 @@ def test_serve_launches_datasette_through_stable_symlink(
     assert files_view is None
 
 
+def test_serve_falls_back_when_stable_symlink_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _seed_db(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(serve_cmd, "_datasette_is_installed", lambda: True)
+
+    def fail_symlink_to(self: Path, target: Path, target_is_directory: bool = False) -> None:
+        _ = self, target, target_is_directory
+        raise OSError("symlinks unavailable")
+
+    def fake_run(argv: Sequence[str], **_kwargs: object) -> object:
+        link = Path(argv[4])
+        captured["link_name"] = link.name
+        captured["is_symlink"] = link.is_symlink()
+        captured["is_file"] = link.is_file()
+        captured["same_bytes"] = link.read_bytes() == db.read_bytes()
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(serve_cmd.Path, "symlink_to", fail_symlink_to)
+    monkeypatch.setattr(serve_cmd.subprocess, "run", fake_run)
+
+    assert index_serve(db=db, no_browser=True) == 0
+    assert captured["link_name"] == "index.sqlite"
+    assert captured["is_symlink"] is False
+    assert captured["is_file"] is True
+    assert captured["same_bytes"] is True
+
+
 def test_serve_reports_missing_datasette(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
