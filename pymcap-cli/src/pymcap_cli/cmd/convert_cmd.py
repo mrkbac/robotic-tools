@@ -43,6 +43,7 @@ class ConvertOptions:
     compression: WriterCompression = DEFAULT_COMPRESSION
     enable_crcs: bool = True
     use_chunking: bool = True
+    zstd_level: int | None = None
 
 
 @dataclass

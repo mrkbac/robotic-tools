@@ -21,8 +21,10 @@ from pymcap_cli.core.mcap_processor import (
 )
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
+    CompressionLevelOption,
     CompressionOption,
     DeleteSourceOption,
+    FastCompressionOption,
     ForceOverwriteOption,
     InPlaceOption,
     NoClobberOption,
@@ -31,6 +33,10 @@ from pymcap_cli.types.types_manual import (
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+# zstd "fast" mode: a negative level trades ~5% larger output for roughly 2x
+# compression throughput. Used by --fast.
+_FAST_ZSTD_LEVEL = -1
 
 
 def compress(
@@ -43,6 +49,8 @@ def compress(
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
     in_place: InPlaceOption = False,
+    compression_level: CompressionLevelOption = None,
+    fast: FastCompressionOption = False,
 ) -> int:
     """Create a compressed copy of an MCAP file.
 
@@ -69,14 +77,26 @@ def compress(
         Compress to a temp file next to the source and, after the output is
         validated (header + summary), atomically replace the source with it.
         Local files only; mutually exclusive with --output and --delete-source.
+    compression_level
+        zstd level. Omit for the library default (3). Negative levels select the
+        fast modes — much higher throughput for slightly larger output. Ignored
+        for non-zstd compression. Mutually exclusive with --fast.
+    fast
+        Shortcut for a fast zstd level (roughly 2x throughput, ~5% larger
+        output). Equivalent to ``--compression-level -1``.
 
     Examples
     --------
     ```
     pymcap-cli compress in.mcap -o out.mcap
     pymcap-cli compress in.mcap --in-place
+    pymcap-cli compress in.mcap -o out.mcap --fast
     ```
     """
+    if fast and compression_level is not None:
+        logger.error("--fast and --compression-level cannot be used together.")
+        return 1
+    zstd_level = _FAST_ZSTD_LEVEL if fast else compression_level
     if in_place:
         if output is not None:
             logger.error("--in-place and --output cannot be used together.")
@@ -112,6 +132,7 @@ def compress(
                 compression=compression,
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
+                zstd_level=zstd_level,
             ),
         )
         logger.info("[green]✓ Compression completed successfully![/green]")

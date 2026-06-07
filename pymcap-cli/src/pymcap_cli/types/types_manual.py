@@ -42,6 +42,22 @@ CompressionOption = Annotated[
     ),
 ]
 
+CompressionLevelOption = Annotated[
+    int | None,
+    Parameter(
+        name=["--compression-level"],
+        group=OUTPUT_OPTIONS_GROUP,
+    ),
+]
+
+FastCompressionOption = Annotated[
+    bool,
+    Parameter(
+        name=["--fast"],
+        group=OUTPUT_OPTIONS_GROUP,
+    ),
+]
+
 OutputPathOption = Annotated[
     Path,
     Parameter(

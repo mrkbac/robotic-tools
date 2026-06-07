@@ -125,7 +125,9 @@ def _chunk_records_match_writer_view(
     return True
 
 
-def _recompress_chunk(chunk: Chunk, target: CompressionType) -> Chunk:
+def _recompress_chunk(
+    chunk: Chunk, target: CompressionType, zstd_level: int | None = None
+) -> Chunk:
     """Worker-side: decompress + re-compress a chunk's data with a new codec.
 
     Avoids parsing/re-emitting every record when only the chunk compression
@@ -133,7 +135,9 @@ def _recompress_chunk(chunk: Chunk, target: CompressionType) -> Chunk:
     the uncompressed chunk payload, which is unchanged.
     """
     decompressed = _predecompress_chunk(chunk, validate_crc=True)
-    new_data, new_compression = _compress_chunk_data(decompressed.data, target)
+    new_data, new_compression = _compress_chunk_data(
+        decompressed.data, target, zstd_level=zstd_level
+    )
     return Chunk(
         message_start_time=chunk.message_start_time,
         message_end_time=chunk.message_end_time,
@@ -164,7 +168,11 @@ def _pread_exact(fd: int, length: int, offset: int) -> bytes:
 
 
 def _read_and_recompress_chunk(
-    fd: int, body_offset: int, body_length: int, target: CompressionType
+    fd: int,
+    body_offset: int,
+    body_length: int,
+    target: CompressionType,
+    zstd_level: int | None = None,
 ) -> Chunk:
     """Worker-side: read a Chunk record body by absolute offset and recompress it.
 
@@ -173,7 +181,7 @@ def _read_and_recompress_chunk(
     read was the throughput ceiling.
     """
     chunk = Chunk.read(_pread_exact(fd, body_length, body_offset))
-    return _recompress_chunk(chunk, target)
+    return _recompress_chunk(chunk, target, zstd_level)
 
 
 @dataclass(slots=True)
@@ -219,6 +227,9 @@ class OutputOptions:
     chunk_size: int = DEFAULT_CHUNK_SIZE
     enable_crcs: bool = True
     use_chunking: bool = True
+    # zstd compression level; None uses the library default (3). Negative levels
+    # select the fast modes (much higher throughput, slightly larger output).
+    zstd_level: int | None = None
 
     # Output processors (chunk grouping). When non-empty, each surviving
     # message is routed through a per-segment MessageGroup keyed by the
@@ -248,6 +259,7 @@ class OutputOptions:
             compression=self.compression,
             enable_crcs=self.enable_crcs,
             use_chunking=self.use_chunking,
+            zstd_level=self.zstd_level,
         )
 
     @property
@@ -373,6 +385,7 @@ class MessageGroup:
             chunk_size=chunk_size,
             compression=compression_type,
             enable_crcs=writer.enable_crcs,
+            zstd_level=writer.zstd_level,
         )
 
     def add_message(self, message: Message) -> None:
@@ -1555,6 +1568,7 @@ class McapProcessor:
 
         with ThreadPoolExecutor(max_workers=max_inflight) as pool:
             target_compression = self.options.output_options.compression_type
+            target_zstd_level = self.options.output_options.zstd_level
 
             def enqueue_next() -> bool:
                 try:
@@ -1595,6 +1609,7 @@ class McapProcessor:
                             body_offset,
                             record_length,
                             target_compression,
+                            target_zstd_level,
                         )
                         queue.append((pending, decision, future))
                         return True
@@ -1616,7 +1631,9 @@ class McapProcessor:
                         self.stats.errors_encountered += 1
                         return True
                     if decision == ChunkDecision.RECOMPRESS:
-                        future = pool.submit(_recompress_chunk, materialized, target_compression)
+                        future = pool.submit(
+                            _recompress_chunk, materialized, target_compression, target_zstd_level
+                        )
                     else:
                         future = pool.submit(_decode_chunk_records, materialized)
                 queue.append((pending, decision, future))

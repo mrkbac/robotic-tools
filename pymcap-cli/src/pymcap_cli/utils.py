@@ -55,6 +55,7 @@ class McapWriterOptions:
     compression: WriterCompression = DEFAULT_COMPRESSION
     enable_crcs: bool = True
     use_chunking: bool = True
+    zstd_level: int | None = None
 
 
 class McapWriterOptionsLike(Protocol):
@@ -62,6 +63,7 @@ class McapWriterOptionsLike(Protocol):
     compression: WriterCompression
     enable_crcs: bool
     use_chunking: bool
+    zstd_level: int | None
 
 
 def bytes_to_human(size_bytes: float | None) -> str:
@@ -95,6 +97,7 @@ def create_mcap_writer(
         enable_crcs=options.enable_crcs,
         use_chunking=options.use_chunking,
         num_workers=num_workers,
+        zstd_level=options.zstd_level,
     )
 
 

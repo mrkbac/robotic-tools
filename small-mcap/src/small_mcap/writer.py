@@ -43,27 +43,38 @@ else:
 # zstd backend dispatch — Python 3.14 ships `compression.zstd` in the stdlib;
 # older interpreters use the third-party `zstandard` package. Either may be
 # absent (zstd is an optional extra).
-_zstd_compress: Callable[[bytes | memoryview], bytes] | None
+# ``level=None`` means the zstd library default (3). Negative levels select the
+# fast modes (much higher throughput, slightly larger output).
+_zstd_compress: Callable[[bytes | memoryview, int | None], bytes] | None
 
 if TYPE_CHECKING:
     _zstd_compress = None
 else:
     try:
-        from compression.zstd import compress as _zstd_compress
+        from compression.zstd import compress as _stdlib_zstd_compress
+
+        def _zstd_compress(data: bytes | memoryview, level: int | None = None) -> bytes:
+            if level is None:
+                return _stdlib_zstd_compress(data)
+            return _stdlib_zstd_compress(data, level=level)
     except ImportError:
         try:
             from zstandard import ZstdCompressor
 
-            # Per-thread compressor cache — `_compress_chunk_data` runs on a
-            # `ThreadPoolExecutor` worker pool, and `ZstdCompressor()` is
+            # Per-thread, per-level compressor cache — `_compress_chunk_data` runs
+            # on a `ThreadPoolExecutor` worker pool, and `ZstdCompressor()` is
             # expensive to construct relative to a single chunk encode.
             _zstd_tls = threading.local()
 
-            def _zstd_compress(data: bytes | memoryview) -> bytes:
-                compressor = getattr(_zstd_tls, "compressor", None)
+            def _zstd_compress(data: bytes | memoryview, level: int | None = None) -> bytes:
+                cache = getattr(_zstd_tls, "compressors", None)
+                if cache is None:
+                    cache = {}
+                    _zstd_tls.compressors = cache
+                compressor = cache.get(level)
                 if compressor is None:
-                    compressor = ZstdCompressor()
-                    _zstd_tls.compressor = compressor
+                    compressor = ZstdCompressor() if level is None else ZstdCompressor(level=level)
+                    cache[level] = compressor
                 return compressor.compress(data)
         except ImportError:
             _zstd_compress = None
@@ -657,7 +668,10 @@ class McapWriterRaw:
 
 
 def _compress_chunk_data(
-    data: bytes | memoryview, compression: CompressionType, min_ratio: float = 0.05
+    data: bytes | memoryview,
+    compression: CompressionType,
+    min_ratio: float = 0.05,
+    zstd_level: int | None = None,
 ) -> tuple[bytes | memoryview, str]:
     """
     Compress chunk data and return (compressed_data, compression_type_used).
@@ -667,6 +681,8 @@ def _compress_chunk_data(
     :param data: Uncompressed chunk data
     :param compression: Desired compression type
     :param min_ratio: Minimum compression ratio to use compression (default 0.05 = 5%)
+    :param zstd_level: zstd compression level; None uses the library default (3).
+        Negative levels select the fast modes (higher throughput, larger output).
     :return: Tuple of (compressed_data, compression_type_string)
     """
     if compression == CompressionType.NONE:
@@ -678,7 +694,7 @@ def _compress_chunk_data(
             raise ImportError(
                 "zstd compression requires Python 3.14 compression.zstd or the zstandard package"
             )
-        compressed = _zstd_compress(data)
+        compressed = _zstd_compress(data, zstd_level)
     elif compression == CompressionType.LZ4:
         if lz4_compress is None:
             raise ImportError("lz4 module not available")
@@ -706,10 +722,12 @@ class _ChunkBuilder:
         compression: CompressionType,
         enable_crcs: bool,
         chunk_size: int = 1024 * 1024,
+        zstd_level: int | None = None,
     ) -> None:
         self.compression = compression
         self.enable_crcs = enable_crcs
         self.chunk_size = chunk_size
+        self.zstd_level = zstd_level
         self.buffer = io.BytesIO()
         self.reset()
 
@@ -819,7 +837,9 @@ class _ChunkBuilder:
         if extracted is None:
             return None
         chunk_data, uncompressed_crc, uncompressed_size, start, end, indices = extracted
-        compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
+        compressed_data, compression_used = _compress_chunk_data(
+            chunk_data, self.compression, zstd_level=self.zstd_level
+        )
         return Chunk(
             compression=compression_used,
             data=compressed_data,
@@ -865,6 +885,7 @@ class McapWriter(McapWriterRaw):
         compression: CompressionType = CompressionType.ZSTD,
         encoder_factory: EncoderFactoryProtocol | None = None,
         num_workers: int = 0,
+        zstd_level: int | None = None,
     ) -> None:
         super().__init__(
             output=output,
@@ -878,13 +899,14 @@ class McapWriter(McapWriterRaw):
         self.use_chunking = use_chunking
         self.chunk_size = chunk_size
         self.compression = compression
+        self.zstd_level = zstd_level
         self.encoder_factory = encoder_factory
         self.encoder_functions: dict[int, Callable[[Any], bytes | memoryview]] = {}
         self.chunk_builder: _ChunkBuilder | None = None
         self._pool: ThreadPoolExecutor | None = None
         self._pending: list[_PendingChunk] = []
         if use_chunking:
-            self.chunk_builder = _ChunkBuilder(compression, enable_crcs, chunk_size)
+            self.chunk_builder = _ChunkBuilder(compression, enable_crcs, chunk_size, zstd_level)
             if num_workers > 0:
                 self._pool = ThreadPoolExecutor(max_workers=num_workers)
                 self._max_pending = num_workers
@@ -982,7 +1004,9 @@ class McapWriter(McapWriterRaw):
         )
 
         if self._pool is not None:
-            future = self._pool.submit(_compress_chunk_data, chunk_data, self.compression)
+            future = self._pool.submit(
+                _compress_chunk_data, chunk_data, self.compression, 0.05, self.zstd_level
+            )
             self._pending.append(
                 _PendingChunk(
                     future=future,
@@ -996,7 +1020,9 @@ class McapWriter(McapWriterRaw):
             if len(self._pending) > self._max_pending:
                 self._drain_one()
         else:
-            compressed_data, compression_used = _compress_chunk_data(chunk_data, self.compression)
+            compressed_data, compression_used = _compress_chunk_data(
+                chunk_data, self.compression, zstd_level=self.zstd_level
+            )
             self._write_chunk(
                 compressed_data,
                 compression_used,
