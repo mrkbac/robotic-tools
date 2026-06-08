@@ -4,7 +4,52 @@ User-facing notes for releases.
 
 ---
 
-## Unreleased
+## pymcap-cli 0.14.0, small-mcap 0.9.0
+
+Headline: `pymcap-cli compress` is several times faster than the upstream
+`mcap compress` on large files, gains in-place and fast-mode options, and the
+`index` command adds a web UI plus in-place schema migration.
+
+### pymcap-cli 0.14.0
+
+- `compress` is substantially faster — roughly 5x quicker than `mcap compress`
+  on multi-GB files (and more with `--fast`). Chunk reads are offloaded to the
+  worker pool, record dispatch avoids per-record overhead, and a chunk's
+  message indexes are written in a single pass, so the recompress path is no
+  longer serialized on the main thread. Output is byte-identical to before.
+- `compress --in-place` rewrites a file in place: it compresses to a temporary
+  file alongside the source, validates the output (header + summary), then
+  atomically replaces the source. The source is left untouched on any failure.
+  Mutually exclusive with `--output` / `--delete-source`; local files only.
+- `compress --fast` and `compress --compression-level N` trade a little ratio
+  for throughput by selecting a faster zstd level (`--fast` ≈ zstd fast mode:
+  roughly 2x compression throughput for ~5% larger output). The default level
+  is unchanged. The level now also applies when recompressing inputs that are
+  already zstd.
+- New `index serve` command hosts a local Datasette-backed web UI over the
+  sidecar index database for browsing indexed recordings. Falls back to a
+  hardlink or copy when the filesystem does not support symlinks.
+- New `index migrate` command upgrades an existing index database to the
+  current schema in place.
+- `info` renders QoS as compact policy codes, keeping the per-channel table
+  narrow.
+
+### small-mcap 0.9.0
+
+- Much faster `MessageIndex` encoding and decoding via vectorized,
+  array-based (de)serialization, plus lazy decoding that skips parsing
+  entirely when the raw bytes are re-emitted unchanged (e.g. recompression).
+  This is the main driver behind the faster `pymcap-cli compress`.
+- The writer accepts a configurable zstd compression level, used by
+  `pymcap-cli compress --fast` / `--compression-level`.
+
+Also released in the same workspace bump: digitalis 0.10.0,
+mcap-codec-support 0.6.0, mcap-ros2-support-fast 0.5.0, pointcloud2 0.5.0,
+pureini 0.5.0, ros-parser 0.5.0.
+
+---
+
+## pymcap-cli 0.13.0
 
 ### pymcap-cli
 
