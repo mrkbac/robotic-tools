@@ -4,6 +4,29 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.15.0
+
+Headline: fixes a data-loss bug where `compress` / `roscompress` could destroy a
+file when the output path resolved to the input.
+
+### pymcap-cli 0.15.0
+
+- Fix: `compress` and `roscompress` no longer destroy a file when the output is
+  the same file as the input. The output is opened for writing (which truncates
+  it) before the input is read, so `compress in.mcap -o in.mcap` — or any input
+  and output that resolve to the same path, including a relative input against
+  an absolute output — wiped the source and left an empty result. Both commands
+  now refuse this up front; use `compress --in-place` to rewrite a file safely.
+- Fix: `compress --delete-source` and `compress --in-place` no longer delete or
+  replace the source when the produced output is empty while the source had
+  messages (e.g. after a silently truncated read). `--delete-source` also no
+  longer treats an empty set of outputs as success. Partial drops from dedup or
+  time/channel filters are still allowed.
+- Fix: `compress` now removes the partially-written output on failure instead of
+  leaving a truncated/zero-byte file behind (previously only `--in-place` did).
+
+---
+
 ## pymcap-cli 0.14.0, small-mcap 0.9.0
 
 Headline: `pymcap-cli compress` is several times faster than the upstream
@@ -33,6 +56,11 @@ Headline: `pymcap-cli compress` is several times faster than the upstream
   current schema in place.
 - `info` renders QoS as compact policy codes, keeping the per-channel table
   narrow.
+- Message-path expressions gain new modifiers `.@to_sec`, `.@to_nsec`, and
+  `.@clamp(lo, hi)`; element-wise math now also operates on decoded array types
+  (memoryview, bytes, bytearray, array.array), not just lists/tuples. Field
+  resolution errors suggest close matches, and modifier inputs are type-checked
+  up front. Nested filter evaluation is faster.
 
 ### small-mcap 0.9.0
 
@@ -42,6 +70,9 @@ Headline: `pymcap-cli compress` is several times faster than the upstream
   This is the main driver behind the faster `pymcap-cli compress`.
 - The writer accepts a configurable zstd compression level, used by
   `pymcap-cli compress --fast` / `--compression-level`.
+- Fix: decoding a `MessageIndex` read from a file now clears its cached raw
+  bytes, so an index that is decoded and then mutated re-emits the updated
+  entries instead of the stale originals.
 
 Also released in the same workspace bump: digitalis 0.10.0,
 mcap-codec-support 0.6.0, mcap-ros2-support-fast 0.5.0, pointcloud2 0.5.0,
