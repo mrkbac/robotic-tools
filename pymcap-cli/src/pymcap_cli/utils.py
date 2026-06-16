@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 from re import Pattern
 from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, cast, overload
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from _typeshed import WriteableBuffer
@@ -554,3 +555,17 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
         if response.lower() not in ("y", "yes"):
             ERR.print("Aborted.")
             raise SystemExit(1)
+
+
+def output_overwrites_input(input_path: str, output: Path) -> bool:
+    """Return True if a local ``input_path`` resolves to the same file as ``output``.
+
+    Opening such an output with ``"wb"`` truncates the source before it is read,
+    destroying the data. URL inputs never collide with a local output.
+    """
+    if urlparse(input_path).scheme in ("http", "https"):
+        return False
+    try:
+        return Path(input_path).resolve() == output.resolve()
+    except OSError:
+        return False

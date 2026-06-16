@@ -14,6 +14,8 @@ from pymcap_cli.cmd._run_processor import (
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.cmd.merge_cmd import merge
 
+from tests.fixtures.mcap_generator import create_simple_mcap
+
 
 def test_validate_mcap_output_returns_true_for_valid_file(simple_mcap: Path) -> None:
     assert validate_mcap_output(simple_mcap) is True
@@ -158,6 +160,56 @@ def test_compress_command_keeps_source_on_validation_failure(
 
     assert rc == 1
     assert simple_mcap_copy.exists()
+
+
+def test_compress_rejects_output_equal_to_input(simple_mcap_copy: Path, monkeypatch) -> None:
+    """`compress in.mcap -o /abs/in.mcap` must not truncate the source before reading.
+
+    The input is given as a *relative* path and the output as the *absolute* path of
+    the same file — they only collide after resolution, which is exactly the form a
+    user hits when they pass a bare name for input and a full path for output.
+    """
+    orig = simple_mcap_copy.read_bytes()
+    monkeypatch.chdir(simple_mcap_copy.parent)
+
+    rc = compress(
+        simple_mcap_copy.name,  # relative
+        simple_mcap_copy.resolve(),  # absolute, same file
+        compression="zstd",
+        force=True,
+        delete_source=True,
+    )
+
+    assert rc == 1
+    assert simple_mcap_copy.exists()
+    assert simple_mcap_copy.read_bytes() == orig
+
+
+def test_finalize_delete_source_preserves_on_empty_outputs(tmp_path: Path) -> None:
+    """An empty outputs list must not vacuously pass validation and delete sources."""
+    src = tmp_path / "src.mcap"
+    src.write_bytes(b"x")
+
+    rc = finalize_delete_source(sources=[str(src)], outputs=[])
+
+    assert rc == 1
+    assert src.exists()
+
+
+def test_finalize_delete_source_preserves_when_output_lost_messages(
+    simple_mcap: Path, tmp_path: Path
+) -> None:
+    """A valid but empty output must not trigger deletion of a non-empty source."""
+    src = tmp_path / "src.mcap"
+    src.write_bytes(simple_mcap.read_bytes())  # 200 messages
+    empty_out = tmp_path / "empty.mcap"
+    empty_out.write_bytes(create_simple_mcap(num_messages=0))
+    assert validate_mcap_output(empty_out) is True  # valid header+summary, 0 messages
+
+    rc = finalize_delete_source(sources=[str(src)], outputs=[empty_out])
+
+    assert rc == 1
+    assert src.exists()
 
 
 def test_merge_command_deletes_all_sources(simple_mcap: Path, tmp_path: Path) -> None:

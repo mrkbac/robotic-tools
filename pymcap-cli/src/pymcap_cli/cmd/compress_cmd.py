@@ -30,6 +30,7 @@ from pymcap_cli.types.types_manual import (
     NoClobberOption,
     OutputPathOption,
 )
+from pymcap_cli.utils import output_overwrites_input
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -113,6 +114,12 @@ def compress(
         if output is None:
             logger.error("Either --output or --in-place is required.")
             return 1
+        if output_overwrites_input(file, output):
+            logger.error(
+                "Output path is the same file as the input. "
+                "Use --in-place to compress in place safely."
+            )
+            return 1
         policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
         if policy is None:
             logger.error("--force and --no-clobber cannot be used together.")
@@ -139,8 +146,9 @@ def compress(
         console.print(result.stats)
     except Exception:
         logger.exception("Error during compression")
-        if in_place:
-            output.unlink(missing_ok=True)
+        # The output was opened "wb" (truncated) before processing, so a failed run
+        # leaves an empty/partial file. Remove it rather than leaving a 0-byte result.
+        output.unlink(missing_ok=True)
         return 1
 
     if in_place:

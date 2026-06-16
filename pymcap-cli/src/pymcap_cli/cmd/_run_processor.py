@@ -98,6 +98,43 @@ def validate_mcap_output(path: Path) -> bool:
     return True
 
 
+def mcap_message_count(path: Path) -> int | None:
+    """Return the message count from an MCAP summary, or None if it can't be read."""
+    try:
+        with path.open("rb") as f:
+            info = read_info(f)
+    except (McapError, InvalidMagicError, OSError, AssertionError) as e:
+        logger.debug(f"Could not read message count for {path}: {e}")
+        return None
+    if info.summary.statistics is None:
+        return None
+    return info.summary.statistics.message_count
+
+
+def _outputs_dropped_all_messages(sources: list[str], outputs: list[Path]) -> bool:
+    """True if every output has zero messages while some local source had messages.
+
+    Guards against deleting sources when a transform silently produced empty output
+    (e.g. the source was truncated before being read). Partial drops — dedup, time or
+    channel filters — are intentionally not flagged; only total loss is.
+    """
+    out_total = 0
+    for p in outputs:
+        count = mcap_message_count(p)
+        if count is None:
+            return False  # unknown — validation already passed, don't second-guess it
+        out_total += count
+    if out_total > 0:
+        return False
+    for src in sources:
+        if urlparse(src).scheme in ("http", "https"):
+            continue  # URLs are never deleted, so their counts don't matter
+        count = mcap_message_count(Path(src))
+        if count:
+            return True
+    return False
+
+
 def delete_source_files(sources: list[str], outputs: list[Path]) -> None:
     """Delete each local source file. Skip URLs and any source path that
     resolves to one of ``outputs`` (with a warning).
@@ -134,12 +171,17 @@ def in_place_temp_path(source: Path) -> Path:
 def finalize_replace_source(*, source: Path, tmp_output: Path) -> int:
     """Validate ``tmp_output`` and atomically replace ``source`` with it.
 
-    Returns 0 on success and 1 if validation failed (source is preserved and
-    the temp file is removed).
+    Returns 0 on success and 1 if the temp output failed validation or is empty
+    while the source had messages. In those cases the source is preserved and the
+    temp file is removed.
     """
     if not validate_mcap_output(tmp_output):
         logger.error(f"[red]Output failed validation: {tmp_output}[/red]")
         logger.error("Source file preserved — output not safe to replace source.")
+        tmp_output.unlink(missing_ok=True)
+        return 1
+    if _outputs_dropped_all_messages([str(source)], [tmp_output]):
+        logger.error("Output contains no messages but the source did — source file preserved.")
         tmp_output.unlink(missing_ok=True)
         return 1
     tmp_output.replace(source)
@@ -154,14 +196,21 @@ def finalize_delete_source(
 ) -> int:
     """Validate every output and, if all valid, delete the eligible sources.
 
-    Returns 0 on success (sources deleted or skipped with warning) and 1 if
-    any output failed validation (no sources are deleted in that case).
+    Returns 0 on success (sources deleted or skipped with warning) and 1 if there
+    are no outputs, any output failed validation, or every output is empty while a
+    source had messages. No sources are deleted in those cases.
     """
+    if not outputs:
+        logger.error("No output files were produced — source file(s) preserved.")
+        return 1
     invalid = [p for p in outputs if not validate_mcap_output(p)]
     if invalid:
         for p in invalid:
             logger.error(f"[red]Output failed validation: {p}[/red]")
         logger.error("Source file(s) preserved — output not safe to replace source.")
+        return 1
+    if _outputs_dropped_all_messages(sources, outputs):
+        logger.error("Output contains no messages but the source did — source file(s) preserved.")
         return 1
     delete_source_files(sources, outputs)
     return 0

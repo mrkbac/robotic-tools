@@ -6,9 +6,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd import _run_processor, compress_cmd
-from pymcap_cli.cmd._run_processor import in_place_temp_path, validate_mcap_output
+from pymcap_cli.cmd._run_processor import (
+    finalize_replace_source,
+    in_place_temp_path,
+    validate_mcap_output,
+)
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.utils import read_info
+
+from tests.fixtures.mcap_generator import create_simple_mcap
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,6 +75,20 @@ def test_compress_in_place_preserves_source_on_validation_failure(
     assert rc == 1
     assert simple_mcap_copy.read_bytes() == original
     assert not in_place_temp_path(simple_mcap_copy).exists()
+
+
+def test_finalize_replace_source_preserves_when_temp_empty(simple_mcap_copy: Path) -> None:
+    """A valid-but-empty temp output must not atomically replace a non-empty source."""
+    original = simple_mcap_copy.read_bytes()  # 200 messages
+    tmp_output = in_place_temp_path(simple_mcap_copy)
+    tmp_output.write_bytes(create_simple_mcap(num_messages=0))
+    assert validate_mcap_output(tmp_output) is True  # valid, but 0 messages
+
+    rc = finalize_replace_source(source=simple_mcap_copy, tmp_output=tmp_output)
+
+    assert rc == 1
+    assert simple_mcap_copy.read_bytes() == original
+    assert not tmp_output.exists()
 
 
 def test_compress_in_place_cleans_temp_on_processing_error(

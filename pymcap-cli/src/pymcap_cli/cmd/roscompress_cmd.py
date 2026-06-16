@@ -50,7 +50,7 @@ from pymcap_cli.core.mcap_transform import (
 )
 from pymcap_cli.exporters._common import normalize_schema_name
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
-from pymcap_cli.utils import confirm_output_overwrite
+from pymcap_cli.utils import confirm_output_overwrite, output_overwrites_input
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -246,6 +246,10 @@ def roscompress(
     pointcloud
         Enable point cloud compression. Default: True.
     """
+    if output_overwrites_input(file, output):
+        logger.error("Output path is the same file as the input; choose a different output file.")
+        return 1
+
     confirm_output_overwrite(output, force)
 
     if not 1 <= jpeg_quality <= 100:
