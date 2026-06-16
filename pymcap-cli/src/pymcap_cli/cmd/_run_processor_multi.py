@@ -28,6 +28,8 @@ def run_processor_multi(
     """
     if input_options is None:
         input_options = InputOptions.from_args()
+    # Let the OutputManager refuse to open a segment that would truncate an input.
+    output_options.input_paths = tuple(files)
     with contextlib.ExitStack() as stack:
         input_files: list[InputFile] = []
 

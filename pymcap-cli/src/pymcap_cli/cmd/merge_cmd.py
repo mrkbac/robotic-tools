@@ -8,6 +8,7 @@ from rich.console import Console
 
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
+    processing_had_errors,
     resolve_overwrite_policy,
     run_processor,
 )
@@ -29,6 +30,7 @@ from pymcap_cli.types.types_manual import (
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
+    output_overwrites_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,10 @@ def merge(
         logger.error("--force and --no-clobber cannot be used together.")
         return 1
 
+    if any(output_overwrites_input(f, output) for f in files):
+        logger.error("Output path is the same file as an input; choose a different output file.")
+        return 1
+
     dedup_processor = DedupIdenticalProcessor() if dedup_identical else None
     extra_processors: list[InputProcessor] | None = [dedup_processor] if dedup_processor else None
 
@@ -147,6 +153,9 @@ def merge(
         return 1
 
     if delete_source:
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source file(s) preserved.")
+            return 1
         return finalize_delete_source(sources=list(files), outputs=[output])
 
     return 0

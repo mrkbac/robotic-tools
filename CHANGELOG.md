@@ -11,19 +11,23 @@ file when the output path resolved to the input.
 
 ### pymcap-cli 0.15.0
 
-- Fix: `compress` and `roscompress` no longer destroy a file when the output is
-  the same file as the input. The output is opened for writing (which truncates
-  it) before the input is read, so `compress in.mcap -o in.mcap` — or any input
-  and output that resolve to the same path, including a relative input against
-  an absolute output — wiped the source and left an empty result. Both commands
-  now refuse this up front; use `compress --in-place` to rewrite a file safely.
-- Fix: `compress --delete-source` and `compress --in-place` no longer delete or
-  replace the source when the produced output is empty while the source had
-  messages (e.g. after a silently truncated read). `--delete-source` also no
-  longer treats an empty set of outputs as success. Partial drops from dedup or
+- Fix: `compress`, `roscompress`, `merge`, and `split` no longer destroy a file
+  when an output resolves to one of the inputs. The output is opened for writing
+  (which truncates it) before the input is read, so `compress in.mcap -o in.mcap`
+  — or any input/output that resolve to the same path, including a relative input
+  against an absolute output, a `merge` output equal to an input, or a `split`
+  template that produces the input path — wiped the source and left an empty
+  result. These cases are now refused up front; use `compress --in-place` to
+  rewrite a single file safely.
+- Fix: `compress --delete-source` / `--in-place` (and `merge`/`split`
+  `--delete-source`) no longer delete or replace sources when the run reported
+  read errors, when an output is empty while the source had messages, or — for
+  `compress` — when the output has fewer messages than the source. An empty set
+  of outputs is no longer treated as success. Intentional drops from dedup or
   time/channel filters are still allowed.
-- Fix: `compress` now removes the partially-written output on failure instead of
-  leaving a truncated/zero-byte file behind (previously only `--in-place` did).
+- Fix: `compress` and `roscompress` now remove the partially-written output on
+  failure instead of leaving a truncated/zero-byte file behind (previously only
+  `compress --in-place` did).
 
 ---
 

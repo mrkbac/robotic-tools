@@ -10,6 +10,7 @@ from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     finalize_replace_source,
     in_place_temp_path,
+    processing_had_errors,
     resolve_overwrite_policy,
     run_processor,
 )
@@ -152,9 +153,16 @@ def compress(
         return 1
 
     if in_place:
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source preserved, not replaced in place.")
+            output.unlink(missing_ok=True)
+            return 1
         return finalize_replace_source(source=Path(file), tmp_output=output)
 
     if delete_source:
-        return finalize_delete_source(sources=[file], outputs=[output])
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source file preserved.")
+            return 1
+        return finalize_delete_source(sources=[file], outputs=[output], require_lossless=True)
 
     return 0

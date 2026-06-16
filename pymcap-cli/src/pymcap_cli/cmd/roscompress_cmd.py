@@ -1,5 +1,6 @@
 """Command to compress image and point cloud topics in MCAP files."""
 
+import contextlib
 import logging
 from collections import deque
 from collections.abc import Iterable, Iterator
@@ -336,11 +337,20 @@ def roscompress(
     last_video_times: dict[str, tuple[int, int]] = {}
     pending_messages: dict[str, deque[DecodedMessage]] = {}
 
-    with (
-        open_input(file) as (input_stream, input_size),
-        output.open("wb") as output_stream,
-        create_progress(title="Compressing images") as progress,
-    ):
+    with contextlib.ExitStack() as stack:
+        # Opening the output truncates it; remove the truncated/partial file if the
+        # run does not finish cleanly. Registered first so it runs after the stream
+        # is closed on exit.
+        ok = False
+
+        def _cleanup_on_failure() -> None:
+            if not ok:
+                output.unlink(missing_ok=True)
+
+        stack.callback(_cleanup_on_failure)
+        input_stream, input_size = stack.enter_context(open_input(file))
+        output_stream = stack.enter_context(output.open("wb"))
+        progress = stack.enter_context(create_progress(title="Compressing images"))
         task_id = progress.add_task("Processing messages", total=total_message_count)
 
         writer = McapWriter(
@@ -415,6 +425,7 @@ def roscompress(
                         counters["converted"] += 1
 
         writer.finish()
+        ok = compress_ok
 
     if not compress_ok:
         return 1

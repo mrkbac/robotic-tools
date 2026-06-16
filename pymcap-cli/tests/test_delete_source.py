@@ -212,6 +212,37 @@ def test_finalize_delete_source_preserves_when_output_lost_messages(
     assert src.exists()
 
 
+def test_merge_rejects_output_equal_to_input(simple_mcap: Path, tmp_path: Path) -> None:
+    """`merge a.mcap b.mcap -o a.mcap` must not truncate an input before reading it."""
+    a = tmp_path / "a.mcap"
+    b = tmp_path / "b.mcap"
+    a.write_bytes(simple_mcap.read_bytes())
+    b.write_bytes(simple_mcap.read_bytes())
+    orig = a.read_bytes()
+
+    rc = merge([str(a), str(b)], a, force=True, delete_source=True)
+
+    assert rc == 1
+    assert a.read_bytes() == orig
+    assert b.exists()
+
+
+def test_compress_keeps_source_when_processing_reports_errors(
+    simple_mcap: Path, tmp_path: Path
+) -> None:
+    """A run that swallowed read errors must not delete the source, even if it
+    produced a readable output."""
+    good = simple_mcap.read_bytes()
+    corrupt = tmp_path / "corrupt.mcap"
+    corrupt.write_bytes(good[: len(good) // 2])  # truncated: processing reports errors
+    output = tmp_path / "out.mcap"
+
+    rc = compress(str(corrupt), output, compression="zstd", force=True, delete_source=True)
+
+    assert rc == 1
+    assert corrupt.exists()
+
+
 def test_merge_command_deletes_all_sources(simple_mcap: Path, tmp_path: Path) -> None:
     s1 = tmp_path / "s1.mcap"
     s2 = tmp_path / "s2.mcap"

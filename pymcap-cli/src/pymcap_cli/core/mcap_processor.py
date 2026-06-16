@@ -76,6 +76,7 @@ from pymcap_cli.utils import (
     confirm_output_overwrite,
     create_mcap_writer,
     file_progress,
+    output_overwrites_input,
 )
 
 console = Console()
@@ -248,6 +249,9 @@ class OutputOptions:
     # Template for multi-output file naming (e.g., "output_{index:03d}.mcap")
     output_template: str = ""
     overwrite_policy: OverwriteCollisionPolicy = OverwriteCollisionPolicy.ASK
+    # Resolved input paths, used to refuse opening a segment that would truncate
+    # a file currently being read. Populated by the multi-output runner.
+    input_paths: tuple[str, ...] = ()
 
     @property
     def compression_type(self) -> CompressionType:
@@ -527,6 +531,11 @@ class OutputManager:
         )
 
         path_obj = Path(path)
+        if any(output_overwrites_input(src, path_obj) for src in self.output_options.input_paths):
+            raise ValueError(
+                f"Output segment '{path}' is the same file as an input; "
+                "choose an output template that does not collide with the input."
+            )
         self.handle_existing_output(path_obj)
         return path, path_obj.open("wb")
 

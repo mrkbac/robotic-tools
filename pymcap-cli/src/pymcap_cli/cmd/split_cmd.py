@@ -8,7 +8,11 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
-from pymcap_cli.cmd._run_processor import finalize_delete_source, resolve_overwrite_policy
+from pymcap_cli.cmd._run_processor import (
+    finalize_delete_source,
+    processing_had_errors,
+    resolve_overwrite_policy,
+)
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
@@ -394,6 +398,9 @@ def split(
         )
 
     if delete_source:
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source file preserved.")
+            return 1
         outputs = [
             Path(segment.path) for segment in result.processor.output_manager.segments.values()
         ]

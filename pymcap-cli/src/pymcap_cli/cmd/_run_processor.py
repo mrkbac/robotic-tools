@@ -135,6 +135,39 @@ def _outputs_dropped_all_messages(sources: list[str], outputs: list[Path]) -> bo
     return False
 
 
+def _outputs_lost_messages(sources: list[str], outputs: list[Path]) -> bool:
+    """True if the outputs hold fewer messages in total than the local sources.
+
+    For lossless transforms (compress) every source message must appear in the
+    output, so any shortfall means data was dropped. Counts that can't be read
+    are treated as unknown and never trigger a block.
+    """
+    out_total = 0
+    for p in outputs:
+        count = mcap_message_count(p)
+        if count is None:
+            return False
+        out_total += count
+    src_total = 0
+    for src in sources:
+        if urlparse(src).scheme in ("http", "https"):
+            continue
+        count = mcap_message_count(Path(src))
+        if count is None:
+            return False
+        src_total += count
+    return out_total < src_total
+
+
+def processing_had_errors(stats: ProcessingStats) -> bool:
+    """True if the processor swallowed read/validation errors during the run.
+
+    Such a run produces incomplete output even when it exits cleanly, so it is
+    not safe to delete or replace the source from it.
+    """
+    return stats.errors_encountered > 0 or stats.validation_errors > 0
+
+
 def delete_source_files(sources: list[str], outputs: list[Path]) -> None:
     """Delete each local source file. Skip URLs and any source path that
     resolves to one of ``outputs`` (with a warning).
@@ -180,8 +213,8 @@ def finalize_replace_source(*, source: Path, tmp_output: Path) -> int:
         logger.error("Source file preserved — output not safe to replace source.")
         tmp_output.unlink(missing_ok=True)
         return 1
-    if _outputs_dropped_all_messages([str(source)], [tmp_output]):
-        logger.error("Output contains no messages but the source did — source file preserved.")
+    if _outputs_lost_messages([str(source)], [tmp_output]):
+        logger.error("Output has fewer messages than the source — source file preserved.")
         tmp_output.unlink(missing_ok=True)
         return 1
     tmp_output.replace(source)
@@ -193,12 +226,17 @@ def finalize_delete_source(
     *,
     sources: list[str],
     outputs: list[Path],
+    require_lossless: bool = False,
 ) -> int:
     """Validate every output and, if all valid, delete the eligible sources.
 
     Returns 0 on success (sources deleted or skipped with warning) and 1 if there
     are no outputs, any output failed validation, or every output is empty while a
     source had messages. No sources are deleted in those cases.
+
+    When ``require_lossless`` is set (transforms that must preserve every message,
+    e.g. ``compress``), any shortfall in total output messages versus the sources
+    also preserves them — not just total loss.
     """
     if not outputs:
         logger.error("No output files were produced — source file(s) preserved.")
@@ -209,7 +247,11 @@ def finalize_delete_source(
             logger.error(f"[red]Output failed validation: {p}[/red]")
         logger.error("Source file(s) preserved — output not safe to replace source.")
         return 1
-    if _outputs_dropped_all_messages(sources, outputs):
+    if require_lossless:
+        if _outputs_lost_messages(sources, outputs):
+            logger.error("Output has fewer messages than the source(s) — source file(s) preserved.")
+            return 1
+    elif _outputs_dropped_all_messages(sources, outputs):
         logger.error("Output contains no messages but the source did — source file(s) preserved.")
         return 1
     delete_source_files(sources, outputs)
