@@ -11,8 +11,24 @@ from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.http_utils import open_http_stream
 
 
+def resolve_mcap_path(path: str) -> str:
+    """Resolve a ROS 2-style bag directory to its inner ``.mcap`` file.
+
+    ROS 2 lays a recording out as ``<bagname>/<bagname>.mcap``. When ``path``
+    points at such a directory, return the inner file so callers can pass just
+    the folder. Anything else (a regular file, a URL, a directory without the
+    matching inner file) is returned unchanged.
+    """
+    candidate_dir = Path(path)
+    if candidate_dir.is_dir():
+        inner = candidate_dir / f"{candidate_dir.name}.mcap"
+        if inner.is_file():
+            return str(inner)
+    return path
+
+
 def _open_path_file(url: ParseResult) -> tuple[io.RawIOBase, int]:
-    file_path = Path(url.path)
+    file_path = Path(resolve_mcap_path(url.path))
     raw_stream = file_path.open("rb", buffering=0)
     size = file_path.stat().st_size
     return raw_stream, size

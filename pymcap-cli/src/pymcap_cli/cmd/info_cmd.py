@@ -21,7 +21,7 @@ from small_mcap import McapError, rebuild_summary
 from small_mcap.records import Summary
 
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
-from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.input_handler import open_input, resolve_mcap_path
 from pymcap_cli.core.qos import parse_qos_profiles
 from pymcap_cli.display.display_utils import (
     ChannelTableColumn,
@@ -454,6 +454,14 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = False,
+    qos: Annotated[
+        bool,
+        Parameter(
+            name=["--qos"],
+            negative="--no-qos",
+            group=DISPLAY_GROUP,
+        ),
+    ] = False,
     watch: Annotated[
         bool,
         Parameter(
@@ -515,6 +523,9 @@ def info(
         --rebuild to calculate message intervals.
     tree
         Display channels in a hierarchical tree structure based on topic paths.
+    qos
+        Show the per-channel QoS column for ROS 2 MCAPs (default: off). Pass
+        --qos to show it.
     watch
         Watch the file for changes and display live-updating statistics.
         Requires exactly one local file. Incompatible with --json and --compress.
@@ -556,6 +567,10 @@ def info(
         else:
             logger.error("At least one file must be specified")
         return 1
+
+    # Accept ROS 2-style bag directories (<bagname>/<bagname>.mcap) in place of
+    # the inner file so display, watch, JSON and link modes stay consistent.
+    files = [resolve_mcap_path(file) for file in files]
 
     if compress and not json_output:
         logger.error("--compress requires --json")
@@ -658,7 +673,7 @@ def info(
             )
             console.print()
 
-        qos_by_channel_id = _qos_from_summary(info_data.summary)
+        qos_by_channel_id = _qos_from_summary(info_data.summary) if qos else None
 
         # Display all sections
         console.print(
