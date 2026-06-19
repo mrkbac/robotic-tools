@@ -12,19 +12,30 @@ from pymcap_cli.http_utils import open_http_stream
 
 
 def resolve_mcap_path(path: str) -> str:
-    """Resolve a ROS 2-style bag directory to its inner ``.mcap`` file.
+    """Resolve a rosbag2 bag directory to its single ``.mcap`` file.
 
-    ROS 2 lays a recording out as ``<bagname>/<bagname>.mcap``. When ``path``
-    points at such a directory, return the inner file so callers can pass just
-    the folder. Anything else (a regular file, a URL, a directory without the
-    matching inner file) is returned unchanged.
+    rosbag2 lays a recording out as ``<bagname>/<bagname>_<N>.mcap`` splits.
+    For single-file commands this resolves a directory holding exactly one split
+    to that file. A multi-split directory (which has no single-file meaning here)
+    or a directory with no resolvable MCAP raises ``ValueError`` rather than
+    surfacing an opaque ``IsADirectoryError`` downstream. Files and URLs pass
+    through unchanged.
     """
     candidate_dir = Path(path)
-    if candidate_dir.is_dir():
-        inner = candidate_dir / f"{candidate_dir.name}.mcap"
-        if inner.is_file():
-            return str(inner)
-    return path
+    if not candidate_dir.is_dir():
+        return path
+
+    from pymcap_cli.core.rosbag2_layout import find_bag_splits  # noqa: PLC0415
+
+    splits = find_bag_splits(candidate_dir)
+    if len(splits) == 1:
+        return str(splits[0])
+    if not splits:
+        raise ValueError(f"{path!r} is not an MCAP file or a rosbag2 bag directory")
+    raise ValueError(
+        f"{path!r} is a multi-split rosbag2 directory ({len(splits)} files); "
+        f"this command reads a single file — use 'info' or 'merge'"
+    )
 
 
 def _open_path_file(url: ParseResult) -> tuple[io.RawIOBase, int]:

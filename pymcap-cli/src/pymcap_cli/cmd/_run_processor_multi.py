@@ -11,6 +11,7 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     ProcessingOptions,
 )
+from pymcap_cli.core.rosbag2_layout import expand_bag_paths
 
 
 def run_processor_multi(
@@ -28,6 +29,7 @@ def run_processor_multi(
     """
     if input_options is None:
         input_options = InputOptions.from_args()
+    files = expand_bag_paths(files)
     # Let the OutputManager refuse to open a segment that would truncate an input.
     output_options.input_paths = tuple(files)
     with contextlib.ExitStack() as stack:

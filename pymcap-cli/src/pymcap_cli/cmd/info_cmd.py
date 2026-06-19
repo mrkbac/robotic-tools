@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 from cyclopts import Group as CycloptsGroup
 from cyclopts import Parameter
@@ -17,12 +18,13 @@ from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
-from small_mcap import McapError, rebuild_summary
+from small_mcap import McapError, RebuildInfo, rebuild_summary
 from small_mcap.records import Summary
 
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
-from pymcap_cli.core.input_handler import open_input, resolve_mcap_path
+from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.qos import parse_qos_profiles
+from pymcap_cli.core.rosbag2_layout import find_bag_splits, read_aggregated_bag_info
 from pymcap_cli.display.display_utils import (
     ChannelTableColumn,
     DistributionBar,
@@ -239,6 +241,41 @@ def _qos_from_summary(summary: Summary) -> dict[int, list[QosProfile]]:
         if profiles:
             out[channel_id] = profiles
     return out
+
+
+def _is_local_dir(path: str) -> bool:
+    return urlparse(path).scheme not in ("http", "https") and Path(path).is_dir()
+
+
+def _load_info(
+    file: str,
+    *,
+    rebuild: bool,
+    exact_sizes: bool,
+    debug: bool,
+) -> tuple[RebuildInfo, int, str]:
+    """Read info for one ``info`` argument.
+
+    A multi-split rosbag2 directory is aggregated into one logical RebuildInfo;
+    a plain file (or single-split directory) is read directly. Returns
+    ``(info, size, label)`` where ``label`` names the file or bag for display.
+    """
+    if _is_local_dir(file):
+        splits = find_bag_splits(Path(file))
+        if not splits:
+            raise ValueError(f"{file!r} is not an MCAP file or a rosbag2 bag directory")
+        if len(splits) > 1:
+            info_data, total = read_aggregated_bag_info(
+                splits, rebuild=rebuild, exact_sizes=exact_sizes
+            )
+            return info_data, total, file
+        file = str(splits[0])
+
+    with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
+        info_data = read_or_rebuild_info(
+            f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
+        )
+    return info_data, file_size, file
 
 
 def _build_info_display(
@@ -498,6 +535,8 @@ def info(
     ----------
     files
         Path(s) to MCAP file(s) to analyze (local files or HTTP/HTTPS URLs).
+        A rosbag2 bag directory (``<bag>/<bag>_<N>.mcap`` splits) may be passed
+        in place of a file; its splits are aggregated into one combined view.
     rebuild
         Rebuild file metadata by scanning all records (use for corrupt or
         summary-less files).
@@ -568,10 +607,6 @@ def info(
             logger.error("At least one file must be specified")
         return 1
 
-    # Accept ROS 2-style bag directories (<bagname>/<bagname>.mcap) in place of
-    # the inner file so display, watch, JSON and link modes stay consistent.
-    files = [resolve_mcap_path(file) for file in files]
-
     if compress and not json_output:
         logger.error("--compress requires --json")
         return 1
@@ -597,20 +632,32 @@ def info(
         if len(files) != 1:
             logger.error("--watch requires exactly one file")
             return 1
+        watch_target = files[0]
+        if _is_local_dir(watch_target):
+            splits = find_bag_splits(Path(watch_target))
+            if not splits:
+                logger.error("%r is not an MCAP file or a rosbag2 bag directory", watch_target)
+                return 1
+            if len(splits) > 1:
+                logger.error(
+                    "--watch does not support multi-split rosbag2 directories; "
+                    "pass a single .mcap file"
+                )
+                return 1
+            watch_target = str(splits[0])
         return _watch_file(
-            files[0], sort.value, reverse, index_duration, median, tree, watch_interval
+            watch_target, sort.value, reverse, index_duration, median, tree, watch_interval
         )
 
     # Link output mode
     if link:
         mode: ScanMode = "exact" if exact_sizes else ("rebuild" if rebuild else "summary")
         for file in files:
-            with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
-                info_data = read_or_rebuild_info(
-                    f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
-                )
-            data = info_to_dict(info_data, str(file), file_size)
-            url = generate_link(data, str(file), file_size, mode)
+            info_data, file_size, label = _load_info(
+                file, rebuild=rebuild, exact_sizes=exact_sizes, debug=debug
+            )
+            data = info_to_dict(info_data, label, file_size)
+            url = generate_link(data, label, file_size, mode)
             print(url)  # noqa: T201
         return 0
 
@@ -618,11 +665,10 @@ def info(
     if json_output:
         all_outputs: list[McapInfoOutput] = []
         for file in files:
-            with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
-                info_data = read_or_rebuild_info(
-                    f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
-                )
-            data = info_to_dict(info_data, str(file), file_size)
+            info_data, file_size, label = _load_info(
+                file, rebuild=rebuild, exact_sizes=exact_sizes, debug=debug
+            )
+            data = info_to_dict(info_data, label, file_size)
             all_outputs.append(data)
         _output_json(all_outputs, compress)
         return 0
@@ -632,13 +678,12 @@ def info(
         if i > 0:
             console.print("\n" + "=" * 80 + "\n")
 
-        with open_input(file, buffering=0, debug=debug) as (f_buffered, file_size):
-            info_data = read_or_rebuild_info(
-                f_buffered, file_size, rebuild=rebuild, exact_sizes=exact_sizes
-            )
+        info_data, file_size, label = _load_info(
+            file, rebuild=rebuild, exact_sizes=exact_sizes, debug=debug
+        )
 
         # Get structured data
-        data = info_to_dict(info_data, str(file), file_size)
+        data = info_to_dict(info_data, label, file_size)
         has_chunk_info = info_data.chunk_information is not None
 
         # Warn if sorting by size fields when channel_sizes is unavailable
@@ -691,7 +736,7 @@ def info(
 
         # Show shareable web inspector link
         mode: ScanMode = "exact" if exact_sizes else ("rebuild" if rebuild else "summary")
-        url = generate_link(data, str(file), file_size, mode)
+        url = generate_link(data, label, file_size, mode)
         console.print(f"\n[link={url}][dim]View in web inspector[/dim][/]")
 
     return 0

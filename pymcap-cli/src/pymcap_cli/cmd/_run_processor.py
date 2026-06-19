@@ -19,6 +19,7 @@ from pymcap_cli.core.mcap_processor import (
     ProcessingOptions,
     ProcessingStats,
 )
+from pymcap_cli.core.rosbag2_layout import expand_bag_paths
 from pymcap_cli.utils import confirm_output_overwrite, read_info
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ def run_processor(
 
     Raises any exception from McapProcessor.process() to the caller.
     """
+    files = expand_bag_paths(files)
     with contextlib.ExitStack() as stack:
         input_files: list[InputFile] = []
 

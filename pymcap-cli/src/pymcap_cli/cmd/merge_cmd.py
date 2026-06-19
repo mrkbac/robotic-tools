@@ -19,6 +19,7 @@ from pymcap_cli.core.mcap_processor import (
 )
 from pymcap_cli.core.processors.base import InputProcessor  # noqa: TC001 - runtime annotation below
 from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
+from pymcap_cli.core.rosbag2_layout import expand_bag_paths
 from pymcap_cli.types.types_manual import (
     ChunkSizeOption,
     CompressionOption,
@@ -111,6 +112,7 @@ def merge(
     pymcap-cli merge *.mcap -o all_recordings.mcap --compression lz4
     ```
     """
+    files = expand_bag_paths(files)
     if len(files) < 2:
         logger.error("At least 2 input files are required for merging")
         return 1
