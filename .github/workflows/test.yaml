@@ -30,7 +30,7 @@ jobs:
     name: test (${{ matrix.package.dir }}, ${{ matrix.python-version }})
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           lfs: ${{ matrix.package.submodules }}
 

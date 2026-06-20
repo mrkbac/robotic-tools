@@ -61,7 +61,7 @@ jobs:
           - websocket-proxy
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check if version needs publishing
         id: check
