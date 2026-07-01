@@ -95,6 +95,9 @@ _OPCODE_SIZE = 1
 _RECORD_LENGTH_SIZE = 8
 _RECORD_HEADER_SIZE = _OPCODE_SIZE + _RECORD_LENGTH_SIZE
 _FOOTER_SIZE = _RECORD_HEADER_SIZE + 8 + 8 + 4
+# Fixed-size prefix of a Message record: channel_id + sequence + log_time + publish_time.
+_MESSAGE_STRUCT = Message._STRUCT  # noqa: SLF001 - reuse the record's compiled struct
+_MESSAGE_HEADER_SIZE = _MESSAGE_STRUCT.size
 
 # Limits and defaults
 _RECORD_SIZE_LIMIT = 4 * 2**30  # 4 GiB - maximum size for a single record
@@ -740,6 +743,119 @@ def _prefetch_chunks(
             yield from _drain(future, indexes, is_last=is_last)
 
 
+def _read_message_seeking_unchunked(
+    stream: IO[bytes],
+    should_include: _ShouldIncludeType,
+    start_time_ns: int,
+    end_time_ns: int,
+) -> _ReaderReturnType:
+    """Fast path for seekable, unchunked, non-CRC reads.
+
+    Scans the data section record-by-record and, for every Message that is
+    filtered out by channel or time, seeks past its body instead of reading it.
+    On files where most bytes belong to excluded topics this avoids copying —
+    and, on a cold cache, fetching from disk — the vast majority of the file.
+
+    Chunk records are decompressed and filtered normally — reached for chunked
+    files with no usable summary, e.g. broken/truncated recordings — so output
+    is always correct even without the per-message seek benefit.
+    """
+    schemas: dict[int, Schema] = {}
+    channels: dict[int, Channel] = {}
+    exclude_channels: set[int] = set()
+    msg_struct = _MESSAGE_STRUCT
+    read = stream.read
+    seek = stream.seek
+
+    magic = read(MAGIC_SIZE)
+    if magic != MAGIC:
+        raise InvalidMagicError(magic)
+
+    def _register_channel(channel: Channel) -> None:
+        if channel.id in channels:
+            return
+        if channel.schema_id != 0 and channel.schema_id not in schemas:
+            raise SchemaNotFoundError(channel.schema_id)
+        channels[channel.id] = channel
+        if not should_include(channel, schemas.get(channel.schema_id)):
+            exclude_channels.add(channel.id)
+
+    while True:
+        header = read(_RECORD_HEADER_SIZE)
+        if len(header) < _RECORD_HEADER_SIZE:
+            return  # truncated tail — stop gracefully, matching allow_incomplete
+        opcode, length = OPCODE_AND_LEN_STRUCT.unpack(header)
+        if length > _RECORD_SIZE_LIMIT:
+            raise RecordLengthLimitExceededError(opcode, length, _RECORD_SIZE_LIMIT)
+
+        if opcode == Opcode.MESSAGE:
+            msg_header = read(_MESSAGE_HEADER_SIZE)
+            if len(msg_header) < _MESSAGE_HEADER_SIZE:
+                return
+            channel_id, sequence, log_time, publish_time = msg_struct.unpack(msg_header)
+            body_len = length - _MESSAGE_HEADER_SIZE
+            channel = channels.get(channel_id)
+            if channel is None:
+                raise ChannelNotFoundError(channel_id)
+            if (
+                channel_id in exclude_channels
+                or log_time < start_time_ns
+                or log_time >= end_time_ns
+            ):
+                seek(body_len, io.SEEK_CUR)
+                continue
+            data = read(body_len)
+            if len(data) < body_len:
+                return
+            yield (
+                schemas.get(channel.schema_id),
+                channel,
+                Message(channel_id, sequence, log_time, publish_time, data),
+            )
+        elif opcode == Opcode.CHANNEL:
+            body = read(length)
+            if len(body) < length:
+                return
+            _register_channel(Channel.read(body))
+        elif opcode == Opcode.SCHEMA:
+            body = read(length)
+            if len(body) < length:
+                return
+            schema = Schema.read(body)
+            schemas[schema.id] = schema
+        elif opcode == Opcode.CHUNK:
+            body = read(length)
+            if len(body) < length:
+                return  # truncated chunk at the tail — stop gracefully
+            # Chunked file with no usable summary — common for broken/truncated
+            # recordings (crashed before the summary was written). Bodies live
+            # inside the compressed chunk, so there is no per-message seek to
+            # exploit; filter inline (a shared generator helper measurably
+            # slows this per-record loop).
+            for record in breakup_chunk(Chunk.read(body)):
+                if isinstance(record, Message):
+                    channel = channels.get(record.channel_id)
+                    if channel is None:
+                        raise ChannelNotFoundError(record.channel_id)
+                    if (
+                        record.channel_id in exclude_channels
+                        or record.log_time < start_time_ns
+                        or record.log_time >= end_time_ns
+                    ):
+                        continue
+                    yield (schemas.get(channel.schema_id), channel, record)
+                elif isinstance(record, Schema):
+                    schemas[record.id] = record
+                elif isinstance(record, Channel):
+                    _register_channel(record)
+        elif opcode in (Opcode.DATA_END, Opcode.FOOTER):
+            # All messages live in the data section, which ends here. Stop before
+            # re-scanning the summary's repeated channel/schema records.
+            return
+        else:
+            seek(length, io.SEEK_CUR)
+
+
 def _read_message_seeking(
     stream: IO[bytes],
     should_include: _ShouldIncludeType,
@@ -754,6 +870,14 @@ def _read_message_seeking(
     if summary is None or not summary.chunk_indexes:
         # seek to start
         stream.seek(0, io.SEEK_SET)
+        # Unchunked, seekable, no CRC: skip filtered message bodies with seek()
+        # instead of reading the whole file. reverse/validate_crc need every byte,
+        # so they keep the general path.
+        if not reverse and not validate_crc:
+            yield from _read_message_seeking_unchunked(
+                stream, should_include, start_time_ns, end_time_ns
+            )
+            return
         yield from _read_message_non_seeking(
             stream, should_include, start_time_ns, end_time_ns, validate_crc, reverse, num_workers
         )

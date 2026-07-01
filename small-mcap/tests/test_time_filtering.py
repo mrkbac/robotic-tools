@@ -1,8 +1,9 @@
 """Tests for time filtering in read_message() with various MCAP configurations.
 
-These tests exercise the _read_message_non_seeking() code path which is used when:
-1. The stream is not seekable, OR
-2. The MCAP file has no chunk indexes (unchunked files or chunked without index)
+These tests use seekable streams whose files have no chunk indexes, so they
+exercise the _read_message_seeking_unchunked() fast path (seek past filtered
+message bodies). Non-seekable filtering is covered in test_reader_prefetch.py
+and test_chunk_filtering.py.
 
 We use different MCAP configurations to trigger various code paths:
 - Unchunked files (use_chunking=False) - no chunks at all
@@ -348,7 +349,7 @@ def test_read_message_with_time_range_chunked(mocker: MockerFixture):
     mcap_data = _create_chunked_mcap_with_timed_messages(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, start_time_ns=2_000_000, end_time_ns=4_000_000))
     spy.assert_not_called()
 
@@ -370,7 +371,7 @@ def test_read_message_with_time_range_unchunked(mocker: MockerFixture):
     mcap_data = _create_unchunked_mcap_with_timed_messages(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, start_time_ns=2_000_000, end_time_ns=4_000_000))
     spy.assert_called_once()
 
@@ -393,7 +394,7 @@ def test_read_message_channel_filtering_unchunked(mocker: MockerFixture):
     def should_include(channel: Channel, _schema: Schema | None) -> bool:
         return channel.id == 1
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, should_include=should_include))
     spy.assert_called_once()
 
@@ -414,7 +415,7 @@ def test_read_message_combined_time_and_channel_filter_unchunked(mocker: MockerF
     def should_include(channel: Channel, _schema: Schema | None) -> bool:
         return channel.id == 1
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(
         read_message(
             buffer,
@@ -440,7 +441,7 @@ def test_read_message_all_messages_filtered_out_unchunked(mocker: MockerFixture)
     mcap_data = _create_unchunked_mcap_with_timed_messages(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, start_time_ns=10_000_000, end_time_ns=20_000_000))
     spy.assert_called_once()
 
@@ -457,7 +458,7 @@ def test_read_message_unchunked_full_read(mocker: MockerFixture):
     mcap_data = _create_unchunked_mcap_with_timed_messages(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer))
     spy.assert_called_once()
 
@@ -484,7 +485,7 @@ def test_chunked_no_index_time_filter(mocker: MockerFixture):
     mcap_data = _create_chunked_mcap_no_index(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, start_time_ns=2_000_000, end_time_ns=4_000_000))
     spy.assert_called_once()
 
@@ -508,7 +509,7 @@ def test_chunked_no_index_channel_filter(mocker: MockerFixture):
     def should_include(channel: Channel, _schema: Schema | None) -> bool:
         return channel.id == 1
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, should_include=should_include))
     spy.assert_called_once()
 
@@ -528,7 +529,7 @@ def test_chunked_no_index_combined_filter(mocker: MockerFixture):
     def should_include(channel: Channel, _schema: Schema | None) -> bool:
         return channel.id == 1
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(
         read_message(
             buffer,
@@ -553,7 +554,7 @@ def test_chunked_no_index_out_of_range(mocker: MockerFixture):
     mcap_data = _create_chunked_mcap_no_index(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, start_time_ns=10_000_000, end_time_ns=20_000_000))
     spy.assert_called_once()
 
@@ -570,7 +571,7 @@ def test_chunked_no_index_full_read(mocker: MockerFixture):
     mcap_data = _create_chunked_mcap_no_index(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer))
     spy.assert_called_once()
 
@@ -598,7 +599,7 @@ def test_chunked_with_message_indexes_time_filter(mocker: MockerFixture):
     mcap_data = _create_chunked_mcap_with_message_indexes(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, start_time_ns=2_000_000, end_time_ns=4_000_000))
     spy.assert_called_once()
 
@@ -622,7 +623,7 @@ def test_chunked_with_message_indexes_channel_filter(mocker: MockerFixture):
     def should_include(channel: Channel, _schema: Schema | None) -> bool:
         return channel.id == 1
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, should_include=should_include))
     spy.assert_called_once()
 
@@ -642,7 +643,7 @@ def test_chunked_with_message_indexes_combined_filter(mocker: MockerFixture):
     def should_include(channel: Channel, _schema: Schema | None) -> bool:
         return channel.id == 1
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(
         read_message(
             buffer,
@@ -674,7 +675,7 @@ def test_chunked_with_message_indexes_all_excluded(mocker: MockerFixture):
     def should_include(_channel: Channel, _schema: Schema | None) -> bool:
         return False
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer, should_include=should_include))
     spy.assert_called_once()
 
@@ -691,7 +692,7 @@ def test_chunked_with_message_indexes_full_read(mocker: MockerFixture):
     mcap_data = _create_chunked_mcap_with_message_indexes(messages)
     buffer = io.BytesIO(mcap_data)
 
-    spy = mocker.spy(reader_module, "_read_message_non_seeking")
+    spy = mocker.spy(reader_module, "_read_message_seeking_unchunked")
     results = list(read_message(buffer))
     spy.assert_called_once()
 
