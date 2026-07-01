@@ -4,12 +4,12 @@ User-facing notes for releases.
 
 ---
 
-## pymcap-cli 0.16.0, small-mcap 0.10.0, ros-parser 0.6.0
+## pymcap-cli 0.16.0, small-mcap 0.10.0, ros-parser 0.6.0, mcap-codec-support 0.6.1
 
 Headline: `plot` gains array paths, browserless image/SVG export, and clear
 feedback about which paths actually matched; message paths now map field access
-over sliced/filtered arrays; and filtered reads of unchunked files are up to
-~10x faster.
+over sliced/filtered arrays; filtered reads of unchunked files are up to ~10x
+faster; and video encoding works again on ffmpeg 7+.
 
 ### pymcap-cli 0.16.0
 
@@ -43,6 +43,12 @@ over sliced/filtered arrays; and filtered reads of unchunked files are up to
   `status{level==2}.message`) now maps element-wise over the array and returns a
   list of values, instead of raising "field not found on object of type
   'list'". A raw array field with no slice/index remains invalid.
+
+### mcap-codec-support 0.6.1
+
+- Fix: video encoding used the `-vsync` ffmpeg flag, which was removed in
+  ffmpeg 7. Encoding failed with "Unrecognized option 'vsync'" on modern
+  builds; it now uses the documented replacement `-fps_mode passthrough`.
 
 ---
 

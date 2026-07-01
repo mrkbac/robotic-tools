@@ -218,8 +218,10 @@ def _build_output_args(
 ) -> list[str]:
     """Build the shared encoder output arguments."""
     cmd: list[str] = [
-        "-vsync",
-        "0",
+        # Modern replacement for the removed ``-vsync 0``: pass every frame
+        # through with its own timestamp. ``-vsync`` errors on ffmpeg 7+.
+        "-fps_mode",
+        "passthrough",
         "-c:v",
         codec_name,
         "-g",
