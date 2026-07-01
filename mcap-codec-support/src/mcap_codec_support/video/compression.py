@@ -212,10 +212,10 @@ def prefetch_image_decodes(
         yield buffer.popleft()
 
 
-def encode_raw_image_to_jpeg(
-    decoded_message: RawImageMessage, *, jpeg_quality: int, scale: int | None
+def encode_raw_image_to_compressed(
+    decoded_message: RawImageMessage, *, format: str, jpeg_quality: int, scale: int | None
 ) -> tuple[bytes, int, int]:
-    """Encode a raw ROS Image message to JPEG using Pillow."""
+    """Encode a raw ROS Image message to compressed format using Pillow."""
     image = raw_image_to_pil(decoded_message)
     src_w, src_h = image.size
     if scale is not None:
@@ -226,13 +226,18 @@ def encode_raw_image_to_jpeg(
     target_w -= target_w % 2
     target_h -= target_h % 2
     if target_w < 2 or target_h < 2:
-        raise VideoEncoderError(f"Source frame too small ({target_w}x{target_h}) for JPEG encoding")
+        raise VideoEncoderError(
+            f"Source frame too small ({target_w}x{target_h}) for image encoding"
+        )
 
     if target_w != src_w or target_h != src_h:
         image = image.resize((target_w, target_h), _PIL_BILINEAR)
 
     buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=jpeg_quality)
+    if format.lower() == "jpeg":
+        image.save(buf, format=format.upper(), quality=jpeg_quality)
+    elif format.lower() == "png":
+        image.save(buf, format=format.upper())
     return buf.getvalue(), target_w, target_h
 
 
