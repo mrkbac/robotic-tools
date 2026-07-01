@@ -6,6 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import pytest
+from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
     ArrayIndex,
     ArraySlice,
@@ -629,6 +630,38 @@ class TestExtendedFilters:
         assert len(result) == 2
         assert result[0]["value"] == 20
         assert result[1]["value"] == 30
+
+
+class TestFieldAccessOverArrays:
+    """Field access after a slice or filter maps element-wise (Foxglove semantics)."""
+
+    def test_field_after_slice_maps(self):
+        path = parse_message_path("/t.colors[:].r")
+        data = {"colors": [{"r": 1.0}, {"r": 2.0}, {"r": 3.0}]}
+        assert path.apply(data) == [1.0, 2.0, 3.0]
+
+    def test_field_after_filter_maps(self):
+        path = parse_message_path("/diag.status{level==2}.message")
+        data = {
+            "status": [
+                {"level": 1, "message": "ok"},
+                {"level": 2, "message": "warn-A"},
+                {"level": 2, "message": "warn-B"},
+            ]
+        }
+        assert path.apply(data) == ["warn-A", "warn-B"]
+
+    def test_modifier_after_mapped_field(self):
+        path = parse_message_path("/t.points[:].x.@mul(2)")
+        data = {"points": [{"x": 1.0}, {"x": 2.5}]}
+        assert path.apply(data) == [2.0, 5.0]
+
+    def test_validate_field_after_slice(self):
+        schema = b"std_msgs/ColorRGBA[] colors\n============\nMSG: std_msgs/ColorRGBA\nfloat32 r\n"
+        defs = parse_schema_to_definitions("pkg/Palette", schema)
+        root = defs["pkg/Palette"]
+        parse_message_path("/t.colors[:].r").validate(root, defs)
+        parse_message_path("/t.colors{r>0.5}.r").validate(root, defs)
 
 
 class TestComplexPaths:

@@ -123,8 +123,16 @@ class Action(ABC):
 class FieldAccess(Action):
     field_name: str
 
-    def apply(self, obj: Any, variables: _VariableStore) -> Any:  # noqa: ARG002
-        """Access a field from an object, supporting both attribute and dict-like access."""
+    def apply(self, obj: Any, variables: _VariableStore) -> Any:
+        """Access a field, mapping element-wise over a list/tuple.
+
+        After a slice or filter yields a sequence, ``.field`` reads that field
+        from each element (Foxglove semantics), so ``arr[:].x`` and
+        ``arr{f}.x`` return a list of the values.
+        """
+        obj_type = type(obj)
+        if obj_type is list or obj_type is tuple:
+            return [self.apply(item, variables) for item in obj]
         name = self.field_name
         value = _lookup_field(obj, name)
         if value is not _MISSING:
@@ -764,10 +772,40 @@ class MessagePath:
         # Track the current message definition (for the root)
         current_msgdef: MessageDefinition | None = message_def
 
+        # A slice or filter opens an "array context": the following field
+        # accesses map element-wise over the array (Foxglove semantics). A raw
+        # array field (no slice/index) does not, so ``arr.field`` still errors.
+        in_array_context = False
+
         for segment in self.segments:
+            if isinstance(segment, FieldAccess) and in_array_context and current_type.is_array:
+                element_type = Type(
+                    type_name=current_type.type_name,
+                    package_name=current_type.package_name,
+                    is_array=False,
+                    array_size=None,
+                    is_upper_bound=False,
+                    string_upper_bound=current_type.string_upper_bound,
+                )
+                field_type, current_msgdef = segment.validate(element_type, None, all_definitions)
+                # The mapped result is an array of the field's type.
+                current_type = Type(
+                    type_name=field_type.type_name,
+                    package_name=field_type.package_name,
+                    is_array=True,
+                    array_size=None,
+                    is_upper_bound=False,
+                    string_upper_bound=field_type.string_upper_bound,
+                )
+                continue
+
             current_type, current_msgdef = segment.validate(
                 current_type, current_msgdef, all_definitions
             )
+            if isinstance(segment, (ArraySlice, Filter)):
+                in_array_context = True
+            elif isinstance(segment, ArrayIndex):
+                in_array_context = False
 
 
 def _validate_field_path(
