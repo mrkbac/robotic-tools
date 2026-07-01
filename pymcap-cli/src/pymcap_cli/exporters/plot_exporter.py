@@ -6,11 +6,18 @@ figure is assembled in :meth:`PlotExporter.finish` once every per-topic
 writer has flushed its buffered samples.
 
 When ``output`` is ``None`` the figure is opened interactively
-(``fig.show()``); otherwise it is written as standalone HTML.
+(``fig.show()``). Otherwise the output suffix picks the renderer: ``.html``
+writes standalone HTML, while ``.png`` / ``.svg`` / ``.pdf`` / ``.jpg`` /
+``.webp`` render a static image via kaleido (no browser needed — handy over
+SSH).
+
+Array-valued paths (e.g. ``/joints.position[:].@degrees``) expand into one
+trace per element index, labelled ``<label>[i]``.
 """
 
 from __future__ import annotations
 
+import array
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,16 +43,76 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Static-image suffixes rendered via kaleido; everything else falls back to HTML.
+IMAGE_SUFFIXES: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp", ".svg", ".pdf"})
+
+# Sequence types an array-valued path may yield. ``str``/``bytes`` are excluded:
+# a string is a scalar sample, and a raw byte blob is not a plottable series.
+_EXPANDABLE_TYPES = (list, tuple, memoryview, bytearray, array.array)
+
+# Upper bound on traces produced by a single array-valued path. Guards against a
+# huge unsliced array (e.g. a 10k-element field) exploding into 10k traces; the
+# excess is dropped with a warning, never silently.
+_MAX_ARRAY_COLUMNS = 64
+
 
 @dataclass
 class SeriesData:
-    """One labelled time-series gathered from a single message-path query."""
+    """One labelled time-series gathered from a single message-path query.
+
+    A scalar path fills ``times_ns`` / ``values``. An array-valued path (a
+    slice, index-free array field, or element-wise modifier that yields a
+    sequence) fills ``array_times_ns`` / ``array_values``, keyed by element
+    index; each index becomes its own trace in :meth:`PlotExporter.finish`.
+    """
 
     label: str
     path_str: str
     parsed: MessagePath
     times_ns: list[int] = field(default_factory=list)
     values: list[float | bool | str] = field(default_factory=list)
+    array_times_ns: dict[int, list[int]] = field(default_factory=dict)
+    array_values: dict[int, list[float | bool | str]] = field(default_factory=dict)
+    warned_no_match: bool = False  # set when an early "won't resolve" warning was emitted
+
+    @property
+    def has_data(self) -> bool:
+        return bool(self.times_ns) or bool(self.array_values)
+
+    @property
+    def point_count(self) -> int:
+        """Total samples collected for this path across scalar and array columns."""
+        return len(self.times_ns) + sum(len(col) for col in self.array_values.values())
+
+
+@dataclass
+class _PlotSeries:
+    """A single flattened, ready-to-render trace (label + samples)."""
+
+    label: str
+    times_ns: list[int]
+    values: list[float | bool | str]
+
+
+def _expand_series(series: SeriesData) -> list[_PlotSeries]:
+    """Flatten a gathered :class:`SeriesData` into one trace per plottable line."""
+    out: list[_PlotSeries] = []
+    if series.times_ns:
+        out.append(_PlotSeries(series.label, series.times_ns, series.values))
+
+    indices = sorted(series.array_values)
+    if len(indices) > _MAX_ARRAY_COLUMNS:
+        logger.warning(
+            f"Path {series.path_str!r} produced {len(indices)} array columns; "
+            f"plotting the first {_MAX_ARRAY_COLUMNS}. Narrow it with a slice "
+            "like [0:8] to plot fewer."
+        )
+        indices = indices[:_MAX_ARRAY_COLUMNS]
+    out.extend(
+        _PlotSeries(f"{series.label}[{idx}]", series.array_times_ns[idx], series.array_values[idx])
+        for idx in indices
+    )
+    return out
 
 
 def parse_path_arg(arg: str) -> tuple[str, str]:
@@ -106,34 +173,30 @@ def downsample_lttb(
 
 def _validate_series_against_schema(
     series: SeriesData, schema_name: str, schema_data: bytes
-) -> bool:
+) -> str | None:
     """Validate one series against a ROS message schema.
 
-    Returns True when the path is acceptable (or schema couldn't be parsed —
-    we degrade gracefully); False when the path is structurally invalid for
-    the schema and the run should bail.
+    Returns ``None`` when the path is acceptable (or the schema couldn't be
+    parsed — we degrade gracefully); otherwise the validation error message,
+    so the caller can surface it as an early, human-readable warning.
     """
     try:
         all_definitions = parse_schema_to_definitions(schema_name, schema_data)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"could not parse schema {schema_name!r}: {exc}")
-        return True
+    except Exception:  # noqa: BLE001 - non-ROS schema (e.g. JSON); can't validate.
+        return None
 
     root_msgdef = all_definitions.get(schema_name)
     if root_msgdef is None:
         parts = schema_name.split("/")
-        short_name = f"{parts[0]}/{parts[-1]}"
-        root_msgdef = all_definitions.get(short_name)
+        root_msgdef = all_definitions.get(f"{parts[0]}/{parts[-1]}")
     if root_msgdef is None:
-        logger.warning(f"no message definition for schema {schema_name!r}")
-        return True
+        return None
 
     try:
         series.parsed.validate(root_msgdef, all_definitions)
-    except ValidationError:
-        logger.exception(f"Query validation error for path {series.path_str!r}")
-        return False
-    return True
+    except ValidationError as exc:
+        return str(exc)
+    return None
 
 
 class _PlotTopicWriter(TopicWriter):
@@ -141,20 +204,12 @@ class _PlotTopicWriter(TopicWriter):
 
     def __init__(self, series: list[SeriesData]) -> None:
         self.series = series
-        self._validated = False
+        self._checked = False
 
     def write(self, msg: DecodedMessage) -> None:
-        if not self._validated:
-            self._validated = True
-            if msg.schema is not None:
-                for series in self.series:
-                    ok = _validate_series_against_schema(
-                        series,
-                        msg.schema.name,
-                        msg.schema.data,
-                    )
-                    if not ok:
-                        raise ValidationError(f"Validation failed for {series.path_str!r}")
+        if not self._checked:
+            self._checked = True
+            self._check_first_message(msg)
 
         log_time_ns = int(msg.message.log_time)
         for series in self.series:
@@ -162,10 +217,47 @@ class _PlotTopicWriter(TopicWriter):
                 value = series.parsed.apply(msg.decoded_message)
             except MessagePathError:
                 continue
-            if value is None or isinstance(value, (list, dict)):
+            if value is None or isinstance(value, dict):
+                continue
+            if isinstance(value, _EXPANDABLE_TYPES):
+                for idx, element in enumerate(value):
+                    if element is None or isinstance(element, (list, tuple, dict, memoryview)):
+                        continue
+                    series.array_times_ns.setdefault(idx, []).append(log_time_ns)
+                    series.array_values.setdefault(idx, []).append(element)
                 continue
             series.times_ns.append(log_time_ns)
             series.values.append(value)
+
+    def _check_first_message(self, msg: DecodedMessage) -> None:
+        """Warn early (on the first message of this topic) about paths that will
+        never resolve — so a typo surfaces seconds in, not after the whole scan.
+        """
+        for series in self.series:
+            topic = series.parsed.topic
+            error = (
+                _validate_series_against_schema(series, msg.schema.name, msg.schema.data)
+                if msg.schema is not None
+                else None
+            )
+            if error is not None:
+                series.warned_no_match = True
+                logger.warning(
+                    f"Path {series.path_str!r} is not valid for topic {topic!r}: {error} "
+                    "It will match nothing — check the field names (Ctrl-C to abort)."
+                )
+                continue
+            # No schema to validate against (e.g. JSON): a runtime resolution
+            # error on the first message means a bad field, not a filter miss.
+            try:
+                series.parsed.apply(msg.decoded_message)
+            except MessagePathError as exc:
+                series.warned_no_match = True
+                logger.warning(
+                    f"Path {series.path_str!r} found no value in the first {topic!r} message "
+                    f"({exc}). It will likely match nothing — check the field names "
+                    "(Ctrl-C to abort)."
+                )
 
     def close(self) -> None:
         # All emission deferred to PlotExporter.finish.
@@ -190,6 +282,7 @@ class PlotExporter(JsonRos2Exporter):
         downsample: int | None = None,
         xy: bool = False,
         force: bool = False,
+        source_name: str | None = None,
     ) -> None:
         if not paths:
             raise ValueError("PlotExporter requires at least one path")
@@ -201,6 +294,7 @@ class PlotExporter(JsonRos2Exporter):
         self._downsample = downsample
         self._xy = xy
         self._force = force
+        self._source_name = source_name
 
         # Pre-parse paths up-front; surface syntax errors immediately.
         self._series: list[SeriesData] = []
@@ -233,7 +327,7 @@ class PlotExporter(JsonRos2Exporter):
 
         path = Path(output)
         if path.exists() and path.is_dir():
-            logger.error(f"{path} is a directory; expected an HTML file path.")
+            logger.error(f"{path} is a directory; expected an .html/.png/.svg/.pdf file path.")
             return None
         if path.exists() and not (force or self._force):
             logger.error(f"{path} exists. Use --force to overwrite.")
@@ -250,41 +344,43 @@ class PlotExporter(JsonRos2Exporter):
         output_path: Path,  # noqa: ARG002 - plot writes to self._output.
         counts: Mapping[int, int],  # noqa: ARG002 - counts are irrelevant to rendering.
     ) -> None:
+        # Report per path what actually matched, so a mistyped topic/field is
+        # obvious instead of silently producing an empty plot.
+        self._report_matches()
+
+        # Flatten each gathered query into one trace per plottable line
+        # (array-valued paths fan out into per-index traces).
+        plot_series = [ps for series in self._series for ps in _expand_series(series)]
+
         # Convert absolute log_time_ns into "seconds since first sample".
         first_ns: int | None = None
-        for series in self._series:
-            if series.times_ns:
-                first_ns = (
-                    series.times_ns[0] if first_ns is None else min(first_ns, series.times_ns[0])
-                )
+        for ps in plot_series:
+            if ps.times_ns:
+                first_ns = ps.times_ns[0] if first_ns is None else min(first_ns, ps.times_ns[0])
 
         if first_ns is None:
-            raise RuntimeError("No plottable data found for any path.")
-
-        for series in self._series:
-            if not series.times_ns:
-                logger.warning(f"no plottable data for {series.label!r}")
+            raise RuntimeError(
+                "No plottable data found for any path — every message path matched 0 messages."
+            )
 
         rendered_series = [
-            (series, [(ts - first_ns) / 1e9 for ts in series.times_ns])
-            for series in self._series
-            if series.times_ns
+            (ps, [(ts - first_ns) / 1e9 for ts in ps.times_ns]) for ps in plot_series if ps.times_ns
         ]
 
         if self._downsample:
-            new_rendered: list[tuple[SeriesData, list[float]]] = []
-            for series, times_s in rendered_series:
-                if any(isinstance(v, str) for v in series.values[:10]):
-                    new_rendered.append((series, times_s))
+            new_rendered: list[tuple[_PlotSeries, list[float]]] = []
+            for ps, times_s in rendered_series:
+                if any(isinstance(v, str) for v in ps.values[:10]):
+                    new_rendered.append((ps, times_s))
                     continue
                 before = len(times_s)
-                t_out, v_out = downsample_lttb(times_s, series.values, self._downsample)
+                t_out, v_out = downsample_lttb(times_s, ps.values, self._downsample)
                 if before != len(t_out):
-                    logger.info(f"Downsampled {series.label!r}: {before} → {len(t_out)} points")
+                    logger.info(f"Downsampled {ps.label!r}: {before} → {len(t_out)} points")
                 # Stash the downsampled values back onto the series so XY
                 # mode also benefits.
-                series.values = v_out
-                new_rendered.append((series, t_out))
+                ps.values = v_out
+                new_rendered.append((ps, t_out))
             rendered_series = new_rendered
 
         if self._xy:
@@ -292,17 +388,17 @@ class PlotExporter(JsonRos2Exporter):
             return
 
         fig = go.Figure()
-        for series, times_s in rendered_series:
+        for ps, times_s in rendered_series:
             fig.add_trace(
                 go.Scattergl(
                     x=times_s,
-                    y=series.values,
+                    y=ps.values,
                     mode="lines",
-                    name=series.label,
+                    name=ps.label,
                 )
             )
         fig.update_layout(
-            title=self._title or ", ".join(s.label for s, _ in rendered_series),
+            title=self._compose_title(", ".join(ps.label for ps, _ in rendered_series)),
             xaxis_title="Time (s)",
             yaxis_title="Value",
             hovermode="x unified",
@@ -311,10 +407,13 @@ class PlotExporter(JsonRos2Exporter):
 
     def _render_xy(
         self,
-        rendered_series: list[tuple[SeriesData, list[float]]],
+        rendered_series: list[tuple[_PlotSeries, list[float]]],
     ) -> None:
         if len(rendered_series) != 2:
-            raise RuntimeError("--xy mode needs both paths to have data")
+            raise RuntimeError(
+                "--xy mode needs exactly two scalar series with data "
+                "(array-valued paths expand into multiple series)."
+            )
 
         (x_series, x_times), (y_series, y_times) = rendered_series
         x_by_time = dict(zip(x_times, x_series.values, strict=True))
@@ -339,7 +438,7 @@ class PlotExporter(JsonRos2Exporter):
             )
         )
         fig.update_layout(
-            title=self._title or f"{x_series.label} vs {y_series.label}",
+            title=self._compose_title(f"{x_series.label} vs {y_series.label}"),
             xaxis_title=x_series.label,
             yaxis_title=y_series.label,
             hovermode="closest",
@@ -347,9 +446,41 @@ class PlotExporter(JsonRos2Exporter):
         fig.update_yaxes(scaleanchor="x", scaleratio=1)
         self._emit(fig)
 
+    def _report_matches(self) -> None:
+        """Log, per requested path, how many samples matched — 0 means a typo."""
+        for series in self._series:
+            n = series.point_count
+            if n == 0:
+                if not series.warned_no_match:  # avoid repeating the early warning
+                    logger.warning(
+                        f"Path {series.path_str!r} matched 0 messages — check the topic and "
+                        "field names (nothing will be plotted for it)."
+                    )
+                continue
+            columns = len(series.array_values)
+            suffix = f" across {columns} array columns" if columns else ""
+            logger.info(f"Path {series.label!r}: {n:,} points{suffix}")
+
+    def _compose_title(self, default: str) -> str:
+        """Build the figure title, keeping the source filename for back-reference."""
+        main = self._title or default
+        if self._source_name:
+            return f"{main}<br><sub>{self._source_name}</sub>"
+        return main
+
     def _emit(self, fig: go.Figure) -> None:
         if self._output is None:
             fig.show()
             return
-        fig.write_html(str(self._output))
+        if self._output.suffix.lower() in IMAGE_SUFFIXES:
+            try:
+                fig.write_image(str(self._output))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to render image {self._output}: {exc}. "
+                    "Static image export needs kaleido — install it with "
+                    "`pip install 'pymcap-cli[plot]'` (or `uv add kaleido`)."
+                ) from exc
+        else:
+            fig.write_html(str(self._output))
         logger.info(f"Plot saved to {self._output}")

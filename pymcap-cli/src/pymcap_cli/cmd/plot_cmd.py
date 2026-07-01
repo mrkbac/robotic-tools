@@ -65,7 +65,12 @@ def plot(
 
     Extracts values along message paths and plots them over time using plotly.
     Supports numeric, boolean, and string values natively. Multiple paths can
-    be overlaid.
+    be overlaid. Array-valued paths expand into one trace per element index.
+
+    Output format is chosen from the ``-o`` suffix: ``.html`` (interactive) or
+    ``.png`` / ``.svg`` / ``.pdf`` / ``.jpg`` / ``.webp`` (static image, no
+    browser needed — handy over SSH). With no ``-o`` the figure opens in a
+    browser.
 
     Paths can be given a custom label: "Label=/topic.field"
 
@@ -75,6 +80,7 @@ def plot(
       pymcap-cli plot recording.mcap --xy /odom.pose.position.x /odom.pose.position.y
       pymcap-cli plot recording.mcap /odom.pose.position.x -d 1000
       pymcap-cli plot recording.mcap /odom.pose.position.x -s 10 -e 20 -o plot.html
+      pymcap-cli plot recording.mcap "/joints.position[:].@degrees" -o joints.svg
     """
     if not paths:
         logger.error("At least one message path is required")
@@ -93,6 +99,7 @@ def plot(
             downsample=downsample,
             xy=xy,
             force=force,
+            source_name=Path(file).name,
         )
     except (ValueError, ValidationError) as exc:
         logger.error(str(exc))  # noqa: TRY400

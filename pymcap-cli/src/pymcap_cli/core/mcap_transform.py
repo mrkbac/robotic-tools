@@ -23,7 +23,7 @@ from pymcap_cli.log_setup import ERR, OUT
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from small_mcap import Channel, DecodedMessage, McapWriter, Schema
+    from small_mcap import Channel, DecodedMessage, McapWriter, Schema, Summary
 
 
 def create_progress(*, title: str) -> Progress:
@@ -41,36 +41,46 @@ def create_progress(*, title: str) -> Progress:
     )
 
 
-def get_total_message_count(
-    file: str,
+def count_included_messages(
+    summary: Summary | None,
     should_include: Callable[[Channel, Schema | None], bool] | None = None,
 ) -> int | None:
-    """Read MCAP summary and return total message count, or None.
+    """Total message count from an already-read summary, or None.
 
+    Returns None when the summary is missing or carries no per-channel counts.
     When ``should_include`` is provided, sum only the counts for channels whose
     ``(channel, schema)`` pair passes the predicate — matching the filter used
     by ``small_mcap.read_message_decoded`` so progress totals reflect what will
     actually be iterated.
     """
+    if not (summary and summary.statistics and summary.statistics.channel_message_counts):
+        return None
+    counts = summary.statistics.channel_message_counts
+    if should_include is None:
+        return sum(counts.values())
+    total = 0
+    for channel_id, count in counts.items():
+        channel = summary.channels.get(channel_id)
+        if channel is None:
+            continue
+        schema = summary.schemas.get(channel.schema_id) if channel.schema_id else None
+        if should_include(channel, schema):
+            total += count
+    return total
+
+
+def get_total_message_count(
+    file: str,
+    should_include: Callable[[Channel, Schema | None], bool] | None = None,
+) -> int | None:
+    """Read the MCAP summary and return the total message count, or None.
+
+    Thin wrapper over :func:`count_included_messages` for callers that only
+    need the count and have no summary in hand.
+    """
     with open_input(file) as (f, _file_size):
-        if not (
-            (summary := get_summary(f))
-            and summary.statistics
-            and summary.statistics.channel_message_counts
-        ):
-            return None
-        counts = summary.statistics.channel_message_counts
-        if should_include is None:
-            return sum(counts.values())
-        total = 0
-        for channel_id, count in counts.items():
-            channel = summary.channels.get(channel_id)
-            if channel is None:
-                continue
-            schema = summary.schemas.get(channel.schema_id) if channel.schema_id else None
-            if should_include(channel, schema):
-                total += count
-        return total
+        summary = get_summary(f)
+    return count_included_messages(summary, should_include)
 
 
 def ensure_schema(

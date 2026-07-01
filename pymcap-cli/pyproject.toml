@@ -52,7 +52,10 @@ bridge = ["robo-ws-bridge"]
 draco = ["mcap-codec-support[draco]"]
 image = ["pillow>=10.0"]
 parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]
-plot = ["plotly>=6.0.0"]
+plot = [
+    "kaleido>=1.0.0",
+    "plotly>=6.0.0",
+]
 pointcloud = ["mcap-codec-support[pointcloud]"]
 video = ["mcap-codec-support[video]"]
 xxhash = ["xxhash>=3.0.0"]

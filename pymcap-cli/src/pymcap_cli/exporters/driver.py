@@ -10,15 +10,16 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from small_mcap import read_message_decoded
+from small_mcap import get_summary, read_message_decoded
 
 from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.core.mcap_transform import create_progress, get_total_message_count
+from pymcap_cli.core.mcap_transform import count_included_messages, create_progress
 from pymcap_cli.exporters._common import (
     make_should_include,
     unique_topic_filename,
 )
+from pymcap_cli.exporters._summary_hints import warn_topic_coverage
 from pymcap_cli.exporters.base import TopicContext
 
 if TYPE_CHECKING:
@@ -58,11 +59,17 @@ def run_export(
 
     should_include = make_should_include(topics=topics, accepts_schema=exporter.accepts)
 
+    # Read the summary exactly once, then derive both the progress total and
+    # the pre-scan coverage warnings from it.
     try:
-        total = get_total_message_count(file, should_include)
+        with open_input(file) as (stream, _size):
+            summary = get_summary(stream)
     except (FileNotFoundError, OSError):
         logger.exception(f"Error reading {file}")
         return 1
+
+    total = count_included_messages(summary, should_include)
+    warn_topic_coverage(summary, file, topics)
 
     writers: dict[int, TopicWriter] = {}
     used_filenames: set[str] = set()
