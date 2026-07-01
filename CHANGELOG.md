@@ -4,6 +4,48 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.16.0, small-mcap 0.10.0, ros-parser 0.6.0
+
+Headline: `plot` gains array paths, browserless image/SVG export, and clear
+feedback about which paths actually matched; message paths now map field access
+over sliced/filtered arrays; and filtered reads of unchunked files are up to
+~10x faster.
+
+### pymcap-cli 0.16.0
+
+- `plot` expands array-valued message paths into one trace per element index, so
+  `"/sensor/joints.position[:].@degrees"` plots every joint. Capped at 64
+  columns (with a warning) to guard against huge unsliced arrays.
+- `plot -o` renders a static image when the output suffix is `.png`, `.svg`,
+  `.pdf`, `.jpg`, or `.webp` — no browser needed, handy over SSH. `.html` and
+  interactive display are unchanged. Adds `kaleido` to the `[plot]` extra.
+- `plot` embeds the source filename in the figure title for back-reference.
+- Before scanning, exporters read the file's summary once and warn when the run
+  will be slow or empty: no usable summary (must scan the whole file), a file
+  with 0 messages, or a requested topic that is missing or sparse.
+- `plot` reports how many samples each message path matched and, on the first
+  message of a topic, warns when a path resolves nothing — so a mistyped path
+  surfaces seconds in instead of after scanning the whole file. A bad path no
+  longer aborts the run; the valid paths still plot.
+
+### small-mcap 0.10.0
+
+- Filtered reads of seekable, unchunked, non-CRC files now seek past the bodies
+  of messages excluded by topic or time instead of reading them. On a 524 MB
+  unchunked file filtered to a low-volume topic this is ~10x faster in memory
+  (11.6 ms → 1.1 ms), and larger from a cold disk cache since the excluded bytes
+  are never fetched. Chunked files lacking a usable summary (e.g. broken or
+  truncated recordings) still decode correctly.
+
+### ros-parser 0.6.0
+
+- Fix: message-path field access after a slice or filter (e.g. `arr[:].x`,
+  `status{level==2}.message`) now maps element-wise over the array and returns a
+  list of values, instead of raising "field not found on object of type
+  'list'". A raw array field with no slice/index remains invalid.
+
+---
+
 ## pymcap-cli 0.15.0
 
 Headline: fixes a data-loss bug where `compress` / `roscompress` could destroy a
