@@ -30,7 +30,7 @@ from mcap_codec_support.video import (
     VideoEncoderError,
     calculate_downscale_dimensions,
     create_video_compression_backend,
-    encode_raw_image_to_jpeg,
+    encode_raw_image_to_compressed,
     get_software_encoder,
     prefetch_image_decodes,
 )
@@ -173,7 +173,7 @@ def roscompress(
         ),
     ] = None,
     image_format: Annotated[
-        Literal["video", "jpeg", "none"],
+        Literal["video", "jpeg", "png", "none"],
         Parameter(
             name=["--image-format"],
             group=ENCODING_GROUP,
@@ -240,6 +240,7 @@ def roscompress(
         How to encode image topics:
         ``video`` (default) — convert raw and compressed images to CompressedVideo
         (H.264/H.265). ``jpeg`` — encode raw Image topics as JPEG CompressedImage;
+        ``png`` — encode raw Image topics as PNG CompressedImage;
         already-compressed images are copied unchanged. ``none`` — copy all image
         topics unchanged.
     jpeg_quality
@@ -261,7 +262,7 @@ def roscompress(
         return 1
 
     do_video = image_format == "video"
-    do_jpeg = image_format == "jpeg"
+    do_image_compress = image_format == "jpeg" or image_format == "png"
 
     # Resolve backend.
     compress_backend = create_video_compression_backend(backend, codec, do_video=do_video)
@@ -303,8 +304,10 @@ def roscompress(
         logger.info(f"Quality (CRF): {quality}")
         if scale is not None:
             logger.info(f"Scale (max dim): {scale}px")
-    elif do_jpeg:
-        logger.info(f"Image mode: jpeg (raw → CompressedImage, q={jpeg_quality})")
+    elif do_image_compress:
+        logger.info(f"Image mode: {image_format} (raw → CompressedImage)")
+        if image_format == "jpeg":
+            logger.info(f"JPEG quality: {jpeg_quality}")
         if scale is not None:
             logger.info(f"Scale (max dim): {scale}px")
     else:
@@ -382,7 +385,8 @@ def roscompress(
             msg_iter,
             compress_backend,
             do_video,
-            do_jpeg,
+            do_image_compress,
+            image_format,
             jpeg_quality,
             pointcloud,
             pc_format,
@@ -437,11 +441,10 @@ def roscompress(
     total_converted = messages_converted + pointcloud_messages_converted
     logger.info("[green bold]✓ Compression complete![/green bold]")
     if topics_converted:
-        target_label = "JPEG" if image_format == "jpeg" else "Video"
-        console.print(f"[cyan]{target_label} topics converted:[/cyan] {len(topics_converted)}")
+        console.print(f"[cyan]{image_format} topics converted:[/cyan] {len(topics_converted)}")
         for topic in sorted(topics_converted):
             console.print(f"  - {topic}")
-        console.print(f"[cyan]{target_label} messages converted:[/cyan] {messages_converted:,}")
+        console.print(f"[cyan]{image_format} messages converted:[/cyan] {messages_converted:,}")
     if pointcloud_topics_converted:
         console.print(
             f"[cyan]Point cloud topics converted:[/cyan] {len(pointcloud_topics_converted)}"
@@ -549,15 +552,16 @@ def _handle_pointcloud(
 
 
 # ---------------------------------------------------------------------------
-# Raw → JPEG path (CompressedImage output)
+# Raw → compressed path (CompressedImage output)
 # ---------------------------------------------------------------------------
 
 
-def _handle_raw_to_jpeg(
+def _handle_raw_to_compressed(
     msg: DecodedMessage,
     backend: AnyVideoBackend,
     decode_future: Future[Any] | None,
     encoders: dict[str, Any],
+    image_format: str,
     jpeg_quality: int,
     scale: int | None,
     writer: McapWriter,
@@ -566,18 +570,18 @@ def _handle_raw_to_jpeg(
     topics_converted: set[str],
     counters: dict[str, int],
 ) -> bool:
-    """Encode a raw Image message as JPEG and write it as a CompressedImage."""
+    """Encode a raw Image message with compressed format and write it as a CompressedImage."""
     del backend, decode_future
 
     topic = msg.channel.topic
     schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
 
     try:
-        jpeg_bytes, target_w, target_h = encode_raw_image_to_jpeg(
-            msg.decoded_message, jpeg_quality=jpeg_quality, scale=scale
+        compressed_bytes, target_w, target_h = encode_raw_image_to_compressed(
+            msg.decoded_message, format=image_format, jpeg_quality=jpeg_quality, scale=scale
         )
     except VideoEncoderError:
-        logger.exception(f"Failed to encode JPEG for {topic}")
+        logger.exception(f"Failed to encode {image_format.upper()} for {topic}")
         return False
 
     if topic not in encoders:
@@ -593,7 +597,7 @@ def _handle_raw_to_jpeg(
         ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
         logger.info(
             f"[green]✓[/green] Converting {topic}: {target_w}x{target_h} "
-            f"({schema_name} → CompressedImage/jpeg)"
+            f"({schema_name} → CompressedImage/{image_format})"
         )
 
     decoded = msg.decoded_message
@@ -605,8 +609,8 @@ def _handle_raw_to_jpeg(
             },
             "frame_id": decoded.header.frame_id,
         },
-        "format": "jpeg",
-        "data": jpeg_bytes,
+        "format": image_format,
+        "data": compressed_bytes,
     }
     writer.add_message_encode(
         channel_id=channel_ids[topic],
@@ -627,7 +631,8 @@ def _run_compress_loop(
     messages: Iterator[tuple[DecodedMessage, Future[Any] | None]],
     backend: AnyVideoBackend,
     do_video: bool,
-    do_jpeg: bool,
+    do_image_compress: bool,
+    image_format: str,
     jpeg_quality: int,
     pointcloud: bool,
     pc_format: str,
@@ -652,12 +657,13 @@ def _run_compress_loop(
     for msg, decode_future in messages:
         schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
 
-        if do_jpeg and schema_name in RAW_SCHEMAS:
-            if not _handle_raw_to_jpeg(
+        if do_image_compress and schema_name in RAW_SCHEMAS:
+            if not _handle_raw_to_compressed(
                 msg,
                 backend,
                 decode_future,
                 encoders,
+                image_format,
                 jpeg_quality,
                 scale,
                 writer,

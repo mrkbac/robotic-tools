@@ -13,7 +13,7 @@ from mcap_codec_support.video.common import (
 )
 from mcap_codec_support.video.compression import (
     create_video_compression_backend,
-    encode_raw_image_to_jpeg,
+    encode_raw_image_to_compressed,
     prefetch_image_decodes,
 )
 from mcap_codec_support.video.factories import VideoDecompressFactory
@@ -43,7 +43,7 @@ __all__ = [
     "VideoEncoderError",
     "calculate_downscale_dimensions",
     "create_video_compression_backend",
-    "encode_raw_image_to_jpeg",
+    "encode_raw_image_to_compressed",
     "get_software_encoder",
     "prefetch_image_decodes",
     "raw_image_to_array",
