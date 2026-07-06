@@ -180,6 +180,14 @@ layers = [
     "display",
     "encoding | types | rosbag_reader",
 ]
+# `core` sits above `display` because core.mcap_transform uses display.osc_utils.
+# These render helpers legitimately consume core domain types the other way, so the
+# two edges can't both be satisfied by ordering; whitelist the render-side imports.
+ignore_imports = [
+    "pymcap_cli.display.tf_render -> pymcap_cli.core.tf_tree",
+    "pymcap_cli.display.tf_render -> pymcap_cli.core.tf_findings",
+    "pymcap_cli.display.diag_render -> pymcap_cli.core.diagnostics",
+]
 
 [[tool.importlinter.contracts]]
 name = "mcap_codec_support features independent"
