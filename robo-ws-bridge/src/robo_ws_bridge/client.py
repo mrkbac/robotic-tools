@@ -20,11 +20,17 @@ from .ws_types import (
     ChannelInfo,
     ConnectionGraphUpdateMessage,
     ConnectionStatus,
+    FetchAssetMessage,
+    GetParametersMessage,
     JsonOpCodes,
+    Parameter,
+    ParameterValuesMessage,
     PublishedTopic,
     RemoveStatusMessage,
     ServerInfoMessage,
+    ServiceCallFailureMessage,
     ServiceInfo,
+    SetParametersMessage,
     StatusMessage,
     SubscribeConnectionGraphMessage,
     SubscribedTopic,
@@ -65,16 +71,31 @@ class ConnectionGraph:
 ConnectionGraphHandler = Callable[[ConnectionGraph], Awaitable[None] | None]
 
 
+@dataclass(frozen=True)
+class ServiceCallResponse:
+    """Successful response to a service call. The payload encoding matches the request."""
+
+    service_id: int
+    call_id: int
+    encoding: str
+    payload: bytes
+
+
+class ServiceCallError(RuntimeError):
+    """Raised when the bridge reports a ``serviceCallFailure`` for our call."""
+
+
+class FetchAssetError(RuntimeError):
+    """Raised when the bridge reports a failed ``fetchAsset`` response."""
+
+
 # Constants for binary message structure
 _MESSAGE_DATA_HEADER_SIZE = 13  # 1 byte opcode + 4 bytes sub_id + 8 bytes timestamp
 _TIME_MESSAGE_SIZE = 9  # 1 byte opcode + 8 bytes timestamp
-
-_UNHANDLED_JSON_OPS = frozenset(
-    {
-        JsonOpCodes.PARAMETER_VALUES.value,
-        JsonOpCodes.SERVICE_CALL_FAILURE.value,
-    }
+_SERVICE_CALL_RESPONSE_HEADER_SIZE = (
+    13  # 1 byte opcode + 4 bytes service id + 4 call id + 4 enc len
 )
+_FETCH_ASSET_RESPONSE_HEADER_SIZE = 10  # 1 byte opcode + 4 request id + 1 status + 4 error len
 
 
 class WebSocketBridgeClient:
@@ -108,6 +129,21 @@ class WebSocketBridgeClient:
         self._next_subscription_id = 1
         self._active_subscriptions: set[int] = set()
         self._channel_to_subscription: dict[int, int] = {}
+
+        # Service-call correlation: call id -> future awaiting the response.
+        self._next_call_id = 1
+        self._pending_calls: dict[int, asyncio.Future[ServiceCallResponse]] = {}
+
+        # Parameter get/set correlation: request id -> future awaiting parameterValues.
+        self._next_param_request_id = 1
+        self._pending_param_requests: dict[str, asyncio.Future[list[Parameter]]] = {}
+
+        # Asset-fetch correlation: request id -> future awaiting the asset bytes.
+        self._next_asset_request_id = 1
+        self._pending_asset_requests: dict[int, asyncio.Future[bytes]] = {}
+
+        # Client-published channels use ids the client allocates.
+        self._next_client_channel_id = 1
 
         # Subscription state tracking
         self._advertised_channels: dict[int, ChannelInfo] = {}
@@ -548,6 +584,183 @@ class WebSocketBridgeClient:
         if channel_id is not None:
             self._channel_to_subscription.pop(channel_id, None)
 
+    async def call_service(
+        self,
+        service_id: int,
+        payload: bytes,
+        *,
+        encoding: str,
+        timeout: float = 10.0,
+    ) -> ServiceCallResponse:
+        """Call an advertised service and await its response.
+
+        Sends a ``SERVICE_CALL_REQUEST`` binary frame and resolves once the matching
+        ``SERVICE_CALL_RESPONSE`` arrives. The payload is treated as opaque bytes; the
+        caller is responsible for encoding the request and decoding the response
+        according to ``encoding`` (one of the server's supported encodings).
+
+        Args:
+            service_id: Advertised service id (see :attr:`services`).
+            payload: Encoded request bytes.
+            encoding: Payload encoding, echoed back on the response.
+            timeout: Seconds to wait for the response.
+
+        Returns:
+            The service response.
+
+        Raises:
+            RuntimeError: If the client is not connected.
+            ServiceCallError: If the server reports a service-call failure.
+            asyncio.TimeoutError: If no response arrives within ``timeout``.
+        """
+        if self._websocket is None:
+            raise RuntimeError("Cannot call service while disconnected")
+
+        call_id = self._next_call_id
+        self._next_call_id += 1
+        future: asyncio.Future[ServiceCallResponse] = asyncio.get_running_loop().create_future()
+        self._pending_calls[call_id] = future
+
+        encoding_bytes = encoding.encode("ascii")
+        frame = (
+            struct.pack(
+                "<BIII",
+                int(BinaryOpCodes.SERVICE_CALL_REQUEST),
+                service_id,
+                call_id,
+                len(encoding_bytes),
+            )
+            + encoding_bytes
+            + payload
+        )
+        try:
+            await self._websocket.send(frame)
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending_calls.pop(call_id, None)
+
+    async def advertise(
+        self,
+        topic: str,
+        *,
+        encoding: str,
+        schema_name: str,
+        schema: str = "",
+        schema_encoding: str | None = None,
+    ) -> int:
+        """Advertise a client channel so this client can publish to ``topic``.
+
+        Only allowed if the server declared the ``clientPublish`` capability. Returns
+        the client-chosen channel id to pass to :meth:`publish`.
+        """
+        if self._websocket is None:
+            raise RuntimeError("Cannot advertise while disconnected")
+        channel_id = self._next_client_channel_id
+        self._next_client_channel_id += 1
+        channel: ChannelInfo = {
+            "id": channel_id,
+            "topic": topic,
+            "encoding": encoding,
+            "schemaName": schema_name,
+            "schema": schema,
+        }
+        if schema_encoding is not None:
+            channel["schemaEncoding"] = schema_encoding
+        message: AdvertiseMessage = {"op": JsonOpCodes.ADVERTISE.value, "channels": [channel]}
+        await self._websocket.send(json.dumps(message))
+        return channel_id
+
+    async def publish(self, channel_id: int, payload: bytes) -> None:
+        """Publish an encoded message on a previously :meth:`advertise`\\ d channel."""
+        if self._websocket is None:
+            raise RuntimeError("Cannot publish while disconnected")
+        frame = struct.pack("<BI", int(BinaryOpCodes.CLIENT_MESSAGE_DATA), channel_id) + payload
+        await self._websocket.send(frame)
+
+    async def unadvertise(self, channel_id: int) -> None:
+        """Withdraw a client channel previously created with :meth:`advertise`."""
+        if self._websocket is None:
+            return
+        message: UnadvertiseMessage = {
+            "op": JsonOpCodes.UNADVERTISE.value,
+            "channelIds": [channel_id],
+        }
+        await self._websocket.send(json.dumps(message))
+
+    async def get_parameters(
+        self, names: list[str] | None = None, *, timeout: float = 5.0
+    ) -> list[Parameter]:
+        """Fetch parameter values from the server (all parameters if ``names`` is empty).
+
+        Only allowed if the server declared the ``parameters`` capability.
+        """
+        if self._websocket is None:
+            raise RuntimeError("Cannot get parameters while disconnected")
+        request_id = f"get-{self._next_param_request_id}"
+        self._next_param_request_id += 1
+        future: asyncio.Future[list[Parameter]] = asyncio.get_running_loop().create_future()
+        self._pending_param_requests[request_id] = future
+        message: GetParametersMessage = {
+            "op": JsonOpCodes.GET_PARAMETERS.value,
+            "parameterNames": names or [],
+            "id": request_id,
+        }
+        try:
+            await self._websocket.send(json.dumps(message))
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending_param_requests.pop(request_id, None)
+
+    async def set_parameters(
+        self, parameters: list[Parameter], *, timeout: float = 5.0
+    ) -> list[Parameter]:
+        """Set parameters and return the server-confirmed values.
+
+        Only allowed if the server declared the ``parameters`` capability.
+        """
+        if self._websocket is None:
+            raise RuntimeError("Cannot set parameters while disconnected")
+        request_id = f"set-{self._next_param_request_id}"
+        self._next_param_request_id += 1
+        future: asyncio.Future[list[Parameter]] = asyncio.get_running_loop().create_future()
+        self._pending_param_requests[request_id] = future
+        message: SetParametersMessage = {
+            "op": JsonOpCodes.SET_PARAMETERS.value,
+            "parameters": parameters,
+            "id": request_id,
+        }
+        try:
+            await self._websocket.send(json.dumps(message))
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending_param_requests.pop(request_id, None)
+
+    async def fetch_asset(self, uri: str, *, timeout: float = 10.0) -> bytes:
+        """Fetch an asset (e.g. a URDF or mesh) by URI and return its bytes.
+
+        Only allowed if the server declared the ``assets`` capability.
+
+        Raises:
+            FetchAssetError: If the server reports a failed fetch.
+            asyncio.TimeoutError: If no response arrives within ``timeout``.
+        """
+        if self._websocket is None:
+            raise RuntimeError("Cannot fetch asset while disconnected")
+        request_id = self._next_asset_request_id
+        self._next_asset_request_id += 1
+        future: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        self._pending_asset_requests[request_id] = future
+        message: FetchAssetMessage = {
+            "op": JsonOpCodes.FETCH_ASSET.value,
+            "uri": uri,
+            "requestId": request_id,
+        }
+        try:
+            await self._websocket.send(json.dumps(message))
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._pending_asset_requests.pop(request_id, None)
+
     async def _send_json(self, message: str) -> bool:
         """Send a raw JSON message to the server (internal use only).
 
@@ -623,10 +836,10 @@ class WebSocketBridgeClient:
                 await self._handle_unadvertise_services(msg)
             elif op == JsonOpCodes.CONNECTION_GRAPH_UPDATE.value:
                 await self._handle_connection_graph_update(msg)
-            elif op in _UNHANDLED_JSON_OPS:
-                # Parameter, services, connection-graph, and service-call ops
-                # are accepted but not yet exposed via callbacks.
-                pass
+            elif op == JsonOpCodes.SERVICE_CALL_FAILURE.value:
+                await self._handle_service_call_failure(msg)
+            elif op == JsonOpCodes.PARAMETER_VALUES.value:
+                self._handle_parameter_values(msg)
             else:
                 logger.debug("Unknown JSON operation: %s", op)
         except Exception:
@@ -727,11 +940,9 @@ class WebSocketBridgeClient:
         elif opcode == BinaryOpCodes.TIME:
             await self._handle_time_data(data)
         elif opcode == BinaryOpCodes.SERVICE_CALL_RESPONSE:
-            # Accepted but not surfaced; service-call API is intentionally not exposed yet.
-            pass
+            self._handle_service_call_response(data)
         elif opcode == BinaryOpCodes.FETCH_ASSET_RESPONSE:
-            # Accepted but not surfaced; fetch-asset API is intentionally not exposed yet.
-            pass
+            self._handle_fetch_asset_response(data)
         else:
             logger.debug("Unknown binary opcode: %d", opcode)
 
@@ -757,6 +968,71 @@ class WebSocketBridgeClient:
             return
 
         await self._invoke_handlers(self._on_message, channel, timestamp, payload)
+
+    def _handle_service_call_response(self, data: bytes) -> None:
+        """Resolve the pending call awaiting this service-call response."""
+        if len(data) < _SERVICE_CALL_RESPONSE_HEADER_SIZE:
+            logger.warning("Invalid service call response format")
+            return
+        service_id, call_id = struct.unpack_from("<II", data, 1)
+        encoding_len = struct.unpack_from("<I", data, 9)[0]
+        encoding = data[13 : 13 + encoding_len].decode("ascii")
+        payload = bytes(data[13 + encoding_len :])
+
+        future = self._pending_calls.get(call_id)
+        if future is None or future.done():
+            logger.debug("No pending call for service-call response call_id=%d", call_id)
+            return
+        future.set_result(
+            ServiceCallResponse(
+                service_id=service_id,
+                call_id=call_id,
+                encoding=encoding,
+                payload=payload,
+            )
+        )
+
+    async def _handle_service_call_failure(self, msg: ServiceCallFailureMessage) -> None:
+        """Reject the pending call the server reports as failed."""
+        call_id = msg["callId"]
+        future = self._pending_calls.get(call_id)
+        if future is None or future.done():
+            logger.debug("No pending call for serviceCallFailure call_id=%d", call_id)
+            return
+        future.set_exception(ServiceCallError(msg["message"]))
+
+    def _handle_parameter_values(self, msg: ParameterValuesMessage) -> None:
+        """Resolve the pending get/set request awaiting these parameter values."""
+        request_id = msg.get("id")
+        if request_id is None:
+            return
+        future = self._pending_param_requests.get(request_id)
+        if future is None or future.done():
+            logger.debug("No pending parameter request for id=%s", request_id)
+            return
+        future.set_result(msg["parameters"])
+
+    def _handle_fetch_asset_response(self, data: bytes) -> None:
+        """Resolve the pending fetch awaiting this asset response."""
+        if len(data) < _FETCH_ASSET_RESPONSE_HEADER_SIZE:
+            logger.warning("Invalid fetch asset response format")
+            return
+        request_id = struct.unpack_from("<I", data, 1)[0]
+        status = data[5]
+        error_len = struct.unpack_from("<I", data, 6)[0]
+        error_message = data[10 : 10 + error_len].decode("utf-8", "replace")
+        asset_data = bytes(data[10 + error_len :])
+
+        future = self._pending_asset_requests.get(request_id)
+        if future is None or future.done():
+            logger.debug("No pending fetch for asset response request_id=%d", request_id)
+            return
+        if status == 0:
+            future.set_result(asset_data)
+        else:
+            future.set_exception(
+                FetchAssetError(error_message or f"fetch failed with status {status}")
+            )
 
     async def _handle_time_data(self, data: bytes) -> None:
         """Handle server time updates."""
