@@ -4,6 +4,58 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.17.0, mcap-codec-support 0.7.0, robo-ws-bridge 0.5.0
+
+Headline: the `bridge` command grows from record/cat into a full live-bridge
+toolkit — `info`, `tf`, `diag`, `call`, `pub`, `params`, and `fetch` — backed by
+new client APIs in `robo-ws-bridge`; `roscompress` cleans point clouds before
+encoding and can drop topics; and `cat` gains `--flat` / `--changed` rendering.
+
+### pymcap-cli 0.17.0
+
+- `bridge` gains seven subcommands against a live Foxglove WebSocket server:
+  - `bridge info` (replaces `bridge inspect`) — summarize channels, schemas, and
+    advertised services/parameters.
+  - `bridge tf` — render the live transform tree.
+  - `bridge diag` — render `diagnostic_msgs` status, reusing the same logic as the
+    offline `diag` / `tftree` commands (now extracted into `core/diagnostics.py`,
+    `core/tf_tree.py`, and shared `display/` renderers).
+  - `bridge call` — call a service with `field:=value` request syntax and print
+    the decoded response as a table.
+  - `bridge pub` — publish to a topic, borrowing its advertised schema.
+  - `bridge params` — list, get, and set parameters.
+  - `bridge fetch` — download an asset (URDF/mesh) to a file or stdout.
+  - The bridge target can now come from `$PYMCAP_BRIDGE` when not passed.
+- `roscompress` cleans point clouds before compression: it drops invalid
+  `(0,0,0)` / NaN points and stable-sorts the rest by laser ring, shrinking
+  fixed-width lidar clouds ~30% at no time cost. Controlled by
+  `--clean-pointcloud` (default on).
+- `roscompress --exclude-topic-glob` / `-x` skips matching topics (e.g.
+  `/debug/*`) before decode, so excluded data is never touched.
+- `roscompress` now encodes point clouds on a thread pool, keeping it within
+  ~1.7x of a plain `compress` despite the extra codec work.
+- `cat` gains shared rendering options (also available on `bridge cat`):
+  `--flat` prints one `dotted.path: value` line per leaf, and `--changed`
+  highlights values that changed since the previous message. Adds
+  `builtin_interfaces` Time/Duration and `geometry_msgs/Quaternion` annotations.
+
+### mcap-codec-support 0.7.0
+
+- New `pointcloud.preprocess.drop_invalid_and_reorder` helper that drops invalid
+  `(0,0,0)` / NaN points and stable-sorts remaining points by laser ring,
+  reusing `pointcloud2.read_points` / `create_cloud`. Powers `roscompress`
+  point-cloud cleaning.
+
+### robo-ws-bridge 0.5.0
+
+- Client-side APIs for the full Foxglove WebSocket surface: `call_service`,
+  `advertise` / `publish` / `unadvertise`, `get_parameters` / `set_parameters`,
+  and `fetch_asset`. Wires up the `SERVICE_CALL_RESPONSE`, `serviceCallFailure`,
+  `parameterValues`, and `FETCH_ASSET_RESPONSE` messages that were previously
+  dropped.
+
+---
+
 ## pymcap-cli 0.16.0, small-mcap 0.10.0, ros-parser 0.6.0, mcap-codec-support 0.6.1
 
 Headline: `plot` gains array paths, browserless image/SVG export, and clear
