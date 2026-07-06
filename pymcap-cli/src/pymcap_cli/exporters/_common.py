@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -157,6 +158,25 @@ def validate_output_dir(output: str | Path, *, force: bool) -> Path | None:
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def exclude_topic_globs(
+    patterns: list[str] | None,
+) -> Callable[[Channel, Schema | None], bool]:
+    """Build a ``should_include`` predicate that drops topics matching any glob.
+
+    The returned callable plugs into ``small_mcap.read_message_decoded`` so the
+    excluded topics are filtered before decode. Returns an accept-all predicate
+    when ``patterns`` is empty.
+    """
+    if not patterns:
+        return lambda _channel, _schema: True
+    compiled = tuple(patterns)
+
+    def _should_include(channel: Channel, _schema: Schema | None) -> bool:
+        return not any(fnmatch(channel.topic, pattern) for pattern in compiled)
+
+    return _should_include
 
 
 def make_should_include(

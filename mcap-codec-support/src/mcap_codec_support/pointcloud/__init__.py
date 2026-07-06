@@ -15,6 +15,7 @@ from mcap_codec_support.pointcloud.factories import (
     PointCloudDecompressFactory,
     is_compressed_codec_available,
 )
+from mcap_codec_support.pointcloud.preprocess import drop_invalid_and_reorder
 from mcap_codec_support.pointcloud.schemas import (
     CLOUDINI_COMPRESSED_POINTCLOUD2,
     COMPRESSED_POINTCLOUD2,
@@ -43,5 +44,6 @@ __all__ = [
     "Pointcloud2DecoderFactory",
     "build_compressed_pointcloud2_message",
     "build_foxglove_compressed_pointcloud_message",
+    "drop_invalid_and_reorder",
     "is_compressed_codec_available",
 ]

@@ -273,3 +273,24 @@ def test_csv_exporter_skips_blob_schemas_by_default():
 
     assert CsvExporter().accepts(_Schema()) is False  # type: ignore[arg-type]
     assert CsvExporter(include_blobs=True).accepts(_Schema()) is True  # type: ignore[arg-type]
+
+
+def _channel(topic: str):
+    return SimpleNamespace(topic=topic)
+
+
+def test_exclude_topic_globs_none_accepts_everything():
+    from pymcap_cli.exporters._common import exclude_topic_globs
+
+    should_include = exclude_topic_globs(None)
+    assert should_include(_channel("/topic/a/secondary"), None)
+    assert should_include(_channel("/anything"), None)
+
+
+def test_exclude_topic_globs_drops_matching_topics():
+    from pymcap_cli.exporters._common import exclude_topic_globs
+
+    should_include = exclude_topic_globs(["*/secondary", "/debug/*"])
+    assert should_include(_channel("/topic/a"), None) is True
+    assert should_include(_channel("/topic/a/secondary"), None) is False
+    assert should_include(_channel("/debug/state"), None) is False

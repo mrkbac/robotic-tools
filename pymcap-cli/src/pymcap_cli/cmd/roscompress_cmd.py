@@ -2,8 +2,10 @@
 
 import contextlib
 import logging
+import os
+import threading
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Annotated, Any, Literal
 
@@ -18,6 +20,7 @@ from mcap_codec_support.pointcloud import (
     PointCloudCompressorProtocol,
     build_compressed_pointcloud2_message,
     build_foxglove_compressed_pointcloud_message,
+    drop_invalid_and_reorder,
 )
 from mcap_codec_support.video import (
     COMPRESSED_IMAGE,
@@ -49,7 +52,7 @@ from pymcap_cli.core.mcap_transform import (
     get_total_message_count,
     print_size_comparison,
 )
-from pymcap_cli.exporters._common import normalize_schema_name
+from pymcap_cli.exporters._common import exclude_topic_globs, normalize_schema_name
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 from pymcap_cli.utils import confirm_output_overwrite, output_overwrites_input
 
@@ -200,6 +203,20 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = True,
+    clean_pointcloud: Annotated[
+        bool,
+        Parameter(
+            name=["--clean-pointcloud/--no-clean-pointcloud"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = True,
+    exclude_topic_glob: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--exclude-topic-glob", "-x"],
+            help="Drop topics matching this shell-style glob (repeatable), e.g. '/debug/*'.",
+        ),
+    ] = None,
 ) -> int:
     """Compress ROS MCAP by converting image and point cloud topics.
 
@@ -246,6 +263,14 @@ def roscompress(
         JPEG quality (1-100, higher = better) when ``image_format=jpeg``. Default: 90.
     pointcloud
         Enable point cloud compression. Default: True.
+    clean_pointcloud
+        Before compressing, drop invalid ``(0,0,0)``/NaN points and group the
+        remaining points by laser ring (``line``). Shrinks such clouds ~30%%
+        at no extra time cost. Default: True.
+    exclude_topic_glob
+        Drop topics whose name matches any of these shell-style globs
+        (repeatable). Excluded topics are skipped before decoding, e.g.
+        ``--exclude-topic-glob '/debug/*'``.
     """
     if output_overwrites_input(file, output):
         logger.error("Output path is the same file as the input; choose a different output file.")
@@ -298,6 +323,8 @@ def roscompress(
 
     logger.info(f"Input: {file}")
     logger.info(f"Output: {output}")
+    if exclude_topic_glob:
+        logger.info(f"Excluding topics matching: {', '.join(exclude_topic_glob)}")
     if do_video:
         logger.info(f"Image mode: video ({encoder_name}, {compress_backend.label})")
         logger.info(f"Quality (CRF): {quality}")
@@ -319,6 +346,8 @@ def roscompress(
             logger.info(f"Draco compression level: {draco_compression_level}")
         if pc_format == "draco" or pc_encoding == "lossy":
             logger.info(f"Point cloud resolution: {resolution}")
+        if clean_pointcloud:
+            logger.info("Point cloud cleanup: drop (0,0,0)/NaN points, group by line")
     else:
         logger.info("Point cloud compression: disabled")
 
@@ -365,7 +394,10 @@ def roscompress(
         channel_ids: dict[str, int] = {}
 
         messages = read_message_decoded(
-            input_stream, decoder_factories=[decoder_factory], num_workers=4
+            input_stream,
+            should_include=exclude_topic_globs(exclude_topic_glob),
+            decoder_factories=[decoder_factory],
+            num_workers=4,
         )
 
         # Video mode benefits from prefetching compressed image decodes. JPEG mode only
@@ -375,6 +407,25 @@ def roscompress(
         if do_video and compress_backend.prefetch_supported:
             decode_pool = ThreadPoolExecutor(max_workers=4)
             msg_iter = prefetch_image_decodes(messages, compress_backend, decode_pool, prefetch=16)
+        elif pointcloud and pc_compressor is not None:
+            workers = min(8, max(2, (os.cpu_count() or 4) - 2))
+            decode_pool = ThreadPoolExecutor(max_workers=workers)
+
+            def _make_pc_compressor() -> PointCloudCompressorProtocol:
+                compressor = _create_pointcloud_compressor(
+                    pc_format, pc_encoding, pc_compression, resolution, draco_compression_level
+                )
+                if compressor is None:  # unreachable: validated non-None above
+                    raise PointCloudCompressionError("point cloud compressor unavailable")
+                return compressor
+
+            msg_iter = _prefetch_pointcloud_compress(
+                messages,
+                decode_pool,
+                _make_pc_compressor,
+                clean_pointcloud,
+                max_inflight=workers * 3,
+            )
         else:
             msg_iter = _iter_no_futures(messages)
 
@@ -387,6 +438,7 @@ def roscompress(
             pointcloud,
             pc_format,
             pc_schema,
+            clean_pointcloud,
             encoders,
             encoder_name,
             codec,
@@ -473,6 +525,54 @@ def _iter_no_futures(
         yield msg, None
 
 
+def _prefetch_pointcloud_compress(
+    messages: Iterable[DecodedMessage],
+    pool: ThreadPoolExecutor,
+    make_compressor: Callable[[], PointCloudCompressorProtocol],
+    clean_pointcloud: bool,
+    max_inflight: int,
+) -> Iterator[tuple[DecodedMessage, Future[tuple[Any, bytes]] | None]]:
+    """Compress point clouds in background threads, yielding messages in order.
+
+    Point cloud preprocessing + Cloudini/Draco encode is the CPU cost of
+    roscompress; everything else is a cheap verbatim copy. Submitting that work
+    to a pool overlaps it with the copy/write path and fans it across cores.
+    Each worker thread keeps its own compressor (the encoder cache is not
+    thread-safe). Non-point-cloud messages pass through with a ``None`` future.
+    """
+    tls = threading.local()
+
+    def _work(decoded: Any) -> tuple[Any, bytes]:
+        compressor = tls.__dict__.get("compressor")
+        if compressor is None:
+            compressor = make_compressor()
+            tls.__dict__["compressor"] = compressor
+        return _compress_pointcloud(decoded, compressor, clean_pointcloud)
+
+    buffer: deque[tuple[DecodedMessage, Future[tuple[Any, bytes]] | None]] = deque()
+    inflight = 0
+    for msg in messages:
+        schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
+        if schema_name in POINTCLOUD2_SCHEMAS:
+            future: Future[tuple[Any, bytes]] | None = pool.submit(_work, msg.decoded_message)
+            inflight += 1
+        else:
+            future = None
+        buffer.append((msg, future))
+
+        # Keep at most ``max_inflight`` clouds submitted ahead of the consumer so
+        # the pool queue and buffered results stay bounded. Copy messages drain
+        # for free; a pending future yields and the consumer blocks on it.
+        while buffer and inflight >= max_inflight:
+            out_msg, out_future = buffer.popleft()
+            if out_future is not None:
+                inflight -= 1
+            yield out_msg, out_future
+
+    while buffer:
+        yield buffer.popleft()
+
+
 def _write_compressed_video(
     writer: McapWriter,
     channel_id: int,
@@ -497,9 +597,24 @@ def _write_compressed_video(
     )
 
 
-def _handle_pointcloud(
-    msg: DecodedMessage,
+def _compress_pointcloud(
+    decoded: Any,
     pc_compressor: PointCloudCompressorProtocol,
+    clean_pointcloud: bool,
+) -> tuple[Any, bytes]:
+    """Preprocess and compress one point cloud, returning ``(processed, bytes)``.
+
+    Pure CPU work with no writer access, so it is safe to run in a worker thread.
+    """
+    if clean_pointcloud:
+        decoded = drop_invalid_and_reorder(decoded)
+    return decoded, pc_compressor.compress(decoded)
+
+
+def _write_pointcloud(
+    msg: DecodedMessage,
+    decoded: Any,
+    compressed: bytes,
     pc_format: str,
     pc_schema: str,
     writer: McapWriter,
@@ -508,12 +623,10 @@ def _handle_pointcloud(
     pointcloud_topics_converted: set[str],
 ) -> None:
     topic = msg.channel.topic
-    decoded = msg.decoded_message
     resolved_schema = pc_schema
     if resolved_schema == "auto":
         resolved_schema = "foxglove" if pc_format == "draco" else "pointcloud2"
 
-    compressed = pc_compressor.compress(decoded)
     if resolved_schema == "foxglove":
         compressed_pc_msg = build_foxglove_compressed_pointcloud_message(
             decoded,
@@ -632,6 +745,7 @@ def _run_compress_loop(
     pointcloud: bool,
     pc_format: str,
     pc_schema: str,
+    clean_pointcloud: bool,
     encoders: dict[str, Any],
     encoder_name: str,
     codec: str,
@@ -649,8 +763,17 @@ def _run_compress_loop(
     task_id: int,
     counters: dict[str, int],
 ) -> bool:
+    # Schema-name normalization is a per-schema constant; cache it by channel id
+    # so the 100k+ copied messages don't each re-run the string work.
+    schema_name_by_channel: dict[int, str] = {}
+    # rich's per-message progress refresh is a measurable slice of the copy path;
+    # batch advances so the bar updates without dominating the loop.
+    pending_advance = 0
     for msg, decode_future in messages:
-        schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
+        schema_name = schema_name_by_channel.get(msg.channel.id)
+        if schema_name is None:
+            schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
+            schema_name_by_channel[msg.channel.id] = schema_name
 
         if do_jpeg and schema_name in RAW_SCHEMAS:
             if not _handle_raw_to_jpeg(
@@ -756,9 +879,22 @@ def _run_compress_loop(
 
         elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
             try:
-                _handle_pointcloud(
+                if decode_future is not None:
+                    processed, compressed = decode_future.result()
+                else:
+                    assert pc_compressor is not None
+                    processed, compressed = _compress_pointcloud(
+                        msg.decoded_message, pc_compressor, clean_pointcloud
+                    )
+            except PointCloudCompressionError as exc:
+                logger.warning(f"Skipping point cloud compression for {msg.channel.topic}: {exc}")
+                copy_message(msg, writer, schema_ids, channel_ids)
+                counters["copied"] += 1
+            else:
+                _write_pointcloud(
                     msg,
-                    pc_compressor,
+                    processed,
+                    compressed,
                     pc_format,
                     pc_schema,
                     writer,
@@ -766,17 +902,17 @@ def _run_compress_loop(
                     channel_ids,
                     pointcloud_topics_converted,
                 )
-            except PointCloudCompressionError as exc:
-                logger.warning(f"Skipping point cloud compression for {msg.channel.topic}: {exc}")
-                copy_message(msg, writer, schema_ids, channel_ids)
-                counters["copied"] += 1
-            else:
                 counters["pc_converted"] += 1
 
         else:
             copy_message(msg, writer, schema_ids, channel_ids)
             counters["copied"] += 1
 
-        progress.update(task_id, advance=1)
+        pending_advance += 1
+        if pending_advance >= 512:
+            progress.update(task_id, advance=pending_advance)
+            pending_advance = 0
 
+    if pending_advance:
+        progress.update(task_id, advance=pending_advance)
     return True
