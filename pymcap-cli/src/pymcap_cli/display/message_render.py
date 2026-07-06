@@ -9,7 +9,9 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
+import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -128,6 +130,17 @@ _ENUM_PRIMITIVE_TYPES = frozenset(
 _TREE_PRIMITIVE_ARRAY_LIMIT = 12
 _TREE_COMPLEX_ARRAY_LIMIT = 16
 
+_TIME_PACKAGE = "builtin_interfaces"
+_QUATERNION_PACKAGE = "geometry_msgs"
+_QUATERNION_TYPE = "Quaternion"
+
+
+class TimeKind(str, Enum):
+    """Kind of `builtin_interfaces` timestamp field to annotate in the tree."""
+
+    TIME = "Time"
+    DURATION = "Duration"
+
 
 @dataclass(frozen=True)
 class EnumField:
@@ -144,15 +157,23 @@ class EnumPlan:
     skip_fields: frozenset[str]
     enum_fields: dict[str, EnumField]
     nested_plans: dict[str, EnumPlan]
+    time_fields: dict[str, TimeKind] = dataclasses.field(default_factory=dict)
+    quaternion_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class RenderContext:
     bytes_mode: BytesMode
     truncate_bytes: int
+    # Dotted paths whose value changed since the previous message on this topic
+    # (``--changed``). None disables change highlighting.
+    changed_paths: frozenset[str] | None = None
 
     def format(self, value: Any) -> str:
         return _format_scalar(value, bytes_mode=self.bytes_mode, truncate_bytes=self.truncate_bytes)
+
+    def is_changed(self, path: str) -> bool:
+        return self.changed_paths is not None and path in self.changed_paths
 
 
 def _message_items(obj: Any) -> list[tuple[str, Any]]:
@@ -268,6 +289,8 @@ def build_enum_plan(
     skip_fields: set[str] = set()
     enum_fields: dict[str, EnumField] = {}
     nested_plans: dict[str, EnumPlan] = {}
+    time_fields: dict[str, TimeKind] = {}
+    quaternion_fields: set[str] = set()
 
     fields_by_name = {f.name: f for f in msgdef.fields}
 
@@ -305,6 +328,20 @@ def build_enum_plan(
                     enum_fields[f.name] = same_msg_enum
             continue
 
+        # builtin_interfaces/Time and /Duration: keep the sec/nanosec breakdown but
+        # tag the field so the renderer can annotate it with a human-readable value.
+        # Detected on the declared type so it works even without their MessageDefinition.
+        time_kind = _time_kind(f.type)
+        if time_kind is not None and not f.type.is_array:
+            time_fields[f.name] = time_kind
+            continue
+
+        # geometry_msgs/Quaternion: keep the x/y/z/w breakdown but tag the field so
+        # the renderer can annotate it with human-readable roll/pitch/yaw.
+        if _is_quaternion_type(f.type) and not f.type.is_array:
+            quaternion_fields.add(f.name)
+            continue
+
         nested_msgdef = _resolve_msgdef(f.type, all_definitions)
         if nested_msgdef is None:
             continue
@@ -325,7 +362,7 @@ def build_enum_plan(
         if sub_plan is not None:
             nested_plans[f.name] = sub_plan
 
-    if not (skip_fields or enum_fields or nested_plans):
+    if not (skip_fields or enum_fields or nested_plans or time_fields or quaternion_fields):
         _visited[schema_name] = None
         return None
 
@@ -333,9 +370,28 @@ def build_enum_plan(
         skip_fields=frozenset(skip_fields),
         enum_fields=dict(enum_fields),
         nested_plans=dict(nested_plans),
+        time_fields=dict(time_fields),
+        quaternion_fields=frozenset(quaternion_fields),
     )
     _visited[schema_name] = plan
     return plan
+
+
+def _time_kind(field_type: RosType) -> TimeKind | None:
+    """Return the TimeKind for a `builtin_interfaces/{Time,Duration}` field type, else None."""
+    if field_type.package_name != _TIME_PACKAGE:
+        return None
+    try:
+        return TimeKind(field_type.type_name)
+    except ValueError:
+        return None
+
+
+def _is_quaternion_type(field_type: RosType) -> bool:
+    """True for a `geometry_msgs/Quaternion` field type."""
+    return (
+        field_type.package_name == _QUATERNION_PACKAGE and field_type.type_name == _QUATERNION_TYPE
+    )
 
 
 def _is_message_obj(obj: Any) -> bool:
@@ -393,6 +449,102 @@ def _key_label(name: str) -> Text:
     return text
 
 
+def _time_parts(value: Any) -> tuple[int, int] | None:
+    """Extract integer (sec, nanosec) from a decoded Time/Duration message or dict."""
+    if isinstance(value, dict):
+        sec, nanosec = value.get("sec"), value.get("nanosec")
+    elif _is_message_obj(value):
+        fields = dict(_message_items(value))
+        sec, nanosec = fields.get("sec"), fields.get("nanosec")
+    else:
+        return None
+    if isinstance(sec, bool) or isinstance(nanosec, bool):
+        return None
+    if isinstance(sec, int) and isinstance(nanosec, int):
+        return sec, nanosec
+    return None
+
+
+def _format_ros_time(sec: int, nanosec: int) -> str:
+    """UTC ISO-8601 timestamp with nanosecond precision for a ROS `Time`."""
+    dt = datetime.fromtimestamp(sec, tz=timezone.utc)
+    return f"{dt:%Y-%m-%dT%H:%M:%S}.{nanosec:09d}Z"
+
+
+def _format_ros_duration(sec: int, nanosec: int) -> str:
+    """Signed seconds string with nanosecond precision for a ROS `Duration`."""
+    total_ns = sec * 1_000_000_000 + nanosec
+    sign = "-" if total_ns < 0 else ""
+    magnitude = abs(total_ns)
+    return f"{sign}{magnitude // 1_000_000_000}.{magnitude % 1_000_000_000:09d}s"
+
+
+def _time_annotation(value: Any, kind: TimeKind) -> Text | None:
+    """Human-readable annotation for a Time/Duration field, or None if unrenderable."""
+    parts = _time_parts(value)
+    if parts is None:
+        return None
+    sec, nanosec = parts
+    try:
+        if kind is TimeKind.TIME:
+            text = f"{_format_ros_time(sec, nanosec)} UTC"
+        else:
+            text = _format_ros_duration(sec, nanosec)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return Text(text, style="green")
+
+
+def _as_float(value: Any) -> float | None:
+    """Return `value` as a float if it is a real number (not bool), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _quaternion_parts(value: Any) -> tuple[float, float, float, float] | None:
+    """Extract numeric (x, y, z, w) from a decoded Quaternion message or dict."""
+    if isinstance(value, dict):
+        source = value
+    elif _is_message_obj(value):
+        source = dict(_message_items(value))
+    else:
+        return None
+    x = _as_float(source.get("x"))
+    y = _as_float(source.get("y"))
+    z = _as_float(source.get("z"))
+    w = _as_float(source.get("w"))
+    if x is None or y is None or z is None or w is None:
+        return None
+    return x, y, z, w
+
+
+def _quaternion_to_rpy_deg(
+    x: float, y: float, z: float, w: float
+) -> tuple[float, float, float] | None:
+    """Convert a quaternion to (roll, pitch, yaw) in degrees, or None if degenerate."""
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm == 0.0:
+        return None
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2.0 * (w * y - z * x))))
+    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
+
+
+def _quaternion_annotation(value: Any) -> Text | None:
+    """`rpy [r°, p°, y°]` annotation for a Quaternion field, or None if unrenderable."""
+    parts = _quaternion_parts(value)
+    if parts is None:
+        return None
+    rpy = _quaternion_to_rpy_deg(*parts)
+    if rpy is None:
+        return None
+    roll, pitch, yaw = rpy
+    return Text(f"rpy [{roll:.1f}°, {pitch:.1f}°, {yaw:.1f}°]", style="green")
+
+
 def _wrapper_value(value: Any, inner_field: str) -> Any:
     if value is None:
         return None
@@ -401,27 +553,74 @@ def _wrapper_value(value: Any, inner_field: str) -> Any:
     return getattr(value, inner_field, None)
 
 
+def _scalar_text(value: Any, ctx: RenderContext, path: str = "") -> Text:
+    """Formatted scalar as Rich `Text`.
+
+    Non-finite floats (NaN/±Inf) render bold red; a value that changed since the
+    previous message (``--changed``) renders bold yellow. NaN highlighting wins.
+    """
+    formatted = ctx.format(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return Text(formatted, style="bold red")
+    if ctx.is_changed(path):
+        return Text(formatted, style="bold yellow")
+    return Text(formatted)
+
+
+def _sequence_body(
+    value: list[Any] | tuple[Any, ...],
+    enum_field: EnumField | None,
+    ctx: RenderContext,
+) -> Text:
+    """Render a scalar sequence inline as ``[a, b, c]`` (truncated past the limit)."""
+    label = Text("[", style="dim")
+    shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
+    for i, item in enumerate(shown):
+        if i:
+            label.append(", ", style="dim")
+        if enum_field is None:
+            label.append_text(_scalar_text(item, ctx))
+        else:
+            label.append_text(_enum_label(item, enum_field))
+    if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT:
+        label.append(f", … ({len(value)} total)", style="dim")
+    label.append("]", style="dim")
+    return label
+
+
+def _apply_changed(text: Text, ctx: RenderContext, path: str) -> Text:
+    if ctx.is_changed(path):
+        text.stylize("bold yellow")
+    return text
+
+
 def _add_sequence(
     parent: Tree,
     name: str,
     value: list[Any] | tuple[Any, ...],
     enum_field: EnumField | None,
     ctx: RenderContext,
+    path: str = "",
 ) -> None:
     label = _key_label(name)
-    label.append("[", style="dim")
-    shown = list(value)[:_TREE_PRIMITIVE_ARRAY_LIMIT]
-    for i, item in enumerate(shown):
-        if i:
-            label.append(", ", style="dim")
-        if enum_field is None:
-            label.append(ctx.format(item))
-        else:
-            label.append_text(_enum_label(item, enum_field))
-    if len(value) > _TREE_PRIMITIVE_ARRAY_LIMIT:
-        label.append(f", … ({len(value)} total)", style="dim")
-    label.append("]", style="dim")
+    label.append_text(_apply_changed(_sequence_body(value, enum_field, ctx), ctx, path))
     parent.add(label)
+
+
+def _render_message_array(
+    parent: Tree,
+    value: list[Any] | tuple[Any, ...],
+    element_plan: EnumPlan | None,
+    ctx: RenderContext,
+    path: str = "",
+) -> None:
+    """Render a sequence of message/dict elements as ``[i]`` subtrees under ``parent``."""
+    shown = list(value)[:_TREE_COMPLEX_ARRAY_LIMIT]
+    for i, item in enumerate(shown):
+        _render_child(parent, Text(f"[{i}]", style="dim"), item, element_plan, ctx, f"{path}[{i}]")
+    remaining = len(value) - _TREE_COMPLEX_ARRAY_LIMIT
+    if remaining > 0:
+        parent.add(Text(f"… ({remaining} more)", style="dim"))
 
 
 def _render_child(
@@ -430,8 +629,9 @@ def _render_child(
     obj: Any,
     plan: EnumPlan | None,
     ctx: RenderContext,
+    path: str = "",
 ) -> None:
-    _render_into(parent.add(label), obj, plan, ctx)
+    _render_into(parent.add(label), obj, plan, ctx, path)
 
 
 def _render_into(
@@ -439,23 +639,36 @@ def _render_into(
     obj: Any,
     plan: EnumPlan | None,
     ctx: RenderContext,
+    path: str = "",
 ) -> None:
     """Populate `parent` with one node per (name, value) pair on `obj`."""
     if isinstance(obj, dict):
         items = [(str(k), v) for k, v in obj.items()]
     elif _is_message_obj(obj):
         items = _message_items(obj)
+    elif isinstance(obj, (list, tuple)):
+        # A query that extracts an array (e.g. `/tf.transforms` or `.transforms[:]`)
+        # hands us a bare sequence; render its elements rather than a raw repr.
+        if obj and _is_tree_obj(obj[0]):
+            _render_message_array(parent, obj, plan, ctx, path)
+        else:
+            parent.add(_apply_changed(_sequence_body(obj, None, ctx), ctx, path))
+        return
     else:
-        parent.add(ctx.format(obj))
+        parent.add(_scalar_text(obj, ctx, path))
         return
 
     skip = plan.skip_fields if plan else frozenset()
     enum_fields = plan.enum_fields if plan else {}
     nested_plans = plan.nested_plans if plan else {}
+    time_fields = plan.time_fields if plan else {}
+    quaternion_fields = plan.quaternion_fields if plan else frozenset()
 
     for name, value in items:
         if name in skip:
             continue
+
+        child_path = f"{path}.{name}" if path else name
 
         enum_field = enum_fields.get(name)
         if enum_field is not None:
@@ -465,21 +678,28 @@ def _render_into(
                 else value
             )
             if isinstance(enum_value, (list, tuple)):
-                _add_sequence(parent, name, enum_value, enum_field, ctx)
+                _add_sequence(parent, name, enum_value, enum_field, ctx, child_path)
             else:
                 label = _key_label(name)
-                label.append_text(_enum_label(enum_value, enum_field))
+                label.append_text(
+                    _apply_changed(_enum_label(enum_value, enum_field), ctx, child_path)
+                )
                 parent.add(label)
             continue
 
         if _is_tree_obj(value):
-            _render_child(
-                parent,
-                Text(name, style="bold cyan"),
-                value,
-                nested_plans.get(name),
-                ctx,
-            )
+            header = Text(name, style="bold cyan")
+            time_kind = time_fields.get(name)
+            if time_kind is not None:
+                annotation = _time_annotation(value, time_kind)
+            elif name in quaternion_fields:
+                annotation = _quaternion_annotation(value)
+            else:
+                annotation = None
+            if annotation is not None:
+                header.append("  ")
+                header.append_text(annotation)
+            _render_child(parent, header, value, nested_plans.get(name), ctx, child_path)
             continue
 
         if isinstance(value, (list, tuple)):
@@ -488,24 +708,14 @@ def _render_into(
                 header.append(name, style="bold cyan")
                 header.append(f"  ({len(value)})", style="dim")
                 child = parent.add(header)
-                inner_plan = nested_plans.get(name)
-                shown_items = list(value)[:_TREE_COMPLEX_ARRAY_LIMIT]
-                for i, item in enumerate(shown_items):
-                    _render_child(child, Text(f"[{i}]", style="dim"), item, inner_plan, ctx)
-                if len(value) > _TREE_COMPLEX_ARRAY_LIMIT:
-                    child.add(
-                        Text(
-                            f"… ({len(value) - _TREE_COMPLEX_ARRAY_LIMIT} more)",
-                            style="dim",
-                        )
-                    )
+                _render_message_array(child, value, nested_plans.get(name), ctx, child_path)
                 continue
 
-            _add_sequence(parent, name, value, None, ctx)
+            _add_sequence(parent, name, value, None, ctx, child_path)
             continue
 
         label = _key_label(name)
-        label.append(ctx.format(value))
+        label.append_text(_scalar_text(value, ctx, child_path))
         parent.add(label)
 
 
@@ -516,8 +726,133 @@ def render_message_tree(
     title: Text,
     bytes_mode: BytesMode,
     truncate_bytes: int,
+    changed_paths: frozenset[str] | None = None,
 ) -> Tree:
     """Render a decoded message as a Rich Tree, decorating known enum fields with names."""
     tree = Tree(title)
-    _render_into(tree, obj, plan, RenderContext(bytes_mode, truncate_bytes))
+    _render_into(tree, obj, plan, RenderContext(bytes_mode, truncate_bytes, changed_paths))
     return tree
+
+
+def _flat_leaf(path: str, value_text: Text) -> Text:
+    if not path:
+        return value_text
+    line = Text()
+    line.append(path, style="bold cyan")
+    line.append(": ", style="dim")
+    line.append_text(value_text)
+    return line
+
+
+def _flat_lines(value: Any, plan: EnumPlan | None, path: str, ctx: RenderContext) -> list[Text]:
+    if isinstance(value, (list, tuple)):
+        if value and _is_tree_obj(value[0]):
+            lines: list[Text] = []
+            shown = list(value)[:_TREE_COMPLEX_ARRAY_LIMIT]
+            for i, item in enumerate(shown):
+                lines.extend(_flat_lines(item, plan, f"{path}[{i}]", ctx))
+            remaining = len(value) - _TREE_COMPLEX_ARRAY_LIMIT
+            if remaining > 0:
+                lines.append(_flat_leaf(f"{path}[…]", Text(f"({remaining} more)", style="dim")))
+            return lines
+        return [_flat_leaf(path, _apply_changed(_sequence_body(value, None, ctx), ctx, path))]
+
+    if not _is_tree_obj(value):
+        return [_flat_leaf(path, _scalar_text(value, ctx, path))]
+
+    if isinstance(value, dict):
+        items = [(str(k), v) for k, v in value.items()]
+    else:
+        items = _message_items(value)
+
+    skip = plan.skip_fields if plan else frozenset()
+    enum_fields = plan.enum_fields if plan else {}
+    nested_plans = plan.nested_plans if plan else {}
+
+    lines = []
+    for name, child_value in items:
+        if name in skip:
+            continue
+        child_path = f"{path}.{name}" if path else name
+        enum_field = enum_fields.get(name)
+        if enum_field is not None:
+            enum_value = (
+                _wrapper_value(child_value, enum_field.inner_field)
+                if enum_field.inner_field is not None
+                else child_value
+            )
+            if isinstance(enum_value, (list, tuple)):
+                body = _apply_changed(_sequence_body(enum_value, enum_field, ctx), ctx, child_path)
+            else:
+                body = _apply_changed(_enum_label(enum_value, enum_field), ctx, child_path)
+            lines.append(_flat_leaf(child_path, body))
+            continue
+        lines.extend(_flat_lines(child_value, nested_plans.get(name), child_path, ctx))
+    return lines
+
+
+def render_message_flat(
+    obj: Any,
+    plan: EnumPlan | None,
+    *,
+    bytes_mode: BytesMode,
+    truncate_bytes: int,
+    changed_paths: frozenset[str] | None = None,
+) -> list[Text]:
+    """Render a decoded message as flat ``dotted.path: value`` lines (one per leaf).
+
+    Honors the same enum decoration and NaN/Inf highlighting as the tree view.
+    Pairs well with ``--query`` to pull a subtree and list its leaves compactly.
+    """
+    return _flat_lines(obj, plan, "", RenderContext(bytes_mode, truncate_bytes, changed_paths))
+
+
+_MISSING = object()
+
+
+def _diff_leaves(prev: Any, cur: Any, path: str, out: set[str]) -> None:
+    prev_fields = _field_map(prev)
+    cur_fields = _field_map(cur)
+    if prev_fields is not None and cur_fields is not None:
+        for name in set(prev_fields) | set(cur_fields):
+            child_path = f"{path}.{name}" if path else name
+            _diff_leaves(
+                prev_fields.get(name, _MISSING), cur_fields.get(name, _MISSING), child_path, out
+            )
+        return
+
+    if isinstance(prev, (list, tuple)) and isinstance(cur, (list, tuple)):
+        prev_has_msgs = bool(prev) and _is_tree_obj(prev[0])
+        cur_has_msgs = bool(cur) and _is_tree_obj(cur[0])
+        if prev_has_msgs or cur_has_msgs:
+            for i in range(max(len(prev), len(cur))):
+                prev_item = prev[i] if i < len(prev) else _MISSING
+                cur_item = cur[i] if i < len(cur) else _MISSING
+                _diff_leaves(prev_item, cur_item, f"{path}[{i}]", out)
+            return
+        # Scalar array: compare as a whole; highlight the field if anything moved.
+        if list(prev) != list(cur):
+            out.add(path)
+        return
+
+    if prev is _MISSING or cur is _MISSING or prev != cur:
+        out.add(path)
+
+
+def _field_map(obj: Any) -> dict[str, Any] | None:
+    if isinstance(obj, dict):
+        return {str(k): v for k, v in obj.items()}
+    if _is_message_obj(obj):
+        return dict(_message_items(obj))
+    return None
+
+
+def changed_leaf_paths(previous: Any, current: Any) -> frozenset[str]:
+    """Dotted paths whose scalar value differs between two decoded messages.
+
+    Paths use the same convention as the flat renderer (``a.b``, ``a[0].b``), so the
+    result can drive ``--changed`` highlighting in either the tree or flat view.
+    """
+    out: set[str] = set()
+    _diff_leaves(previous, current, "", out)
+    return frozenset(out)

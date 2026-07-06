@@ -1,4 +1,4 @@
-"""`pymcap-cli bridge inspect` — server snapshot and live `--watch`."""
+"""`pymcap-cli bridge info` — server snapshot and live `--watch`."""
 
 import asyncio
 import base64
@@ -26,6 +26,7 @@ from pymcap_cli.cmd.bridge._shared import (
     BridgeFetchError,
     BridgeInfo,
     BridgeStatus,
+    BridgeTarget,
     SortChoice,
     _append_status,
     _remove_statuses,
@@ -88,6 +89,64 @@ def _build_statuses_table(statuses: tuple[BridgeStatus, ...]) -> Table:
     return table
 
 
+def _collect_graph_nodes(graph: ConnectionGraph) -> dict[str, dict[str, list[str]]]:
+    """Group a connection graph's topics/services by the node that owns them."""
+    nodes: dict[str, dict[str, list[str]]] = {}
+
+    def _bucket(node_id: str) -> dict[str, list[str]]:
+        return nodes.setdefault(node_id, {"publishes": [], "subscribes": [], "provides": []})
+
+    for topic in graph.published_topics:
+        for pub_id in topic["publisherIds"]:
+            _bucket(pub_id)["publishes"].append(topic["name"])
+    for topic in graph.subscribed_topics:
+        for sub_id in topic["subscriberIds"]:
+            _bucket(sub_id)["subscribes"].append(topic["name"])
+    for svc in graph.advertised_services:
+        for provider_id in svc["providerIds"]:
+            _bucket(provider_id)["provides"].append(svc["name"])
+
+    return nodes
+
+
+def _topic_connection_counts(graph: ConnectionGraph) -> dict[str, tuple[int, int]]:
+    """Map topic name -> (publisher count, subscriber count)."""
+    pubs: dict[str, int] = {}
+    subs: dict[str, int] = {}
+    for topic in graph.published_topics:
+        pubs[topic["name"]] = len(topic["publisherIds"])
+    for topic in graph.subscribed_topics:
+        subs[topic["name"]] = len(topic["subscriberIds"])
+    names = set(pubs) | set(subs)
+    return {name: (pubs.get(name, 0), subs.get(name, 0)) for name in names}
+
+
+def _build_connection_graph_summary(graph: ConnectionGraph) -> Table | None:
+    """One row per node with publish/subscribe/service counts — the compact default view."""
+    nodes = _collect_graph_nodes(graph)
+    if not nodes:
+        return None
+
+    table = Table(
+        title=f"Connection graph ({len(nodes)} nodes)",
+        title_justify="left",
+        title_style="bold cyan",
+    )
+    table.add_column("Node")
+    table.add_column("Pub", justify="right", style="green")
+    table.add_column("Sub", justify="right", style="yellow")
+    table.add_column("Svc", justify="right", style="cyan")
+    for node_id in sorted(nodes):
+        sections = nodes[node_id]
+        table.add_row(
+            _format_parts_with_colors(node_id),
+            str(len(sections["publishes"])),
+            str(len(sections["subscribes"])),
+            str(len(sections["provides"])),
+        )
+    return table
+
+
 def _build_connection_graph_tree(
     graph: ConnectionGraph,
     channels: Iterable[ChannelInfo] = (),
@@ -105,21 +164,7 @@ def _build_connection_graph_tree(
         if svc_type:
             types_by_service.setdefault(svc["name"], svc_type)
 
-    nodes: dict[str, dict[str, list[str]]] = {}
-
-    def _bucket(node_id: str) -> dict[str, list[str]]:
-        return nodes.setdefault(node_id, {"publishes": [], "subscribes": [], "provides": []})
-
-    for topic in graph.published_topics:
-        for pub_id in topic["publisherIds"]:
-            _bucket(pub_id)["publishes"].append(topic["name"])
-    for topic in graph.subscribed_topics:
-        for sub_id in topic["subscriberIds"]:
-            _bucket(sub_id)["subscribes"].append(topic["name"])
-    for svc in graph.advertised_services:
-        for provider_id in svc["providerIds"]:
-            _bucket(provider_id)["provides"].append(svc["name"])
-
+    nodes = _collect_graph_nodes(graph)
     if not nodes:
         return None
 
@@ -145,64 +190,54 @@ def _build_connection_graph_tree(
     return tree
 
 
-def _format_node_ids(node_ids: list[str]) -> str:
-    if not node_ids:
-        return ""
-    return "\n".join(_format_parts_with_colors(node_id) for node_id in sorted(node_ids))
-
-
-def _build_channels_table(channels: list[ChannelInfo], graph: ConnectionGraph | None) -> Table:
+def _build_channels_table(
+    channels: list[ChannelInfo],
+    topic_counts: dict[str, tuple[int, int]] | None = None,
+) -> Table:
     table = Table()
     table.add_column("ID", justify="right", style="cyan")
     table.add_column("Topic")
     table.add_column("Schema")
+    if topic_counts is not None:
+        table.add_column("Pub", justify="right", style="green")
+        table.add_column("Sub", justify="right", style="yellow")
 
-    pub_ids: dict[str, list[str]] = {}
-    sub_ids: dict[str, list[str]] = {}
-    if graph is not None:
-        pub_ids = {t["name"]: list(t["publisherIds"]) for t in graph.published_topics}
-        sub_ids = {t["name"]: list(t["subscriberIds"]) for t in graph.subscribed_topics}
-        table.add_column("Publishers")
-        table.add_column("Subscribers")
-
-    seen_topics: set[str] = set()
     for ch in channels:
-        seen_topics.add(ch["topic"])
         row = [
             str(ch["id"]),
             _format_parts_with_colors(ch["topic"]),
             _format_schema_with_link(ch.get("schemaName")),
         ]
-        if graph is not None:
-            row.append(_format_node_ids(pub_ids.get(ch["topic"], [])))
-            row.append(_format_node_ids(sub_ids.get(ch["topic"], [])))
+        if topic_counts is not None:
+            pubs, subs = topic_counts.get(ch["topic"], (0, 0))
+            row.extend([str(pubs), str(subs)])
         table.add_row(*row)
-
-    if graph is not None:
-        for topic in sorted((set(pub_ids) | set(sub_ids)) - seen_topics):
-            table.add_row(
-                "",
-                _format_parts_with_colors(topic),
-                "",
-                _format_node_ids(pub_ids.get(topic, [])),
-                _format_node_ids(sub_ids.get(topic, [])),
-            )
 
     return table
 
 
-def _build_display(info: BridgeInfo, sort: SortChoice, reverse: bool) -> RenderableType:
+def _build_display(
+    info: BridgeInfo, sort: SortChoice, reverse: bool, graph: bool
+) -> RenderableType:
     sorted_channels = _sort_channels(info.channels, sort, reverse)
     parts: list[RenderableType] = [_build_summary(info), Text("")]
     if info.statuses:
         parts.extend([_build_statuses_table(info.statuses), Text("")])
-    parts.append(_build_channels_table(sorted_channels, info.connection_graph))
+    topic_counts = (
+        _topic_connection_counts(info.connection_graph)
+        if info.connection_graph is not None
+        else None
+    )
+    parts.append(_build_channels_table(sorted_channels, topic_counts))
     if info.connection_graph is not None:
-        graph_tree = _build_connection_graph_tree(
-            info.connection_graph, info.channels, info.services
-        )
-        if graph_tree is not None:
-            parts.extend([Text(""), graph_tree])
+        if graph:
+            graph_section = _build_connection_graph_tree(
+                info.connection_graph, info.channels, info.services
+            )
+        else:
+            graph_section = _build_connection_graph_summary(info.connection_graph)
+        if graph_section is not None:
+            parts.extend([Text(""), graph_section])
     return Group(*parts)
 
 
@@ -210,6 +245,7 @@ async def _watch_async(
     url: str,
     sort: SortChoice,
     reverse: bool,
+    graph: bool,
     interval: float,
     connect_timeout: float,
 ) -> int:
@@ -256,7 +292,7 @@ async def _watch_async(
                     f"\n[dim]Watching... Last update: {now}"
                     f" | Channels: {len(info.channels)} | Ctrl+C to stop[/]"
                 )
-                live.update(Group(_build_display(info, sort, reverse), status))
+                live.update(Group(_build_display(info, sort, reverse, graph), status))
                 await asyncio.sleep(interval)
     finally:
         await client.disconnect()
@@ -266,18 +302,19 @@ def _watch(
     url: str,
     sort: SortChoice,
     reverse: bool,
+    graph: bool,
     interval: float,
     connect_timeout: float,
 ) -> int:
     try:
-        return asyncio.run(_watch_async(url, sort, reverse, interval, connect_timeout))
+        return asyncio.run(_watch_async(url, sort, reverse, graph, interval, connect_timeout))
     except KeyboardInterrupt:
         console.print("\n[dim]Watch stopped.[/]")
         return 0
 
 
-def inspect(
-    target: str,
+def info(
+    target: BridgeTarget,
     *,
     json_output: Annotated[
         bool,
@@ -294,6 +331,10 @@ def inspect(
     reverse: Annotated[
         bool,
         Parameter(name=["--reverse"], group=DISPLAY_GROUP),
+    ] = False,
+    graph: Annotated[
+        bool,
+        Parameter(name=["-g", "--graph"], group=DISPLAY_GROUP),
     ] = False,
     watch: Annotated[
         bool,
@@ -312,10 +353,11 @@ def inspect(
         Parameter(name=["--discover-seconds"], group=CONNECTION_GROUP),
     ] = 1.5,
 ) -> int:
-    """Inspect a live Foxglove WebSocket bridge.
+    """Summarize a live Foxglove WebSocket bridge.
 
     Connects to a Foxglove WebSocket bridge, prints the server metadata and
-    advertised channel list, then disconnects. Use `info` for MCAP files.
+    advertised channel list, then disconnects. The connection graph is shown
+    as a compact per-node summary; pass ``--graph`` for the full tree.
 
     Parameters
     ----------
@@ -331,6 +373,9 @@ def inspect(
         Sort channels by ``topic`` (default), ``id``, or ``schema``.
     reverse
         Reverse sort order (descending).
+    graph
+        Expand the full connection graph as a per-node publish/subscribe tree
+        instead of the compact node-count summary.
     watch
         Stay connected and refresh on advertise/unadvertise events. Ctrl+C to stop.
     watch_interval
@@ -344,11 +389,12 @@ def inspect(
     Examples
     --------
     ```
-    pymcap-cli bridge ws://localhost:8765
-    pymcap-cli bridge 127.0.0.1:8765
-    pymcap-cli bridge 192.168.1.10           # default port 8765
-    pymcap-cli bridge ws://localhost:8765 --json
-    pymcap-cli bridge ws://localhost:8765 --watch
+    pymcap-cli bridge info ws://localhost:8765
+    pymcap-cli bridge info 127.0.0.1:8765
+    pymcap-cli bridge info 192.168.1.10           # default port 8765
+    pymcap-cli bridge info ws://localhost:8765 --graph
+    pymcap-cli bridge info ws://localhost:8765 --json
+    pymcap-cli bridge info ws://localhost:8765 --watch
     ```
     """
     if compress and not json_output:
@@ -361,7 +407,7 @@ def inspect(
     url = to_ws_url(target)
 
     if watch:
-        return _watch(url, sort, reverse, watch_interval, connect_timeout)
+        return _watch(url, sort, reverse, graph, watch_interval, connect_timeout)
 
     try:
         info = fetch_bridge_info(
@@ -378,5 +424,5 @@ def inspect(
         _output_json(info, compress)
         return 0
 
-    console.print(_build_display(info, sort, reverse))
+    console.print(_build_display(info, sort, reverse, graph))
     return 0

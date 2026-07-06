@@ -7,17 +7,52 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from ros_parser import parse_schema_to_definitions
-from ros_parser.message_path import ValidationError
+from ros_parser.message_path import ArrayIndex, ArraySlice, FieldAccess, ValidationError
 
-from pymcap_cli.display.message_render import build_enum_plan, resolve_msgdef_by_name
+from pymcap_cli.display.message_render import EnumPlan, build_enum_plan, resolve_msgdef_by_name
 
 if TYPE_CHECKING:
     from ros_parser.message_path import MessagePath
     from ros_parser.models import MessageDefinition
 
-    from pymcap_cli.display.message_render import EnumPlan
-
 logger = logging.getLogger(__name__)
+
+
+def query_result_is_empty(result: object) -> bool:
+    """True when a query produced nothing to show — ``None`` or an empty sequence.
+
+    Filter/slice queries (e.g. ``.transforms[:]{child_frame_id=="base_link"}``) return
+    an empty list when nothing matched. Callers skip those so ``--limit`` counts real
+    hits and empty frames don't clutter the stream. A falsy *scalar* (``0``, ``False``,
+    ``""``) is a genuine value and is NOT treated as empty.
+    """
+    if result is None:
+        return True
+    return isinstance(result, (list, tuple)) and len(result) == 0
+
+
+def plan_for_query(root_plan: EnumPlan | None, parsed_query: MessagePath | None) -> EnumPlan | None:
+    """Return the render plan matching the sub-object a query extracts.
+
+    The root plan describes the whole message. A field-path query renders a sub-value,
+    so we walk the query's segments into the plan's ``nested_plans``:
+    ``.field`` descends into that field's nested plan, array index/slice keep the
+    element plan. Anything the plan can't follow (a scalar/enum leaf, a filter, a math
+    modifier) yields None, so that sub-value simply renders undecorated.
+    """
+    if parsed_query is None:
+        return root_plan
+    plan = root_plan
+    for segment in parsed_query.segments:
+        if isinstance(segment, (ArrayIndex, ArraySlice)):
+            continue
+        if isinstance(segment, FieldAccess):
+            if plan is None:
+                return None
+            plan = plan.nested_plans.get(segment.field_name)
+            continue
+        return None
+    return plan
 
 
 class SchemaLike(Protocol):

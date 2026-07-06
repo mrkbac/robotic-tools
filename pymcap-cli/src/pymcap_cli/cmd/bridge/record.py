@@ -21,6 +21,7 @@ from small_mcap import McapWriter
 from pymcap_cli.cmd.bridge._shared import (
     CONNECTION_GROUP,
     DISPLAY_GROUP,
+    BridgeTarget,
     console,
     to_ws_url,
 )
@@ -315,7 +316,7 @@ async def _record_async(
 
 
 def record(
-    target: str,
+    target: BridgeTarget,
     *,
     output: OutputPathOption,
     topics: Annotated[

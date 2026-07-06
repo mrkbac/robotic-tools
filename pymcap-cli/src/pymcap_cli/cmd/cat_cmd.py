@@ -24,13 +24,15 @@ from ros_parser.message_path import (
 from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.display.cat_helpers import SchemaCache
+from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query, query_result_is_empty
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
     TTY_BYTES_TRUNCATE,
     BytesMode,
+    changed_leaf_paths,
     message_matches_grep,
     message_to_dict,
+    render_message_flat,
     render_message_tree,
 )
 from pymcap_cli.utils import ProgressTrackingIO, file_progress, parse_timestamp_bounds_absolute
@@ -143,6 +145,28 @@ def cat(
             ),
         ),
     ] = BytesMode.SMART,
+    flat: Annotated[
+        bool,
+        Parameter(
+            name=["--flat"],
+            group=OUTPUT_GROUP,
+            help=(
+                "In a terminal, print one `dotted.path: value` line per leaf "
+                "instead of a tree. Greppable, and handy with --query."
+            ),
+        ),
+    ] = False,
+    changed: Annotated[
+        bool,
+        Parameter(
+            name=["--changed"],
+            group=OUTPUT_GROUP,
+            help=(
+                "In a terminal, highlight values that changed since the previous "
+                "message on the same topic. The full message is still shown."
+            ),
+        ),
+    ] = False,
 ) -> int:
     """Stream MCAP messages to stdout.
 
@@ -223,6 +247,7 @@ def cat(
     message_count = 0
     validated_topics: set[str] = set()
     schema_cache = SchemaCache()
+    previous_by_topic: dict[str, Any] = {}
 
     def should_include_message(
         channel: Channel,
@@ -291,7 +316,7 @@ def cat(
                 if parsed_query:
                     try:
                         data = parsed_query.apply(msg.decoded_message)
-                        if data is None:
+                        if query_result_is_empty(data):
                             continue
                     except MessagePathError as e:
                         logger.warning(f"Filter error on {msg.channel.topic}: {e}")
@@ -314,19 +339,38 @@ def cat(
                     header.append(schema.name if schema else "unknown", style="yellow")
                     header.append("]", style="dim")
 
-                    plan = (
-                        None if parsed_query or schema is None else schema_cache.enum_plan(schema)
-                    )
+                    root_plan = schema_cache.enum_plan(schema) if schema is not None else None
+                    plan = plan_for_query(root_plan, parsed_query)
 
-                    tree = render_message_tree(
-                        data,
-                        plan,
-                        title=header,
-                        bytes_mode=bytes_mode,
-                        truncate_bytes=TTY_BYTES_TRUNCATE,
-                    )
+                    changed_paths = None
+                    if changed:
+                        topic = msg.channel.topic
+                        previous = previous_by_topic.get(topic)
+                        changed_paths = (
+                            changed_leaf_paths(previous, data) if previous is not None else None
+                        )
+                        previous_by_topic[topic] = data
 
-                    console_out.print(Panel(tree, border_style="blue", expand=False))
+                    if flat:
+                        console_out.print(header)
+                        for flat_line in render_message_flat(
+                            data,
+                            plan,
+                            bytes_mode=bytes_mode,
+                            truncate_bytes=TTY_BYTES_TRUNCATE,
+                            changed_paths=changed_paths,
+                        ):
+                            console_out.print(flat_line)
+                    else:
+                        tree = render_message_tree(
+                            data,
+                            plan,
+                            title=header,
+                            bytes_mode=bytes_mode,
+                            truncate_bytes=TTY_BYTES_TRUNCATE,
+                            changed_paths=changed_paths,
+                        )
+                        console_out.print(Panel(tree, border_style="blue", expand=False))
                 else:
                     line = _to_jsonl(msg, data)
                     if out_file is not None:

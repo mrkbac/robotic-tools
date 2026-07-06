@@ -13,7 +13,7 @@ from enum import IntFlag
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap import include_topics, read_message_decoded
@@ -32,6 +32,41 @@ Quat = tuple[float, float, float, float]
 class RosStamp(Protocol):
     sec: int
     nanosec: int
+
+
+class _RosVec3(Protocol):
+    x: float
+    y: float
+    z: float
+
+
+class _RosQuat(Protocol):
+    x: float
+    y: float
+    z: float
+    w: float
+
+
+class _RosTransform(Protocol):
+    translation: _RosVec3
+    rotation: _RosQuat
+
+
+class _RosTfHeader(Protocol):
+    stamp: RosStamp
+    frame_id: str
+
+
+class _RosTransformStamped(Protocol):
+    header: _RosTfHeader
+    child_frame_id: str
+    transform: _RosTransform
+
+
+class TfMessageLike(Protocol):
+    """A decoded ``tf2_msgs/msg/TFMessage`` (list of stamped transforms)."""
+
+    transforms: Sequence[_RosTransformStamped]
 
 
 class TfTopicFlag(IntFlag):
@@ -338,17 +373,7 @@ def read_tf_graph(
             should_include=include_topics(topics),
             decoder_factories=[DecoderFactory()],
         ):
-            for transform_stamped in msg.decoded_message.transforms:
-                trans = transform_stamped.transform.translation
-                rot = transform_stamped.transform.rotation
-                graph.add(
-                    static=msg.channel.topic == TF_STATIC_TOPIC,
-                    stamp_ns=stamp_to_ns(transform_stamped.header.stamp),
-                    parent=transform_stamped.header.frame_id,
-                    child=transform_stamped.child_frame_id,
-                    translation=(trans.x, trans.y, trans.z),
-                    rotation=(rot.x, rot.y, rot.z, rot.w),
-                )
+            add_tf_message(graph, msg.channel.topic, msg.decoded_message)
     return graph
 
 
@@ -400,6 +425,31 @@ def quaternion_to_euler_rad(x: float, y: float, z: float, w: float) -> tuple[flo
 
 def stamp_to_ns(stamp: RosStamp) -> int:
     return int(stamp.sec) * NS_TO_SEC + int(stamp.nanosec)
+
+
+def add_tf_message(graph: TfGraph, topic: str, message: TfMessageLike) -> bool:
+    """Feed one decoded ``tf2_msgs/TFMessage`` into ``graph``.
+
+    Returns True if this message introduced a new (parent, child) edge — callers
+    use that to refresh a live display only when the tree structure changes.
+    """
+    is_static = topic == TF_STATIC_TOPIC
+    added_new_edge = False
+    for transform_stamped in message.transforms:
+        edge = (transform_stamped.header.frame_id, transform_stamped.child_frame_id)
+        if edge not in graph.transforms:
+            added_new_edge = True
+        trans = transform_stamped.transform.translation
+        rot = transform_stamped.transform.rotation
+        graph.add(
+            static=is_static,
+            stamp_ns=stamp_to_ns(transform_stamped.header.stamp),
+            parent=transform_stamped.header.frame_id,
+            child=transform_stamped.child_frame_id,
+            translation=(trans.x, trans.y, trans.z),
+            rotation=(rot.x, rot.y, rot.z, rot.w),
+        )
+    return added_new_edge
 
 
 def _transform_value_from_data(transform: TransformData) -> TransformValue:

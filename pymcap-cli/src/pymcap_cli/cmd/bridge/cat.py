@@ -6,7 +6,6 @@ import logging
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Annotated, Any
 
 from cyclopts import Group as CycloptsGroup
@@ -21,16 +20,24 @@ from ros_parser.message_path import (
     MessagePathError,
     parse_message_path,
 )
-from small_mcap import JSONDecoderFactory
+from small_mcap import JSONDecoderFactory, Schema
 
-from pymcap_cli.cmd.bridge._shared import CONNECTION_GROUP, console, to_ws_url
-from pymcap_cli.display.cat_helpers import SchemaCache
+from pymcap_cli.cmd.bridge._shared import (
+    CONNECTION_GROUP,
+    BridgeTarget,
+    channel_to_schema,
+    console,
+    to_ws_url,
+)
+from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query, query_result_is_empty
 from pymcap_cli.display.message_render import (
     SMART_BYTES_INLINE_LIMIT,
     TTY_BYTES_TRUNCATE,
     BytesMode,
+    changed_leaf_paths,
     message_matches_grep,
     message_to_dict,
+    render_message_flat,
     render_message_tree,
 )
 from pymcap_cli.log_setup import ERR
@@ -39,25 +46,6 @@ logger = logging.getLogger(__name__)
 
 CAT_FILTER_GROUP = CycloptsGroup("Filtering")
 CAT_OUTPUT_GROUP = CycloptsGroup("Output")
-
-
-@dataclass(frozen=True)
-class _BridgeSchema:
-    """MCAP-style Schema view of a bridge ChannelInfo, satisfying the decoder Protocol."""
-
-    id: int
-    name: str
-    encoding: str
-    data: bytes
-
-
-def _channel_to_schema(channel: ChannelInfo) -> _BridgeSchema:
-    return _BridgeSchema(
-        id=channel["id"],
-        name=channel.get("schemaName", ""),
-        encoding=channel.get("schemaEncoding", ""),
-        data=channel.get("schema", "").encode("utf-8"),
-    )
 
 
 async def _cat_async(
@@ -72,6 +60,8 @@ async def _cat_async(
     duration: float | None,
     bytes_mode: BytesMode,
     connect_timeout: float,
+    flat: bool = False,
+    changed: bool = False,
 ) -> int:
     parsed_query: MessagePath | None = None
     if query:
@@ -100,8 +90,9 @@ async def _cat_async(
     factories = [JSONDecoderFactory(), DecoderFactory()]
 
     decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-    schemas_by_channel: dict[int, _BridgeSchema] = {}
+    schemas_by_channel: dict[int, Schema] = {}
     schema_cache = SchemaCache()
+    previous_by_topic: dict[str, Any] = {}
     validated_topics: set[str] = set()
     warned_channels: set[int] = set()
     subscribed: set[int] = set()
@@ -122,7 +113,7 @@ async def _cat_async(
         cid = channel["id"]
         if cid in decoders:
             return decoders[cid]
-        schema = _channel_to_schema(channel)
+        schema = channel_to_schema(channel)
         message_encoding = channel["encoding"]
         decoder: Callable[[bytes | memoryview], Any] | None = None
         for factory in factories:
@@ -166,17 +157,36 @@ async def _cat_async(
         header.append(schema_name, style="yellow")
         header.append("]", style="dim")
         schema = schemas_by_channel.get(channel["id"])
-        plan = (
-            None if parsed_query is not None or schema is None else schema_cache.enum_plan(schema)
-        )
-        tree = render_message_tree(
-            data,
-            plan,
-            title=header,
-            bytes_mode=bytes_mode,
-            truncate_bytes=TTY_BYTES_TRUNCATE,
-        )
-        console.print(Panel(tree, border_style="blue", expand=False))
+        root_plan = schema_cache.enum_plan(schema) if schema is not None else None
+        plan = plan_for_query(root_plan, parsed_query)
+
+        changed_paths = None
+        if changed:
+            topic = channel["topic"]
+            previous = previous_by_topic.get(topic)
+            changed_paths = changed_leaf_paths(previous, data) if previous is not None else None
+            previous_by_topic[topic] = data
+
+        if flat:
+            console.print(header)
+            for flat_line in render_message_flat(
+                data,
+                plan,
+                bytes_mode=bytes_mode,
+                truncate_bytes=TTY_BYTES_TRUNCATE,
+                changed_paths=changed_paths,
+            ):
+                console.print(flat_line)
+        else:
+            tree = render_message_tree(
+                data,
+                plan,
+                title=header,
+                bytes_mode=bytes_mode,
+                truncate_bytes=TTY_BYTES_TRUNCATE,
+                changed_paths=changed_paths,
+            )
+            console.print(Panel(tree, border_style="blue", expand=False))
 
     def _on_message(channel: ChannelInfo, log_time_ns: int, payload: bytes) -> None:
         nonlocal total, return_code
@@ -216,7 +226,7 @@ async def _cat_async(
             except MessagePathError as exc:
                 logger.warning(f"Filter error on {topic}: {exc}")
                 return
-            if data is None:
+            if query_result_is_empty(data):
                 return
         else:
             data = decoded
@@ -286,7 +296,7 @@ async def _cat_async(
 
 
 def cat(
-    target: str,
+    target: BridgeTarget,
     *,
     topics: Annotated[
         list[str],
@@ -353,6 +363,28 @@ def cat(
             ),
         ),
     ] = BytesMode.SMART,
+    flat: Annotated[
+        bool,
+        Parameter(
+            name=["--flat"],
+            group=CAT_OUTPUT_GROUP,
+            help=(
+                "In a terminal, print one `dotted.path: value` line per leaf "
+                "instead of a tree. Greppable, and handy with --query."
+            ),
+        ),
+    ] = False,
+    changed: Annotated[
+        bool,
+        Parameter(
+            name=["--changed"],
+            group=CAT_OUTPUT_GROUP,
+            help=(
+                "In a terminal, highlight values that changed since the previous "
+                "message on the same topic. The full message is still shown."
+            ),
+        ),
+    ] = False,
     connect_timeout: Annotated[
         float,
         Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
@@ -419,6 +451,8 @@ def cat(
                 limit=limit,
                 duration=duration,
                 bytes_mode=bytes_mode,
+                flat=flat,
+                changed=changed,
                 connect_timeout=connect_timeout,
             )
         )

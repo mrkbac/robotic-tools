@@ -21,7 +21,12 @@ from pymcap_cli.cmd.bridge._shared import (
     to_ws_url,
 )
 from pymcap_cli.cmd.bridge.cat import _cat_async, cat
-from pymcap_cli.cmd.bridge.inspect import _build_connection_graph_tree
+from pymcap_cli.cmd.bridge.info import (
+    _build_channels_table,
+    _build_connection_graph_summary,
+    _build_connection_graph_tree,
+    _topic_connection_counts,
+)
 from pymcap_cli.cmd.bridge.record import (
     BridgeRecorder,
     TopicSelector,
@@ -256,6 +261,71 @@ def test_connection_graph_tree_sorts_nodes_and_topics() -> None:
     alpha_pos = talker_section.index("/alpha")
     zeta_pos = talker_section.index("/zeta")
     assert alpha_pos < zeta_pos
+
+
+def test_connection_graph_summary_returns_none_when_empty() -> None:
+    graph = ConnectionGraph(
+        published_topics=(),
+        subscribed_topics=(),
+        advertised_services=(),
+    )
+    assert _build_connection_graph_summary(graph) is None
+
+
+def test_connection_graph_summary_counts_per_node_without_listing_topics() -> None:
+    graph = ConnectionGraph(
+        published_topics=(
+            {"name": "/zeta", "publisherIds": ["/talker"]},
+            {"name": "/alpha", "publisherIds": ["/talker"]},
+        ),
+        subscribed_topics=({"name": "/zeta", "subscriberIds": ["/listener"]},),
+        advertised_services=({"name": "/reset", "providerIds": ["/talker"]},),
+    )
+    summary = _build_connection_graph_summary(graph)
+    assert summary is not None
+    output = _render(summary)
+    assert "2 nodes" in output
+    assert "/talker" in output
+    assert "/listener" in output
+    # The compact summary reports counts only — it must not enumerate topic names.
+    assert "/zeta" not in output
+    assert "/alpha" not in output
+    assert "/reset" not in output
+
+
+def test_channels_table_is_compact_without_publisher_columns() -> None:
+    channels = [
+        _make_channel(channel_id=1, topic="/chatter", schema_name="std_msgs/String"),
+    ]
+    output = _render(_build_channels_table(channels))
+    assert "/chatter" in output
+    assert "std_msgs/String" in output
+    assert "Publishers" not in output
+    assert "Subscribers" not in output
+    assert "Pub" not in output
+    assert "Sub" not in output
+
+
+def test_topic_connection_counts_maps_pub_and_sub_totals() -> None:
+    graph = ConnectionGraph(
+        published_topics=({"name": "/chatter", "publisherIds": ["/talker", "/talker2"]},),
+        subscribed_topics=({"name": "/chatter", "subscriberIds": ["/listener"]},),
+        advertised_services=(),
+    )
+    assert _topic_connection_counts(graph) == {"/chatter": (2, 1)}
+
+
+def test_channels_table_shows_pub_sub_counts_when_graph_available() -> None:
+    channels = [
+        _make_channel(channel_id=1, topic="/chatter", schema_name="std_msgs/String"),
+        _make_channel(channel_id=2, topic="/quiet", schema_name="std_msgs/String"),
+    ]
+    topic_counts = {"/chatter": (2, 1)}
+    output = _render(_build_channels_table(channels, topic_counts))
+    assert "Pub" in output
+    assert "Sub" in output
+    # A topic absent from the graph falls back to zero counts rather than being dropped.
+    assert "/quiet" in output
 
 
 def test_status_cache_replaces_and_removes_id_statuses() -> None:
