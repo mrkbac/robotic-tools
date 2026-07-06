@@ -1,6 +1,6 @@
 [project]
 name = "mcap-codec-support"
-version = "0.7.0"
+version = "0.8.0"
 description = "Reusable MCAP encoder and decoder factories for robotics codecs"
 readme = "README.md"
 requires-python = ">=3.10"
