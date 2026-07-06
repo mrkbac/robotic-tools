@@ -23,6 +23,16 @@ H264_SPS = b"\x00\x00\x00\x01\x67\x42\x00\x0a"
 # H.264 start code + slice NAL type 1 (non-IDR)
 H264_SLICE = b"\x00\x00\x00\x01\x41\xab\xcd\xef"
 
+# x264 writes a 4-byte start code on the first NAL of an access unit and 3-byte
+# codes on the NALs inside it; IDR access units open with SPS + PPS.
+# Payload high bit set ⇔ first_mb_in_slice == 0 (slice starts a new picture).
+H264_P1 = b"\x00\x00\x00\x01\x41\xe0\x11\x22"
+H264_P2 = b"\x00\x00\x00\x01\x41\xe0\x33\x44"
+# Continuation slice of the same picture (first_mb_in_slice > 0 → high bit clear).
+H264_P_CONT_4BYTE = b"\x00\x00\x00\x01\x41\x40\x55\x66"
+H264_PPS_3BYTE = b"\x00\x00\x01\x68\xce\x38\x80"
+H264_IDR_3BYTE = b"\x00\x00\x01\x65\x88\x84\x00"
+
 
 class TestAnnexBParser:
     def test_single_au_flush(self) -> None:
@@ -70,6 +80,45 @@ class TestAnnexBParser:
         parser = AnnexBParser("h265")
         result = parser.feed(h265_vcl + h265_vcl2)
         assert len(result) == 1
+
+    def test_sps_led_idr_au_is_own_au(self) -> None:
+        """A P-frame directly before an SPS-led IDR AU must not merge into it.
+
+        This is the x264 GOP-boundary layout: the IDR access unit starts with
+        SPS/PPS (4-byte start code on the SPS, 3-byte codes inside the AU).
+        """
+        parser = AnnexBParser("h264")
+        idr_au = H264_SPS + H264_PPS_3BYTE + H264_IDR_3BYTE
+        aus = parser.feed(H264_P1 + idr_au + H264_P2)
+        aus.extend(parser.flush_list())
+        assert aus == [H264_P1, idr_au, H264_P2]
+
+    def test_sps_led_idr_au_boundary_in_flush(self) -> None:
+        """flush_list splits the SPS-led IDR AU from the preceding P-frame."""
+        parser = AnnexBParser("h264")
+        idr_au = H264_SPS + H264_PPS_3BYTE + H264_IDR_3BYTE
+        aus = parser.feed(H264_P1 + idr_au)
+        aus.extend(parser.flush_list())
+        assert aus == [H264_P1, idr_au]
+
+    def test_multi_slice_picture_is_one_au(self) -> None:
+        """Continuation slices (first_mb_in_slice > 0) stay in the same AU."""
+        parser = AnnexBParser("h264")
+        aus = parser.feed(H264_P1 + H264_P_CONT_4BYTE + H264_P2)
+        aus.extend(parser.flush_list())
+        assert aus == [H264_P1 + H264_P_CONT_4BYTE, H264_P2]
+
+    def test_h265_sps_led_idr_au_is_own_au(self) -> None:
+        """H.265 equivalent: SPS (type 33) opens the IDR AU."""
+        h265_p1 = b"\x00\x00\x00\x01\x02\x01\xab\xcd"
+        h265_sps = b"\x00\x00\x00\x01\x42\x01\x01\x02"
+        h265_idr_3byte = b"\x00\x00\x01\x26\x01\xaf\x08"  # IDR_W_RADL (type 19)
+        h265_p2 = b"\x00\x00\x00\x01\x02\x01\xef\x01"
+        parser = AnnexBParser("h265")
+        idr_au = h265_sps + h265_idr_3byte
+        aus = parser.feed(h265_p1 + idr_au + h265_p2)
+        aus.extend(parser.flush_list())
+        assert aus == [h265_p1, idr_au, h265_p2]
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +214,38 @@ class TestFFmpegVideoEncoder:
 
         for packet in encoder.flush_packets():
             assert packet[:4] == b"\x00\x00\x00\x01"
+
+    def test_no_frame_loss_across_gops(self) -> None:
+        """Every input frame yields exactly one access unit, incl. GOP boundaries.
+
+        x264 opens each IDR access unit with SPS/PPS; a parser that only splits
+        on VCL NALs merges the preceding P-frame into it, losing one frame per
+        GOP (and shifting message/AU pairing by one from there on).
+        """
+        width, height = 64, 64
+        frame_size = width * height * 3 // 2
+        encoder = FFmpegVideoEncoder(
+            width=width,
+            height=height,
+            codec_name="libx264",
+            quality=28,
+            target_fps=30.0,
+            gop_size=10,
+            input_pix_fmt="yuv420p",
+        )
+
+        n = 35
+        outputs: list[bytes] = []
+        for i in range(n):
+            raw = bytes([(i * 7) % 256] * frame_size)
+            result = encoder.encode(raw)
+            if result is not None:
+                outputs.append(result)
+        outputs.extend(encoder.flush_packets())
+
+        assert len(outputs) == n
+        for packet in outputs:
+            assert packet.startswith(b"\x00\x00\x00\x01")
 
     def test_cleanup_on_del(self) -> None:
         encoder = FFmpegVideoEncoder(

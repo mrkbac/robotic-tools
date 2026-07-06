@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import threading
-import time
 from queue import Empty, Queue
 
 from mcap_codec_support.video.common import (
@@ -81,19 +80,33 @@ ROS_ENCODING_TO_PIX_FMT: dict[str, str] = {
 # Annex B access-unit splitter
 # ---------------------------------------------------------------------------
 
-_START_CODE_4 = b"\x00\x00\x00\x01"
+_START_CODE_3 = b"\x00\x00\x01"
 _H264_VCL_TYPES = frozenset({1, 2, 3, 4, 5})
+# Non-VCL NAL types that may only appear at the start of an access unit
+# (H.264 §7.4.1.2.3): SEI, SPS, PPS, AUD, prefix NAL, subset SPS.
+_H264_AU_START_NONVCL = frozenset({6, 7, 8, 9, 14, 15})
 _H265_MAX_VCL_TYPE = 31
+# H.265 §7.4.2.4.4: VPS, SPS, PPS, AUD, prefix SEI.
+_H265_AU_START_NONVCL = frozenset({32, 33, 34, 35, 39})
 
 
 class AnnexBParser:
-    """Split an Annex B byte stream into per-access-unit chunks."""
+    """Split an Annex B byte stream into per-access-unit chunks.
+
+    A new access unit starts at a VCL NAL that begins a picture
+    (``first_mb_in_slice == 0`` / ``first_slice_segment_in_pic_flag``) or at a
+    non-VCL NAL that may only open an AU (SPS/PPS/SEI/AUD/...), once the
+    current AU holds at least one VCL NAL. Both 3- and 4-byte start codes are
+    recognized — x264 uses a 4-byte code only on the first NAL of an AU, so
+    scanning 4-byte codes alone misses the IDR slices behind SPS/PPS and
+    merges each SPS-led IDR AU into the previous frame.
+    """
 
     def __init__(self, codec: str) -> None:
         self._is_h265 = "265" in codec or "hevc" in codec
         self._buf = bytearray()
-        self._current_au = bytearray()
-        self._current_has_vcl = False
+        self._scan_pos = 0
+        self._has_vcl = False
 
     def _is_vcl(self, nal_header: int) -> bool:
         if self._is_h265:
@@ -102,41 +115,54 @@ class AnnexBParser:
         nal_type = nal_header & 0x1F
         return nal_type in _H264_VCL_TYPES
 
+    def _starts_new_au(self, header_pos: int) -> bool:
+        header = self._buf[header_pos]
+        if self._is_h265:
+            nal_type = (header >> 1) & 0x3F
+            if nal_type <= _H265_MAX_VCL_TYPE:
+                # first_slice_segment_in_pic_flag: first bit after 2-byte header.
+                return bool(self._buf[header_pos + 2] & 0x80)
+            return nal_type in _H265_AU_START_NONVCL
+        nal_type = header & 0x1F
+        if nal_type in _H264_VCL_TYPES:
+            # first_mb_in_slice is Exp-Golomb-coded; a leading 1-bit means value 0.
+            return bool(self._buf[header_pos + 1] & 0x80)
+        return nal_type in _H264_AU_START_NONVCL
+
+    def _scan(self, *, final: bool) -> list[bytes]:
+        """Emit finished AUs from the buffer; the open AU stays at ``buf[0:]``."""
+        buf = self._buf
+        result: list[bytes] = []
+        pos = self._scan_pos
+        # Bytes needed past the start code to classify a NAL: header plus the
+        # first payload byte (2-byte header for H.265).
+        classify_len = 3 if self._is_h265 else 2
+        while True:
+            idx = buf.find(_START_CODE_3, pos)
+            if idx == -1:
+                # A start code may straddle the chunk boundary; rescan its tail.
+                pos = max(pos, len(buf) - 2)
+                break
+            header_pos = idx + 3
+            if header_pos + classify_len > len(buf) and not final:
+                pos = idx
+                break
+            sc_start = idx - 1 if idx > 0 and buf[idx - 1] == 0 else idx
+            classifiable = header_pos + classify_len <= len(buf)
+            if sc_start > 0 and self._has_vcl and classifiable and self._starts_new_au(header_pos):
+                result.append(bytes(buf[:sc_start]))
+                del buf[:sc_start]
+                header_pos -= sc_start
+                self._has_vcl = False
+            if header_pos < len(buf) and self._is_vcl(buf[header_pos]):
+                self._has_vcl = True
+            pos = header_pos
+        self._scan_pos = pos
+        return result
+
     def feed(self, data: bytes) -> list[bytes]:
         self._buf.extend(data)
-        result: list[bytes] = []
-
-        while True:
-            first = self._buf.find(_START_CODE_4)
-            if first == -1:
-                break
-            second = self._buf.find(_START_CODE_4, first + 4)
-            if second == -1 or second + 4 >= len(self._buf):
-                break
-
-            next_nal_header = self._buf[second + 4]
-            next_is_vcl = self._is_vcl(next_nal_header)
-
-            if first + 4 < len(self._buf):
-                cur_nal_header = self._buf[first + 4]
-                if self._is_vcl(cur_nal_header) and not self._current_has_vcl:
-                    self._current_has_vcl = True
-
-            if next_is_vcl and self._current_has_vcl:
-                self._current_au.extend(self._buf[:second])
-                result.append(bytes(self._current_au))
-                self._current_au = bytearray()
-                self._current_has_vcl = False
-                self._buf = self._buf[second:]
-                continue
-
-            if next_is_vcl:
-                self._current_has_vcl = True
-
-            self._current_au.extend(self._buf[:second])
-            self._buf = self._buf[second:]
-
-        return result
+        return self._scan(final=False)
 
     def flush(self) -> bytes | None:
         """Return any remaining data as a single final access unit."""
@@ -147,50 +173,13 @@ class AnnexBParser:
 
     def flush_list(self) -> list[bytes]:
         """Return remaining data split into individual access units."""
-        # Combine all buffered data.
-        self._current_au.extend(self._buf)
-        self._buf.clear()
-        remaining = bytes(self._current_au)
-        self._current_au.clear()
-        self._current_has_vcl = False
-
-        if not remaining:
-            return []
-
-        # Split by VCL NAL boundaries — each VCL NAL starts a new AU.
-        # Find all start code positions.
-        positions: list[int] = []
-        pos = 0
-        while True:
-            idx = remaining.find(_START_CODE_4, pos)
-            if idx == -1:
-                break
-            positions.append(idx)
-            pos = idx + 4
-
-        if not positions:
-            return [remaining]
-
-        # Find AU boundaries: a new AU starts at each VCL NAL that follows
-        # a previous VCL NAL (i.e., the second and subsequent VCL NALs).
-        au_starts = [positions[0]]
-        seen_vcl = False
-        for p in positions:
-            if p + 4 >= len(remaining):
-                continue
-            nal_header = remaining[p + 4]
-            is_vcl = self._is_vcl(nal_header)
-            if is_vcl and seen_vcl:
-                au_starts.append(p)
-            if is_vcl:
-                seen_vcl = True
-
-        # Split into AUs.
-        aus: list[bytes] = []
-        for i, start in enumerate(au_starts):
-            end = au_starts[i + 1] if i + 1 < len(au_starts) else len(remaining)
-            aus.append(remaining[start:end])
-        return aus
+        result = self._scan(final=True)
+        if self._buf:
+            result.append(bytes(self._buf))
+            self._buf.clear()
+        self._scan_pos = 0
+        self._has_vcl = False
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -416,27 +405,24 @@ class FFmpegVideoEncoder:
         self._stderr_thread.start()
 
         self._is_image_pipe = input_pix_fmt is None
-        self._last_frame: bytes | None = None
-        self._frames_fed = 0
-        self._frames_returned = 0
 
     def _read_stdout(self) -> None:
         if self._process.stdout is None:
             return
         fd = self._process.stdout.fileno()
-        os.set_blocking(fd, False)
+        # Dedicated thread: block on read (default pipe mode) instead of
+        # spinning on a non-blocking fd with time.sleep — the poll loop burned
+        # ~200 wakeups/s per encoder for no benefit and added output latency.
         try:
             while True:
                 try:
                     chunk = os.read(fd, 65536)
-                    if not chunk:
-                        break
-                    for au in self._parser.feed(chunk):
-                        self._output_queue.put(au)
-                except BlockingIOError:
-                    time.sleep(0.005)
                 except OSError:
                     break
+                if not chunk:
+                    break
+                for au in self._parser.feed(chunk):
+                    self._output_queue.put(au)
             for au in self._parser.flush_list():
                 self._output_queue.put(au)
         finally:
@@ -450,8 +436,13 @@ class FFmpegVideoEncoder:
             if text:
                 self._stderr_lines.append(text)
 
-    def _encode_raw(self, frame: bytes) -> bytes | None:
-        """Write *frame* bytes to ffmpeg stdin and return one access unit (or None)."""
+    def encode(self, frame: bytes) -> bytes | None:
+        """Write *frame* bytes to ffmpeg stdin and return one access unit (or None).
+
+        The output queue is drained non-blocking: waiting here would serialize
+        Python with the encoder, so a frame's access unit is typically returned
+        by a later ``encode`` call and the tail by ``flush_packets``.
+        """
         if self._process.stdin is None:
             raise VideoEncoderError("ffmpeg stdin is not available")
         try:
@@ -462,7 +453,7 @@ class FFmpegVideoEncoder:
             raise VideoEncoderError(f"ffmpeg process died unexpectedly:\n{stderr_tail}") from exc
 
         try:
-            au = self._output_queue.get(timeout=0.2)
+            au = self._output_queue.get_nowait()
         except Empty:
             return None
 
@@ -471,17 +462,8 @@ class FFmpegVideoEncoder:
             raise VideoEncoderError(f"ffmpeg exited prematurely:\n{stderr_tail}")
         return au
 
-    def encode(self, frame: bytes) -> bytes | None:
-        """Write *frame* bytes to ffmpeg stdin and return one access unit (or None)."""
-        self._last_frame = frame
-        self._frames_fed += 1
-        result = self._encode_raw(frame)
-        if result is not None:
-            self._frames_returned += 1
-        return result
-
-    def _flush_packets_raw(self) -> list[bytes]:
-        """Close the encoder and return remaining buffered access units as a list."""
+    def flush_packets(self) -> list[bytes]:
+        """Close the encoder and return all remaining access units."""
         if self._process.stdin and not self._process.stdin.closed:
             self._process.stdin.close()
 
@@ -506,26 +488,6 @@ class FFmpegVideoEncoder:
             )
 
         return packets
-
-    def flush_packets(self) -> list[bytes]:
-        """Flush encoder, sending padding frames to prevent frame loss.
-
-        ffmpeg drops the last N frames when stdin closes (both image2pipe
-        and rawvideo). We compensate by sending extra copies of the last
-        frame, then trimming the excess AUs from the output.
-        """
-        if self._last_frame is not None:
-            try:
-                assert self._process.stdin is not None
-                for _ in range(2):
-                    self._process.stdin.write(self._last_frame)
-                    self._process.stdin.flush()
-            except (BrokenPipeError, AssertionError):
-                pass
-        packets = self._flush_packets_raw()
-        # Keep only enough packets to reach the real frame count.
-        needed = self._frames_fed - self._frames_returned
-        return packets[:needed]
 
     def __del__(self) -> None:
         try:

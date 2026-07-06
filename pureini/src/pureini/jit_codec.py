@@ -107,7 +107,9 @@ def _encode_delta_varint(delta: int, output: np.ndarray, out_offset: int) -> int
 # ---------------------------------------------------------------------------
 
 
-@nb.njit(cache=True, fastmath=False)  # Must disable fastmath for NaN handling
+# nogil so a thread pool (e.g. roscompress) can run this pure-numeric hot loop on
+# several point clouds truly in parallel instead of serializing on the GIL.
+@nb.njit(cache=True, fastmath=False, nogil=True)  # fastmath off for NaN handling
 def encode_chunk_jit(
     point_data: np.ndarray,  # Raw point cloud bytes (uint8)
     chunk_start: int,  # Starting point index

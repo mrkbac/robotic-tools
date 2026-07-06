@@ -97,6 +97,9 @@ omit = [
 ]
 
 [tool.importlinter]
+# The contracts guard runtime coupling; `if TYPE_CHECKING:` imports are
+# annotation-only and don't require the target package at runtime.
+exclude_type_checking_imports = true
 root_packages = [
     "digitalis",
     "mcap_codec_support",

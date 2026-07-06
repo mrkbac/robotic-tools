@@ -7,7 +7,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from cyclopts import Group, Parameter
 from mcap_codec_support.pointcloud import (
@@ -55,6 +55,18 @@ from pymcap_cli.core.mcap_transform import (
 from pymcap_cli.exporters._common import exclude_topic_globs, normalize_schema_name
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 from pymcap_cli.utils import confirm_output_overwrite, output_overwrites_input
+
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    from av import VideoFrame
+    from mcap_codec_support._protocols import VideoEncoderProtocol
+    from pointcloud2 import Pointcloud2Msg
+
+    # The chosen video backend is either the PyAV (av.VideoFrame) or the
+    # ffmpeg-CLI (raw bytes) flavor for the whole run, so an encoder cache entry
+    # is one or the other — never mixed.
+    _VideoEncoder: TypeAlias = "VideoEncoderProtocol[VideoFrame] | VideoEncoderProtocol[bytes]"
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -355,7 +367,7 @@ def roscompress(
     total_message_count = get_total_message_count(file)
 
     # Track encoders per topic (lazy initialization).
-    encoders: dict[str, Any] = {}
+    encoders: dict[str, _VideoEncoder] = {}
     decoder_factory = DecoderFactory()
     encoder_factory = ROS2EncoderFactory()
 
@@ -408,7 +420,11 @@ def roscompress(
             decode_pool = ThreadPoolExecutor(max_workers=4)
             msg_iter = prefetch_image_decodes(messages, compress_backend, decode_pool, prefetch=16)
         elif pointcloud and pc_compressor is not None:
-            workers = min(8, max(2, (os.cpu_count() or 4) - 2))
+            # Point cloud encode is overlapped with the read/re-chunk floor, so
+            # wall time stops improving past ~4 workers (measured knee on both
+            # lidar- and camera-heavy files); more just occupies cores for no
+            # gain. Cap at 4, still scaling down on small machines.
+            workers = min(4, max(2, (os.cpu_count() or 4) - 2))
             decode_pool = ThreadPoolExecutor(max_workers=workers)
 
             def _make_pc_compressor() -> PointCloudCompressorProtocol:
@@ -531,7 +547,7 @@ def _prefetch_pointcloud_compress(
     make_compressor: Callable[[], PointCloudCompressorProtocol],
     clean_pointcloud: bool,
     max_inflight: int,
-) -> Iterator[tuple[DecodedMessage, Future[tuple[Any, bytes]] | None]]:
+) -> "Iterator[tuple[DecodedMessage, Future[tuple[Pointcloud2Msg, bytes]] | None]]":
     """Compress point clouds in background threads, yielding messages in order.
 
     Point cloud preprocessing + Cloudini/Draco encode is the CPU cost of
@@ -542,19 +558,30 @@ def _prefetch_pointcloud_compress(
     """
     tls = threading.local()
 
-    def _work(decoded: Any) -> tuple[Any, bytes]:
+    def _work(decoded: "Pointcloud2Msg") -> "tuple[Pointcloud2Msg, bytes]":
         compressor = tls.__dict__.get("compressor")
         if compressor is None:
             compressor = make_compressor()
             tls.__dict__["compressor"] = compressor
         return _compress_pointcloud(decoded, compressor, clean_pointcloud)
 
-    buffer: deque[tuple[DecodedMessage, Future[tuple[Any, bytes]] | None]] = deque()
+    # Whether a channel carries point clouds depends only on its schema, so
+    # resolve it once per channel id — the membership test would otherwise run
+    # a string normalization on every one of the (often millions of) messages.
+    is_pointcloud_by_channel: dict[int, bool] = {}
+
+    buffer: deque[tuple[DecodedMessage, Future[tuple[Pointcloud2Msg, bytes]] | None]] = deque()
     inflight = 0
     for msg in messages:
-        schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
-        if schema_name in POINTCLOUD2_SCHEMAS:
-            future: Future[tuple[Any, bytes]] | None = pool.submit(_work, msg.decoded_message)
+        is_pc = is_pointcloud_by_channel.get(msg.channel.id)
+        if is_pc is None:
+            schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
+            is_pc = schema_name in POINTCLOUD2_SCHEMAS
+            is_pointcloud_by_channel[msg.channel.id] = is_pc
+        if is_pc:
+            future: Future[tuple[Pointcloud2Msg, bytes]] | None = pool.submit(
+                _work, msg.decoded_message
+            )
             inflight += 1
         else:
             future = None
@@ -598,10 +625,10 @@ def _write_compressed_video(
 
 
 def _compress_pointcloud(
-    decoded: Any,
+    decoded: "Pointcloud2Msg",
     pc_compressor: PointCloudCompressorProtocol,
     clean_pointcloud: bool,
-) -> tuple[Any, bytes]:
+) -> "tuple[Pointcloud2Msg, bytes]":
     """Preprocess and compress one point cloud, returning ``(processed, bytes)``.
 
     Pure CPU work with no writer access, so it is safe to run in a worker thread.
@@ -613,7 +640,7 @@ def _compress_pointcloud(
 
 def _write_pointcloud(
     msg: DecodedMessage,
-    decoded: Any,
+    decoded: "Pointcloud2Msg",
     compressed: bytes,
     pc_format: str,
     pc_schema: str,
@@ -670,7 +697,6 @@ def _handle_raw_to_jpeg(
     msg: DecodedMessage,
     backend: AnyVideoBackend,
     decode_future: Future[Any] | None,
-    encoders: dict[str, Any],
     jpeg_quality: int,
     scale: int | None,
     writer: McapWriter,
@@ -693,8 +719,9 @@ def _handle_raw_to_jpeg(
         logger.exception(f"Failed to encode JPEG for {topic}")
         return False
 
-    if topic not in encoders:
-        encoders[topic] = True
+    # JPEG encoders are intra-only and hold no state, so channel registration is
+    # the per-topic init marker (video mode keeps the encoder object instead).
+    if topic not in channel_ids:
         topics_converted.add(topic)
         schema_id = ensure_schema(
             writer,
@@ -746,7 +773,7 @@ def _run_compress_loop(
     pc_format: str,
     pc_schema: str,
     clean_pointcloud: bool,
-    encoders: dict[str, Any],
+    encoders: "dict[str, _VideoEncoder]",
     encoder_name: str,
     codec: str,
     quality: int,
@@ -780,7 +807,6 @@ def _run_compress_loop(
                 msg,
                 backend,
                 decode_future,
-                encoders,
                 jpeg_quality,
                 scale,
                 writer,
