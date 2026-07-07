@@ -30,6 +30,8 @@ cache if that composition ever becomes real.
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +55,19 @@ if TYPE_CHECKING:
 
     from small_mcap import Message
 
+    _Decoder = Callable[[bytes | memoryview], Any]
+    _PendingEntry = tuple[
+        "Future[Iterable[TransformOutput] | None]",
+        MessageContext,
+        Message,
+        Channel,
+        Schema,
+    ]
+
+# How many transform tasks may be submitted ahead of the in-order drain when
+# running with a worker pool — bounds memory and gives workers slack to run.
+_MAX_INFLIGHT_MULTIPLIER = 4
+
 
 @dataclass(frozen=True, slots=True)
 class TransformOutput:
@@ -75,19 +90,39 @@ _EncoderKey = tuple[str, str, bytes]
 
 
 class MessageTransformProcessor(InputProcessor):
-    """Decode matched messages, run a subclass transform, re-encode the result."""
+    """Decode matched messages, run a subclass transform, re-encode the result.
 
-    def __init__(self) -> None:
+    Pass ``workers > 0`` to run the (expensive) decode+``transform`` step on a
+    worker pool while the main thread keeps reading, routing, and writing — the
+    results are still emitted in input order and any tail is flushed in
+    ``finalize()``. **When ``workers > 0``, ``transform`` (and the decode it
+    wraps) run on multiple threads concurrently, so a subclass holding
+    non-thread-safe state (e.g. a native compressor) must make it per-thread
+    (``threading.local``).** With ``workers == 0`` (the default) everything runs
+    inline on the main thread — right for cheap edits, where a handoff would
+    cost more than the work.
+    """
+
+    def __init__(self, *, workers: int = 0) -> None:
         self._decoder_factory = DecoderFactory()
         self._encoder_factory = ROS2EncoderFactory()
-        # Matched input channels: id -> (channel, schema).
-        self._targets: dict[int, tuple[Channel, Schema]] = {}
+        # Matched input channels: id -> (channel, schema, decoder). The decoder
+        # is resolved once here (not per message) so worker threads reuse a
+        # ready reentrant decode function rather than racing on decoder_for.
+        self._targets: dict[int, tuple[Channel, Schema, _Decoder | None]] = {}
         # Streams whose channels were known up front (summary present); only
         # those can be scoped to specific channels. Streamed/unindexed inputs
         # stay pessimistic (decode everything) like TopicAliasProcessor.
         self._streams_with_summary: set[int] = set()
         self._out_channels: dict[_OutChannelKey, int] = {}
         self._encoders: dict[_EncoderKey, Callable[[Any], bytes | memoryview]] = {}
+
+        self._pool: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=workers) if workers > 0 else None
+        )
+        self._max_inflight = max(workers, 1) * _MAX_INFLIGHT_MULTIPLIER
+        # In submission order: (transform future, context, message, channel, schema).
+        self._pending: deque[_PendingEntry] = deque()
 
     # ------------------------------------------------------------------ hooks
     def matches(self, channel: Channel, schema: Schema | None) -> bool:
@@ -106,7 +141,7 @@ class MessageTransformProcessor(InputProcessor):
         - Return one or more :class:`TransformOutput` → replace / fan out.
 
         Because ``None`` is meaningful, implement this with ``return`` (a list
-        or ``None``), not ``yield``.
+        or ``None``), not ``yield``. Must be thread-safe if ``workers > 0``.
         """
         raise NotImplementedError
 
@@ -121,7 +156,8 @@ class MessageTransformProcessor(InputProcessor):
         self, context: ChannelContext, channel: Channel, schema: Schema | None
     ) -> Action:
         if schema is not None and self.matches(channel, schema):
-            self._targets[channel.id] = (channel, schema)
+            decoder = self._decoder_factory.decoder_for(channel.message_encoding, schema)
+            self._targets[channel.id] = (channel, schema, decoder)
         return Action.CONTINUE
 
     @override
@@ -136,17 +172,53 @@ class MessageTransformProcessor(InputProcessor):
         if target is None:
             yield message
             return
-        channel, schema = target
-        decoder = self._decoder_factory.decoder_for(channel.message_encoding, schema)
+        channel, schema, decoder = target
         if decoder is None:
             # Not CDR/ros2msg after all — pass through rather than corrupt.
             yield message
             return
-        decoded = decoder(message.data)
-        outputs = self.transform(channel, schema, decoded)
+
+        if self._pool is None:
+            # Inline: decode + transform on the main thread.
+            outputs = self._decode_transform(decoder, channel, schema, message)
+            yield from self._emit(context, message, channel, schema, outputs)
+            return
+
+        # Offload decode + transform; emit results in submission order.
+        future = self._pool.submit(self._decode_transform, decoder, channel, schema, message)
+        self._pending.append((future, context, message, channel, schema))
+        while len(self._pending) > self._max_inflight:
+            yield from self._drain_one()
+
+    @override
+    def finalize(self) -> Iterable[Message]:
+        while self._pending:
+            yield from self._drain_one()
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+
+    # --------------------------------------------------------------- helpers
+    def _decode_transform(
+        self, decoder: _Decoder, channel: Channel, schema: Schema, message: Message
+    ) -> Iterable[TransformOutput] | None:
+        """Decode + transform one message. Runs on a worker thread when pooled."""
+        return self.transform(channel, schema, decoder(message.data))
+
+    def _drain_one(self) -> Iterable[Message]:
+        future, context, message, channel, schema = self._pending.popleft()
+        yield from self._emit(context, message, channel, schema, future.result())
+
+    def _emit(
+        self,
+        context: MessageContext,
+        message: Message,
+        channel: Channel,
+        schema: Schema,
+        outputs: Iterable[TransformOutput] | None,
+    ) -> Iterable[Message]:
+        """Resolve output channels + encode on the main thread, emit in order."""
         if outputs is None:
-            # Transform declined (or a codec failed) — keep the original.
-            yield message
+            yield message  # transform declined — keep the original
             return
         for out in outputs:
             out_channel_id = self._resolve_output_channel(context, message, channel, schema, out)

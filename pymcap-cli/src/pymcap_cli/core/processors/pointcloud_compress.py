@@ -11,6 +11,7 @@ pipeline (topic drop, rechunk, per-schema compression split, splitting, …).
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, Literal
 
 from mcap_codec_support._schemas import normalize_schema_name
@@ -77,12 +78,23 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         resolution: float = 0.01,
         draco_compression_level: int = 7,
         clean: bool = True,
+        workers: int = 0,
     ) -> None:
-        super().__init__()
+        super().__init__(workers=workers)
         self._clean = clean
-        self._compressor = _make_compressor(
-            pc_format, pc_encoding, pc_compression, resolution, draco_compression_level
+        self._compressor_args = (
+            pc_format,
+            pc_encoding,
+            pc_compression,
+            resolution,
+            draco_compression_level,
         )
+        # The native compressor is not thread-safe, so with workers > 0 each
+        # worker thread keeps its own (via thread-local). Build one eagerly on
+        # this thread too, which validates the optional dependency up front
+        # (ImportError surfaces at construction, not mid-stream on a worker).
+        self._tls = threading.local()
+        self._tls.compressor = _make_compressor(*self._compressor_args)
 
         resolved = pc_schema
         if resolved == "auto":
@@ -101,6 +113,14 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
     def matches(self, channel: Channel, schema: Schema | None) -> bool:
         return schema is not None and normalize_schema_name(schema.name) in POINTCLOUD2_SCHEMAS
 
+    def _compressor(self) -> PointCloudCompressorProtocol:
+        """The calling thread's compressor (built lazily; not shared across threads)."""
+        compressor = getattr(self._tls, "compressor", None)
+        if compressor is None:
+            compressor = _make_compressor(*self._compressor_args)
+            self._tls.compressor = compressor
+        return compressor
+
     @override
     def transform(
         self, channel: Channel, schema: Schema, decoded: Any
@@ -108,7 +128,7 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         if self._clean:
             decoded = drop_invalid_and_reorder(decoded)
         try:
-            compressed = self._compressor.compress(decoded)
+            compressed = self._compressor().compress(decoded)
         except PointCloudCompressionError as exc:
             logger.warning("Skipping point cloud compression for %s: %s", channel.topic, exc)
             return None  # keep the raw message rather than drop it

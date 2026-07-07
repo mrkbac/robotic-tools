@@ -9,6 +9,7 @@ and composes with everything else. The heavy lifting lives in the processors
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -259,6 +260,13 @@ def roscompress(
                     resolution=resolution,
                     draco_compression_level=draco_compression_level,
                     clean=clean_pointcloud,
+                    # Parallelize point-cloud compression only when video isn't
+                    # also being transcoded: with video, point clouds already
+                    # ride for free in the main thread's idle time (hidden behind
+                    # the video worker threads), and a second pool just adds CPU
+                    # contention. Without video, the main thread would otherwise
+                    # compress them serially.
+                    workers=0 if image_format == "video" else _pointcloud_workers(),
                 )
             )
     except ImportError:
@@ -333,3 +341,12 @@ def _local_size(file: str) -> int:
         return Path(file).stat().st_size
     except OSError:
         return 0
+
+
+def _pointcloud_workers() -> int:
+    """Worker count for parallel point-cloud compression.
+
+    Point-cloud encode overlaps the read/re-chunk floor, so wall time stops
+    improving past ~4 workers (measured knee); more just occupies cores.
+    """
+    return min(4, max(2, (os.cpu_count() or 4) - 2))

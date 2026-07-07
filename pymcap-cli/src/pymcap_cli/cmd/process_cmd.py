@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, TypeVar
@@ -660,7 +661,13 @@ def process(
                     PointcloudCompressProcessor,
                 )
 
-                extras.append(PointcloudCompressProcessor(resolution=pc_resolution))
+                # Parallelize only when video isn't also being compressed — with
+                # video, point clouds are hidden behind the video worker threads
+                # and a second pool just contends for CPU.
+                pc_workers = 0 if compress_video else min(4, max(2, (os.cpu_count() or 4) - 2))
+                extras.append(
+                    PointcloudCompressProcessor(resolution=pc_resolution, workers=pc_workers)
+                )
         except (ImportError, VideoEncoderError) as e:
             logger.error(str(e))  # noqa: TRY400
             return 1

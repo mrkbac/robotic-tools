@@ -191,6 +191,33 @@ def test_pointcloud_compress_drop_topic_and_split_in_one_pass(tmp_path: Path):
     assert len(clouds) == 3
 
 
+def test_pointcloud_processor_parallel_matches_inline(tmp_path: Path):
+    """workers>0 (parallel, thread-local compressor) yields the same output as inline."""
+    src = tmp_path / "in.mcap"
+    _write_input(src)
+    out_inline = tmp_path / "inline.mcap"
+    out_parallel = tmp_path / "parallel.mcap"
+
+    _run(src, out_inline, extra_processors=[PointcloudCompressProcessor(workers=0)])
+    _run(src, out_parallel, extra_processors=[PointcloudCompressProcessor(workers=3)])
+
+    # Same per-channel message counts and — since clouds decode deterministically —
+    # the same decompressed point counts in the same per-channel order.
+    def _clouds(p: Path) -> list[tuple[str, int]]:
+        result = []
+        with p.open("rb") as f:
+            for m in read_message_decoded(
+                f, decoder_factories=[CloudiniPointCloudDecompressFactory()]
+            ):
+                if m.channel.topic == "/lidar/points":
+                    d = m.decoded_message
+                    result.append((m.channel.topic, int(d["width"]) * int(d["height"])))
+        return result
+
+    assert _clouds(out_parallel) == _clouds(out_inline)
+    assert len(_clouds(out_parallel)) == 3
+
+
 def test_pointcloud_processor_preserves_timestamps(tmp_path: Path):
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_input(src)
