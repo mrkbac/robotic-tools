@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 from collections import deque
 from typing import TYPE_CHECKING, Any
@@ -39,9 +40,51 @@ if TYPE_CHECKING:
         AnyVideoBackend,
         RawImageMessage,
         VideoDecompressorProtocol,
+        VideoEncoderProtocol,
     )
     from mcap_codec_support.video.ffmpeg import FFmpegVideoEncoder
     from mcap_codec_support.video.pyav import VideoEncoder
+
+
+# Measured aggregate NVENC throughput on this class of GPU peaks around 4-6
+# concurrent sessions and then collapses (8 sessions ran *slower* than 2) —
+# even when the hardware allows opening that many at all. This is the ceiling
+# regardless of what ``probe_max_concurrent_encoders`` finds is openable.
+MAX_USEFUL_CONCURRENT_ENCODERS = 6
+
+
+def probe_max_concurrent_encoders(
+    backend: AnyVideoBackend, encoder_name: str, upper_bound: int = 8
+) -> int:
+    """Probe how many concurrent hardware encode sessions this system can open.
+
+    Hardware encoders (NVENC etc.) cap the number of simultaneously open
+    sessions at a driver/hardware-specific limit; recordings routinely carry
+    more video topics than that (a camera plus its throttled duplicate, times
+    several cameras), and exceeding the limit fails encoder *creation* outright
+    rather than degrading gracefully. Software encoders have no such limit, so
+    this only probes for encoder names containing a known hardware marker. Tiny
+    throwaway contexts keep the probe cheap; a small margin below the empirical
+    result absorbs the transient contention observed near the real limit.
+    """
+    if not any(marker in encoder_name for marker in ("nvenc", "videotoolbox", "vaapi")):
+        return MAX_USEFUL_CONCURRENT_ENCODERS
+    opened: list[VideoEncoderProtocol[Any]] = []
+    try:
+        for _ in range(upper_bound):
+            try:
+                # 320x240: small enough to probe cheaply, but well above the
+                # minimum resolution some hardware encoders reject (e.g. this
+                # NVENC build fails avcodec_open2 below roughly 160x96).
+                opened.append(backend.create_encoder(320, 240, encoder_name, 28))
+            except VideoEncoderError:
+                break
+    finally:
+        for enc in opened:
+            with contextlib.suppress(Exception):
+                enc.flush_packets()
+    margin = 1 if len(opened) < upper_bound else 0
+    return max(1, min(len(opened) - margin, MAX_USEFUL_CONCURRENT_ENCODERS))
 
 
 class _PyAVCompressionBackend:

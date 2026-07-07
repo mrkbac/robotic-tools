@@ -12,9 +12,11 @@ from mcap_codec_support.video.common import (
     raw_image_to_array,
 )
 from mcap_codec_support.video.compression import (
+    MAX_USEFUL_CONCURRENT_ENCODERS,
     create_video_compression_backend,
     encode_raw_image_to_jpeg,
     prefetch_image_decodes,
+    probe_max_concurrent_encoders,
 )
 from mcap_codec_support.video.factories import VideoDecompressFactory
 from mcap_codec_support.video.schemas import (
@@ -32,6 +34,7 @@ __all__ = [
     "FOXGLOVE_COMPRESSED_VIDEO",
     "IMAGE",
     "IMAGE_SCHEMAS",
+    "MAX_USEFUL_CONCURRENT_ENCODERS",
     "RAW_SCHEMAS",
     "AnyVideoBackend",
     "EncoderBackend",
@@ -46,5 +49,6 @@ __all__ = [
     "encode_raw_image_to_jpeg",
     "get_software_encoder",
     "prefetch_image_decodes",
+    "probe_max_concurrent_encoders",
     "raw_image_to_array",
 ]
