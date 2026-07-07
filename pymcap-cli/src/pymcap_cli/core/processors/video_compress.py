@@ -18,6 +18,7 @@ time-ordered, so per-topic order is all that must hold.
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -124,6 +125,13 @@ class VideoCompressProcessor(InputProcessor):
         self._overflow_pool: ThreadPoolExecutor | None = None
         self._out_schema_id: int | None = None
         self._video_encoder_fn: Any = None
+        # Decode and encode are two pipelined stages, as in standalone
+        # roscompress: a shared pool decodes frames (stateless, parallel across
+        # topics) while each topic's single encode thread consumes them in
+        # order. Collapsing both onto one per-topic thread serializes them and
+        # loses the decode/encode overlap.
+        decode_workers = min(4, max(2, (os.cpu_count() or 4) - 2))
+        self._decode_pool = ThreadPoolExecutor(max_workers=decode_workers)
 
     # ---------------------------------------------------------------- scoping
     @override
@@ -176,11 +184,13 @@ class VideoCompressProcessor(InputProcessor):
                 frame_id=decoded.header.frame_id,
             )
         )
-        # Decode (expensive JPEG→frame) AND encode on the topic's worker thread,
-        # so decode parallelizes across topics instead of serializing the main
-        # loop — this is what standalone roscompress's decode-prefetch did.
-        future = state.pool.submit(self._decode_and_encode, state.encoder, dm, schema_name)
-        state.futures.append((future, dm))
+        # Two-stage pipeline: decode on the shared pool (parallel), encode on the
+        # topic's single thread (serial, stateful). The encode task blocks on its
+        # decode future, but later frames' decodes run ahead on the pool — so
+        # decode and encode overlap instead of serializing.
+        decode_future = self._decode_pool.submit(self._decode_frame, dm, schema_name)
+        encode_future = state.pool.submit(self._encode_frame, state.encoder, decode_future)
+        state.futures.append((encode_future, dm))
 
         # Drain completed packets (bounded) and emit them in order.
         while len(state.futures) > _INFLIGHT_PER_TOPIC:
@@ -210,6 +220,7 @@ class VideoCompressProcessor(InputProcessor):
             state.pool.shutdown(wait=True)
         if self._overflow_pool is not None:
             self._overflow_pool.shutdown(wait=True)
+        self._decode_pool.shutdown(wait=True)
 
     # ---------------------------------------------------------------- helpers
     def _decode(self, schema: Schema | None, channel: Channel, message: Message) -> Any:
@@ -280,12 +291,19 @@ class VideoCompressProcessor(InputProcessor):
         self._states[channel.topic] = state
         return state
 
-    def _decode_and_encode(
-        self, encoder: VideoEncoderProtocol[Any], dm: DecodedMessage, schema_name: str
+    def _decode_frame(self, dm: DecodedMessage, schema_name: str) -> Any:
+        """Decode one image to a frame — runs on the shared decode pool."""
+        return self._backend.decode_image(dm, schema_name)[0]
+
+    def _encode_frame(
+        self, encoder: VideoEncoderProtocol[Any], decode_future: Future[Any]
     ) -> bytes | None:
-        """Decode one image and encode it — runs on the topic's worker thread."""
-        frame: Any = self._backend.decode_image(dm, schema_name)[0]
-        return encoder.encode(frame)
+        """Encode a decoded frame — runs on the topic's single encode thread.
+
+        Blocks on the decode future, but the decode pool has already run later
+        frames' decodes ahead, so this rarely waits.
+        """
+        return encoder.encode(decode_future.result())
 
     def _drain_one(self, topic: str, state: _TopicState) -> Message | None:
         """Resolve the oldest in-flight decode+encode; emit a packet if one came out."""
