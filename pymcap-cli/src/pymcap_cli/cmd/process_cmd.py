@@ -67,6 +67,7 @@ LATCHING_GROUP = Group("Latching")
 TOPIC_TRANSFORM_GROUP = Group("Topic Transforms")
 TIME_TRANSFORM_GROUP = Group("Time / Decimation")
 RECHUNK_GROUP = Group("Rechunking")
+COMPRESS_GROUP = Group("Message Compression")
 SPLIT_GROUP = Group("Splitting (multi-output)")
 SPLIT_EXPR_GROUP = Group("Splitting — Expression Options")
 
@@ -257,6 +258,47 @@ def process(
             ),
         ),
     ] = None,
+    # ----- Message compression (transcode image / point-cloud payloads) -----
+    compress_video: Annotated[
+        bool,
+        Parameter(
+            name=["--compress-video"],
+            group=COMPRESS_GROUP,
+            help=(
+                "Transcode Image / CompressedImage topics to CompressedVideo "
+                "(H.264/H.265) in the same pass. Composes with topic drop, "
+                "rechunk, split, etc."
+            ),
+        ),
+    ] = False,
+    compress_pointcloud: Annotated[
+        bool,
+        Parameter(
+            name=["--compress-pointcloud"],
+            group=COMPRESS_GROUP,
+            help="Transcode PointCloud2 topics to CompressedPointCloud2 (Cloudini).",
+        ),
+    ] = False,
+    video_codec: Annotated[
+        str,
+        Parameter(name=["--video-codec"], group=COMPRESS_GROUP, help="h264 or h265."),
+    ] = "h264",
+    video_quality: Annotated[
+        int,
+        Parameter(name=["--video-quality"], group=COMPRESS_GROUP, help="CRF (lower=better)."),
+    ] = 28,
+    video_scale: Annotated[
+        int | None,
+        Parameter(name=["--video-scale"], group=COMPRESS_GROUP, help="Cap max image dimension."),
+    ] = None,
+    pc_resolution: Annotated[
+        float,
+        Parameter(
+            name=["--pc-resolution"],
+            group=COMPRESS_GROUP,
+            help="Cloudini lossy point-cloud resolution (m).",
+        ),
+    ] = 0.01,
     # ----- Rechunking -----
     rechunk_strategy: Annotated[
         RechunkStrategy,
@@ -306,6 +348,20 @@ def process(
                 "Cap on total uncompressed bytes buffered across all chunk "
                 "groups in a segment (e.g. '256MB'). When exceeded, the "
                 "largest in-flight chunk is flushed prematurely."
+            ),
+        ),
+    ] = None,
+    incompressible_schema_pattern: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--incompressible-schema-pattern"],
+            group=RECHUNK_GROUP,
+            help=(
+                "Regex matched against Schema.name (repeatable). Matching "
+                "channels (e.g. already-compressed video / point clouds) join "
+                "their own uncompressed chunk group — skip the wasted zstd pass "
+                "on data that won't shrink. Pairs naturally with "
+                "--compress-video / --compress-pointcloud."
             ),
         ),
     ] = None,
@@ -540,11 +596,14 @@ def process(
 
     rechunk_patterns_compiled = []
     rechunk_schema_patterns_compiled = []
+    incompressible_patterns_compiled = []
     try:
         if rechunk_pattern:
             rechunk_patterns_compiled = compile_topic_patterns(rechunk_pattern)
         if rechunk_schema_pattern:
             rechunk_schema_patterns_compiled = compile_topic_patterns(rechunk_schema_pattern)
+        if incompressible_schema_pattern:
+            incompressible_patterns_compiled = compile_topic_patterns(incompressible_schema_pattern)
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400
         return 1
@@ -577,6 +636,34 @@ def process(
         extras.append(DedupIdenticalProcessor())
     if rename_rules:
         extras.append(TopicRewriteProcessor(rename_rules))
+
+    # Payload transcodes run last among input processors: they consume matched
+    # image / point-cloud channels and emit on new (compressed-schema) channels,
+    # so upstream relabel/alias/dedup see the original messages first. Imported
+    # lazily so a plain `process` run pays none of the codec import cost.
+    if compress_video or compress_pointcloud:
+        from mcap_codec_support.video import VideoEncoderError  # noqa: PLC0415
+
+        try:
+            if compress_video:
+                from pymcap_cli.core.processors.video_compress import (  # noqa: PLC0415
+                    VideoCompressProcessor,
+                )
+
+                extras.append(
+                    VideoCompressProcessor(
+                        codec=video_codec, quality=video_quality, scale=video_scale
+                    )
+                )
+            if compress_pointcloud:
+                from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
+                    PointcloudCompressProcessor,
+                )
+
+                extras.append(PointcloudCompressProcessor(resolution=pc_resolution))
+        except (ImportError, VideoEncoderError) as e:
+            logger.error(str(e))  # noqa: TRY400
+            return 1
 
     if dedup_identical and not always_decode_chunk:
         logger.info(
@@ -659,6 +746,7 @@ def process(
         rechunk_strategy,
         topic_patterns=rechunk_patterns_compiled,
         schema_patterns=rechunk_schema_patterns_compiled,
+        incompressible_schema_patterns=incompressible_patterns_compiled,
     )
 
     # --- Run ------------------------------------------------------------------
