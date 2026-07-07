@@ -1,57 +1,29 @@
-"""Command to decompress CompressedVideo and CompressedPointCloud2 topics in MCAP files."""
+"""Command to decompress CompressedVideo and CompressedPointCloud2 topics in MCAP files.
 
-from collections import deque
-from typing import Annotated, Any, Literal
+Thin preset over the processing pipeline: builds the decompress processors
+(video / point cloud) and runs them through ``run_processor`` — the inverse of
+``roscompress``. The decompression logic lives in the reusable processors
+(``core/processors/decompress.py``).
+"""
+
+import logging
+from pathlib import Path
+from typing import Annotated, Literal
 
 from cyclopts import Group, Parameter
-from mcap_codec_support.pointcloud import (
-    COMPRESSED_POINTCLOUD2_SCHEMA,
-    FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
-    POINTCLOUD2,
-    CompressedPointCloudDecompressFactory,
-)
-from mcap_codec_support.video import (
-    COMPRESSED_IMAGE,
-    COMPRESSED_VIDEO_SCHEMA,
-    IMAGE,
-    EncoderMode,
-    VideoDecompressFactory,
-)
-from mcap_ros2_support_fast.writer import ROS2EncoderFactory
+from mcap_codec_support.video import EncoderMode
 from rich.console import Console
-from small_mcap import DecodedMessage, McapWriter, read_message_decoded
 
-# NOPDecoderFactory is not re-exported from the small_mcap top level.
-from small_mcap.nop_decoder import NOPDecoderFactory
-
-from pymcap_cli.constants import NS_TO_SEC
-from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.core.mcap_transform import (
-    copy_message,
-    create_progress,
-    ensure_channel,
-    ensure_schema,
-    get_total_message_count,
-    print_size_comparison,
-)
+from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
+from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
-from pymcap_cli.utils import confirm_output_overwrite
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 VIDEO_GROUP = Group("Video")
 POINTCLOUD_GROUP = Group("Point Cloud")
-
-
-def _build_header(msg: DecodedMessage) -> dict[str, Any]:
-    """Build a ROS header dict from a DecodedMessage's original CompressedVideo fields."""
-    decoded = msg.decoded_message
-    if decoded is not None and isinstance(decoded, dict):
-        return decoded.get("header", {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": ""})
-    # Fallback: use message timestamps.
-    sec = msg.message.log_time // NS_TO_SEC
-    nanosec = msg.message.log_time % NS_TO_SEC
-    return {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": ""}
 
 
 def rosdecompress(
@@ -120,201 +92,64 @@ def rosdecompress(
     pointcloud
         Enable point cloud decompression. Default: True.
     """
-    confirm_output_overwrite(output, force)
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
+    assert overwrite_policy is not None
 
-    # Print config.
     console.print(f"[cyan]Input:[/cyan] {file}")
     console.print(f"[cyan]Output:[/cyan] {output}")
     if video:
-        console.print(f"[cyan]Video format:[/cyan] {video_format}")
-        if video_format == "compressed":
-            console.print(f"[cyan]JPEG quality:[/cyan] {jpeg_quality}")
-        console.print(f"[cyan]Backend:[/cyan] {backend.value}")
+        console.print(f"[cyan]Video format:[/cyan] {video_format} (backend={backend.value})")
     else:
         console.print("[cyan]Video decompression:[/cyan] disabled")
-    if pointcloud:
-        console.print("[cyan]Point cloud decompression:[/cyan] enabled")
-    else:
-        console.print("[cyan]Point cloud decompression:[/cyan] disabled")
+    pc_state = "enabled" if pointcloud else "disabled"
+    console.print(f"[cyan]Point cloud decompression:[/cyan] {pc_state}")
 
-    total_message_count = get_total_message_count(file)
-
-    # Create decoder factories.
-    # Video/pointcloud factories are channel-aware and handle compressed topics.
-    # CDR factory handles all other ROS2 schemas (pass-through messages).
-    factories: list[
-        VideoDecompressFactory | CompressedPointCloudDecompressFactory | NOPDecoderFactory
-    ] = []
+    extras = []
     if video:
-        factories.append(
-            VideoDecompressFactory(
-                video_format=video_format,
-                jpeg_quality=jpeg_quality,
-                backend=backend,
+        from pymcap_cli.core.processors.decompress import (  # noqa: PLC0415
+            VideoDecompressProcessor,
+        )
+
+        extras.append(
+            VideoDecompressProcessor(
+                video_format=video_format, jpeg_quality=jpeg_quality, backend=backend
             )
         )
     if pointcloud:
-        factories.append(CompressedPointCloudDecompressFactory())
-    factories.append(NOPDecoderFactory())
-    encoder_factory = ROS2EncoderFactory()
+        from pymcap_cli.core.processors.decompress import (  # noqa: PLC0415
+            PointcloudDecompressProcessor,
+        )
 
-    # Statistics.
-    video_messages = 0
-    pointcloud_messages = 0
-    messages_copied = 0
-    video_topics: set[str] = set()
-    pointcloud_topics: set[str] = set()
+        extras.append(PointcloudDecompressProcessor())
 
-    schema_ids: dict[str, int] = {}
-    channel_ids: dict[str, int] = {}
+    input_options = InputOptions.from_args(extra_processors=extras or None)
+    output_options = OutputOptions(output_processors=[], overwrite_policy=overwrite_policy)
 
-    # Pending video messages whose decoded data hasn't arrived yet (decoder buffering).
-    pending_video: dict[int, deque[DecodedMessage]] = {}
+    try:
+        result = run_processor(
+            files=[file],
+            output=output,
+            input_options=input_options,
+            output_options=output_options,
+        )
+    except Exception:
+        logger.exception("Error during decompression")
+        output.unlink(missing_ok=True)
+        return 1
 
-    # Track which video factory is used for flushing.
-    video_factory: VideoDecompressFactory | None = None
-    for f in factories:
-        if isinstance(f, VideoDecompressFactory):
-            video_factory = f
-            break
-
-    with (
-        open_input(file) as (input_stream, input_size),
-        output.open("wb") as output_stream,
-        create_progress(title="Decompressing topics") as progress,
-    ):
-        task_id = progress.add_task("Processing messages", total=total_message_count)
-
-        writer = McapWriter(output_stream, encoder_factory=encoder_factory, num_workers=4)
-        writer.start()
-
-        messages = read_message_decoded(input_stream, decoder_factories=factories, num_workers=4)
-
-        for msg in messages:
-            schema_name = msg.schema.name if msg.schema else ""
-            topic = msg.channel.topic
-
-            if schema_name == COMPRESSED_VIDEO_SCHEMA and video:
-                decoded = msg.decoded_message  # triggers CDR decode via VideoDecompressFactory
-                if video_format == "compressed":
-                    out_schema_name = "sensor_msgs/msg/CompressedImage"
-                    out_schema_data = COMPRESSED_IMAGE
-                else:
-                    out_schema_name = "sensor_msgs/msg/Image"
-                    out_schema_data = IMAGE
-
-                # Register schema/channel on first encounter.
-                schema_id = ensure_schema(
-                    writer, out_schema_name, "ros2msg", out_schema_data.encode(), schema_ids
-                )
-                ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
-
-                # Buffer message metadata.
-                if msg.channel.id not in pending_video:
-                    pending_video[msg.channel.id] = deque()
-                pending_video[msg.channel.id].append(msg)
-
-                if decoded is None:
-                    progress.advance(task_id)
-                    continue
-
-                # Write using oldest pending message's metadata.
-                pending_msg = pending_video[msg.channel.id].popleft()
-                writer.add_message_encode(
-                    channel_id=channel_ids[topic],
-                    log_time=pending_msg.message.log_time,
-                    publish_time=pending_msg.message.publish_time,
-                    data=decoded,
-                )
-                video_messages += 1
-                video_topics.add(topic)
-
-            elif (
-                schema_name
-                in {COMPRESSED_POINTCLOUD2_SCHEMA, FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA}
-                and pointcloud
-            ):
-                decoded = msg.decoded_message
-                schema_id = ensure_schema(
-                    writer,
-                    "sensor_msgs/msg/PointCloud2",
-                    "ros2msg",
-                    POINTCLOUD2.encode(),
-                    schema_ids,
-                )
-                channel_id = ensure_channel(writer, topic, "cdr", schema_id, channel_ids)
-                writer.add_message_encode(
-                    channel_id=channel_id,
-                    log_time=msg.message.log_time,
-                    publish_time=msg.message.publish_time,
-                    data=decoded,
-                )
-                pointcloud_messages += 1
-                pointcloud_topics.add(topic)
-
-            else:
-                # Pass-through: copy raw bytes — never touches decoded_message.
-                copy_message(msg, writer, schema_ids, channel_ids)
-                messages_copied += 1
-                progress.advance(task_id)
-                continue
-
-            progress.advance(task_id)
-
-        # Flush buffered frames from video decompressors.
-        if video_factory is not None:
-            flushed_frames = video_factory.flush_all_by_channel()
-            for source_channel_id, frame in flushed_frames:
-                pending = pending_video.get(source_channel_id)
-                if not pending:
-                    continue
-                pending_msg = pending.popleft()
-                topic_name = pending_msg.channel.topic
-                header = _build_header(pending_msg)
-                if frame.is_jpeg:
-                    msg_data: dict[str, Any] = {
-                        "header": header,
-                        "format": "jpeg",
-                        "data": frame.data,
-                    }
-                else:
-                    msg_data = {
-                        "header": header,
-                        "height": frame.height,
-                        "width": frame.width,
-                        "encoding": "rgb8",
-                        "is_bigendian": 0,
-                        "step": frame.width * 3,
-                        "data": frame.data,
-                    }
-                writer.add_message_encode(
-                    channel_id=channel_ids[topic_name],
-                    log_time=pending_msg.message.log_time,
-                    publish_time=pending_msg.message.publish_time,
-                    data=msg_data,
-                )
-                video_messages += 1
-                video_topics.add(topic_name)
-
-        writer.finish()
-        output_size = output_stream.tell()
-
-    # Print statistics.
     console.print()
-    if video_messages:
-        target = "CompressedImage (JPEG)" if video_format == "compressed" else "Image (raw)"
-        console.print(
-            f"[green]Video:[/green] {video_messages:,} messages -> {target} "
-            f"({len(video_topics)} topic{'s' if len(video_topics) != 1 else ''})"
-        )
-    if pointcloud_messages:
-        console.print(
-            f"[green]Point cloud:[/green] {pointcloud_messages:,} messages -> PointCloud2 "
-            f"({len(pointcloud_topics)} topic{'s' if len(pointcloud_topics) != 1 else ''})"
-        )
-    if messages_copied:
-        console.print(f"[dim]Copied:[/dim] {messages_copied:,} messages unchanged")
+    written = result.stats.writer_statistics.message_count
+    console.print(f"[green]Messages written:[/green] {written:,}")
 
-    print_size_comparison(input_size, output_size)
+    input_size = _local_size(file)
+    if input_size and output.exists():
+        print_size_comparison(input_size, output.stat().st_size)
 
     return 0
+
+
+def _local_size(file: str) -> int:
+    try:
+        return Path(file).stat().st_size
+    except OSError:
+        return 0
