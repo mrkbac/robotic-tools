@@ -96,6 +96,22 @@ def rechunk(
             ),
         ),
     ] = None,
+    incompressible_schema_pattern: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--incompressible-schema-pattern"],
+            group=STRATEGY_GROUP,
+            help=(
+                "Regex matched against Schema.name (repeatable). Matching "
+                "channels join their own uncompressed chunk group — for "
+                "payloads already compressed (H.264/H.265 video, "
+                "Cloudini/Draco point clouds), zstd saves under 1% of size "
+                "for real CPU cost on both write and every future read. "
+                "Independent of --strategy: applies on top of it, or alone "
+                "with --strategy=none."
+            ),
+        ),
+    ] = None,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
@@ -129,6 +145,9 @@ def rechunk(
     max_groups
         Hard cap on concurrent chunk groups per output segment. Overflow
         channels share the last-created group.
+    incompressible_schema_pattern
+        Regex matched against ``Schema.name`` (repeatable). Matching channels
+        join their own uncompressed chunk group, independent of ``strategy``.
     chunk_size
         Chunk size of output file in bytes.
     compression
@@ -153,6 +172,10 @@ def rechunk(
 
     # Each topic in its own chunk, but cap memory at 8 concurrent groups
     pymcap-cli rechunk in.mcap --strategy all --max-groups 8 -o out.mcap
+
+    # Skip zstd for already-compressed video/point-cloud payloads
+    pymcap-cli rechunk in.mcap --strategy none \\
+        --incompressible-schema-pattern 'CompressedVideo|CompressedPointCloud' -o out.mcap
     ```
     """
     # Validate pattern is provided when using PATTERN strategy
@@ -186,7 +209,11 @@ def rechunk(
     schema_patterns: list[Pattern[str]] = []
 
     if strategy == RechunkStrategy.NONE:
-        logger.info("Strategy: None — preserving input chunking via fast-copy where possible")
+        logger.info(
+            "Strategy: None — preserving input chunking via fast-copy where possible"
+            if not incompressible_schema_pattern
+            else "Strategy: None (plus an incompressible-schema split — see below)"
+        )
     elif strategy == RechunkStrategy.ALL:
         logger.info("Strategy: Each topic in its own chunk group")
     else:  # PATTERN
@@ -198,10 +225,19 @@ def rechunk(
             logger.error(str(e))  # noqa: TRY400
             return 1
 
+    try:
+        incompressible_patterns = compile_topic_patterns(incompressible_schema_pattern or [])
+    except ValueError as e:
+        logger.error(str(e))  # noqa: TRY400
+        return 1
+    if incompressible_patterns:
+        logger.info(f"Incompressible schema pattern(s): {len(incompressible_patterns)}")
+
     output_processors = build_output_processors(
         strategy,
         topic_patterns=patterns,
         schema_patterns=schema_patterns,
+        incompressible_schema_patterns=incompressible_patterns,
     )
 
     try:

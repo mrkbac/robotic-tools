@@ -211,14 +211,14 @@ def roscompress(
     pointcloud: Annotated[
         bool,
         Parameter(
-            name=["--pointcloud/--no-pointcloud"],
+            name=["--pointcloud"],
             group=POINTCLOUD_GROUP,
         ),
     ] = True,
     clean_pointcloud: Annotated[
         bool,
         Parameter(
-            name=["--clean-pointcloud/--no-clean-pointcloud"],
+            name=["--clean-pointcloud"],
             group=POINTCLOUD_GROUP,
         ),
     ] = True,
@@ -305,6 +305,7 @@ def roscompress(
 
     # Detect encoder.
     encoder_name = ""
+    max_dedicated_video_pools = 1
     if do_video:
         if encoder:
             if not compress_backend.test_encoder(encoder):
@@ -313,6 +314,7 @@ def roscompress(
             encoder_name = encoder
         else:
             encoder_name = compress_backend.resolve_encoder(codec)
+        max_dedicated_video_pools = _probe_max_concurrent_encoders(compress_backend, encoder_name)
 
     # Create point cloud compressor.
     pc_compressor: PointCloudCompressorProtocol | None = None
@@ -368,6 +370,7 @@ def roscompress(
 
     # Track encoders per topic (lazy initialization).
     encoders: dict[str, _VideoEncoder] = {}
+    video_pools: dict[str, ThreadPoolExecutor] = {}
     decoder_factory = DecoderFactory()
     encoder_factory = ROS2EncoderFactory()
 
@@ -414,18 +417,25 @@ def roscompress(
 
         # Video mode benefits from prefetching compressed image decodes. JPEG mode only
         # transcodes raw Image topics and copies CompressedImage topics unchanged.
+        # These two prefetch stages target disjoint schemas, so they compose: a file
+        # with both image and point cloud topics (the common case) gets image decode
+        # *and* point cloud compress overlapped with the main loop, not just one.
         decode_pool: ThreadPoolExecutor | None = None
+        pc_pool: ThreadPoolExecutor | None = None
         msg_iter: Iterator[tuple[DecodedMessage, Future[Any] | None]]
         if do_video and compress_backend.prefetch_supported:
             decode_pool = ThreadPoolExecutor(max_workers=4)
             msg_iter = prefetch_image_decodes(messages, compress_backend, decode_pool, prefetch=16)
-        elif pointcloud and pc_compressor is not None:
+        else:
+            msg_iter = _iter_no_futures(messages)
+
+        if pointcloud and pc_compressor is not None:
             # Point cloud encode is overlapped with the read/re-chunk floor, so
             # wall time stops improving past ~4 workers (measured knee on both
             # lidar- and camera-heavy files); more just occupies cores for no
             # gain. Cap at 4, still scaling down on small machines.
             workers = min(4, max(2, (os.cpu_count() or 4) - 2))
-            decode_pool = ThreadPoolExecutor(max_workers=workers)
+            pc_pool = ThreadPoolExecutor(max_workers=workers)
 
             def _make_pc_compressor() -> PointCloudCompressorProtocol:
                 compressor = _create_pointcloud_compressor(
@@ -436,14 +446,12 @@ def roscompress(
                 return compressor
 
             msg_iter = _prefetch_pointcloud_compress(
-                messages,
-                decode_pool,
+                msg_iter,
+                pc_pool,
                 _make_pc_compressor,
                 clean_pointcloud,
                 max_inflight=workers * 3,
             )
-        else:
-            msg_iter = _iter_no_futures(messages)
 
         compress_ok = _run_compress_loop(
             msg_iter,
@@ -456,6 +464,8 @@ def roscompress(
             pc_schema,
             clean_pointcloud,
             encoders,
+            video_pools,
+            max_dedicated_video_pools,
             encoder_name,
             codec,
             quality,
@@ -474,6 +484,12 @@ def roscompress(
         )
         if decode_pool is not None:
             decode_pool.shutdown(wait=True)
+        if pc_pool is not None:
+            pc_pool.shutdown(wait=True)
+        # Topics beyond _MAX_DEDICATED_VIDEO_POOLS share one overflow pool
+        # (see _run_compress_loop), so dedupe by identity before shutting down.
+        for video_pool in {id(p): p for p in video_pools.values()}.values():
+            video_pool.shutdown(wait=True)
 
         # Flush remaining frames from video encoders. JPEG encoders are intra-only
         # and write inline, so pending_messages stays empty and we skip them here.
@@ -542,19 +558,21 @@ def _iter_no_futures(
 
 
 def _prefetch_pointcloud_compress(
-    messages: Iterable[DecodedMessage],
+    messages: Iterable[tuple[DecodedMessage, "Future[Any] | None"]],
     pool: ThreadPoolExecutor,
     make_compressor: Callable[[], PointCloudCompressorProtocol],
     clean_pointcloud: bool,
     max_inflight: int,
-) -> "Iterator[tuple[DecodedMessage, Future[tuple[Pointcloud2Msg, bytes]] | None]]":
+) -> "Iterator[tuple[DecodedMessage, Future[Any] | None]]":
     """Compress point clouds in background threads, yielding messages in order.
 
     Point cloud preprocessing + Cloudini/Draco encode is the CPU cost of
     roscompress; everything else is a cheap verbatim copy. Submitting that work
     to a pool overlaps it with the copy/write path and fans it across cores.
     Each worker thread keeps its own compressor (the encoder cache is not
-    thread-safe). Non-point-cloud messages pass through with a ``None`` future.
+    thread-safe). Non-point-cloud messages pass through unchanged — including
+    an already-attached future from an upstream prefetch stage (e.g. image
+    decode), so this can wrap that stage's output instead of replacing it.
     """
     tls = threading.local()
 
@@ -570,34 +588,38 @@ def _prefetch_pointcloud_compress(
     # a string normalization on every one of the (often millions of) messages.
     is_pointcloud_by_channel: dict[int, bool] = {}
 
-    buffer: deque[tuple[DecodedMessage, Future[tuple[Pointcloud2Msg, bytes]] | None]] = deque()
+    # ``is_ours`` marks entries whose future we submitted (and must count
+    # against ``max_inflight``); passed-through upstream futures are bounded
+    # by that upstream stage's own limit and must not affect this count.
+    buffer: deque[tuple[DecodedMessage, Future[Any] | None, bool]] = deque()
     inflight = 0
-    for msg in messages:
-        is_pc = is_pointcloud_by_channel.get(msg.channel.id)
-        if is_pc is None:
-            schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
-            is_pc = schema_name in POINTCLOUD2_SCHEMAS
-            is_pointcloud_by_channel[msg.channel.id] = is_pc
-        if is_pc:
-            future: Future[tuple[Pointcloud2Msg, bytes]] | None = pool.submit(
-                _work, msg.decoded_message
-            )
-            inflight += 1
-        else:
-            future = None
-        buffer.append((msg, future))
+    for msg, upstream_future in messages:
+        future = upstream_future
+        is_ours = False
+        if future is None:
+            is_pc = is_pointcloud_by_channel.get(msg.channel.id)
+            if is_pc is None:
+                schema_name = normalize_schema_name(msg.schema.name) if msg.schema else ""
+                is_pc = schema_name in POINTCLOUD2_SCHEMAS
+                is_pointcloud_by_channel[msg.channel.id] = is_pc
+            if is_pc:
+                future = pool.submit(_work, msg.decoded_message)
+                inflight += 1
+                is_ours = True
+        buffer.append((msg, future, is_ours))
 
         # Keep at most ``max_inflight`` clouds submitted ahead of the consumer so
         # the pool queue and buffered results stay bounded. Copy messages drain
         # for free; a pending future yields and the consumer blocks on it.
         while buffer and inflight >= max_inflight:
-            out_msg, out_future = buffer.popleft()
-            if out_future is not None:
+            out_msg, out_future, out_is_ours = buffer.popleft()
+            if out_is_ours:
                 inflight -= 1
             yield out_msg, out_future
 
     while buffer:
-        yield buffer.popleft()
+        out_msg, out_future, _ = buffer.popleft()
+        yield out_msg, out_future
 
 
 def _write_compressed_video(
@@ -762,6 +784,61 @@ def _handle_raw_to_jpeg(
 # Unified processing loop
 # ---------------------------------------------------------------------------
 
+# How many messages may be queued (submitted but not yet written) at once.
+# Video encode is the only submit-ahead-of-write step, so this is effectively
+# a lookahead window for per-topic NVENC/x264 calls to run concurrently on
+# their own threads while the writer stays strictly in input order. Most
+# entries in the window are cheap copy/pointcloud writes (a handful of
+# percent of messages are typically video), so a few hundred gives each video
+# encoder thread ample wall-clock time to finish before its write is due.
+_WRITE_PIPELINE_DEPTH = 512
+
+# Tags for deferred `pending_writes` entries — see _run_compress_loop.
+_KIND_VIDEO = 0
+_KIND_POINTCLOUD = 1
+_KIND_COPY = 2
+
+# Measured aggregate NVENC throughput on this class of GPU peaks around 4-6
+# concurrent sessions and then collapses (8 sessions ran *slower* than 2) —
+# even when the hardware allows opening that many at all. This is the ceiling
+# regardless of what _probe_max_concurrent_encoders finds is actually openable.
+_MAX_USEFUL_CONCURRENT_ENCODERS = 6
+
+
+def _probe_max_concurrent_encoders(
+    backend: AnyVideoBackend, encoder_name: str, upper_bound: int = 8
+) -> int:
+    """Probe how many concurrent hardware encode sessions this system can open.
+
+    Hardware encoders (NVENC etc.) cap the number of simultaneously open
+    sessions at a driver/hardware-specific limit; recordings routinely carry
+    more video topics than that (a camera plus its throttled duplicate, times
+    several cameras), and exceeding the limit fails encoder *creation*
+    outright rather than degrading gracefully. Software encoders have no such
+    limit, so this only probes for encoder names containing a known hardware
+    marker. Tiny throwaway contexts keep the probe itself cheap; a small
+    margin below the empirical result absorbs the transient contention
+    observed near the real limit.
+    """
+    if not any(marker in encoder_name for marker in ("nvenc", "videotoolbox", "vaapi")):
+        return _MAX_USEFUL_CONCURRENT_ENCODERS
+    opened: list[VideoEncoderProtocol[Any]] = []
+    try:
+        for _ in range(upper_bound):
+            try:
+                # 320x240: small enough to probe cheaply, but well above the
+                # minimum resolution some hardware encoders reject (e.g. this
+                # NVENC build fails avcodec_open2 below roughly 160x96).
+                opened.append(backend.create_encoder(320, 240, encoder_name, 28))
+            except VideoEncoderError:
+                break
+    finally:
+        for enc in opened:
+            with contextlib.suppress(Exception):
+                enc.flush_packets()
+    margin = 1 if len(opened) < upper_bound else 0
+    return max(1, min(len(opened) - margin, _MAX_USEFUL_CONCURRENT_ENCODERS))
+
 
 def _run_compress_loop(
     messages: Iterator[tuple[DecodedMessage, Future[Any] | None]],
@@ -774,6 +851,8 @@ def _run_compress_loop(
     pc_schema: str,
     clean_pointcloud: bool,
     encoders: "dict[str, _VideoEncoder]",
+    video_pools: dict[str, ThreadPoolExecutor],
+    max_dedicated_video_pools: int,
     encoder_name: str,
     codec: str,
     quality: int,
@@ -796,6 +875,73 @@ def _run_compress_loop(
     # rich's per-message progress refresh is a measurable slice of the copy path;
     # batch advances so the bar updates without dominating the loop.
     pending_advance = 0
+    overflow_video_pool: ThreadPoolExecutor | None = None
+
+    # Deferred writes, strictly in the order their messages were read.
+    # Draining them oldest-first (blocking on a still-running video encode if
+    # necessary) keeps the output byte-for-byte in input order regardless of
+    # which topic's background encoder happens to finish first. Entries are
+    # (kind, payload) tuples rather than per-message closures — with ~97% of
+    # messages typically being plain copies, allocating a fresh function
+    # object (plus its captured-variable cells) for every one of them is
+    # measurable; one dispatch function defined here, outside the loop, pays
+    # that cost once instead of per message.
+    pending_writes: deque[tuple[int, tuple[Any, ...]]] = deque()
+
+    def _drain_one() -> None:
+        kind, payload = pending_writes.popleft()
+        if kind == _KIND_COPY:
+            (msg,) = payload
+            copy_message(msg, writer, schema_ids, channel_ids)
+            counters["copied"] += 1
+        elif kind == _KIND_POINTCLOUD:
+            msg, processed, compressed = payload
+            _write_pointcloud(
+                msg,
+                processed,
+                compressed,
+                pc_format,
+                pc_schema,
+                writer,
+                schema_ids,
+                channel_ids,
+                pointcloud_topics_converted,
+            )
+            counters["pc_converted"] += 1
+        else:  # _KIND_VIDEO
+            topic, msg, future, frame = payload
+            try:
+                video_data = future.result()
+            except VideoEncoderError:
+                # A run of frames for the same topic can be in flight on its
+                # dedicated worker thread when the hardware encoder dies, so
+                # several futures may fail before this one drains. Swap to
+                # software only once — later failures see it already swapped
+                # (by an earlier frame's drain) and just retry on it directly;
+                # if the software encoder itself fails, let it raise.
+                sw = get_software_encoder(codec)
+                if encoders[topic].config.codec_name != sw:
+                    logger.warning(f"Encoder failed for {topic}, falling back to {sw}")
+                    cfg: EncoderConfig = encoders[topic].config
+                    pix_fmt = backend.get_pix_fmt(topic)
+                    encoders[topic] = backend.create_encoder(
+                        cfg.width,
+                        cfg.height,
+                        sw,
+                        quality,
+                        input_pix_fmt=pix_fmt,
+                        scale=(cfg.width, cfg.height) if pix_fmt is None and scale else None,
+                    )
+                video_data = encoders[topic].encode(frame)
+
+            if video_data is None:
+                return
+            # Write output using the oldest pending message's metadata.
+            pending_msg = pending_messages[topic].popleft()
+            _write_compressed_video(writer, channel_ids[topic], pending_msg, video_data, codec)
+            counters["converted"] += 1
+            last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
+
     for msg, decode_future in messages:
         schema_name = schema_name_by_channel.get(msg.channel.id)
         if schema_name is None:
@@ -844,6 +990,18 @@ def _run_compress_loop(
                         input_pix_fmt=pix_fmt,
                         scale=(width, height) if pix_fmt is None and scale is not None else None,
                     )
+                    # Single dedicated worker: this encoder is stateful (GOP/B-frame
+                    # ordering) and calls must stay strictly sequential, but a
+                    # separate thread per topic lets independent video streams
+                    # encode concurrently instead of serializing on the main thread.
+                    # Only the first few topics get one — see
+                    # max_dedicated_video_pools / _probe_max_concurrent_encoders.
+                    if len(video_pools) < max_dedicated_video_pools:
+                        video_pools[topic] = ThreadPoolExecutor(max_workers=1)
+                    else:
+                        if overflow_video_pool is None:
+                            overflow_video_pool = ThreadPoolExecutor(max_workers=1)
+                        video_pools[topic] = overflow_video_pool
                     topics_converted.add(topic)
                     # Register schema/channel immediately so flush can write messages.
                     vid_schema_id = ensure_schema(
@@ -868,40 +1026,12 @@ def _run_compress_loop(
                 else:
                     frame, _, _ = backend.decode_image(msg, schema_name)
 
-            try:
-                video_data = encoders[topic].encode(frame)
-            except VideoEncoderError:
-                sw = get_software_encoder(codec)
-                if encoders[topic].config.codec_name != sw:
-                    logger.warning(f"Encoder failed for {topic}, falling back to {sw}")
-                    cfg: EncoderConfig = encoders[topic].config
-                    pix_fmt = backend.get_pix_fmt(topic)
-                    encoders[topic] = backend.create_encoder(
-                        cfg.width,
-                        cfg.height,
-                        sw,
-                        quality,
-                        input_pix_fmt=pix_fmt,
-                        scale=(cfg.width, cfg.height) if pix_fmt is None and scale else None,
-                    )
-                    video_data = encoders[topic].encode(frame)
-                else:
-                    raise
-
-            # Buffer this message's metadata for when encoder output arrives.
             if topic not in pending_messages:
                 pending_messages[topic] = deque()
             pending_messages[topic].append(msg)
 
-            if video_data is None:
-                progress.update(task_id, advance=1)
-                continue
-
-            # Write output using the oldest pending message's metadata.
-            pending_msg = pending_messages[topic].popleft()
-            _write_compressed_video(writer, channel_ids[topic], pending_msg, video_data, codec)
-            counters["converted"] += 1
-            last_video_times[topic] = (msg.message.log_time, msg.message.publish_time)
+            future = video_pools[topic].submit(encoders[topic].encode, frame)
+            pending_writes.append((_KIND_VIDEO, (topic, msg, future, frame)))
 
         elif pointcloud and schema_name in POINTCLOUD2_SCHEMAS:
             try:
@@ -914,30 +1044,50 @@ def _run_compress_loop(
                     )
             except PointCloudCompressionError as exc:
                 logger.warning(f"Skipping point cloud compression for {msg.channel.topic}: {exc}")
-                copy_message(msg, writer, schema_ids, channel_ids)
-                counters["copied"] += 1
+
+                # do_video is constant for the whole run: when it's False, no
+                # video future can ever be pending, so there is no ordering
+                # hazard to defer against — write straight through, matching
+                # the pre-pipelining cost for image-format=none/jpeg runs.
+                if do_video:
+                    pending_writes.append((_KIND_COPY, (msg,)))
+                else:
+                    copy_message(msg, writer, schema_ids, channel_ids)
+                    counters["copied"] += 1
             else:
-                _write_pointcloud(
-                    msg,
-                    processed,
-                    compressed,
-                    pc_format,
-                    pc_schema,
-                    writer,
-                    schema_ids,
-                    channel_ids,
-                    pointcloud_topics_converted,
-                )
-                counters["pc_converted"] += 1
+                if do_video:
+                    pending_writes.append((_KIND_POINTCLOUD, (msg, processed, compressed)))
+                else:
+                    _write_pointcloud(
+                        msg,
+                        processed,
+                        compressed,
+                        pc_format,
+                        pc_schema,
+                        writer,
+                        schema_ids,
+                        channel_ids,
+                        pointcloud_topics_converted,
+                    )
+                    counters["pc_converted"] += 1
+
+        elif do_video:
+            pending_writes.append((_KIND_COPY, (msg,)))
 
         else:
             copy_message(msg, writer, schema_ids, channel_ids)
             counters["copied"] += 1
 
+        if do_video and len(pending_writes) > _WRITE_PIPELINE_DEPTH:
+            _drain_one()
+
         pending_advance += 1
         if pending_advance >= 512:
             progress.update(task_id, advance=pending_advance)
             pending_advance = 0
+
+    while pending_writes:
+        _drain_one()
 
     if pending_advance:
         progress.update(task_id, advance=pending_advance)

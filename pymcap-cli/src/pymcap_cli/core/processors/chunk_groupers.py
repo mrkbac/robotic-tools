@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from small_mcap import CompressionType
 from typing_extensions import override
 
 from pymcap_cli.core.processors.base import OutputProcessor
@@ -62,3 +63,48 @@ class PerChannelGrouper(OutputProcessor):
         schema: Schema | None,
     ) -> int:
         return channel.id
+
+
+class SchemaCompressionGrouper(OutputProcessor):
+    """Route channels whose schema matches a pattern to a chosen compression.
+
+    Defaults to no compression — the motivating case is payloads already
+    compressed elsewhere (H.264/H.265 video, Cloudini/Draco point clouds),
+    where an extra zstd pass over the chunk gains under 1% (confirmed
+    empirically) for real CPU cost on both write and every future read. Pass
+    ``compression`` to route matching schemas elsewhere instead. Matching
+    channels join one shared group; every other channel defers to whatever
+    grouping/compression is otherwise configured (composable with
+    ``PatternGrouper``/``PerChannelGrouper``).
+    """
+
+    _MARKER = "schema-compression-override"
+
+    def __init__(
+        self,
+        schema_patterns: list[Pattern[str]],
+        compression: CompressionType = CompressionType.NONE,
+    ) -> None:
+        self.schema_patterns = schema_patterns
+        self.compression = compression
+
+    def _matches(self, schema: Schema | None) -> bool:
+        return schema is not None and any(p.search(schema.name) for p in self.schema_patterns)
+
+    @override
+    def chunk_group_key(
+        self,
+        segment_key: OutputKey,
+        channel: Channel,
+        schema: Schema | None,
+    ) -> str | None:
+        return self._MARKER if self._matches(schema) else None
+
+    @override
+    def chunk_compression(
+        self,
+        segment_key: OutputKey,
+        channel: Channel,
+        schema: Schema | None,
+    ) -> CompressionType | None:
+        return self.compression if self._matches(schema) else None

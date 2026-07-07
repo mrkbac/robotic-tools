@@ -818,13 +818,13 @@ class McapProcessor:
         composite_key = self._composite_group_key(segment.key, channel)
         group = segment.groups.get(composite_key)
         if group is None:
-            group = self._create_or_overflow_group(segment)
+            group = self._create_or_overflow_group(segment, channel)
             segment.groups[composite_key] = group
 
         segment.channel_to_group[channel_id] = group
         return group
 
-    def _create_or_overflow_group(self, segment: "OutputSegment") -> MessageGroup:
+    def _create_or_overflow_group(self, segment: "OutputSegment", channel: Channel) -> MessageGroup:
         """Create a new group, or route into the segment's overflow when the cap is hit.
 
         With ``max_chunk_groups=N``, the first N callers each get their own
@@ -838,14 +838,32 @@ class McapProcessor:
                 assert segment.chunk_groups, "max_chunk_groups must be >= 1 if set"
                 segment.overflow_group = segment.chunk_groups[-1]
             return segment.overflow_group
-        return self._create_segment_message_group(segment)
+        return self._create_segment_message_group(segment, channel)
 
-    def _create_segment_message_group(self, segment: "OutputSegment") -> MessageGroup:
+    def _create_segment_message_group(
+        self, segment: "OutputSegment", channel: Channel
+    ) -> MessageGroup:
         """Create a MessageGroup attached to a specific segment."""
         opts = self.options.output_options
-        group = MessageGroup(segment.writer, opts.chunk_size, opts.compression_type)
+        compression = self._group_compression(segment.key, channel)
+        group = MessageGroup(segment.writer, opts.chunk_size, compression)
         segment.chunk_groups.append(group)
         return group
+
+    def _group_compression(self, segment_key: OutputKey, channel: Channel) -> CompressionType:
+        """Compression for a new group, honoring the first processor override.
+
+        Mirrors ``_composite_group_key``'s processor-chain walk, but for the
+        compression choice: the first non-``None`` answer wins, else the
+        run's default compression applies.
+        """
+        opts = self.options.output_options
+        schema = self.schemas.get(channel.schema_id)
+        for processor in opts.output_processors:
+            override = processor.chunk_compression(segment_key, channel, schema)
+            if override is not None:
+                return override
+        return opts.compression_type
 
     def _enforce_segment_memory_cap(self, writer: McapWriter) -> None:
         """Flush the largest builder in this writer's segment while total buffered > cap.

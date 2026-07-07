@@ -27,8 +27,9 @@ from pymcap_cli.core.mcap_processor import (
 from pymcap_cli.core.processors.chunk_groupers import (
     PatternGrouper,
     PerChannelGrouper,
+    SchemaCompressionGrouper,
 )
-from small_mcap import McapWriter
+from small_mcap import CompressionType, McapWriter
 
 from tests.helpers import empty_processor_result
 
@@ -141,6 +142,49 @@ def test_rechunk_max_memory_rejects_unparsable():
         max_memory="not-a-size",
     )
     assert exit_code == 1
+
+
+def test_rechunk_incompressible_schema_pattern_alone_with_strategy_none(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """--incompressible-schema-pattern activates grouping even with --strategy=none."""
+    rec = _Recorder()
+    _patch(monkeypatch, rechunk_cmd, rec)
+
+    exit_code = rechunk_cmd.rechunk(
+        file="in.mcap",
+        output=Path("out.mcap"),
+        strategy=RechunkStrategy.NONE,
+        incompressible_schema_pattern=["CompressedVideo"],
+    )
+
+    assert exit_code == 0
+    assert rec.output_options is not None
+    assert len(rec.output_options.output_processors) == 1
+    grouper = rec.output_options.output_processors[0]
+    assert isinstance(grouper, SchemaCompressionGrouper)
+    assert len(grouper.schema_patterns) == 1
+
+
+def test_rechunk_incompressible_schema_pattern_composes_with_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """--incompressible-schema-pattern adds to, rather than replaces, --strategy's grouper."""
+    rec = _Recorder()
+    _patch(monkeypatch, rechunk_cmd, rec)
+
+    exit_code = rechunk_cmd.rechunk(
+        file="in.mcap",
+        output=Path("out.mcap"),
+        strategy=RechunkStrategy.ALL,
+        incompressible_schema_pattern=["CompressedVideo"],
+    )
+
+    assert exit_code == 0
+    assert rec.output_options is not None
+    assert len(rec.output_options.output_processors) == 2
+    assert isinstance(rec.output_options.output_processors[0], PerChannelGrouper)
+    assert isinstance(rec.output_options.output_processors[1], SchemaCompressionGrouper)
 
 
 def test_process_propagates_schema_pattern_and_max_groups(monkeypatch: pytest.MonkeyPatch):
@@ -360,3 +404,64 @@ class TestEndToEndRechunk:
         cam_a_group = segment.channel_to_group[1]
         cam_b_group = segment.channel_to_group[2]
         assert cam_a_group is not cam_b_group
+
+    def test_incompressible_schema_grouper_overrides_compression(self, tmp_path: Path):
+        """Matching-schema channels land in a shared, uncompressed group.
+
+        Two CompressedVideo channels + one telemetry channel. With the
+        default (zstd) run compression, the video channels' group must use
+        CompressionType.NONE while the telemetry channel's group keeps the
+        run default.
+        """
+        inp = tmp_path / "in.mcap"
+        out = tmp_path / "out.mcap"
+        _write_fixture(
+            inp,
+            [
+                ("/cam_a/compressed", "foxglove_msgs/msg/CompressedVideo"),
+                ("/cam_b/compressed", "foxglove_msgs/msg/CompressedVideo"),
+                ("/imu", "sensor_msgs/msg/Imu"),
+            ],
+        )
+
+        result = _run(
+            inp,
+            out,
+            output_processors=[SchemaCompressionGrouper([re.compile("CompressedVideo")])],
+            compression="zstd",
+        )
+
+        assert result.processor.output_manager is not None
+        segment = next(iter(result.processor.output_manager.segments.values()))
+        cam_a_group = segment.channel_to_group[1]
+        cam_b_group = segment.channel_to_group[2]
+        imu_group = segment.channel_to_group[3]
+
+        # Both video channels share one group; the imu channel gets its own.
+        assert cam_a_group is cam_b_group
+        assert imu_group is not cam_a_group
+
+        assert cam_a_group.chunk_builder.compression == CompressionType.NONE
+        assert imu_group.chunk_builder.compression == CompressionType.ZSTD
+
+    def test_incompressible_schema_grouper_preserves_message_count(self, tmp_path: Path):
+        """The compression split changes chunk layout, not message content."""
+        inp = tmp_path / "in.mcap"
+        out = tmp_path / "out.mcap"
+        _write_fixture(
+            inp,
+            [
+                ("/cam/compressed", "foxglove_msgs/msg/CompressedVideo"),
+                ("/imu", "sensor_msgs/msg/Imu"),
+            ],
+            messages_per_channel=10,
+        )
+
+        result = _run(
+            inp,
+            out,
+            output_processors=[SchemaCompressionGrouper([re.compile("CompressedVideo")])],
+            compression="zstd",
+        )
+
+        assert result.stats.writer_statistics.message_count == 20

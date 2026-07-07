@@ -703,7 +703,7 @@ def duplicates(
     rebuild_missing: Annotated[
         bool,
         Parameter(
-            name=["--rebuild-missing/--no-rebuild-missing"],
+            name=["--rebuild-missing"],
             help=(
                 "Scan files without usable summary data and rebuild summary in memory. "
                 "Default to fall back to a full decode rather "

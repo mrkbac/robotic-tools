@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         Channel,
         Chunk,
         ChunkIndex,
+        CompressionType,
         LazyChunk,
         Message,
         MessageIndex,
@@ -286,4 +287,21 @@ class OutputProcessor:
         schema: Schema | None,
     ) -> Hashable | None:
         """Return the chunk-group identifier for ``channel`` in ``segment_key``."""
+        return None
+
+    def chunk_compression(
+        self,
+        segment_key: OutputKey,
+        channel: Channel,
+        schema: Schema | None,
+    ) -> CompressionType | None:
+        """Return a compression override for the group ``channel`` joins.
+
+        Checked once, when a new chunk group is created for a channel's
+        composite key. Return ``None`` to defer to the run's default
+        compression; the first non-``None`` answer across the configured
+        processor chain wins. Lets a grouper mark its own groups as, e.g.,
+        already-compressed payloads (video, point clouds) that gain nothing
+        from an extra compression pass.
+        """
         return None

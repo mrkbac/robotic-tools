@@ -62,7 +62,7 @@ def rosdecompress(
     video: Annotated[
         bool,
         Parameter(
-            name=["--video/--no-video"],
+            name=["--video"],
             group=VIDEO_GROUP,
         ),
     ] = True,
@@ -90,7 +90,7 @@ def rosdecompress(
     pointcloud: Annotated[
         bool,
         Parameter(
-            name=["--pointcloud/--no-pointcloud"],
+            name=["--pointcloud"],
             group=POINTCLOUD_GROUP,
         ),
     ] = True,
