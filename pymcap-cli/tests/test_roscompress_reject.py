@@ -40,7 +40,12 @@ def test_roscompress_removes_output_on_failure(
     src.write_bytes(simple_mcap.read_bytes())
     output = tmp_path / "out.mcap"
 
-    monkeypatch.setattr(roscompress_cmd, "_run_compress_loop", lambda *_a, **_k: False)
+    def _boom(*_a: object, **_k: object) -> None:
+        # Simulate a mid-processing failure after the output stream is opened.
+        output.write_bytes(b"partial")
+        raise RuntimeError("processing blew up")
+
+    monkeypatch.setattr(roscompress_cmd, "run_processor", _boom)
 
     rc = roscompress(str(src), output, force=True, image_format="none", pointcloud=False)
 
