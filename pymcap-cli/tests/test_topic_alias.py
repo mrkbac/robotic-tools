@@ -56,6 +56,7 @@ def _build_context(channels: list[Channel], *, with_summary: bool = True, stream
         remap_channel=lambda c: c,
         remap_message=lambda m: m,
         register_channel=register,
+        register_schema=lambda *_: 0,
     )
     return ctx, registered
 

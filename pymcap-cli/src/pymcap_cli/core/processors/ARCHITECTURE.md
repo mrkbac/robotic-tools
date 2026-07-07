@@ -78,6 +78,41 @@ correct but slow.
 The "next processor, not myself" rule lets `TopicAliasProcessor` emit one
 aliased copy without infinite recursion.
 
+## End-of-stream flush: `finalize()`
+
+`on_message` need not emit in lockstep with input — a processor may buffer now
+and emit later (an async encoder draining a background thread, or a reorder
+buffer). After every input record is consumed, the dispatcher calls
+`finalize()` once per unique processor. Yielded messages are **fully-formed
+output records** — routed and written directly, *not* fed back through the
+chain. Preserve each message's original `log_time`; reads are time-ordered
+(`read_message` heap-merges chunks by `log_time`), so late emission is fine as
+long as per-channel order and timestamps are intact. Default: emit nothing.
+
+## Registering output-only schemas / channels
+
+`InputContext.register_channel(channel)` adds an output-only channel (returns
+it with a fresh id) — used by `TopicAliasProcessor`. `register_channel` only
+references an *existing* `schema_id`; when a processor's output needs a **new
+schema** with no input counterpart (e.g. `CompressedPointCloud2`), call
+`InputContext.register_schema(name, encoding, data) -> id` first (deduped by
+content) and pass the returned id to `register_channel`. Channels/schemas are
+written lazily on first use, so an input channel a transform fully consumes
+leaves no orphaned empty record in the output.
+
+## Value-level transforms: `MessageTransformProcessor`
+
+Most processors are container-level (route/drop/relabel). For payload-level
+work, subclass `MessageTransformProcessor` (`message_transform.py`): it decodes
+a matched message's CDR, hands the decoded object to `transform()`, and
+re-encodes the result. Two shapes share the base — **transcode** (new
+schema/topic; a new channel is registered) and **value edit** (same
+schema/topic, changed fields; the input channel is reused). `transform` returns
+`None` (pass through unchanged), `[]` (drop), or one/more `TransformOutput`
+(replace/fan out). Matchers are expected to target **disjoint** channel sets,
+so each message is decoded once (there is no cross-processor decode cache).
+`PointcloudCompressProcessor` is the first concrete subclass.
+
 ## Chain ordering
 
 The chain is ordered: processors run in the order the dispatcher assembles
@@ -155,6 +190,18 @@ Quick reference; consult each module's docstring for full semantics.
 - `TopicRewriteProcessor` — change topic string on existing channels (id-stable).
 - `ChannelMergeProcessor` — collapse N input channels with the same schema into one output channel.
 - `TimeOffsetProcessor` — shift `log_time` / `publish_time` by a constant.
+- `MessageTransformProcessor` (base) — decode → `transform()` → re-encode; for
+  payload transcodes and value edits (see "Value-level transforms" above).
+- `PointcloudCompressProcessor` — PointCloud2 → CompressedPointCloud2 /
+  CompressedPointCloud (Cloudini / Draco).
+
+### Output chunk grouping / compression
+
+- `PerChannelGrouper` — each channel in its own chunk group.
+- `PatternGrouper` — group channels by topic / schema regex.
+- `SchemaCompressionGrouper` — route schema-matching channels (e.g.
+  already-compressed video / point clouds) to their own group at a chosen
+  compression (default: none).
 
 ### Deduplication
 

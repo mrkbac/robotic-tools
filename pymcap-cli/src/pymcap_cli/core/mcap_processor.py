@@ -573,8 +573,13 @@ class OutputManager:
             self.output_options.to_writer_options(),
             num_workers=num_workers,
         )
-        writer.schemas = dict(self.schemas)
-        writer.channels = dict(self.channels)
+        # Schemas/channels are written lazily via ``ensure_channel_written`` when
+        # a message (or fast-copied chunk) first references them — never eagerly
+        # seeded from ``self.schemas``/``self.channels``. Eager seeding would emit
+        # a channel record for every *input* channel even when a transform fully
+        # consumes it (e.g. PointCloud2 → CompressedPointCloud2 on the same
+        # topic), leaving an orphaned empty channel on the old schema. Lazy
+        # writing keeps the output clean and matches standalone roscompress.
         writer.start(profile=self.header.profile, library=self.header.library)
 
         segment = OutputSegment(
@@ -689,6 +694,12 @@ class McapProcessor:
 
         # Track which channels we've already seen to optimize metadata extraction
         self.known_channels: set[int] = set()
+
+        # Content-dedupe cache for processor-registered output-only schemas:
+        # (name, encoding, data) -> assigned schema id. Lets a processor call
+        # register_schema repeatedly (once per message) without allocating a
+        # new id each time.
+        self._extra_schema_ids: dict[tuple[str, str, bytes], int] = {}
 
         # Unified output management for both single-output and split-output modes.
         self.output_manager: OutputManager | None = None
@@ -1003,6 +1014,27 @@ class McapProcessor:
         for survivor_msg in survivors:
             self._write_survivor(survivor_msg, stream_id, input_channel_id)
 
+    def _finalize_input_processors(self) -> None:
+        """Flush end-of-stream output buffered by input processors.
+
+        Runs once after every input chunk is consumed. Each unique processor's
+        ``finalize()`` output is a fully-formed output record — routed and
+        written directly, not re-fed through the chain (see the ``finalize``
+        contract in ``processors/base.py``). Output channels registered via
+        ``register_channel`` are marked included for every stream, so routing
+        under stream 0 is valid regardless of which input produced them.
+        """
+        assert self.output_manager is not None
+        for proc in self._iter_unique_input_processors():
+            for message in proc.finalize():
+                if not isinstance(message, Message):
+                    msg = (
+                        f"{type(proc).__name__}.finalize yielded "
+                        f"{type(message).__name__}, expected Message"
+                    )
+                    raise TypeError(msg)
+                self._write_survivor(message, stream_id=0, input_channel_id=message.channel_id)
+
     def _write_survivor(
         self,
         message: Message,
@@ -1099,6 +1131,26 @@ class McapProcessor:
         for sid in range(len(self.options.inputs)):
             self.channel_filter_cache[(sid, new_id)] = True
         return new_channel
+
+    def _register_extra_schema(self, name: str, encoding: str, data: bytes) -> int:
+        """Register an output-only Schema allocated by a processor; return its id.
+
+        Deduped by ``(name, encoding, data)`` so a processor calling this once
+        per message reuses the same id. The Schema is stored in the shared
+        ``self.schemas`` registry, so ``OutputManager.ensure_channel_written``
+        writes it automatically when the first channel referencing it is
+        written. Needed for transcode processors whose *output* schema
+        (CompressedVideo, CompressedPointCloud2) has no input counterpart.
+        """
+        key = (name, encoding, data)
+        existing = self._extra_schema_ids.get(key)
+        if existing is not None:
+            return existing
+        preferred = max(self.schemas, default=0) + 1
+        new_id = self.remapper.reserve_schema_id(preferred)
+        self.schemas[new_id] = Schema(id=new_id, name=name, encoding=encoding, data=data)
+        self._extra_schema_ids[key] = new_id
+        return new_id
 
     def _handle_message_record(self, message: Message, stream_id: int) -> None:
         message_to_process = self.remapper.remap_message(stream_id, message)
@@ -1202,6 +1254,9 @@ class McapProcessor:
             def register_channel(channel: Channel, sid: int = stream_id) -> Channel:
                 return self._register_extra_channel(sid, channel)
 
+            def register_schema(name: str, encoding: str, data: bytes) -> int:
+                return self._register_extra_schema(name, encoding, data)
+
             contexts.append(
                 InputContext(
                     stream_id=stream_id,
@@ -1215,6 +1270,7 @@ class McapProcessor:
                     remap_channel=remap_channel,
                     remap_message=remap_message,
                     register_channel=register_channel,
+                    register_schema=register_schema,
                 )
             )
         return contexts
@@ -1334,6 +1390,11 @@ class McapProcessor:
                 # chunk decompresses in parallel. zstd/lz4 release the GIL so
                 # the speedup is genuine.
                 self._run_chunk_pipeline(heapq.merge(*chunk_generators))
+
+                # Flush any output buffered past end-of-stream by input
+                # processors (e.g. an async encoder draining trailing frames)
+                # before the writers are finished.
+                self._finalize_input_processors()
 
                 # Complete progress
                 progress.update(task, completed=total_size)

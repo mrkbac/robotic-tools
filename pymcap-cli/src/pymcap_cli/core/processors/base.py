@@ -48,6 +48,11 @@ class InputContext:
     # messages on the new id (typically by yielding additional messages from
     # ``on_message``).
     register_channel: Callable[[Channel], Channel]
+    # Register a new output-only Schema and return its assigned id, for
+    # transcode processors whose output schema (e.g. CompressedVideo) has no
+    # input counterpart. Deduped by (name, encoding, data). Pair the returned
+    # id with a ``register_channel`` call to emit messages on it.
+    register_schema: Callable[[str, str, bytes], int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +220,19 @@ class InputProcessor:
         return Action.CONTINUE
 
     def on_segment_open(self, context: SegmentContext) -> Iterable[tuple[int, Message]]:
+        return ()
+
+    def finalize(self) -> Iterable[Message]:
+        """Flush any output buffered past the end of the input stream.
+
+        Called once, after every input record has been consumed, for each
+        unique processor in the chain. A processor that holds messages back
+        during ``on_message`` — e.g. an async encoder still draining frames
+        from a background thread, or one that buffers to reorder — emits the
+        remainder here. Yielded messages are treated as fully-formed output
+        records: they are routed and written directly, not fed back through
+        the processor chain. Default: emit nothing.
+        """
         return ()
 
 
