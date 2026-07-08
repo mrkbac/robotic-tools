@@ -22,10 +22,13 @@ from pymcap_cli.core.mcap_processor import (
     ProcessingOptions,
     _chunk_records_match_writer_view,
 )
+from pymcap_cli.core.processors.base import ChunkDecision
 from small_mcap import Channel, CompressionType, McapWriter, Message, Schema, get_summary
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 
 def _write_mcap(
@@ -118,6 +121,60 @@ def test_single_file_passthrough_still_fast_copies(tmp_path: Path) -> None:
     assert stats.chunks_processed > 0
     assert stats.chunks_copied == stats.chunks_processed
     assert stats.chunks_decoded == 0
+
+
+def test_zstd_level_none_fast_copies_explicit_level_recompresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`process` must default zstd_level to None: unset yields CONTINUE
+    (fast-copy), any explicit level forces RECOMPRESS of every chunk.
+
+    chunks_copied counts RECOMPRESS the same as CONTINUE (and chunks_decoded is
+    0 for both), so the regression is invisible in the stats — observe the
+    ChunkDecision directly.
+    """
+    chunk_size = 4 * 1024
+    payload = b'{"x":"' + b"a" * 256 + b'"}'
+    src = tmp_path / "src.mcap"
+    _write_mcap(
+        src,
+        schemas=[(1, "S", b'{"k":"v"}')],
+        channels=[(1, "/t", 1)],
+        messages=[(1, i, payload) for i in range(100)],
+        chunk_size=chunk_size,
+    )
+
+    original = McapProcessor._should_decode_chunk
+
+    def _decisions(zstd_level: int | None) -> list[ChunkDecision]:
+        seen: list[ChunkDecision] = []
+
+        def spy(self, chunk, indexes, stream_id):
+            decision = original(self, chunk, indexes, stream_id)
+            seen.append(decision)
+            return decision
+
+        monkeypatch.setattr(McapProcessor, "_should_decode_chunk", spy)
+        with src.open("rb") as s, (tmp_path / f"out_{zstd_level}.mcap").open("wb") as out:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(stream=s, size=src.stat().st_size, options=InputOptions.from_args())
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    compression="zstd", chunk_size=chunk_size, zstd_level=zstd_level
+                ),
+            )
+            McapProcessor(options).process(out)
+        return seen
+
+    none_decisions = _decisions(None)
+    level1_decisions = _decisions(1)
+
+    assert none_decisions
+    assert set(none_decisions) == {ChunkDecision.CONTINUE}
+    assert level1_decisions
+    assert set(level1_decisions) == {ChunkDecision.RECOMPRESS}
 
 
 def test_channel_id_collision_decodes_every_chunk_from_remapped_stream(

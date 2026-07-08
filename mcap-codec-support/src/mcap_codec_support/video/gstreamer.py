@@ -263,7 +263,6 @@ class GStreamerVideoEncoder:
             )
         except OSError as exc:
             os.close(r_fd)
-            os.close(w_fd)
             raise VideoEncoderError(f"Failed to start gst-launch: {exc}") from exc
         finally:
             os.close(w_fd)  # keep only the read end in this process

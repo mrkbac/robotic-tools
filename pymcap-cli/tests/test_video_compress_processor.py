@@ -10,7 +10,10 @@ from __future__ import annotations
 import io
 from typing import TYPE_CHECKING
 
+import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
+from mcap_codec_support.video import VideoEncoderError, get_software_encoder
+from mcap_codec_support.video.common import EncoderConfig
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd._run_processor import run_processor
@@ -156,3 +159,98 @@ def test_video_processor_output_is_a_valid_bitstream(tmp_path: Path):
     for _frame in ctx.decode(None):  # flush
         decoded += 1
     assert decoded == 10
+
+
+# --------------------------------------------------------------------------
+# Hardware-encoder crash → software fallback (regression for frame-loss shift)
+# --------------------------------------------------------------------------
+
+
+class _CrashingHwEncoder:
+    """Buffers ``buffer_depth`` frames (returns None), then the process dies."""
+
+    def __init__(self, buffer_depth: int) -> None:
+        self.config = EncoderConfig(width=_W, height=_H, codec_name="hw_enc")
+        self._calls = 0
+        self._buffer_depth = buffer_depth
+        self.closed = False
+
+    def encode(self, _frame: object) -> bytes | None:
+        self._calls += 1
+        if self._calls <= self._buffer_depth:
+            return None  # frame accepted but held in the encoder's buffer
+        raise VideoEncoderError("hardware encoder crashed mid-stream")
+
+    def flush_packets(self) -> list[bytes]:
+        raise VideoEncoderError("encoder is dead")  # a crashed encoder cannot flush
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StubSoftwareEncoder:
+    def __init__(self) -> None:
+        self.config = EncoderConfig(width=_W, height=_H, codec_name=get_software_encoder("h264"))
+
+    def encode(self, _frame: object) -> bytes:
+        return b"pkt"
+
+    def flush_packets(self) -> list[bytes]:
+        return []
+
+    def close(self) -> None:
+        pass
+
+
+class _FallbackBackend:
+    """Fake backend: a hardware encoder that crashes, then a software one."""
+
+    label = "fake"
+    prefetch_supported = False
+
+    def __init__(self, buffer_depth: int) -> None:
+        self._buffer_depth = buffer_depth
+
+    def resolve_encoder(self, _codec: str) -> str:
+        return "hw_enc"
+
+    def get_pix_fmt(self, _topic: str) -> str | None:
+        return None
+
+    def decode_image(self, _dm: object, _schema_name: str) -> tuple[bytes, int, int]:
+        return b"frame", _W, _H
+
+    def create_encoder(
+        self, _w: int, _h: int, codec_name: str, _quality: int, **_kwargs: object
+    ) -> object:
+        if codec_name == "hw_enc":
+            return _CrashingHwEncoder(self._buffer_depth)
+        return _StubSoftwareEncoder()
+
+
+def test_video_processor_fallback_after_hw_crash_keeps_timestamps_aligned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A crashed hardware encoder must not shift surviving packets' timestamps.
+
+    The encoder accepts (buffers) 2 frames, then dies. Those 2 frames are
+    unrecoverable, but the remaining 3 must keep THEIR OWN log_times — before
+    the fix their metadata was reused for the wrong frames, shifting every
+    output timestamp by the buffer depth.
+    """
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_cameras(src, ["/cam/front"], n=5)
+
+    monkeypatch.setattr(
+        video_compress,
+        "create_video_compression_backend",
+        lambda *_a, **_k: _FallbackBackend(buffer_depth=2),
+    )
+    _run(src, out, extra_processors=[VideoCompressProcessor(codec="h264")])
+
+    with out.open("rb") as f:
+        times = [m.log_time for _s, c, m in read_message(f) if c.topic == "/cam/front"]
+
+    # _write_cameras stamps frame i (single topic, cid=1) at log_time i*step + 1.
+    step = 1_000_000
+    assert times == [2 * step + 1, 3 * step + 1, 4 * step + 1]

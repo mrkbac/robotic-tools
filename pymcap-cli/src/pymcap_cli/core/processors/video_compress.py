@@ -357,10 +357,24 @@ class VideoCompressProcessor(InputProcessor):
         concatenation stays decodable); subsequent in-flight frames that also
         failed on the now-dead hardware encoder are simply re-encoded here on the
         software encoder. Only a software-encode failure propagates.
+
+        A crashed hardware encoder loses the packets for frames it had accepted
+        but not yet output; those frames are unrecoverable. Their ``_FrameMeta``
+        entries still sit at the head of ``pending``, ahead of the frames that
+        will re-encode on software (this frame plus everything still queued in
+        ``futures``). Drop exactly those orphaned metas on the swap so surviving
+        packets keep pairing with the right frame instead of shifting by the
+        dead encoder's buffer depth.
         """
         sw = get_software_encoder(self._codec)
         if state.encoder.config.codec_name != sw:
-            logger.warning("Encoder failed for %s, falling back to %s", state.schema_name, sw)
+            orphaned = max(0, len(state.pending) - (len(state.futures) + 1))
+            logger.warning(
+                "Encoder failed for %s, falling back to %s (%d buffered frame(s) lost)",
+                state.schema_name,
+                sw,
+                orphaned,
+            )
             state.encoder.close()
             state.encoder = self._backend.create_encoder(
                 state.width,
@@ -370,6 +384,8 @@ class VideoCompressProcessor(InputProcessor):
                 input_pix_fmt=state.pix_fmt,
                 scale=state.scale_dims,
             )
+            for _ in range(orphaned):
+                state.pending.popleft()
         frame: Any = self._backend.decode_image(dm, state.schema_name)[0]
         return state.encoder.encode(frame)
 

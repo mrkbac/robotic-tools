@@ -366,14 +366,16 @@ class TestCombinedOperations:
 
 
 class TestZstdLevel:
-    def test_default_zstd_level_is_one(self, monkeypatch: pytest.MonkeyPatch):
+    def test_default_zstd_level_is_none(self, monkeypatch: pytest.MonkeyPatch):
+        # Default must stay None so a plain `process` fast-copies unchanged
+        # chunks instead of forcing a full decode/recompress of every chunk.
         rec = _Recorder()
         _patch_single(monkeypatch, rec)
         _patch_multi(monkeypatch, rec)
 
         assert process_cmd.process(**_kwargs()) == 0
         assert rec.output_options is not None
-        assert rec.output_options.zstd_level == 1
+        assert rec.output_options.zstd_level is None
 
     def test_zstd_level_flag_propagates(self, monkeypatch: pytest.MonkeyPatch):
         rec = _Recorder()

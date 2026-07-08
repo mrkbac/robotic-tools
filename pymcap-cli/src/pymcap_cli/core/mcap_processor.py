@@ -571,8 +571,15 @@ class OutputManager:
         if compression_type == CompressionType.NONE:
             num_workers = 0
         else:
+            num_workers = min(4, os.cpu_count() or 1)
             env = os.environ.get("MCAP_COMPRESS_WORKERS")
-            num_workers = int(env) if env else min(4, os.cpu_count() or 1)
+            if env:
+                try:
+                    num_workers = max(1, int(env))
+                except ValueError:
+                    console.print(
+                        f"[yellow]Ignoring non-integer MCAP_COMPRESS_WORKERS={env!r}[/yellow]"
+                    )
         writer = create_mcap_writer(
             stream,
             self.output_options.to_writer_options(),

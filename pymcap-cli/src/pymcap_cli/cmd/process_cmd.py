@@ -489,7 +489,7 @@ def process(
     # ----- Output -----
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
-    zstd_level: CompressionLevelOption = 1,
+    zstd_level: CompressionLevelOption = None,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -535,8 +535,10 @@ def process(
     compression
         Compression algorithm for output file.
     zstd_level
-        zstd compression level (default 1). Camera/lidar payloads are largely
-        incompressible, so higher levels cost a lot of time for little size gain.
+        zstd compression level. Unset by default so unchanged chunks are
+        fast-copied as-is; setting it (e.g. 1) forces a full decode/recompress
+        of every chunk. Camera/lidar payloads are largely incompressible, so
+        higher levels cost a lot of time for little size gain.
     force
         Force overwrite of output file without confirmation.
     no_clobber
