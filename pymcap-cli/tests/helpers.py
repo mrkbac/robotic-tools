@@ -55,7 +55,7 @@ def input_context(*, stream_id: int = 0, summary=None) -> InputContext:
         else None,
         remap_channel=lambda channel: channel,
         remap_message=lambda message: message,
-        register_channel=lambda channel: channel,
+        register_channel=lambda channel, _source_channel_id=None: channel,
         register_schema=lambda *_: 0,
     )
 

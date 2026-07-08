@@ -261,7 +261,8 @@ class MessageTransformProcessor(InputProcessor):
                 topic=out.topic,
                 message_encoding=out.message_encoding,
                 metadata={},
-            )
+            ),
+            in_channel.id,
         )
         self._out_channels[key] = new_channel.id
         return new_channel.id

@@ -1,18 +1,25 @@
-"""Video compression as a pipeline processor (async, NVENC-parallel).
+"""Video compression as a pipeline processor (async, hardware-accelerated).
 
 Transcodes raw ``sensor_msgs/Image`` and ``sensor_msgs/CompressedImage`` topics
 to ``foxglove_msgs/CompressedVideo`` (H.264/H.265) in-place on the same topic.
 
 Unlike a plain :class:`MessageTransformProcessor`, video encoding is stateful
-and *buffered*: a hardware encoder returns a frame's packet several frames
-later, so a frame in cannot map to a packet out one-for-one. This processor
-therefore drives the encoder directly — one dedicated worker thread per topic
-(so independent camera streams encode concurrently, budgeted by
-``probe_max_concurrent_encoders`` to stay within the GPU's useful session
-count), a per-topic FIFO pairing returned packets with the oldest pending
-frame's metadata, and ``finalize()`` to flush the encoder tails at end of
-stream. Output messages keep their source frame's ``log_time``; reads are
-time-ordered, so per-topic order is all that must hold.
+and *buffered*: a hardware encoder returns a frame's packet a couple of frames
+later, so a frame in cannot map to a packet out one-for-one. Each image topic is
+encoded as one continuous stream by a dedicated single-thread encoder, while a
+shared pool decodes frames ahead of it (stateless, parallel) so decode overlaps
+encode. Independent camera topics therefore encode concurrently. ``finalize()``
+flushes each encoder's tail at end of stream.
+
+Output messages keep their source frame's ``log_time``; reads are time-ordered,
+so only per-topic frame order must hold — which it does, since one encoder emits
+one topic's packets in frame order (``max_b_frames = 0``).
+
+To compress many time windows of one recording in parallel and merge the
+results, run several of these in separate processes over disjoint ``--start``/
+``--end`` ranges: each window's stream is self-contained (its first frame is an
+IDR), so the merged output stays valid. ``VC_DECODE`` caps the decode-pool size
+per process so N parallel compressors don't oversubscribe the CPU.
 """
 
 from __future__ import annotations
@@ -34,7 +41,6 @@ from mcap_codec_support.video import (
     calculate_downscale_dimensions,
     create_video_compression_backend,
     get_software_encoder,
-    probe_max_concurrent_encoders,
 )
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
@@ -60,9 +66,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Per-topic lookahead: frames submitted to a topic's encoder ahead of draining
-# its packets. Keeps memory bounded while giving the encoder thread slack to
-# run in parallel with the main loop.
+# its packets. Bounds decoded frames held in flight while giving the encoder
+# thread slack to run in parallel with the main loop.
 _INFLIGHT_PER_TOPIC = 128
+
+
+def _decode_pool_size() -> int:
+    """Decode-pool worker count, overridable via ``VC_DECODE`` for parallel runs."""
+    env = os.environ.get("VC_DECODE")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            logger.warning("Ignoring non-integer VC_DECODE=%r", env)
+    return min(8, max(2, (os.cpu_count() or 4) - 2))
 
 
 @dataclass(slots=True)
@@ -82,9 +99,12 @@ class _TopicState:
     pool: ThreadPoolExecutor
     out_channel_id: int
     schema_name: str
+    width: int
+    height: int
+    pix_fmt: str | None
+    scale_dims: tuple[int, int] | None
     # (decode+encode future, the DecodedMessage) — the message is kept so a
-    # hardware encoder that dies mid-stream can re-decode and retry the frame
-    # on the software fallback.
+    # hardware encoder that dies mid-stream can re-decode and retry on software.
     futures: deque[tuple[Future[bytes | None], DecodedMessage]]
     pending: deque[_FrameMeta]
 
@@ -113,25 +133,18 @@ class VideoCompressProcessor(InputProcessor):
             self._encoder_name = encoder
         else:
             self._encoder_name = self._backend.resolve_encoder(codec)
-        self._max_dedicated_pools = probe_max_concurrent_encoders(
-            self._backend, self._encoder_name
-        )
 
         self._decoder_factory = DecoderFactory()
         # channel_id -> (channel, schema, schema_name) for matched image channels
         self._targets: dict[int, tuple[Channel, Schema, str]] = {}
         self._streams_with_summary: set[int] = set()
         self._states: dict[str, _TopicState] = {}
-        self._overflow_pool: ThreadPoolExecutor | None = None
         self._out_schema_id: int | None = None
         self._video_encoder_fn: Any = None
-        # Decode and encode are two pipelined stages, as in standalone
-        # roscompress: a shared pool decodes frames (stateless, parallel across
-        # topics) while each topic's single encode thread consumes them in
-        # order. Collapsing both onto one per-topic thread serializes them and
-        # loses the decode/encode overlap.
-        decode_workers = min(4, max(2, (os.cpu_count() or 4) - 2))
-        self._decode_pool = ThreadPoolExecutor(max_workers=decode_workers)
+        # Decode and encode are two pipelined stages: a shared pool decodes
+        # frames (stateless, parallel across topics) while each topic's single
+        # encode thread consumes them in order, so decode and encode overlap.
+        self._decode_pool = ThreadPoolExecutor(max_workers=_decode_pool_size())
 
     # ---------------------------------------------------------------- scoping
     @override
@@ -194,33 +207,38 @@ class VideoCompressProcessor(InputProcessor):
 
         # Drain completed packets (bounded) and emit them in order.
         while len(state.futures) > _INFLIGHT_PER_TOPIC:
-            emitted = self._drain_one(channel.topic, state)
+            emitted = self._drain_one(state)
             if emitted is not None:
                 yield emitted
 
     @override
     def finalize(self) -> Iterable[Message]:
-        for topic, state in self._states.items():
-            # Drain everything still queued on the encoder thread.
-            while state.futures:
-                emitted = self._drain_one(topic, state)
-                if emitted is not None:
-                    yield emitted
-            # Flush the encoder's internal buffer; each packet pairs with the
-            # oldest still-pending frame, in order.
-            try:
-                packets = state.encoder.flush_packets()
-            except VideoEncoderError:
-                logger.exception("Failed to flush encoder for %s", topic)
-                packets = []
-            for packet in packets:
-                if not state.pending:
-                    break
-                yield self._build_video_message(state, state.pending.popleft(), packet)
-            state.pool.shutdown(wait=True)
-        if self._overflow_pool is not None:
-            self._overflow_pool.shutdown(wait=True)
-        self._decode_pool.shutdown(wait=True)
+        try:
+            for topic, state in self._states.items():
+                yield from self._finalize_topic(topic, state)
+        finally:
+            for state in self._states.values():
+                state.encoder.close()
+                state.pool.shutdown(wait=False)
+            self._decode_pool.shutdown(wait=False)
+
+    def _finalize_topic(self, topic: str, state: _TopicState) -> Iterable[Message]:
+        # Drain everything still queued on the encoder thread.
+        while state.futures:
+            emitted = self._drain_one(state)
+            if emitted is not None:
+                yield emitted
+        # Flush the encoder's internal buffer; each packet pairs with the oldest
+        # still-pending frame, in order.
+        try:
+            packets = state.encoder.flush_packets()
+        except VideoEncoderError:
+            logger.exception("Failed to flush encoder for %s", topic)
+            packets = []
+        for packet in packets:
+            if not state.pending:
+                break
+            yield self._build_video_message(state, state.pending.popleft(), packet)
 
     # ---------------------------------------------------------------- helpers
     def _decode(self, schema: Schema | None, channel: Channel, message: Message) -> Any:
@@ -239,10 +257,14 @@ class VideoCompressProcessor(InputProcessor):
     ) -> _TopicState | None:
         _frame, width, height = self._backend.decode_image(dm, schema_name)
         pix_fmt = self._backend.get_pix_fmt(channel.topic)
+        scale_dims: tuple[int, int] | None = None
         if self._scale is not None:
             width, height = calculate_downscale_dimensions(width, height, self._scale)
+            if pix_fmt is None:
+                scale_dims = (width, height)
         width -= width % 2
         height -= height % 2
+
         try:
             encoder = self._backend.create_encoder(
                 width,
@@ -250,7 +272,7 @@ class VideoCompressProcessor(InputProcessor):
                 self._encoder_name,
                 self._quality,
                 input_pix_fmt=pix_fmt,
-                scale=(width, height) if pix_fmt is None and self._scale is not None else None,
+                scale=scale_dims,
             )
         except VideoEncoderError:
             logger.exception("Failed to create encoder for %s", channel.topic)
@@ -260,18 +282,13 @@ class VideoCompressProcessor(InputProcessor):
             self._out_schema_id = context.input.register_schema(
                 COMPRESSED_VIDEO_SCHEMA, "ros2msg", FOXGLOVE_COMPRESSED_VIDEO.encode()
             )
+        # Deterministic output channel id (derived from the source channel) so
+        # the same input compressed in independent time windows yields a
+        # byte-compatible channel table that ``merge`` can fast-copy.
         out_channel = context.input.register_channel(
-            replace(channel, schema_id=self._out_schema_id, metadata=dict(channel.metadata))
+            replace(channel, schema_id=self._out_schema_id, metadata=dict(channel.metadata)),
+            channel.id,
         )
-
-        # Only the first few topics get a dedicated encoder thread; the rest
-        # share one overflow thread (see probe_max_concurrent_encoders).
-        if len(self._states) < self._max_dedicated_pools:
-            pool = ThreadPoolExecutor(max_workers=1)
-        else:
-            if self._overflow_pool is None:
-                self._overflow_pool = ThreadPoolExecutor(max_workers=1)
-            pool = self._overflow_pool
 
         logger.info(
             "[green]✓[/green] Converting %s: %dx%d (%s → CompressedVideo)",
@@ -282,9 +299,13 @@ class VideoCompressProcessor(InputProcessor):
         )
         state = _TopicState(
             encoder=encoder,
-            pool=pool,
+            pool=ThreadPoolExecutor(max_workers=1),
             out_channel_id=out_channel.id,
             schema_name=schema_name,
+            width=width,
+            height=height,
+            pix_fmt=pix_fmt,
+            scale_dims=scale_dims,
             futures=deque(),
             pending=deque(),
         )
@@ -305,35 +326,50 @@ class VideoCompressProcessor(InputProcessor):
         """
         return encoder.encode(decode_future.result())
 
-    def _drain_one(self, topic: str, state: _TopicState) -> Message | None:
-        """Resolve the oldest in-flight decode+encode; emit a packet if one came out."""
+    def _drain_one(self, state: _TopicState) -> Message | None:
+        """Resolve the oldest in-flight decode+encode; emit a packet if one came out.
+
+        Any decode/encode failure falls back to the software encoder (see
+        ``_fallback_encode``); a frame that still cannot be encoded is dropped
+        (its metadata too, so later packets stay paired) rather than crashing
+        the whole transcode.
+        """
         future, dm = state.futures.popleft()
         try:
             video_data = future.result()
-        except VideoEncoderError:
-            video_data = self._fallback_encode(topic, state, dm)
+        except Exception:  # noqa: BLE001 — decode or encode of one frame failed
+            try:
+                video_data = self._fallback_encode(state, dm)
+            except Exception:
+                logger.exception("Dropping unencodable frame on %s", state.schema_name)
+                if state.pending:
+                    state.pending.popleft()
+                return None
         if video_data is None:
             return None
         return self._build_video_message(state, state.pending.popleft(), video_data)
 
-    def _fallback_encode(
-        self, topic: str, state: _TopicState, dm: DecodedMessage
-    ) -> bytes | None:
-        """Swap a failed hardware encoder to software once, then retry the frame."""
+    def _fallback_encode(self, state: _TopicState, dm: DecodedMessage) -> bytes | None:
+        """Encode one frame on the software encoder, swapping the topic to it once.
+
+        Called after a hardware-encode failure. The first call swaps the topic's
+        encoder to software (a fresh stream — its first frame is an IDR, so the
+        concatenation stays decodable); subsequent in-flight frames that also
+        failed on the now-dead hardware encoder are simply re-encoded here on the
+        software encoder. Only a software-encode failure propagates.
+        """
         sw = get_software_encoder(self._codec)
-        cfg = state.encoder.config
-        if cfg.codec_name == sw:
-            raise VideoEncoderError(f"software encoder {sw} failed for {topic}")
-        logger.warning("Encoder failed for %s, falling back to %s", topic, sw)
-        pix_fmt = self._backend.get_pix_fmt(topic)
-        state.encoder = self._backend.create_encoder(
-            cfg.width,
-            cfg.height,
-            sw,
-            self._quality,
-            input_pix_fmt=pix_fmt,
-            scale=(cfg.width, cfg.height) if pix_fmt is None and self._scale else None,
-        )
+        if state.encoder.config.codec_name != sw:
+            logger.warning("Encoder failed for %s, falling back to %s", state.schema_name, sw)
+            state.encoder.close()
+            state.encoder = self._backend.create_encoder(
+                state.width,
+                state.height,
+                sw,
+                self._quality,
+                input_pix_fmt=state.pix_fmt,
+                scale=state.scale_dims,
+            )
         frame: Any = self._backend.decode_image(dm, state.schema_name)[0]
         return state.encoder.encode(frame)
 

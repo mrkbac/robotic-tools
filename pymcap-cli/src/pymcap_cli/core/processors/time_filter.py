@@ -11,6 +11,7 @@ from pymcap_cli.core.processors.base import (
     InputContext,
     InputProcessor,
     MessageContext,
+    MessageScope,
     PipelineContext,
 )
 from pymcap_cli.utils import RelativeTime
@@ -126,6 +127,23 @@ class TimeFilterProcessor(InputProcessor):
         if self.end_ns is not None and chunk.message_end_time >= self.end_ns:
             return ChunkDecision.DECODE
         return ChunkDecision.CONTINUE
+
+    @override
+    def message_scope(self, context: ChunkContext) -> MessageScope:
+        """A chunk wholly inside the (non-inverted) window drops nothing, so its
+        messages need no per-message pass; only boundary-spanning chunks do.
+
+        Interior chunks still get decoded when *another* processor transcodes a
+        channel in them — reporting NONE here lets the dispatcher fast-path this
+        filter for the untouched (telemetry) messages riding along.
+        """
+        start, end = context.chunk_start_time, context.chunk_end_time
+        if self._invert or start is None or end is None:
+            return MessageScope.all()
+        inside = (self.start_ns is None or start >= self.start_ns) and (
+            self.end_ns is None or end < self.end_ns
+        )
+        return MessageScope.none() if inside else MessageScope.all()
 
     def _in_window(self, log_time: int) -> bool:
         if self.start_ns is not None and log_time < self.start_ns:

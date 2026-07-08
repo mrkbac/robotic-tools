@@ -155,6 +155,49 @@ class TestBackendSelection:
 
         assert backend.label == "ffmpeg-cli"
 
+    def test_auto_prefers_ffmpeg_when_pyav_only_software_but_ffmpeg_has_hardware(
+        self, monkeypatch
+    ) -> None:
+        # PyAV present but its build lacks NVENC → resolves to software libx264;
+        # system ffmpeg has hardware NVENC. AUTO should pick ffmpeg-cli so the
+        # GPU is used (the common pip-installed-PyAV case).
+        monkeypatch.setattr(
+            compression_module._PyAVCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "libx264",
+        )
+        monkeypatch.setattr(
+            compression_module._FfmpegCliCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "h264_nvenc",
+        )
+        backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
+        assert backend.label == "ffmpeg-cli"
+
+    def test_auto_keeps_pyav_when_it_has_hardware(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            compression_module._PyAVCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "h264_nvenc",
+        )
+        backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
+        assert backend.label != "ffmpeg-cli"
+
+    def test_auto_keeps_pyav_when_neither_has_hardware(self, monkeypatch) -> None:
+        # No hardware anywhere → stay on PyAV (in-process, no subprocess/pipe cost).
+        monkeypatch.setattr(
+            compression_module._PyAVCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "libx264",
+        )
+        monkeypatch.setattr(
+            compression_module._FfmpegCliCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "libx264",
+        )
+        backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
+        assert backend.label != "ffmpeg-cli"
+
 
 # ---------------------------------------------------------------------------
 # FFmpegVideoEncoder integration

@@ -13,6 +13,7 @@ from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.video.common import (
     DEFAULT_FPS,
     DEFAULT_GOP_SIZE,
+    SOFTWARE_CODEC_MAP,
     EncoderMode,
     VideoEncoderError,
     calculate_downscale_dimensions,
@@ -217,17 +218,41 @@ class _FfmpegCliCompressionBackend:
 def create_video_compression_backend(
     mode: EncoderMode, codec: str, *, do_video: bool
 ) -> AnyVideoBackend:
-    """Select the roscompress video backend."""
+    """Select the roscompress video backend.
+
+    ``AUTO`` prefers PyAV (in-process, no subprocess/pipe overhead) but only
+    when PyAV can actually reach a hardware encoder. A pip-installed PyAV wheel
+    is typically software-only, so if PyAV would fall back to a CPU encoder
+    (e.g. libx264) while the system ``ffmpeg`` exposes a hardware encoder (e.g.
+    NVENC), AUTO picks the ffmpeg-cli backend instead — hardware encoding
+    without needing a custom PyAV build.
+    """
     if mode is EncoderMode.FFMPEG_CLI:
         return _FfmpegCliCompressionBackend()
 
     pyav_backend = _PyAVCompressionBackend()
-    if mode is EncoderMode.AUTO and do_video:
+    if mode is not EncoderMode.AUTO or not do_video:
+        return pyav_backend
+
+    try:
+        pyav_encoder = pyav_backend.resolve_encoder(codec)
+    except (ImportError, ValueError):
+        # PyAV missing or no usable encoder at all — fall back to ffmpeg.
+        return _FfmpegCliCompressionBackend()
+
+    if _is_software_encoder(pyav_encoder):
+        # PyAV can only do software; use ffmpeg-cli if it offers hardware.
+        ffmpeg_backend = _FfmpegCliCompressionBackend()
         try:
-            pyav_backend.resolve_encoder(codec)
-        except (ImportError, ValueError):
-            return _FfmpegCliCompressionBackend()
+            if not _is_software_encoder(ffmpeg_backend.resolve_encoder(codec)):
+                return ffmpeg_backend
+        except (ImportError, ValueError, VideoEncoderError):
+            pass  # no system ffmpeg / no encoder — stay on PyAV software
     return pyav_backend
+
+
+def _is_software_encoder(encoder_name: str) -> bool:
+    return encoder_name in set(SOFTWARE_CODEC_MAP.values())
 
 
 def prefetch_image_decodes(

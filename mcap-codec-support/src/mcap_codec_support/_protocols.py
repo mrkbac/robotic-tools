@@ -42,6 +42,10 @@ class VideoEncoderProtocol(Protocol[FrameT]):
 
     def flush_packets(self) -> list[bytes]: ...
 
+    def close(self) -> None:
+        """Release the encoder's native context / subprocess."""
+        ...
+
 
 class VideoDecompressorProtocol(Protocol):
     """Decompresses H.264/H.265 video packets to image data."""

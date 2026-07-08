@@ -47,7 +47,12 @@ class InputContext:
     # writer's channel registry; the processor is responsible for emitting
     # messages on the new id (typically by yielding additional messages from
     # ``on_message``).
-    register_channel: Callable[[Channel], Channel]
+    # Register a new output-only Channel: ``register_channel(channel,
+    # source_channel_id=None)``. Pass ``source_channel_id`` (the input channel a
+    # transcode derives from) to get a deterministic output id that is stable
+    # across independent runs of the same input — so parallel time-window outputs
+    # share a channel table and ``merge`` can fast-copy them.
+    register_channel: Callable[..., Channel]
     # Register a new output-only Schema and return its assigned id, for
     # transcode processors whose output schema (e.g. CompressedVideo) has no
     # input counterpart. Deduped by (name, encoding, data). Pair the returned
@@ -77,6 +82,11 @@ class MessageContext:
 class ChunkContext:
     input: InputContext
     message_indexes: tuple[MessageIndex, ...] | None
+    # Chunk log-time bounds when known (None for streamed/unindexed inputs).
+    # Lets a time-window processor report that a wholly-inside chunk needs no
+    # per-message work, so the dispatcher can fast-path its messages.
+    chunk_start_time: int | None = None
+    chunk_end_time: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

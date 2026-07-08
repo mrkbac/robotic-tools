@@ -489,13 +489,17 @@ class FFmpegVideoEncoder:
 
         return packets
 
-    def __del__(self) -> None:
+    def close(self) -> None:
+        """Terminate the ffmpeg subprocess if it is still running (idempotent)."""
         try:
             if self._process.poll() is None:
                 self._process.kill()
                 self._process.wait(timeout=2)
         except Exception:  # noqa: BLE001, S110
             pass
+
+    def __del__(self) -> None:
+        self.close()
 
 
 # ---------------------------------------------------------------------------

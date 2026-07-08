@@ -58,6 +58,7 @@ from pymcap_cli.core.processors.base import (
     InputContext,
     InputProcessor,
     MessageContext,
+    MessageScopeKind,
     OutputKey,
     OutputProcessor,
     OutputRouter,
@@ -692,6 +693,12 @@ class McapProcessor:
         # Key: (stream_id, channel_id), Value: True if included
         self.channel_filter_cache: dict[tuple[int, int], bool] = {}
 
+        # Cache the per-message context by (stream_id, input_channel_id). Its
+        # fields (the stream's InputContext + the channel id) are constant for
+        # every message on a channel, so this frozen dataclass is built once per
+        # channel instead of ~3x per message on the hot dispatch path.
+        self._message_context_cache: dict[tuple[int, int | None], MessageContext] = {}
+
         # Track which channels we've already seen to optimize metadata extraction
         self.known_channels: set[int] = set()
 
@@ -700,6 +707,11 @@ class McapProcessor:
         # register_schema repeatedly (once per message) without allocating a
         # new id each time.
         self._extra_schema_ids: dict[tuple[str, str, bytes], int] = {}
+
+        # Frozen base for deterministic output-channel ids (see
+        # _register_extra_channel). None until the first source-keyed
+        # registration, then fixed above all input channel ids.
+        self._extra_channel_base: int | None = None
 
         # Unified output management for both single-output and split-output modes.
         self.output_manager: OutputManager | None = None
@@ -760,10 +772,15 @@ class McapProcessor:
         stream_id: int,
         input_channel_id: int | None,
     ) -> MessageContext:
-        return MessageContext(
-            input=self._get_input_context(stream_id),
-            input_channel_id=input_channel_id,
-        )
+        key = (stream_id, input_channel_id)
+        context = self._message_context_cache.get(key)
+        if context is None:
+            context = MessageContext(
+                input=self._get_input_context(stream_id),
+                input_channel_id=input_channel_id,
+            )
+            self._message_context_cache[key] = context
+        return context
 
     def _chunk_context(self, stream_id: int, indexes: list[MessageIndex]) -> ChunkContext:
         return ChunkContext(
@@ -960,6 +977,7 @@ class McapProcessor:
         stream_id: int,
         *,
         input_channel_id: int | None = None,
+        chain_channels: frozenset[int] | None = None,
     ) -> None:
         self.stats.messages_processed += 1
         assert self.output_manager is not None
@@ -977,6 +995,20 @@ class McapProcessor:
         # rule: replacing a message and fan-out are both explicit in the
         # iterable length.
         processors = self._get_processors(stream_id)
+        # Chain bypass: with a transcode, a chunk is decoded so a few channels
+        # (camera/lidar) can be transformed, but it also carries the bulk of the
+        # file's telemetry that no processor's ``message_scope`` covers. Those
+        # messages pass through every processor unchanged, so skip the whole
+        # chain and route them directly. ``chain_channels`` is the union of
+        # processor scopes for this chunk (None ⇒ some processor needs every
+        # message ⇒ no bypass).
+        if not processors or (
+            chain_channels is not None and message.channel_id not in chain_channels
+        ):
+            self._write_survivor(message, stream_id, input_channel_id)
+            return
+
+        context = self._message_context(stream_id, input_channel_id)
         pending: deque[tuple[Message, int]] = deque()
         pending.append((message, 0))
         survivors: list[Message] = []
@@ -989,7 +1021,6 @@ class McapProcessor:
                 continue
 
             proc = processors[start_idx]
-            context = self._message_context(stream_id, input_channel_id)
             produced = False
             for out in proc.on_message(context, current):
                 if not isinstance(out, Message):
@@ -1078,12 +1109,23 @@ class McapProcessor:
 
     def _handle_channel_record(self, channel: Channel, stream_id: int) -> None:
         remapped_channel = self.remapper.remap_channel(stream_id, channel)
-
-        if remapped_channel.id not in self.known_channels:
+        is_new = remapped_channel.id not in self.known_channels
+        if is_new:
             self.known_channels.add(remapped_channel.id)
             self.channels[remapped_channel.id] = remapped_channel
 
-            # Pre-compute filtering decision for this stream (cache it).
+        # Compute and cache this stream's include/exclude decision, under both
+        # the original id (chunk-index lookups in _should_decode_chunk) and the
+        # remapped id (post-remap message lookups in _is_channel_included).
+        #
+        # This must run for every stream, not only the one that first defines an
+        # output id: on a merge a later stream's channel dedups to an
+        # already-known id, and without its own cache entry every one of its
+        # chunks is needlessly decoded (the slow path this avoids). The decision
+        # is recomputed per stream — not shared by output id — because each input
+        # can carry its own filter chain; sharing one stream's decision would
+        # drop another stream's messages that its own filters would keep.
+        if (stream_id, channel.id) not in self.channel_filter_cache:
             processors = self._get_processors(stream_id)
             should_include = True
             schema = self.schemas.get(remapped_channel.schema_id)
@@ -1092,20 +1134,22 @@ class McapProcessor:
                 input_channel_id=channel.id,
             )
             if processors:
-                skip = False
-                for p in processors:
-                    action = p.on_channel(context, remapped_channel, schema)
-                    if action & Action.SKIP:
-                        skip = True
+                skip = any(
+                    p.on_channel(context, remapped_channel, schema) & Action.SKIP
+                    for p in processors
+                )
                 should_include = not skip
             for router in self.options.output_options.routers:
                 router.on_channel(context, remapped_channel, schema)
+            self.channel_filter_cache[(stream_id, channel.id)] = should_include
             self.channel_filter_cache[(stream_id, remapped_channel.id)] = should_include
 
-            if not should_include:
+            if is_new and not should_include:
                 del self.channels[remapped_channel.id]
 
-    def _register_extra_channel(self, stream_id: int, channel: Channel) -> Channel:
+    def _register_extra_channel(
+        self, stream_id: int, channel: Channel, source_channel_id: int | None = None
+    ) -> Channel:
         """Register an output-only Channel allocated by a processor.
 
         Picks a fresh id above the writer registry and *reserves* it in the
@@ -1113,12 +1157,25 @@ class McapProcessor:
         collide with it. Marks the channel as included in the filter cache
         for every input stream — synthetic channels bypass per-stream filters.
 
+        When ``source_channel_id`` is given, the new id is derived
+        deterministically from it (``base + source_channel_id``, where ``base``
+        is fixed above all input channel ids). This makes a transcode's output
+        channel ids depend only on the (stable) input channel — not on the order
+        messages happen to arrive — so the same input compressed in independent
+        time windows yields byte-compatible channel tables that ``merge`` can
+        fast-copy instead of decoding to renumber.
+
         ``stream_id`` is retained in the signature for symmetry with
         ``remap_channel`` / ``remap_message`` closures even though the
         synthetic channel is global.
         """
         _ = stream_id  # synthetic channels are not stream-scoped
-        new_id = self.remapper.reserve_channel_id(max(self.known_channels, default=0) + 1)
+        if source_channel_id is not None:
+            if self._extra_channel_base is None:
+                self._extra_channel_base = max(self.known_channels, default=0) + 1
+            new_id = self.remapper.reserve_channel_id(self._extra_channel_base + source_channel_id)
+        else:
+            new_id = self.remapper.reserve_channel_id(max(self.known_channels, default=0) + 1)
         new_channel = Channel(
             id=new_id,
             schema_id=channel.schema_id,
@@ -1251,8 +1308,12 @@ class McapProcessor:
             def remap_message(message: Message, sid: int = stream_id) -> Message:
                 return self.remapper.remap_message(sid, message)
 
-            def register_channel(channel: Channel, sid: int = stream_id) -> Channel:
-                return self._register_extra_channel(sid, channel)
+            def register_channel(
+                channel: Channel,
+                source_channel_id: int | None = None,
+                sid: int = stream_id,
+            ) -> Channel:
+                return self._register_extra_channel(sid, channel, source_channel_id)
 
             def register_schema(name: str, encoding: str, data: bytes) -> int:
                 return self._register_extra_schema(name, encoding, data)
@@ -1792,7 +1853,11 @@ class McapProcessor:
                 )
                 self.stats.errors_encountered += 1
                 return
-            self._process_decoded_records(records, pending.stream_id)
+            self._process_decoded_records(
+                records,
+                pending.stream_id,
+                self._chain_channels_for_chunk(pending.stream_id, pending),
+            )
             return
 
         if decision == ChunkDecision.DECODE_VERIFY:
@@ -1817,7 +1882,11 @@ class McapProcessor:
                 self.stats.chunks_verified += 1
                 return
             # Stale records: fall through to the existing re-emit path.
-            self._process_decoded_records(records, pending.stream_id)
+            self._process_decoded_records(
+                records,
+                pending.stream_id,
+                self._chain_channels_for_chunk(pending.stream_id, pending),
+            )
             return
 
         if decision == ChunkDecision.RECOMPRESS:
@@ -1855,7 +1924,12 @@ class McapProcessor:
                 target_writer.add_chunk(pending.chunk, indices_by_channel)
             self.stats.chunks_copied += 1
 
-    def _process_decoded_records(self, records: list[McapRecord], stream_id: int) -> None:
+    def _process_decoded_records(
+        self,
+        records: list[McapRecord],
+        stream_id: int,
+        chain_channels: frozenset[int] | None = None,
+    ) -> None:
         """Process records that were already decoded from a chunk (by a worker)."""
         self.stats.chunks_decoded += 1
         for chunk_record in records:
@@ -1865,11 +1939,41 @@ class McapProcessor:
                     message_to_write,
                     stream_id,
                     input_channel_id=chunk_record.channel_id,
+                    chain_channels=chain_channels,
                 )
             elif isinstance(chunk_record, Schema):
                 self._handle_schema_record(chunk_record, stream_id)
             elif isinstance(chunk_record, Channel):
                 self._handle_channel_record(chunk_record, stream_id)
+
+    def _chain_channels_for_chunk(
+        self, stream_id: int, pending: PendingChunk
+    ) -> frozenset[int] | None:
+        """Union of input-processor message scopes for one chunk.
+
+        Returns the set of channel ids whose messages must traverse the
+        processor chain, or ``None`` when some processor needs *every* message
+        (scope ``ALL``) so no bypass is safe. Cheap: a handful of processors,
+        evaluated once per decoded chunk.
+        """
+        processors = self._get_processors(stream_id)
+        if not processors:
+            return frozenset()
+        chunk = pending.chunk
+        context = ChunkContext(
+            input=self._get_input_context(stream_id),
+            message_indexes=tuple(pending.indexes) if pending.indexes else None,
+            chunk_start_time=chunk.message_start_time,
+            chunk_end_time=chunk.message_end_time,
+        )
+        wanted: set[int] = set()
+        for proc in processors:
+            scope = proc.message_scope(context)
+            if scope.kind is MessageScopeKind.ALL:
+                return None
+            if scope.kind is MessageScopeKind.CHANNELS:
+                wanted.update(scope.channel_ids)
+        return frozenset(wanted)
 
     def _resolve_output_header(self) -> Header:
         """Choose output header metadata from readable inputs.

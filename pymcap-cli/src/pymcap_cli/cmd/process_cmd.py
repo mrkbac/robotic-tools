@@ -6,7 +6,7 @@ import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, TypeVar
+from typing import TYPE_CHECKING, Annotated, Literal, TypeVar
 
 from cyclopts import Group, Parameter, validators
 from rich.console import Console
@@ -291,6 +291,23 @@ def process(
     video_scale: Annotated[
         int | None,
         Parameter(name=["--video-scale"], group=COMPRESS_GROUP, help="Cap max image dimension."),
+    ] = None,
+    video_backend: Annotated[
+        Literal["auto", "pyav", "ffmpeg-cli"],
+        Parameter(
+            name=["--video-backend"],
+            group=COMPRESS_GROUP,
+            help="Video encode backend: pyav (in-process) or ffmpeg-cli (system "
+            "ffmpeg subprocess — use hardware NVENC without a custom PyAV build).",
+        ),
+    ] = "auto",
+    video_encoder: Annotated[
+        str | None,
+        Parameter(
+            name=["--video-encoder"],
+            group=COMPRESS_GROUP,
+            help="Force a specific encoder (e.g. h264_nvenc, libx264). Auto-detect if unset.",
+        ),
     ] = None,
     pc_resolution: Annotated[
         float,
@@ -647,13 +664,19 @@ def process(
 
         try:
             if compress_video:
+                from mcap_codec_support.video import EncoderMode  # noqa: PLC0415
+
                 from pymcap_cli.core.processors.video_compress import (  # noqa: PLC0415
                     VideoCompressProcessor,
                 )
 
                 extras.append(
                     VideoCompressProcessor(
-                        codec=video_codec, quality=video_quality, scale=video_scale
+                        codec=video_codec,
+                        quality=video_quality,
+                        scale=video_scale,
+                        backend=EncoderMode(video_backend),
+                        encoder=video_encoder,
                     )
                 )
             if compress_pointcloud:
