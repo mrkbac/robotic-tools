@@ -39,6 +39,7 @@ from pymcap_cli.types.size import parse_size_bytes
 from pymcap_cli.types.types_manual import (
     OUTPUT_OPTIONS_GROUP,
     ChunkSizeOption,
+    CompressionLevelOption,
     CompressionOption,
     DeleteSourceOption,
     ForceOverwriteOption,
@@ -293,12 +294,15 @@ def process(
         Parameter(name=["--video-scale"], group=COMPRESS_GROUP, help="Cap max image dimension."),
     ] = None,
     video_backend: Annotated[
-        Literal["auto", "pyav", "ffmpeg-cli"],
+        Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"],
         Parameter(
             name=["--video-backend"],
             group=COMPRESS_GROUP,
-            help="Video encode backend: pyav (in-process) or ffmpeg-cli (system "
-            "ffmpeg subprocess — use hardware NVENC without a custom PyAV build).",
+            help="Video encode backend: pyav (in-process), ffmpeg-cli (system "
+            "ffmpeg subprocess — hardware NVENC without a custom PyAV build), or "
+            "gstreamer (L4T GStreamer nvjpegdec + nvv4l2 — hardware JPEG decode + "
+            "encode; opt-in only, nvjpegdec can crush shadows on full-range "
+            "footage). auto never selects gstreamer.",
         ),
     ] = "auto",
     video_encoder: Annotated[
@@ -485,6 +489,7 @@ def process(
     # ----- Output -----
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    zstd_level: CompressionLevelOption = 1,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -529,6 +534,9 @@ def process(
         Chunk size of output file in bytes.
     compression
         Compression algorithm for output file.
+    zstd_level
+        zstd compression level (default 1). Camera/lidar payloads are largely
+        incompressible, so higher levels cost a lot of time for little size gain.
     force
         Force overwrite of output file without confirmation.
     no_clobber
@@ -783,6 +791,7 @@ def process(
     output_options = OutputOptions(
         compression=compression,
         chunk_size=chunk_size,
+        zstd_level=zstd_level,
         output_processors=output_processors,
         max_chunk_groups=rechunk_max_groups,
         max_chunk_memory_bytes=rechunk_max_memory_bytes,

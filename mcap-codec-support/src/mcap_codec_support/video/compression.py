@@ -201,8 +201,15 @@ class _FfmpegCliCompressionBackend:
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
     ) -> FFmpegVideoEncoder:
-        from mcap_codec_support.video.ffmpeg import FFmpegVideoEncoder  # noqa: PLC0415
+        from mcap_codec_support.video.ffmpeg import (  # noqa: PLC0415
+            FFmpegVideoEncoder,
+            probe_hw_mjpeg_decoder,
+        )
 
+        # JPEG path only: offload decode to a hardware MJPEG decoder when one
+        # probes healthy (cached; None → CPU decode). Keeps the pipe compact
+        # (JPEG, not raw frames) either way.
+        decode_codec = probe_hw_mjpeg_decoder() if input_pix_fmt is None else None
         return FFmpegVideoEncoder(
             width=width,
             height=height,
@@ -212,6 +219,7 @@ class _FfmpegCliCompressionBackend:
             gop_size=DEFAULT_GOP_SIZE,
             input_pix_fmt=input_pix_fmt,
             scale=scale,
+            decode_codec=decode_codec,
         )
 
 
@@ -226,7 +234,27 @@ def create_video_compression_backend(
     (e.g. libx264) while the system ``ffmpeg`` exposes a hardware encoder (e.g.
     NVENC), AUTO picks the ffmpeg-cli backend instead — hardware encoding
     without needing a custom PyAV build.
+
+    ``GSTREAMER`` is **opt-in only**, never chosen by AUTO: it uses the Jetson
+    hardware JPEG decoder (``nvjpegdec``), whose full-range/limited-range colour
+    handling is not faithful to libjpeg on all inputs (it can crush shadows on
+    full-range JFIF footage — see :mod:`mcap_codec_support.video.gstreamer`), so it
+    must not be selected without the user asking for it. A timed liveness probe
+    guards the explicit path against a codec stack that hangs.
     """
+    if mode is EncoderMode.GSTREAMER:
+        from mcap_codec_support.video.gstreamer import (  # noqa: PLC0415
+            GStreamerCompressionBackend,
+            probe_hw_jpeg_pipeline,
+        )
+
+        if not probe_hw_jpeg_pipeline(codec):
+            raise VideoEncoderError(
+                "GStreamer video pipeline did not produce output within the probe "
+                "timeout — the L4T GStreamer codec stack may be unavailable or "
+                "wedged. Use --video-backend ffmpeg-cli (or auto)."
+            )
+        return GStreamerCompressionBackend()
     if mode is EncoderMode.FFMPEG_CLI:
         return _FfmpegCliCompressionBackend()
 

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import mcap_codec_support.video.compression as compression_module
+import mcap_codec_support.video.ffmpeg as ffmpeg_module
 import pytest
 from mcap_codec_support.video import EncoderMode, create_video_compression_backend
+from mcap_codec_support.video.common import PROBE_JPEG
 from mcap_codec_support.video.ffmpeg import (
     AnnexBParser,
     FFmpegVideoEncoder,
+    check_decoder_cli,
     check_encoder_cli,
     find_ffmpeg,
+    probe_hw_mjpeg_decoder,
 )
 
 # ---------------------------------------------------------------------------
@@ -138,6 +142,46 @@ class TestFfmpegDiscovery:
     @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
     def test_check_encoder_cli_nonexistent(self) -> None:
         assert check_encoder_cli("totally_fake_encoder_xyz") is False
+
+
+class TestHwMjpegDecodeProbe:
+    @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
+    def test_check_decoder_cli(self) -> None:
+        assert check_decoder_cli("mjpeg") is True  # CPU mjpeg always present
+        assert check_decoder_cli("totally_fake_decoder_xyz") is False
+
+    def test_probe_returns_str_or_none(self) -> None:
+        result = probe_hw_mjpeg_decoder()
+        assert result is None or isinstance(result, str)
+
+    def test_probe_none_when_no_candidates(self, monkeypatch) -> None:
+        # No platform candidates → None regardless of ffmpeg/platform. A broken
+        # candidate that hangs is covered by the real timed probe (killed on
+        # timeout), which cannot be reproduced hermetically here.
+        monkeypatch.setattr(ffmpeg_module, "_HW_MJPEG_DECODERS", {})
+        ffmpeg_module.probe_hw_mjpeg_decoder.cache_clear()
+        try:
+            assert ffmpeg_module.probe_hw_mjpeg_decoder() is None
+        finally:
+            ffmpeg_module.probe_hw_mjpeg_decoder.cache_clear()
+
+    @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
+    def test_encoder_accepts_forced_decode_codec(self) -> None:
+        # Forcing the CPU mjpeg decoder exercises the decode_codec code path
+        # end-to-end (the -c:v insertion must produce a valid command).
+        encoder = FFmpegVideoEncoder(
+            width=32, height=32, codec_name="libx264", quality=28, decode_codec="mjpeg"
+        )
+        outputs: list[bytes] = []
+        try:
+            for _ in range(10):
+                result = encoder.encode(PROBE_JPEG)
+                if result is not None:
+                    outputs.append(result)
+            outputs.extend(encoder.flush_packets())
+        finally:
+            encoder.close()
+        assert len(outputs) == 10
 
 
 class TestBackendSelection:

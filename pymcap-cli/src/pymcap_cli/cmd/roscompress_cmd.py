@@ -10,6 +10,7 @@ and composes with everything else. The heavy lifting lives in the processors
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -20,14 +21,21 @@ from rich.console import Console
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
+from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 from pymcap_cli.utils import output_overwrites_input
 
 if TYPE_CHECKING:
-    from pymcap_cli.core.processors.base import InputProcessor
+    from pymcap_cli.core.processors.base import InputProcessor, OutputProcessor
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+# roscompress emits already-compressed payloads (CompressedVideo / CompressedImage
+# / CompressedPointCloud); route them to their own uncompressed chunk group so the
+# container zstd pass isn't wasted on data that won't shrink (and never touches
+# them on future reads).
+_COMPRESSED_OUTPUT_PATTERN = re.compile(r"Compressed(Image|Video|PointCloud)")
 
 # Parameter groups
 ENCODING_GROUP = Group("Encoding")
@@ -304,8 +312,13 @@ def roscompress(
         exclude_topic_glob=exclude_topic_glob or None,
         extra_processors=extras or None,
     )
+    # Route the compressed output into its own uncompressed chunk group — the
+    # payloads are already compressed, so a container zstd pass only burns CPU.
+    output_processors: list[OutputProcessor] = []
+    if image_format != "none" or pointcloud:
+        output_processors.append(SchemaCompressionGrouper([_COMPRESSED_OUTPUT_PATTERN]))
     output_options = OutputOptions(
-        output_processors=[],
+        output_processors=output_processors,
         overwrite_policy=overwrite_policy,
     )
 

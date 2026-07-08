@@ -7,12 +7,16 @@ All ``ffmpeg`` / ``ffprobe`` subprocess usage is confined to this module.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import threading
+from functools import lru_cache
+from pathlib import Path
 from queue import Empty, Queue
 
 from mcap_codec_support.video.common import (
+    PROBE_JPEG,
     DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
@@ -62,6 +66,101 @@ def resolve_encoder(codec: str) -> str:
         return _resolve_encoder(codec, test_fn=check_encoder_cli)
     except ValueError as exc:
         raise VideoEncoderError(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Hardware MJPEG decode probe (portable JPEG-decode offload)
+# ---------------------------------------------------------------------------
+
+# Platform → hardware MJPEG decoders to try, best first. These offload JPEG
+# decode off the CPU inside the same ffmpeg process that encodes. Apple's
+# VideoToolbox exposes no named MJPEG *decoder* through ffmpeg (H.264/HEVC/ProRes
+# only), so macOS has no candidate here and stays on CPU decode.
+_HW_MJPEG_DECODERS: dict[str, tuple[str, ...]] = {
+    "Linux": ("mjpeg_cuvid", "mjpeg_vaapi", "mjpeg_qsv"),
+}
+
+
+def _hw_mjpeg_candidates() -> tuple[str, ...]:
+    """Hardware MJPEG decoders worth probing on this host, best first.
+
+    On Jetson/Tegra ``mjpeg_cuvid`` (the CUDA NVDEC path) *hangs*, and the
+    hardware JPEG path there is ``nvjpegdec`` via the ``gstreamer`` backend — so
+    it is dropped to avoid paying the probe-timeout to rediscover that every run.
+    """
+    names = _HW_MJPEG_DECODERS.get(platform.system(), ())
+    if Path("/etc/nv_tegra_release").exists():
+        names = tuple(n for n in names if n != "mjpeg_cuvid")
+    return names
+
+
+def check_decoder_cli(decoder_name: str) -> bool:
+    """Check whether the system ``ffmpeg`` lists *decoder_name*."""
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return False
+    try:
+        result = subprocess.run(  # noqa: S603
+            [ffmpeg, "-hide_banner", "-decoders"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return any(
+        len(parts) >= 2 and parts[1] == decoder_name
+        for parts in (line.split() for line in result.stdout.splitlines())
+    )
+
+
+@lru_cache(maxsize=8)
+def probe_hw_mjpeg_decoder(timeout: float = 2.5) -> str | None:
+    """Return a *working* hardware MJPEG decoder name for this host, or None.
+
+    Probes each platform candidate by actually decoding a tiny embedded JPEG
+    under a hard *timeout*. A broken hardware decoder tends to *hang* rather than
+    error (``mjpeg_cuvid`` on Jetson Thor wedges in CUDA), which is worse than
+    slow — so the deadline, after which the child is killed, is what makes this
+    safe to consult by default: callers treat ``None`` as "decode on the CPU".
+    Cached, so the (possibly slow) probe runs once per process.
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return None
+    for name in _hw_mjpeg_candidates():
+        if not check_decoder_cli(name):
+            continue
+        try:
+            result = subprocess.run(  # noqa: S603
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "image2pipe",
+                    "-c:v",
+                    name,
+                    "-i",
+                    "pipe:0",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                input=PROBE_JPEG,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue  # hung or failed to launch → treat as unavailable
+        if result.returncode == 0:
+            return name
+    return None
 
 
 # Mapping from ROS image encoding to ffmpeg pixel format.
@@ -324,6 +423,10 @@ class FFmpegVideoEncoder:
     When *input_pix_fmt* is ``None`` (the default), the encoder accepts
     JPEG/PNG bytes via ``image2pipe``. When set (e.g. ``"rgb24"``), it
     accepts raw pixel data of that format via ``rawvideo``.
+
+    *decode_codec* (JPEG path only) forces the input decoder — pass a hardware
+    MJPEG decoder from :func:`probe_hw_mjpeg_decoder` to offload JPEG decode off
+    the CPU inside this same process; ``None`` lets ffmpeg pick the CPU decoder.
     """
 
     def __init__(
@@ -338,6 +441,7 @@ class FFmpegVideoEncoder:
         preset: str | None = None,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
+        decode_codec: str | None = None,
     ) -> None:
         ffmpeg = _require_ffmpeg()
         codec_fam = _codec_family(codec_name)
@@ -363,7 +467,8 @@ class FFmpegVideoEncoder:
                 "pipe:0",
             ]
         else:
-            # Compressed images (JPEG/PNG/etc.) — let ffmpeg detect the image codec.
+            # Compressed images (JPEG/PNG/etc.) — let ffmpeg detect the image codec,
+            # or force a hardware MJPEG decoder to offload JPEG decode off the CPU.
             cmd = [
                 ffmpeg,
                 "-hide_banner",
@@ -371,11 +476,10 @@ class FFmpegVideoEncoder:
                 "error",
                 "-f",
                 "image2pipe",
-                "-r",
-                str(fps_int),
-                "-i",
-                "pipe:0",
             ]
+            if decode_codec is not None:
+                cmd.extend(["-c:v", decode_codec])
+            cmd.extend(["-r", str(fps_int), "-i", "pipe:0"])
 
         if scale is not None:
             sw, sh = scale

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import platform
 from dataclasses import dataclass
 from enum import Enum
@@ -41,6 +42,7 @@ class EncoderMode(str, Enum):
     AUTO = "auto"
     PYAV = "pyav"
     FFMPEG_CLI = "ffmpeg-cli"
+    GSTREAMER = "gstreamer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,24 @@ class DecompressedFrame:
 
 DEFAULT_FPS: float = 30.0
 DEFAULT_GOP_SIZE: int = 30
+
+# A 32x32 baseline JPEG used by the hardware capability probes (GStreamer nv
+# decode/encode, ffmpeg hardware-MJPEG decode). Self-contained so probing needs
+# no Pillow import and no real input frame.
+PROBE_JPEG: bytes = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcv"
+    "Jik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7"
+    "Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCAAgACADASIAAhEBAxEB/8QAHwAAAQUBAQEB"
+    "AQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKB"
+    "kaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1"
+    "dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+    "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcF"
+    "BAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5"
+    "OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0"
+    "tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDy+1tenFbV"
+    "ra9OKLW16cVs2tr04oALW16cVtWtr04otbXpxWza2vTigDjLW16cVtWtr04otbXpxWza2vTigAtbXpxW1a2vT"
+    "ii1tenFbVra9OKAP//Z"
+)
 
 # Mapping from short codec name to software (CPU) encoder name.
 SOFTWARE_CODEC_MAP: dict[str, str] = {

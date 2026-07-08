@@ -568,7 +568,11 @@ class OutputManager:
         # release the GIL, so a small worker pool meaningfully speeds up writes.
         # For uncompressed output the pool is pure overhead.
         compression_type = self.output_options.compression_type
-        num_workers = 0 if compression_type == CompressionType.NONE else min(4, os.cpu_count() or 1)
+        if compression_type == CompressionType.NONE:
+            num_workers = 0
+        else:
+            env = os.environ.get("MCAP_COMPRESS_WORKERS")
+            num_workers = int(env) if env else min(4, os.cpu_count() or 1)
         writer = create_mcap_writer(
             stream,
             self.output_options.to_writer_options(),

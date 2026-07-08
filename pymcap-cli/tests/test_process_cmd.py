@@ -363,3 +363,23 @@ class TestCombinedOperations:
         assert any(isinstance(p, TopicAliasProcessor) for p in extras)
         assert rec.output_options is not None
         assert any(isinstance(r, DurationSplitProcessor) for r in rec.output_options.routers)
+
+
+class TestZstdLevel:
+    def test_default_zstd_level_is_one(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+        _patch_multi(monkeypatch, rec)
+
+        assert process_cmd.process(**_kwargs()) == 0
+        assert rec.output_options is not None
+        assert rec.output_options.zstd_level == 1
+
+    def test_zstd_level_flag_propagates(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+        _patch_multi(monkeypatch, rec)
+
+        assert process_cmd.process(**_kwargs(), zstd_level=9) == 0
+        assert rec.output_options is not None
+        assert rec.output_options.zstd_level == 9

@@ -312,3 +312,38 @@ class TestRoscompressMixedInput:
 
         assert {m["topic"] for m in _read_messages(compressed)} == input_topics
         assert {m["topic"] for m in _read_messages(decompressed)} == input_topics
+
+
+@pytest.mark.e2e
+class TestRoscompressChunkCompression:
+    def test_compressed_video_lands_in_uncompressed_chunks(
+        self, image_compressed_mcap: Path, tmp_path: Path
+    ) -> None:
+        """roscompress must route CompressedVideo into its own uncompressed chunk
+        group — a container zstd pass over already-compressed video is wasted CPU.
+        """
+        out = tmp_path / "compressed.mcap"
+        rc = roscompress(
+            file=str(image_compressed_mcap),
+            output=out,
+            force=True,
+            encoder="libx264",
+            backend=EncoderMode.FFMPEG_CLI,
+            pointcloud=False,
+        )
+        assert rc == 0
+        with out.open("rb") as f:
+            s = get_summary(f)
+        assert s is not None
+        video_ch = {
+            c.id
+            for c in s.channels.values()
+            if (sch := s.schemas.get(c.schema_id)) and "CompressedVideo" in sch.name
+        }
+        assert video_ch, "expected a CompressedVideo output channel"
+        video_chunk_comps = {
+            ci.compression or "none"
+            for ci in (s.chunk_indexes or ())
+            if set(ci.message_index_offsets) & video_ch
+        }
+        assert video_chunk_comps == {"none"}, video_chunk_comps

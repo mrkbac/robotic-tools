@@ -45,8 +45,11 @@ CompressionOption = Annotated[
 CompressionLevelOption = Annotated[
     int | None,
     Parameter(
-        name=["--compression-level"],
+        name=["--zstd-level", "--compression-level"],
         group=OUTPUT_OPTIONS_GROUP,
+        help="zstd compression level (negative = fastest, up to 22 = smallest). "
+        "Higher levels cost a lot of time; mostly-incompressible camera/lidar "
+        "payloads gain little above ~1.",
     ),
 ]
 
