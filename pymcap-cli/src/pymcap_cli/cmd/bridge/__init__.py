@@ -11,6 +11,7 @@ from cyclopts import App
 
 from pymcap_cli.cmd.bridge.call import call as _call
 from pymcap_cli.cmd.bridge.cat import cat as _cat
+from pymcap_cli.cmd.bridge.delay import delay as _delay
 from pymcap_cli.cmd.bridge.diag import diag as _diag
 from pymcap_cli.cmd.bridge.fetch import fetch as _fetch
 from pymcap_cli.cmd.bridge.info import info as _info
@@ -27,6 +28,7 @@ bridge_app = App(
 bridge_app.command(_info, name="info")
 bridge_app.command(_record, name="record")
 bridge_app.command(_cat, name="cat")
+bridge_app.command(_delay, name="delay")
 bridge_app.command(_tf, name="tf")
 bridge_app.command(_diag, name="diag")
 bridge_app.command(_call, name="call")
