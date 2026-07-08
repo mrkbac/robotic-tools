@@ -22,6 +22,7 @@ from pymcap_cli.cmd.bridge._shared import (
     CONNECTION_GROUP,
     DISPLAY_GROUP,
     BridgeTarget,
+    ChannelSubscriptionManager,
     console,
     to_ws_url,
 )
@@ -201,24 +202,6 @@ def _build_record_status(
     return Group(summary, Text(""), table)
 
 
-async def _subscribe_if_matching(
-    client: WebSocketBridgeClient, recorder: BridgeRecorder, channel: ChannelInfo
-) -> None:
-    if recorder.matches_topic(channel["topic"]):
-        await client.subscribe(channel["topic"])
-
-
-async def _subscribe_matching_channels(
-    client: WebSocketBridgeClient, recorder: BridgeRecorder
-) -> None:
-    async def _on_advertise(channel: ChannelInfo) -> None:
-        await _subscribe_if_matching(client, recorder, channel)
-
-    client.on_advertised_channel(_on_advertise)
-    for channel in list(client.channels.values()):
-        await _subscribe_if_matching(client, recorder, channel)
-
-
 async def _record_async(
     *,
     url: str,
@@ -261,7 +244,12 @@ async def _record_async(
                 )
 
                 client.on_message(recorder.on_message)
-                await _subscribe_matching_channels(client, recorder)
+                subscriber = ChannelSubscriptionManager(
+                    client,
+                    lambda channel: recorder.matches_topic(channel["topic"]),
+                )
+                subscriber.install()
+                await subscriber.subscribe_existing()
 
                 start = time.monotonic()
                 background: list[asyncio.Task[None]] = []

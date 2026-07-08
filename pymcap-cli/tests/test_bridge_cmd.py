@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import socket
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd.bridge import record as record_module
+from pymcap_cli.cmd.bridge import tf as tf_module
 from pymcap_cli.cmd.bridge._shared import (
     BridgeInfo,
     BridgeStatus,
@@ -33,12 +35,13 @@ from pymcap_cli.cmd.bridge.record import (
     _build_record_status,
     _record_async,
 )
+from pymcap_cli.core.tf_tree import TfGraph
 from pymcap_cli.display.message_render import BytesMode
 from pymcap_cli.utils import compile_topic_patterns
 from rich.console import Console, RenderableType
 from robo_ws_bridge import ConnectionGraph
 from robo_ws_bridge.server import Channel as ServerChannel
-from robo_ws_bridge.server import WebSocketBridgeServer
+from robo_ws_bridge.server import ConnectionState, WebSocketBridgeServer
 from small_mcap import JSONDecoderFactory, McapWriter, read_message_decoded
 
 if TYPE_CHECKING:
@@ -642,6 +645,64 @@ def test_record_async_captures_messages_into_mcap(tmp_path: Path) -> None:
     assert decoded[0].schema.name == "std_msgs/String"
 
 
+def test_record_async_captures_duplicate_topic_channels(tmp_path: Path) -> None:
+    port = _free_port()
+    output = tmp_path / "capture.mcap"
+
+    async def run() -> int:
+        server = WebSocketBridgeServer(host="127.0.0.1", port=port, name="test-bridge")
+        server.register_channel(_json_string_channel(1, "/duplicated"))
+        server.register_channel(_json_string_channel(2, "/duplicated"))
+        await server.start()
+
+        subscribed = asyncio.Event()
+        subscribed_channels: set[int] = set()
+
+        def _on_subscribe(_state: ConnectionState, _subscription_id: int, channel_id: int) -> None:
+            subscribed_channels.add(channel_id)
+            if {1, 2} <= subscribed_channels:
+                subscribed.set()
+
+        server.on_subscribe(_on_subscribe)
+
+        async def publish_once_subscribed() -> None:
+            await subscribed.wait()
+            await server.publish_message(1, b'{"data":"first-channel"}', timestamp_ns=1)
+            await server.publish_message(2, b'{"data":"second-channel"}', timestamp_ns=2)
+
+        publisher = asyncio.create_task(publish_once_subscribed())
+        try:
+            return await _record_async(
+                url=f"ws://127.0.0.1:{port}",
+                output=output,
+                selector=TopicSelector(
+                    include_patterns=tuple(compile_topic_patterns(["^/duplicated$"]))
+                ),
+                duration=0.5,
+                message_limit=2,
+                chunk_size=1024,
+                compression_choice="none",
+                connect_timeout=5.0,
+                refresh_interval=0.05,
+                show_status=False,
+            )
+        finally:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
+            await server.stop()
+
+    rc = asyncio.run(run())
+    assert rc == 0
+
+    with output.open("rb") as f:
+        decoded = list(read_message_decoded(f, decoder_factories=[JSONDecoderFactory()]))
+    assert [d.decoded_message["data"] for d in decoded] == [
+        "first-channel",
+        "second-channel",
+    ]
+    assert all(d.channel.topic == "/duplicated" for d in decoded)
+
+
 _JSON_STRING_SCHEMA = '{"type":"object","properties":{"data":{"type":"string"}}}'
 
 
@@ -661,6 +722,7 @@ def _run_cat_against_server(
     register: list[ServerChannel],
     publish: list[tuple[int, bytes, int]],
     cat_kwargs: dict,
+    wait_for_channels: set[int] | None = None,
 ) -> int:
     port = _free_port()
 
@@ -671,10 +733,24 @@ def _run_cat_against_server(
         await server.start()
 
         subscribed = asyncio.Event()
-        server.on_subscribe(lambda *_args: subscribed.set())
+        subscribed_channels: set[int] = set()
+
+        def _on_subscribe(_state: ConnectionState, _subscription_id: int, channel_id: int) -> None:
+            if wait_for_channels is None:
+                subscribed.set()
+                return
+            subscribed_channels.add(channel_id)
+            if wait_for_channels <= subscribed_channels:
+                subscribed.set()
+
+        server.on_subscribe(_on_subscribe)
 
         async def publisher_task() -> None:
-            await subscribed.wait()
+            if wait_for_channels is None:
+                await subscribed.wait()
+            else:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(subscribed.wait(), timeout=0.2)
             for channel_id, payload, ts in publish:
                 await server.publish_message(channel_id, payload, timestamp_ns=ts)
                 await asyncio.sleep(0.01)
@@ -830,6 +906,30 @@ def test_cat_async_swallows_malformed_schema_for_one_channel(
     assert lines[0]["message"]["data"] == "survives"
 
 
+def test_cat_async_subscribes_each_channel_for_duplicate_topics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _run_cat_against_server(
+        register=[
+            _json_string_channel(1, "/duplicated"),
+            _json_string_channel(2, "/duplicated"),
+        ],
+        publish=[
+            (1, b'{"data":"first-channel"}', 1),
+            (2, b'{"data":"second-channel"}', 2),
+        ],
+        cat_kwargs=_default_cat_kwargs(topics=["^/duplicated$"], limit=2, duration=1.0),
+        wait_for_channels={1, 2},
+    )
+    assert rc == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert [entry["message"]["data"] for entry in lines] == [
+        "first-channel",
+        "second-channel",
+    ]
+
+
 def test_cat_command_unreachable_port_returns_one() -> None:
     port = _free_port()
     rc = cat(
@@ -849,3 +949,36 @@ def test_cat_command_rejects_non_positive_limit() -> None:
 def test_cat_command_rejects_non_positive_duration() -> None:
     rc = cat(target="ws://127.0.0.1:1", topics=[".*"], duration=0.0)
     assert rc == 1
+
+
+def test_bridge_tf_returns_error_for_cyclic_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_collect_tf_graph_async(
+        _url: str,
+        *,
+        static_only: bool,
+        connect_timeout: float,
+        collect_seconds: float,
+    ) -> TfGraph:
+        _ = (static_only, connect_timeout, collect_seconds)
+        graph = TfGraph()
+        graph.add(
+            static=True,
+            stamp_ns=0,
+            parent="map",
+            child="odom",
+            translation=(0.0, 0.0, 0.0),
+            rotation=(0.0, 0.0, 0.0, 1.0),
+        )
+        graph.add(
+            static=True,
+            stamp_ns=0,
+            parent="odom",
+            child="map",
+            translation=(0.0, 0.0, 0.0),
+            rotation=(0.0, 0.0, 0.0, 1.0),
+        )
+        return graph
+
+    monkeypatch.setattr(tf_module, "_collect_tf_graph_async", fake_collect_tf_graph_async)
+
+    assert tf_module.tf("ws://example:8765", discover_seconds=0.1) == 1

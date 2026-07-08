@@ -15,6 +15,7 @@ from pymcap_cli.cmd.bridge._shared import (
     DISPLAY_GROUP,
     BridgeFetchError,
     BridgeTarget,
+    ChannelSubscriptionManager,
     channel_to_schema,
     console,
     to_ws_url,
@@ -43,7 +44,6 @@ async def _collect_tf_graph_async(
 
     factory = DecoderFactory()
     decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-    subscribed: set[int] = set()
 
     def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
         cid = channel["id"]
@@ -68,16 +68,11 @@ async def _collect_tf_graph_async(
             return
         add_tf_message(graph, channel["topic"], decoded)
 
-    async def _maybe_subscribe(channel: ChannelInfo) -> None:
-        cid = channel["id"]
-        if cid in subscribed or channel["topic"] not in tf_topics:
-            return
-        if _decoder_for(channel) is None:
-            return
-        subscribed.add(cid)
-        await client.subscribe(channel["topic"])
-
-    client.on_advertised_channel(_maybe_subscribe)
+    subscriber = ChannelSubscriptionManager(
+        client,
+        lambda channel: channel["topic"] in tf_topics and _decoder_for(channel) is not None,
+    )
+    subscriber.install()
     client.on_message(_on_message)
 
     await client.connect()
@@ -89,8 +84,7 @@ async def _collect_tf_graph_async(
                 f"Timed out after {connect_timeout:.1f}s waiting for serverInfo from {url}"
             ) from exc
 
-        for channel in list(client.channels.values()):
-            await _maybe_subscribe(channel)
+        await subscriber.subscribe_existing()
 
         await asyncio.sleep(collect_seconds)
         return graph
@@ -158,14 +152,14 @@ def tf(
         ERR.print(f"[red]Error:[/] Failed to connect to {url}: {exc}")
         return 1
 
+    findings = collect_tf_findings(graph)
     table = build_tf_table(graph.transforms, graph.counts, compact=console.width < TF_COMPACT_WIDTH)
-    if table is None:
+    if table is not None:
+        console.print(table)
+    elif not graph.transforms:
         console.print(f"[yellow]No transforms received from {url} in {discover_seconds:.1f}s.[/]")
         return 0
 
-    console.print(table)
-
-    findings = collect_tf_findings(graph)
     if findings:
         console.print()
         console.print(build_findings_table(findings))

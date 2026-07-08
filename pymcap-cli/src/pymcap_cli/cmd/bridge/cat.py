@@ -25,6 +25,7 @@ from small_mcap import JSONDecoderFactory, Schema
 from pymcap_cli.cmd.bridge._shared import (
     CONNECTION_GROUP,
     BridgeTarget,
+    ChannelSubscriptionManager,
     channel_to_schema,
     console,
     to_ws_url,
@@ -95,7 +96,6 @@ async def _cat_async(
     previous_by_topic: dict[str, Any] = {}
     validated_topics: set[str] = set()
     warned_channels: set[int] = set()
-    subscribed: set[int] = set()
     total = 0
     return_code = 0
     done = asyncio.Event()
@@ -247,19 +247,11 @@ async def _cat_async(
     server_info_event = asyncio.Event()
     client.on_server_info(lambda *_: server_info_event.set())
 
-    async def _maybe_subscribe(channel: ChannelInfo) -> None:
-        cid = channel["id"]
-        if cid in subscribed or not _topic_matches(channel["topic"]):
-            return
-        if _decoder_for(channel) is None:
-            return
-        subscribed.add(cid)
-        await client.subscribe(channel["topic"])
-
-    async def _on_advertise(channel: ChannelInfo) -> None:
-        await _maybe_subscribe(channel)
-
-    client.on_advertised_channel(_on_advertise)
+    subscriber = ChannelSubscriptionManager(
+        client,
+        lambda channel: _topic_matches(channel["topic"]) and _decoder_for(channel) is not None,
+    )
+    subscriber.install()
     client.on_message(_on_message)
 
     await client.connect()
@@ -270,8 +262,7 @@ async def _cat_async(
             ERR.print(f"[red]Error:[/] Timed out connecting to {url}")
             return 1
 
-        for channel in list(client.channels.values()):
-            await _maybe_subscribe(channel)
+        await subscriber.subscribe_existing()
 
         background: list[asyncio.Task[None]] = []
         if duration is not None:

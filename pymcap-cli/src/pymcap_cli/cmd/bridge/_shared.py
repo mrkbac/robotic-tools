@@ -7,7 +7,7 @@ stay focused on their own UX concerns.
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from ipaddress import ip_address
@@ -65,6 +65,45 @@ def channel_to_schema(channel: ChannelInfo) -> Schema:
         encoding=channel.get("schemaEncoding", ""),
         data=channel.get("schema", "").encode("utf-8"),
     )
+
+
+class ChannelSubscriptionManager:
+    """Subscribe to matching bridge advertisements once per channel id."""
+
+    def __init__(
+        self,
+        client: WebSocketBridgeClient,
+        should_subscribe: Callable[[ChannelInfo], bool],
+    ) -> None:
+        self._client = client
+        self._should_subscribe = should_subscribe
+        self._subscribed_channel_ids: set[int] = set()
+        self._next_subscription_id = 1
+
+    def install(self) -> None:
+        self._client.on_disconnect(self._clear_subscriptions)
+        self._client.on_advertised_channel(self.subscribe_if_matching)
+        self._client.on_channel_unadvertised(self._forget_channel)
+
+    async def subscribe_existing(self) -> None:
+        for channel in list(self._client.channels.values()):
+            await self.subscribe_if_matching(channel)
+
+    async def subscribe_if_matching(self, channel: ChannelInfo) -> None:
+        channel_id = channel["id"]
+        if channel_id in self._subscribed_channel_ids or not self._should_subscribe(channel):
+            return
+
+        subscription_id = self._next_subscription_id
+        self._next_subscription_id += 1
+        await self._client.subscribe_to_channel(subscription_id, channel_id)
+        self._subscribed_channel_ids.add(channel_id)
+
+    def _forget_channel(self, channel: ChannelInfo) -> None:
+        self._subscribed_channel_ids.discard(channel["id"])
+
+    def _clear_subscriptions(self) -> None:
+        self._subscribed_channel_ids.clear()
 
 
 @dataclass(frozen=True)

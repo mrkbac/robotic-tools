@@ -18,6 +18,7 @@ from pymcap_cli.cmd.bridge._shared import (
     DISPLAY_GROUP,
     BridgeFetchError,
     BridgeTarget,
+    ChannelSubscriptionManager,
     channel_to_schema,
     console,
     to_ws_url,
@@ -66,7 +67,6 @@ async def _collect_diagnostics_async(
 
     factory = DecoderFactory()
     decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-    subscribed: set[int] = set()
 
     def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
         cid = channel["id"]
@@ -91,16 +91,11 @@ async def _collect_diagnostics_async(
             return
         add_diagnostic_message(entries, log_time_ns, decoded)
 
-    async def _maybe_subscribe(channel: ChannelInfo) -> None:
-        cid = channel["id"]
-        if cid in subscribed or channel["topic"] not in wanted:
-            return
-        if _decoder_for(channel) is None:
-            return
-        subscribed.add(cid)
-        await client.subscribe(channel["topic"])
-
-    client.on_advertised_channel(_maybe_subscribe)
+    subscriber = ChannelSubscriptionManager(
+        client,
+        lambda channel: channel["topic"] in wanted and _decoder_for(channel) is not None,
+    )
+    subscriber.install()
     client.on_message(_on_message)
 
     await client.connect()
@@ -112,8 +107,7 @@ async def _collect_diagnostics_async(
                 f"Timed out after {connect_timeout:.1f}s waiting for serverInfo from {url}"
             ) from exc
 
-        for channel in list(client.channels.values()):
-            await _maybe_subscribe(channel)
+        await subscriber.subscribe_existing()
 
         await asyncio.sleep(collect_seconds)
         return entries
