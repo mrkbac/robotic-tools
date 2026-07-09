@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 from collections import deque
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -110,6 +110,7 @@ class _FfmpegCliCompressionBackend:
 
     def __init__(self) -> None:
         self._topic_pix_fmt: dict[str, str | None] = {}
+        self._compressed_topic_modes: dict[str, Literal["pipe", "rgb24"]] = {}
 
     def get_pix_fmt(self, topic: str) -> str | None:
         return self._topic_pix_fmt.get(topic)
@@ -135,9 +136,24 @@ class _FfmpegCliCompressionBackend:
         topic = msg.channel.topic
 
         if schema_name in COMPRESSED_SCHEMAS:
-            self._topic_pix_fmt[topic] = None
+            mode = self._compressed_topic_modes.get(topic)
+            if mode == "rgb24":
+                self._topic_pix_fmt[topic] = "rgb24"
+                return _decode_compressed_to_rgb24(data)
+            if mode == "pipe":
+                self._topic_pix_fmt[topic] = None
+                frame, width, height = self.decode_compressed(data)
+                return frame, width, height
+
             frame, width, height = self.decode_compressed(data)
-            return frame, width, height
+            if _is_image2pipe_fast_path(data) or _ffmpeg_can_pipe_image(data):
+                self._compressed_topic_modes[topic] = "pipe"
+                self._topic_pix_fmt[topic] = None
+                return frame, width, height
+
+            self._compressed_topic_modes[topic] = "rgb24"
+            self._topic_pix_fmt[topic] = "rgb24"
+            return _decode_compressed_to_rgb24(data)
 
         from mcap_codec_support.video.ffmpeg import ROS_ENCODING_TO_PIX_FMT  # noqa: PLC0415
 
@@ -240,6 +256,33 @@ def _is_software_encoder(encoder_name: str) -> bool:
     return encoder_name in set(SOFTWARE_CODEC_MAP.values())
 
 
+def _is_image2pipe_fast_path(data: bytes) -> bool:
+    return data[:2] == b"\xff\xd8" or data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def _ffmpeg_can_pipe_image(data: bytes) -> bool:
+    from mcap_codec_support.video.ffmpeg import probe_image_pipe_decode  # noqa: PLC0415
+
+    return probe_image_pipe_decode(data)
+
+
+def _decode_compressed_to_rgb24(data: bytes) -> tuple[bytes, int, int]:
+    try:
+        from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
+    except ImportError as exc:
+        raise VideoEncoderError(
+            "Pillow is required to decode this compressed image format with ffmpeg-cli. "
+            "Install with: uv add 'mcap-codec-support[video]'"
+        ) from exc
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            rgb = image.convert("RGB")
+            return rgb.tobytes(), rgb.width, rgb.height
+    except (OSError, UnidentifiedImageError) as exc:
+        raise VideoEncoderError(f"Failed to decode compressed image with Pillow: {exc}") from exc
+
+
 def prefetch_image_decodes(
     messages: Iterable[DecodedMessage],
     backend: AnyVideoBackend,
@@ -265,10 +308,14 @@ def prefetch_image_decodes(
         yield buffer.popleft()
 
 
-def encode_raw_image_to_jpeg(
-    decoded_message: RawImageMessage, *, jpeg_quality: int, scale: int | None
+def encode_raw_image_to_compressed(
+    decoded_message: RawImageMessage,
+    *,
+    image_format: Literal["jpeg", "png"],
+    jpeg_quality: int,
+    scale: int | None,
 ) -> tuple[bytes, int, int]:
-    """Encode a raw ROS Image message to JPEG using Pillow."""
+    """Encode a raw ROS Image message to a compressed still-image format using Pillow."""
     image = raw_image_to_pil(decoded_message)
     src_w, src_h = image.size
     if scale is not None:
@@ -279,14 +326,28 @@ def encode_raw_image_to_jpeg(
     target_w -= target_w % 2
     target_h -= target_h % 2
     if target_w < 2 or target_h < 2:
-        raise VideoEncoderError(f"Source frame too small ({target_w}x{target_h}) for JPEG encoding")
+        raise VideoEncoderError(
+            f"Source frame too small ({target_w}x{target_h}) for image encoding"
+        )
 
     if target_w != src_w or target_h != src_h:
         image = image.resize((target_w, target_h), _PIL_BILINEAR)
 
     buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=jpeg_quality)
+    if image_format == "jpeg":
+        image.save(buf, format="JPEG", quality=jpeg_quality)
+    else:
+        image.save(buf, format="PNG")
     return buf.getvalue(), target_w, target_h
+
+
+def encode_raw_image_to_jpeg(
+    decoded_message: RawImageMessage, *, jpeg_quality: int, scale: int | None
+) -> tuple[bytes, int, int]:
+    """Encode a raw ROS Image message to JPEG using Pillow."""
+    return encode_raw_image_to_compressed(
+        decoded_message, image_format="jpeg", jpeg_quality=jpeg_quality, scale=scale
+    )
 
 
 def decode_compressed_image_to_rgb_array(data: bytes) -> npt.NDArray[np.uint8]:

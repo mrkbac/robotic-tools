@@ -194,7 +194,7 @@ Quick reference; consult each module's docstring for full semantics.
   payload transcodes and value edits (see "Value-level transforms" above).
 - `PointcloudCompressProcessor` — PointCloud2 → CompressedPointCloud2 /
   CompressedPointCloud (Cloudini / Draco).
-- `JpegCompressProcessor` — raw Image → JPEG CompressedImage.
+- `ImageCompressProcessor` — raw Image → JPEG/PNG CompressedImage.
 - `VideoCompressProcessor` — Image / CompressedImage → CompressedVideo
   (H.264/H.265); async, one encoder thread per topic, flushes in `finalize()`.
 - `PointcloudDecompressProcessor` / `VideoDecompressProcessor` — the inverses

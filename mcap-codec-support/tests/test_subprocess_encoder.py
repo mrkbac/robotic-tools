@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+
 import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.ffmpeg as ffmpeg_module
 import pytest
@@ -14,6 +16,7 @@ from mcap_codec_support.video.ffmpeg import (
     check_encoder_cli,
     find_ffmpeg,
     probe_hw_mjpeg_decoder,
+    probe_image_dimensions,
 )
 
 # ---------------------------------------------------------------------------
@@ -142,6 +145,21 @@ class TestFfmpegDiscovery:
     @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
     def test_check_encoder_cli_nonexistent(self) -> None:
         assert check_encoder_cli("totally_fake_encoder_xyz") is False
+
+
+@pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
+class TestImageDimensionProbe:
+    def test_probe_falls_back_to_ffprobe_with_binary_input(self) -> None:
+        image_module = pytest.importorskip("PIL.Image")
+        image_module.init()
+        if "WEBP" not in image_module.SAVE:
+            pytest.skip("Pillow build cannot write WebP")
+
+        image = image_module.new("RGB", (37, 23), color=(10, 20, 30))
+        buf = io.BytesIO()
+        image.save(buf, format="WEBP")
+
+        assert probe_image_dimensions(buf.getvalue()) == (37, 23)
 
 
 class TestHwMjpegDecodeProbe:

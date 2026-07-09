@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 
 import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
-from mcap_codec_support.video import VideoEncoderError, get_software_encoder
+from mcap_codec_support.video import EncoderMode, VideoEncoderError, get_software_encoder
 from mcap_codec_support.video.common import EncoderConfig
+from mcap_codec_support.video.ffmpeg import check_encoder_cli, find_ffmpeg
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd._run_processor import run_processor
@@ -32,6 +33,7 @@ from tests.fixtures.image_mcap_generator import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from types import ModuleType
 
 _W, _H = 160, 120
 _VIDEO_SCHEMA = "foxglove_msgs/msg/CompressedVideo"
@@ -60,6 +62,57 @@ def _write_cameras(path: Path, topics: list[str], n: int) -> None:
                 {"header": header, "format": "jpeg", "data": create_jpeg_frame(_W, _H, i)},
                 log_time,
             )
+    writer.finish()
+    path.write_bytes(buf.getvalue())
+
+
+def _pillow_frame(
+    image_module: ModuleType, width: int, height: int, frame_idx: int, image_format: str
+) -> bytes:
+    data = bytearray(width * height * 3)
+    for y in range(height):
+        for x in range(width):
+            idx = (y * width + x) * 3
+            data[idx] = (x * 255 // width + frame_idx * 10) % 256
+            data[idx + 1] = (y * 255 // height) % 256
+            data[idx + 2] = (frame_idx * 20) % 256
+    img = image_module.frombytes("RGB", (width, height), bytes(data))
+    output = io.BytesIO()
+    img.save(output, format=image_format.upper())
+    return output.getvalue()
+
+
+def _write_pillow_compressed_camera(path: Path, n: int, image_format: str) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    image_module.init()
+    pil_format = image_format.upper()
+    if pil_format not in image_module.SAVE:
+        pytest.skip(f"Pillow build cannot write {pil_format}")
+
+    buf = io.BytesIO()
+    writer = McapWriter(buf, chunk_size=1 << 20, encoder_factory=ROS2EncoderFactory())
+    writer.start(profile="ros2")
+    writer.add_schema(
+        1,
+        "sensor_msgs/msg/CompressedImage",
+        "ros2msg",
+        SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode(),
+    )
+    writer.add_channel(1, f"/cam/{image_format}", "cdr", 1)
+    step = 1_000_000
+    for i in range(n):
+        log_time = i * step
+        header = {"stamp": {"sec": i, "nanosec": 0}, "frame_id": "cam"}
+        writer.add_message_encode(
+            1,
+            log_time,
+            {
+                "header": header,
+                "format": image_format,
+                "data": _pillow_frame(image_module, _W, _H, i, image_format),
+            },
+            log_time,
+        )
     writer.finish()
     path.write_bytes(buf.getvalue())
 
@@ -159,6 +212,35 @@ def test_video_processor_output_is_a_valid_bitstream(tmp_path: Path):
     for _frame in ctx.decode(None):  # flush
         decoded += 1
     assert decoded == 10
+
+
+@pytest.mark.skipif(
+    find_ffmpeg() is None or not check_encoder_cli("libx264"),
+    reason="ffmpeg/libx264 not available",
+)
+@pytest.mark.parametrize("image_format", ["webp", "tiff"])
+def test_video_processor_ffmpeg_cli_transcodes_fallback_compressed_images(
+    tmp_path: Path, image_format: str
+):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_pillow_compressed_camera(src, n=4, image_format=image_format)
+
+    _run(
+        src,
+        out,
+        extra_processors=[
+            VideoCompressProcessor(encoder="libx264", backend=EncoderMode.FFMPEG_CLI)
+        ],
+    )
+
+    topic = f"/cam/{image_format}"
+    assert _counts(out) == {topic: 4}
+    with out.open("rb") as f:
+        summary = get_summary(f)
+    assert summary is not None
+    chans = [c for c in summary.channels.values() if c.topic == topic]
+    assert len(chans) == 1
+    assert summary.schemas[chans[0].schema_id].name == _VIDEO_SCHEMA
 
 
 # --------------------------------------------------------------------------

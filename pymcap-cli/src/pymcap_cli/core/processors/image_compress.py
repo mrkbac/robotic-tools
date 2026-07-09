@@ -1,6 +1,6 @@
-"""Raw-image → JPEG CompressedImage as a pipeline processor.
+"""Raw-image → still-image CompressedImage as a pipeline processor.
 
-JPEG is intra-only and stateless, so this fits the synchronous
+JPEG/PNG are stateless, so this fits the synchronous
 :class:`MessageTransformProcessor` directly (one frame in → one frame out).
 Only raw ``sensor_msgs/Image`` topics are matched; already-compressed image
 topics are left untouched (pass through).
@@ -8,14 +8,14 @@ topics are left untouched (pass through).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.video import (
     COMPRESSED_IMAGE,
     RAW_SCHEMAS,
     VideoEncoderError,
-    encode_raw_image_to_jpeg,
+    encode_raw_image_to_compressed,
 )
 from typing_extensions import override
 
@@ -30,11 +30,18 @@ if TYPE_CHECKING:
 _COMPRESSED_IMAGE_SCHEMA = "sensor_msgs/msg/CompressedImage"
 
 
-class JpegCompressProcessor(MessageTransformProcessor):
-    """Encode raw Image topics to JPEG CompressedImage."""
+class ImageCompressProcessor(MessageTransformProcessor):
+    """Encode raw Image topics to still-image CompressedImage."""
 
-    def __init__(self, *, jpeg_quality: int = 90, scale: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        image_format: Literal["jpeg", "png"] = "jpeg",
+        jpeg_quality: int = 90,
+        scale: int | None = None,
+    ) -> None:
         super().__init__()
+        self._image_format = image_format
         self._jpeg_quality = jpeg_quality
         self._scale = scale
         self._schema_data = COMPRESSED_IMAGE.encode()
@@ -48,8 +55,11 @@ class JpegCompressProcessor(MessageTransformProcessor):
         self, channel: Channel, schema: Schema, decoded: Any
     ) -> list[TransformOutput] | None:
         try:
-            jpeg_bytes, _w, _h = encode_raw_image_to_jpeg(
-                decoded, jpeg_quality=self._jpeg_quality, scale=self._scale
+            image_bytes, _w, _h = encode_raw_image_to_compressed(
+                decoded,
+                image_format=self._image_format,
+                jpeg_quality=self._jpeg_quality,
+                scale=self._scale,
             )
         except VideoEncoderError:
             return None  # keep the raw frame rather than drop it
@@ -61,8 +71,8 @@ class JpegCompressProcessor(MessageTransformProcessor):
                 },
                 "frame_id": decoded.header.frame_id,
             },
-            "format": "jpeg",
-            "data": jpeg_bytes,
+            "format": self._image_format,
+            "data": image_bytes,
         }
         return [
             TransformOutput(

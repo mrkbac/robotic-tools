@@ -1,4 +1,4 @@
-"""Tests for ``roscompress --image-format jpeg``."""
+"""Tests for still-image ``roscompress --image-format`` modes."""
 
 from __future__ import annotations
 
@@ -43,6 +43,28 @@ def test_jpeg_mode_converts_raw_images(image_rgb_mcap: Path, tmp_path: Path) -> 
         assert bytes(msg.decoded_message.data).startswith(b"\xff\xd8")
 
 
+def test_png_mode_converts_raw_images(image_rgb_mcap: Path, tmp_path: Path) -> None:
+    output = tmp_path / "png.mcap"
+
+    rc = roscompress(
+        file=str(image_rgb_mcap),
+        output=output,
+        force=True,
+        image_format="png",
+        backend=EncoderMode.PYAV,
+        pointcloud=False,
+    )
+
+    assert rc == 0
+    messages = _decoded_messages(output)
+    assert messages
+    for msg in messages:
+        assert msg.schema is not None
+        assert msg.schema.name == "sensor_msgs/msg/CompressedImage"
+        assert msg.decoded_message.format == "png"
+        assert bytes(msg.decoded_message.data).startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def test_jpeg_mode_copies_compressed_images_unchanged(
     image_compressed_mcap: Path, tmp_path: Path
 ) -> None:
@@ -55,6 +77,28 @@ def test_jpeg_mode_copies_compressed_images_unchanged(
         output=output,
         force=True,
         image_format="jpeg",
+        backend=EncoderMode.PYAV,
+        pointcloud=False,
+    )
+
+    assert rc == 0
+    output_messages = _decoded_messages(output)
+    assert [bytes(msg.decoded_message.data) for msg in output_messages] == input_payloads
+    assert [msg.decoded_message.format for msg in output_messages] == ["jpeg"] * len(input_payloads)
+
+
+def test_png_mode_copies_compressed_images_unchanged(
+    image_compressed_mcap: Path, tmp_path: Path
+) -> None:
+    input_messages = _decoded_messages(image_compressed_mcap)
+    input_payloads = [bytes(msg.decoded_message.data) for msg in input_messages]
+    output = tmp_path / "png-copy.mcap"
+
+    rc = roscompress(
+        file=str(image_compressed_mcap),
+        output=output,
+        force=True,
+        image_format="png",
         backend=EncoderMode.PYAV,
         pointcloud=False,
     )

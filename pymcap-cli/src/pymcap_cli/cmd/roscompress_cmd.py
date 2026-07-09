@@ -1,11 +1,11 @@
 """Command to compress image and point cloud topics in MCAP files.
 
 Thin preset over the processing pipeline: builds the transcode processors
-(video / JPEG / point cloud) and runs them through ``run_processor``, so the
+(video / still-image / point cloud) and runs them through ``run_processor``, so the
 command shares the pipeline's machinery (fast-copy, chunk grouping, ordering)
 and composes with everything else. The heavy lifting lives in the processors
 (``core/processors/video_compress.py``, ``pointcloud_compress.py``,
-``jpeg_compress.py``).
+``image_compress.py``).
 """
 
 import logging
@@ -118,7 +118,7 @@ def roscompress(
         ),
     ] = None,
     image_format: Annotated[
-        Literal["video", "jpeg", "none"],
+        Literal["video", "jpeg", "png", "none"],
         Parameter(
             name=["--image-format"],
             group=ENCODING_GROUP,
@@ -199,6 +199,7 @@ def roscompress(
         How to encode image topics:
         ``video`` (default) — convert raw and compressed images to CompressedVideo
         (H.264/H.265). ``jpeg`` — encode raw Image topics as JPEG CompressedImage;
+        ``png`` — encode raw Image topics as PNG CompressedImage;
         already-compressed images are copied unchanged. ``none`` — copy all image
         topics unchanged.
     jpeg_quality
@@ -247,12 +248,18 @@ def roscompress(
                     backend=backend,
                 )
             )
-        elif image_format == "jpeg":
-            from pymcap_cli.core.processors.jpeg_compress import (  # noqa: PLC0415
-                JpegCompressProcessor,
+        elif image_format in {"jpeg", "png"}:
+            from pymcap_cli.core.processors.image_compress import (  # noqa: PLC0415
+                ImageCompressProcessor,
             )
 
-            extras.append(JpegCompressProcessor(jpeg_quality=jpeg_quality, scale=scale))
+            extras.append(
+                ImageCompressProcessor(
+                    image_format=image_format,
+                    jpeg_quality=jpeg_quality,
+                    scale=scale,
+                )
+            )
 
         if pointcloud:
             from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
@@ -297,6 +304,8 @@ def roscompress(
         logger.info(f"Quality (CRF): {quality}")
     elif image_format == "jpeg":
         logger.info(f"Image mode: jpeg (raw → CompressedImage, q={jpeg_quality})")
+    elif image_format == "png":
+        logger.info("Image mode: png (raw → CompressedImage)")
     else:
         logger.info("Image mode: none (copy unchanged)")
     if scale is not None and image_format != "none":

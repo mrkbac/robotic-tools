@@ -6,6 +6,7 @@ All ``ffmpeg`` / ``ffprobe`` subprocess usage is confined to this module.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shutil
@@ -407,14 +408,47 @@ def _ffprobe_image_dimensions(data: bytes) -> tuple[int, int]:
     ]
     try:
         result = subprocess.run(  # noqa: S603
-            cmd, input=data, capture_output=True, text=True, timeout=10, check=False
+            cmd, input=data, capture_output=True, timeout=10, check=False
         )
-        parts = result.stdout.strip().split(",")
+        parts = result.stdout.decode("utf-8", errors="replace").strip().split(",")
         if len(parts) == 2:
             return int(parts[0]), int(parts[1])
     except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
     raise VideoEncoderError("Cannot determine image dimensions")
+
+
+def probe_image_pipe_decode(data: bytes, timeout: float = 5.0) -> bool:
+    """Return whether ffmpeg can decode one image from ``image2pipe``."""
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return False
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "image2pipe",
+        "-i",
+        "pipe:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            input=data,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
 
 
 class FFmpegVideoEncoder:
@@ -569,7 +603,8 @@ class FFmpegVideoEncoder:
     def flush_packets(self) -> list[bytes]:
         """Close the encoder and return all remaining access units."""
         if self._process.stdin and not self._process.stdin.closed:
-            self._process.stdin.close()
+            with contextlib.suppress(BrokenPipeError):
+                self._process.stdin.close()
 
         self._stdout_thread.join(timeout=10)
         self._stderr_thread.join(timeout=5)
