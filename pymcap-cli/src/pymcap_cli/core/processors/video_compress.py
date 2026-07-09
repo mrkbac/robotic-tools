@@ -55,6 +55,7 @@ from pymcap_cli.core.processors.base import (
     InputProcessor,
     MessageContext,
     MessageScope,
+    MessageWithContext,
 )
 
 if TYPE_CHECKING:
@@ -91,6 +92,8 @@ class _FrameMeta:
     stamp_sec: int
     stamp_nanosec: int
     frame_id: str
+    stream_id: int
+    input_channel_id: int | None
 
 
 @dataclass(slots=True)
@@ -170,7 +173,9 @@ class VideoCompressProcessor(InputProcessor):
 
     # ------------------------------------------------------------- per-message
     @override
-    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
+    def on_message(
+        self, context: MessageContext, message: Message
+    ) -> Iterable[Message | MessageWithContext]:
         target = self._targets.get(message.channel_id)
         if target is None:
             yield message
@@ -195,6 +200,8 @@ class VideoCompressProcessor(InputProcessor):
                 stamp_sec=decoded.header.stamp.sec,
                 stamp_nanosec=decoded.header.stamp.nanosec,
                 frame_id=decoded.header.frame_id,
+                stream_id=context.input.stream_id,
+                input_channel_id=context.input_channel_id,
             )
         )
         # Two-stage pipeline: decode on the shared pool (parallel), encode on the
@@ -212,7 +219,7 @@ class VideoCompressProcessor(InputProcessor):
                 yield emitted
 
     @override
-    def finalize(self) -> Iterable[Message]:
+    def finalize(self) -> Iterable[MessageWithContext]:
         try:
             for topic, state in self._states.items():
                 yield from self._finalize_topic(topic, state)
@@ -222,7 +229,7 @@ class VideoCompressProcessor(InputProcessor):
                 state.pool.shutdown(wait=False)
             self._decode_pool.shutdown(wait=False)
 
-    def _finalize_topic(self, topic: str, state: _TopicState) -> Iterable[Message]:
+    def _finalize_topic(self, topic: str, state: _TopicState) -> Iterable[MessageWithContext]:
         # Drain everything still queued on the encoder thread.
         while state.futures:
             emitted = self._drain_one(state)
@@ -238,7 +245,12 @@ class VideoCompressProcessor(InputProcessor):
         for packet in packets:
             if not state.pending:
                 break
-            yield self._build_video_message(state, state.pending.popleft(), packet)
+            meta = state.pending.popleft()
+            yield MessageWithContext(
+                message=self._build_video_message(state, meta, packet),
+                stream_id=meta.stream_id,
+                input_channel_id=meta.input_channel_id,
+            )
 
     # ---------------------------------------------------------------- helpers
     def _decode(self, schema: Schema | None, channel: Channel, message: Message) -> Any:
@@ -326,7 +338,7 @@ class VideoCompressProcessor(InputProcessor):
         """
         return encoder.encode(decode_future.result())
 
-    def _drain_one(self, state: _TopicState) -> Message | None:
+    def _drain_one(self, state: _TopicState) -> MessageWithContext | None:
         """Resolve the oldest in-flight decode+encode; emit a packet if one came out.
 
         Any decode/encode failure falls back to the software encoder (see
@@ -347,7 +359,12 @@ class VideoCompressProcessor(InputProcessor):
                 return None
         if video_data is None:
             return None
-        return self._build_video_message(state, state.pending.popleft(), video_data)
+        meta = state.pending.popleft()
+        return MessageWithContext(
+            message=self._build_video_message(state, meta, video_data),
+            stream_id=meta.stream_id,
+            input_channel_id=meta.input_channel_id,
+        )
 
     def _fallback_encode(self, state: _TopicState, dm: DecodedMessage) -> bytes | None:
         """Encode one frame on the software encoder, swapping the topic to it once.

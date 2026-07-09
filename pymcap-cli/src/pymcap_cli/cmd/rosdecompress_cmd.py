@@ -18,6 +18,7 @@ from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processo
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
+from pymcap_cli.utils import output_overwrites_input
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -92,6 +93,10 @@ def rosdecompress(
     pointcloud
         Enable point cloud decompression. Default: True.
     """
+    if output_overwrites_input(file, output):
+        logger.error("Output path is the same file as the input; choose a different output file.")
+        return 1
+
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
     assert overwrite_policy is not None
 

@@ -43,6 +43,7 @@ from pymcap_cli.core.processors.base import (
     InputProcessor,
     MessageContext,
     MessageScope,
+    MessageWithContext,
 )
 
 if TYPE_CHECKING:
@@ -153,6 +154,8 @@ class _PendingVideo:
     stamp_sec: int
     stamp_nanosec: int
     frame_id: str
+    stream_id: int
+    input_channel_id: int | None
 
 
 @dataclass(slots=True)
@@ -204,7 +207,9 @@ class VideoDecompressProcessor(InputProcessor, _OutputChannelMixin):
         return MessageScope.channels(set(self._targets))
 
     @override
-    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
+    def on_message(
+        self, context: MessageContext, message: Message
+    ) -> Iterable[Message | MessageWithContext]:
         target = self._targets.get(message.channel_id)
         if target is None:
             yield message
@@ -235,6 +240,8 @@ class VideoDecompressProcessor(InputProcessor, _OutputChannelMixin):
                 stamp_sec=decoded.timestamp.sec,
                 stamp_nanosec=decoded.timestamp.nanosec,
                 frame_id=decoded.frame_id,
+                stream_id=context.input.stream_id,
+                input_channel_id=context.input_channel_id,
             )
         )
         frame = state.decompressor.decompress(bytes(decoded.data), decoded.format)
@@ -242,15 +249,16 @@ class VideoDecompressProcessor(InputProcessor, _OutputChannelMixin):
             yield self._emit(state, state.pending.popleft(), frame)
 
     @override
-    def finalize(self) -> Iterable[Message]:
+    def finalize(self) -> Iterable[MessageWithContext]:
         for state in self._states.values():
             for frame in state.decompressor.flush():
                 if not state.pending:
                     break
                 yield self._emit(state, state.pending.popleft(), frame)
 
-    def _emit(self, state: _VideoChannelState, meta: _PendingVideo, frame: Any) -> Message:
-
+    def _emit(
+        self, state: _VideoChannelState, meta: _PendingVideo, frame: Any
+    ) -> MessageWithContext:
         header = {
             "stamp": {"sec": meta.stamp_sec, "nanosec": meta.stamp_nanosec},
             "frame_id": meta.frame_id,
@@ -267,10 +275,14 @@ class VideoDecompressProcessor(InputProcessor, _OutputChannelMixin):
                 "step": frame.width * 3,
                 "data": frame.data,
             }
-        return Message(
-            channel_id=state.out_channel_id,
-            sequence=0,
-            log_time=meta.log_time,
-            publish_time=meta.publish_time,
-            data=self._encode(payload),
+        return MessageWithContext(
+            message=Message(
+                channel_id=state.out_channel_id,
+                sequence=0,
+                log_time=meta.log_time,
+                publish_time=meta.publish_time,
+                data=self._encode(payload),
+            ),
+            stream_id=meta.stream_id,
+            input_channel_id=meta.input_channel_id,
         )

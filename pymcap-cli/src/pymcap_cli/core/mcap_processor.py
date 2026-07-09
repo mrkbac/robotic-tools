@@ -59,6 +59,7 @@ from pymcap_cli.core.processors.base import (
     InputProcessor,
     MessageContext,
     MessageScopeKind,
+    MessageWithContext,
     OutputKey,
     OutputProcessor,
     OutputRouter,
@@ -1019,29 +1020,30 @@ class McapProcessor:
             self._write_survivor(message, stream_id, input_channel_id)
             return
 
-        context = self._message_context(stream_id, input_channel_id)
-        pending: deque[tuple[Message, int]] = deque()
-        pending.append((message, 0))
-        survivors: list[Message] = []
+        pending: deque[tuple[Message, int, int, int | None]] = deque()
+        pending.append((message, 0, stream_id, input_channel_id))
+        survivors: list[tuple[Message, int, int | None]] = []
         dropped = False
 
         while pending:
-            current, start_idx = pending.popleft()
+            current, start_idx, current_stream_id, current_input_channel_id = pending.popleft()
             if start_idx >= len(processors):
-                survivors.append(current)
+                survivors.append((current, current_stream_id, current_input_channel_id))
                 continue
 
             proc = processors[start_idx]
+            context = self._message_context(current_stream_id, current_input_channel_id)
             produced = False
             for out in proc.on_message(context, current):
-                if not isinstance(out, Message):
-                    msg = (
-                        f"{type(proc).__name__}.on_message yielded "
-                        f"{type(out).__name__}, expected Message"
-                    )
-                    raise TypeError(msg)
+                out_message, out_stream_id, out_input_channel_id = self._processor_output_context(
+                    proc,
+                    out,
+                    default_stream_id=current_stream_id,
+                    default_input_channel_id=current_input_channel_id,
+                    method="on_message",
+                )
                 produced = True
-                pending.append((out, start_idx + 1))
+                pending.append((out_message, start_idx + 1, out_stream_id, out_input_channel_id))
             if not produced:
                 dropped = True
 
@@ -1053,8 +1055,33 @@ class McapProcessor:
         # Each survivor gets its own routing decision and writes — fan-out
         # messages may land in different segments and chunk grouping applies
         # per survivor.
-        for survivor_msg in survivors:
-            self._write_survivor(survivor_msg, stream_id, input_channel_id)
+        for survivor_msg, survivor_stream_id, survivor_input_channel_id in survivors:
+            self._write_survivor(survivor_msg, survivor_stream_id, survivor_input_channel_id)
+
+    def _processor_output_context(
+        self,
+        proc: InputProcessor,
+        out: Message | MessageWithContext,
+        *,
+        default_stream_id: int,
+        default_input_channel_id: int | None,
+        method: str,
+    ) -> tuple[Message, int, int | None]:
+        if isinstance(out, MessageWithContext):
+            if not isinstance(out.message, Message):
+                msg = (
+                    f"{type(proc).__name__}.{method} yielded MessageWithContext "
+                    f"with {type(out.message).__name__}, expected Message"
+                )
+                raise TypeError(msg)
+            return out.message, out.stream_id, out.input_channel_id
+        if not isinstance(out, Message):
+            msg = (
+                f"{type(proc).__name__}.{method} yielded {type(out).__name__}, "
+                "expected Message or MessageWithContext"
+            )
+            raise TypeError(msg)
+        return out, default_stream_id, default_input_channel_id
 
     def _finalize_input_processors(self) -> None:
         """Flush end-of-stream output buffered by input processors.
@@ -1063,19 +1090,27 @@ class McapProcessor:
         ``finalize()`` output is a fully-formed output record — routed and
         written directly, not re-fed through the chain (see the ``finalize``
         contract in ``processors/base.py``). Output channels registered via
-        ``register_channel`` are marked included for every stream, so routing
-        under stream 0 is valid regardless of which input produced them.
+        ``register_channel`` are marked included for every stream, but routers
+        and segment-open replay may still depend on the producing input context.
+        Buffered processors should yield ``MessageWithContext`` so the original
+        stream/channel is preserved; plain ``Message`` yields retain the historic
+        stream-0 fallback for compatibility.
         """
         assert self.output_manager is not None
         for proc in self._iter_unique_input_processors():
-            for message in proc.finalize():
-                if not isinstance(message, Message):
-                    msg = (
-                        f"{type(proc).__name__}.finalize yielded "
-                        f"{type(message).__name__}, expected Message"
-                    )
-                    raise TypeError(msg)
-                self._write_survivor(message, stream_id=0, input_channel_id=message.channel_id)
+            for out in proc.finalize():
+                message, stream_id, input_channel_id = self._processor_output_context(
+                    proc,
+                    out,
+                    default_stream_id=0,
+                    default_input_channel_id=None,
+                    method="finalize",
+                )
+                if input_channel_id is None:
+                    input_channel_id = message.channel_id
+                self._write_survivor(
+                    message, stream_id=stream_id, input_channel_id=input_channel_id
+                )
 
     def _write_survivor(
         self,

@@ -15,10 +15,17 @@ from typing import TYPE_CHECKING, Any
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd._run_processor import run_processor
+from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
     OverwriteCollisionPolicy,
+)
+from pymcap_cli.core.processors.base import (
+    InputProcessor,
+    MessageContext,
+    MessageWithContext,
+    OutputRouter,
 )
 from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,
@@ -27,9 +34,10 @@ from pymcap_cli.core.processors.message_transform import (
 from small_mcap import McapWriter, read_message_decoded
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
-    from small_mcap import Channel, Schema
+    from small_mcap import Channel, Message, Schema
 
 _STRING_SCHEMA = b"string data"
 # A distinct output schema for the transcode shape: single string field.
@@ -144,6 +152,33 @@ class _StringToShout(MessageTransformProcessor):
         ]
 
 
+class _BufferUntilFinalize(InputProcessor):
+    """Hold messages until finalize, preserving their original routing context."""
+
+    def __init__(self) -> None:
+        self._pending: list[MessageWithContext] = []
+
+    def on_message(
+        self, context: MessageContext, message: Message
+    ) -> Iterable[Message | MessageWithContext]:
+        self._pending.append(
+            MessageWithContext(
+                message=message,
+                stream_id=context.input.stream_id,
+                input_channel_id=context.input_channel_id,
+            )
+        )
+        return ()
+
+    def finalize(self) -> Iterable[MessageWithContext]:
+        return tuple(self._pending)
+
+
+class _RouteByInputStream(OutputRouter):
+    def route_message(self, context: MessageContext, message: Message) -> tuple[int]:
+        return (context.input.stream_id,)
+
+
 # --------------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------------
@@ -230,3 +265,27 @@ def test_timestamps_preserved(tmp_path: Path):
         msgs = read_message_decoded(f, decoder_factories=[DecoderFactory()])
         times = [m.message.log_time for m in msgs]
     assert times == [1, 2, 3]
+
+
+def test_finalize_output_preserves_input_stream_context_for_routing(tmp_path: Path):
+    """Buffered tail messages must route using the stream that produced them."""
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    _write_strings(first, [("/chat", "from first")])
+    _write_strings(second, [("/chat", "from second")])
+
+    processor = _BufferUntilFinalize()
+    run_processor_multi(
+        files=[str(first), str(second)],
+        input_options=InputOptions.from_args(extra_processors=[processor]),
+        output_options=OutputOptions(
+            routers=[_RouteByInputStream()],
+            output_template=str(tmp_path / "stream_{key}.mcap"),
+            overwrite_policy=OverwriteCollisionPolicy.OVERWRITE,
+        ),
+    )
+
+    assert [value for _topic, _schema, value in _read(tmp_path / "stream_0.mcap")] == ["from first"]
+    assert [value for _topic, _schema, value in _read(tmp_path / "stream_1.mcap")] == [
+        "from second"
+    ]

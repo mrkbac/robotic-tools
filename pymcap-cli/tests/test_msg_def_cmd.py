@@ -56,6 +56,8 @@ def test_msg_def_uses_colored_rendering_for_tty(
 
     monkeypatch.setattr(msg_def_cmd, "get_message_definition", fake_get_message_definition)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
 
     rc = msg_def_cmd.msg_def("sensor_msgs/msg/Image")
 

@@ -89,6 +89,12 @@ chain. Preserve each message's original `log_time`; reads are time-ordered
 (`read_message` heap-merges chunks by `log_time`), so late emission is fine as
 long as per-channel order and timestamps are intact. Default: emit nothing.
 
+Plain `Message` yields inherit the current input stream/channel context. If a
+processor emits a message later than the callback that accepted the source
+message, yield `MessageWithContext(message, stream_id, input_channel_id)` so
+routers and segment-open replay see the original input context. This applies to
+delayed drains from `on_message` as well as tail output from `finalize()`.
+
 ## Registering output-only schemas / channels
 
 `InputContext.register_channel(channel)` adds an output-only channel (returns

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from pymcap_cli.cmd import roscompress_cmd
 from pymcap_cli.cmd.roscompress_cmd import roscompress
+from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,6 +27,22 @@ def test_roscompress_rejects_output_equal_to_input(
     monkeypatch.chdir(tmp_path)
 
     rc = roscompress(src.name, src.resolve(), force=True, image_format="none", pointcloud=False)
+
+    assert rc == 1
+    assert src.exists()
+    assert src.read_bytes() == orig
+
+
+def test_rosdecompress_rejects_output_equal_to_input(
+    simple_mcap: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """`rosdecompress in.mcap -o /abs/in.mcap` must not truncate the source."""
+    src = tmp_path / "data.mcap"
+    src.write_bytes(simple_mcap.read_bytes())
+    orig = src.read_bytes()
+    monkeypatch.chdir(tmp_path)
+
+    rc = rosdecompress(src.name, src.resolve(), force=True, video=False, pointcloud=False)
 
     assert rc == 1
     assert src.exists()

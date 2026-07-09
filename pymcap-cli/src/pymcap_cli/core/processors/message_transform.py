@@ -48,6 +48,7 @@ from pymcap_cli.core.processors.base import (
     InputProcessor,
     MessageContext,
     MessageScope,
+    MessageWithContext,
 )
 
 if TYPE_CHECKING:
@@ -167,7 +168,9 @@ class MessageTransformProcessor(InputProcessor):
         return MessageScope.channels(set(self._targets))
 
     @override
-    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
+    def on_message(
+        self, context: MessageContext, message: Message
+    ) -> Iterable[Message | MessageWithContext]:
         target = self._targets.get(message.channel_id)
         if target is None:
             yield message
@@ -191,7 +194,7 @@ class MessageTransformProcessor(InputProcessor):
             yield from self._drain_one()
 
     @override
-    def finalize(self) -> Iterable[Message]:
+    def finalize(self) -> Iterable[MessageWithContext]:
         while self._pending:
             yield from self._drain_one()
         if self._pool is not None:
@@ -204,9 +207,14 @@ class MessageTransformProcessor(InputProcessor):
         """Decode + transform one message. Runs on a worker thread when pooled."""
         return self.transform(channel, schema, decoder(message.data))
 
-    def _drain_one(self) -> Iterable[Message]:
+    def _drain_one(self) -> Iterable[MessageWithContext]:
         future, context, message, channel, schema = self._pending.popleft()
-        yield from self._emit(context, message, channel, schema, future.result())
+        for out in self._emit(context, message, channel, schema, future.result()):
+            yield MessageWithContext(
+                message=out,
+                stream_id=context.input.stream_id,
+                input_channel_id=context.input_channel_id,
+            )
 
     def _emit(
         self,

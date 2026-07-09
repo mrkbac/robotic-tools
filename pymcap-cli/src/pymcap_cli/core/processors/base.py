@@ -79,6 +79,21 @@ class MessageContext:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageWithContext:
+    """A processor-emitted message with its original routing context.
+
+    Plain ``Message`` yields inherit the current message's context. Buffered
+    processors should yield ``MessageWithContext`` when the emitted message may
+    belong to an earlier input stream/channel than the message currently being
+    processed, or when it is emitted from ``finalize()``.
+    """
+
+    message: Message
+    stream_id: int
+    input_channel_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkContext:
     input: InputContext
     message_indexes: tuple[MessageIndex, ...] | None
@@ -212,7 +227,9 @@ class InputProcessor:
     ) -> Action:
         return Action.CONTINUE
 
-    def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:
+    def on_message(
+        self, context: MessageContext, message: Message
+    ) -> Iterable[Message | MessageWithContext]:
         """Yield 0+ messages to forward downstream.
 
         - Yield nothing → drop the message.
@@ -232,7 +249,7 @@ class InputProcessor:
     def on_segment_open(self, context: SegmentContext) -> Iterable[tuple[int, Message]]:
         return ()
 
-    def finalize(self) -> Iterable[Message]:
+    def finalize(self) -> Iterable[Message | MessageWithContext]:
         """Flush any output buffered past the end of the input stream.
 
         Called once, after every input record has been consumed, for each
@@ -241,7 +258,9 @@ class InputProcessor:
         from a background thread, or one that buffers to reorder — emits the
         remainder here. Yielded messages are treated as fully-formed output
         records: they are routed and written directly, not fed back through
-        the processor chain. Default: emit nothing.
+        the processor chain. Yield ``MessageWithContext`` when the stream
+        context matters for routers or segment-open replay. Default: emit
+        nothing.
         """
         return ()
 
