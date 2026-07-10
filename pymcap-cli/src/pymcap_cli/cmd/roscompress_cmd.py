@@ -56,7 +56,7 @@ def roscompress(
         ),
     ] = 28,
     codec: Annotated[
-        Literal["h264", "h265"],
+        Literal["h264", "h265", "vp9", "av1"],
         Parameter(
             name=["--codec"],
             group=ENCODING_GROUP,
@@ -185,7 +185,7 @@ def roscompress(
     quality
         Video quality (CRF: lower = better, 0-51). Default: 28.
     codec
-        Video codec (h264, h265). Default: h264.
+        Video codec (h264, h265, vp9, av1). Default: h264.
     encoder
         Force specific encoder (libx264, h264_videotoolbox, etc.). If None, auto-detect.
     scale

@@ -1,6 +1,7 @@
 """`pymcap-cli bridge proxy` — low-latency live Foxglove bridge proxy."""
 
 import asyncio
+import contextlib
 import logging
 import socket
 from dataclasses import dataclass
@@ -69,6 +70,16 @@ class _ChannelState:
     worker: TransformWorker | None
     throttle_hz: float
     last_sent_time: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProxySnapshot:
+    """Point-in-time proxy state for the live dashboard."""
+
+    upstream_connected: bool
+    upstream_channels: int
+    transformed_channels: int
+    client_count: int
 
 
 class BridgeProxy:
@@ -383,6 +394,14 @@ class BridgeProxy:
             1 for item in self._channels.values() if item.worker is not None
         )
 
+    def snapshot(self) -> ProxySnapshot:
+        return ProxySnapshot(
+            upstream_connected=self.upstream_client.is_connected,
+            upstream_channels=len(self._channels),
+            transformed_channels=self.metrics.transformed_channel_count,
+            client_count=len(self._client_subscriptions),
+        )
+
     def _create_transformer(self, channel: ChannelInfo) -> "LiveTransformer | None":
         return create_transformer(self._transform_rules, channel)
 
@@ -397,7 +416,7 @@ def proxy(
         Parameter(name=["--image-format"], group=IMAGE_GROUP),
     ] = "video",
     image_codec: Annotated[
-        Literal["h264", "h265"],
+        Literal["h264", "h265", "vp9", "av1"],
         Parameter(name=["--image-codec"], group=IMAGE_GROUP),
     ] = "h264",
     image_quality: Annotated[
@@ -464,6 +483,10 @@ def proxy(
         int,
         Parameter(name=["--max-message-size"], group=CONNECTION_GROUP),
     ] = 0,
+    dashboard: Annotated[
+        bool,
+        Parameter(name=["--dashboard"], negative="--no-dashboard", group=CONNECTION_GROUP),
+    ] = True,
 ) -> int:
     """Run a low-latency transforming proxy for a live Foxglove WebSocket bridge."""
     if port <= 0:
@@ -517,22 +540,36 @@ def proxy(
 
     url = to_ws_url(target)
     try:
-        return asyncio.run(_proxy_async(url=url, host=host, port=port, config=config))
+        return asyncio.run(
+            _proxy_async(url=url, host=host, port=port, config=config, show_dashboard=dashboard)
+        )
     except KeyboardInterrupt:
         console.print("[dim]Interrupted.[/]")
         return 0
 
 
-async def _proxy_async(*, url: str, host: str, port: int, config: ProxyConfig) -> int:
+async def _proxy_async(
+    *, url: str, host: str, port: int, config: ProxyConfig, show_dashboard: bool
+) -> int:
     bridge = BridgeProxy(
         upstream_url=url,
         listen_host=host,
         listen_port=port,
         config=config,
     )
+    dashboard_task: asyncio.Task[None] | None = None
     try:
-        await bridge.start()
+        serve = asyncio.ensure_future(bridge.start())
+        if show_dashboard and console.is_terminal:
+            from pymcap_cli.cmd.bridge._proxy_dashboard import ProxyDashboard  # noqa: PLC0415
+
+            dashboard_task = asyncio.ensure_future(ProxyDashboard(bridge, console).run())
+        await serve
     finally:
+        if dashboard_task is not None:
+            dashboard_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await dashboard_task
         await bridge.stop()
     return 0
 

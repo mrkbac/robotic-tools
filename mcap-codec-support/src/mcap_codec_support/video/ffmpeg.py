@@ -282,6 +282,50 @@ class AnnexBParser:
         return result
 
 
+# IVF file header: 'DKIF', then version/header-length/fourcc/dimensions/etc.
+_IVF_FILE_HEADER_LEN = 32
+# Per-frame header: 4-byte little-endian frame size, then an 8-byte timestamp.
+_IVF_FRAME_HEADER_LEN = 12
+
+
+class IVFParser:
+    """Split an IVF byte stream (``ffmpeg -f ivf``) into per-frame packets.
+
+    VP9 and AV1 are emitted by ffmpeg in the IVF container rather than a raw
+    Annex-B elementary stream, so their frame boundaries come from the 12-byte
+    IVF frame headers (a 4-byte little-endian size prefix) instead of NAL start
+    codes. Mirrors :class:`AnnexBParser`'s ``feed`` / ``flush_list`` interface so
+    :class:`FFmpegVideoEncoder` can swap parsers by codec family.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._file_header_seen = False
+
+    def feed(self, data: bytes) -> list[bytes]:
+        self._buf.extend(data)
+        return self._drain()
+
+    def flush_list(self) -> list[bytes]:
+        return self._drain()
+
+    def _drain(self) -> list[bytes]:
+        if not self._file_header_seen:
+            if len(self._buf) < _IVF_FILE_HEADER_LEN:
+                return []
+            del self._buf[:_IVF_FILE_HEADER_LEN]
+            self._file_header_seen = True
+        frames: list[bytes] = []
+        while len(self._buf) >= _IVF_FRAME_HEADER_LEN:
+            frame_size = int.from_bytes(self._buf[0:4], "little")
+            end = _IVF_FRAME_HEADER_LEN + frame_size
+            if len(self._buf) < end:
+                break
+            frames.append(bytes(self._buf[_IVF_FRAME_HEADER_LEN:end]))
+            del self._buf[:end]
+        return frames
+
+
 # ---------------------------------------------------------------------------
 # Codec helpers
 # ---------------------------------------------------------------------------
@@ -290,7 +334,13 @@ _CODEC_TO_FORMAT: dict[str, str] = {
     "h264": "h264",
     "h265": "hevc",
     "hevc": "hevc",
+    "vp9": "ivf",
+    "av1": "ivf",
 }
+
+# Codec families that ffmpeg muxes into IVF (and that IVFParser splits) rather
+# than a raw Annex-B elementary stream.
+_IVF_FAMILIES = frozenset({"vp9", "av1"})
 
 
 def _codec_family(codec_name: str) -> str:
@@ -299,6 +349,10 @@ def _codec_family(codec_name: str) -> str:
         return "h264"
     if "265" in lower or "hevc" in lower:
         return "h265"
+    if "vp9" in lower:
+        return "vp9"
+    if "av1" in lower:
+        return "av1"
     return "h264"
 
 
@@ -533,7 +587,9 @@ class FFmpegVideoEncoder:
         except OSError as exc:
             raise VideoEncoderError(f"Failed to start ffmpeg: {exc}") from exc
 
-        self._parser = AnnexBParser(codec_fam)
+        self._parser: AnnexBParser | IVFParser = (
+            IVFParser() if codec_fam in _IVF_FAMILIES else AnnexBParser(codec_fam)
+        )
         self._output_queue: Queue[bytes | None] = Queue()
         self._stderr_lines: list[str] = []
 

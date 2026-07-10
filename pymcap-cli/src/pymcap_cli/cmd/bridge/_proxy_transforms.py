@@ -320,6 +320,10 @@ def is_video_keyframe(data: bytes, video_format: str) -> bool:
         return _has_h265_keyframe(data)
     if "264" in fmt or "avc" in fmt:
         return _has_h264_keyframe(data)
+    if "vp9" in fmt:
+        return _is_vp9_keyframe(data)
+    if "av1" in fmt:
+        return _is_av1_keyframe(data)
     return True
 
 
@@ -407,3 +411,66 @@ def _has_h265_keyframe(data: bytes) -> bool:
         if 16 <= nal_type <= 21:
             return True
     return False
+
+
+def _is_vp9_keyframe(data: bytes) -> bool:
+    """Read the VP9 uncompressed header: frame_type == 0 (KEY_FRAME).
+
+    Bits are read MSB-first from the first byte: a 2-bit frame_marker (0b10),
+    profile_low/high bits, an optional reserved bit for profile 3, then
+    show_existing_frame and — when that is 0 — the frame_type bit.
+    """
+    if not data:
+        return False
+    byte = data[0]
+
+    def bit(index: int) -> int:
+        return (byte >> (7 - index)) & 1
+
+    if (bit(0) << 1 | bit(1)) != 0b10:  # frame_marker
+        return False
+    profile = (bit(3) << 1) | bit(2)
+    pos = 4 + (1 if profile == 3 else 0)  # skip the profile-3 reserved bit
+    if bit(pos) == 1:  # show_existing_frame → not a new coded frame
+        return False
+    return bit(pos + 1) == 0  # frame_type: 0 = KEY_FRAME
+
+
+def _is_av1_keyframe(data: bytes) -> bool:
+    """Detect an AV1 key frame by the presence of a sequence-header OBU.
+
+    libaom/ffmpeg emit an ``OBU_SEQUENCE_HEADER`` (type 1) ahead of every key
+    frame and not before inter frames, so scanning the temporal unit's OBU
+    headers for one is a robust keyframe signal without decoding the frame.
+    """
+    idx = 0
+    length = len(data)
+    while idx < length:
+        header = data[idx]
+        obu_type = (header >> 3) & 0xF
+        has_extension = (header >> 2) & 1
+        has_size_field = (header >> 1) & 1
+        idx += 1 + has_extension
+        if obu_type == 1:  # OBU_SEQUENCE_HEADER
+            return True
+        if not has_size_field:
+            return False  # size-less OBU: cannot skip to the next one
+        size, idx = _read_leb128(data, idx)
+        if size < 0:
+            return False
+        idx += size
+    return False
+
+
+def _read_leb128(data: bytes, idx: int) -> tuple[int, int]:
+    """Read an unsigned LEB128 value; return ``(value, next_index)`` or ``(-1, idx)``."""
+    value = 0
+    for shift in range(0, 56, 7):
+        if idx >= len(data):
+            return -1, idx
+        byte = data[idx]
+        idx += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, idx
+    return -1, idx

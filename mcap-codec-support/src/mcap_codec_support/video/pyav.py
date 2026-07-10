@@ -297,8 +297,11 @@ class JpegEncoder:
 
 
 # ---------------------------------------------------------------------------
-# PyAVVideoDecompressor (H.264/H.265 → Image)
+# PyAVVideoDecompressor (H.264/H.265/VP9/AV1 → Image)
 # ---------------------------------------------------------------------------
+
+# CompressedVideo ``format`` string -> PyAV decoder codec name.
+_DECOMPRESS_CODECS = {"h264": "h264", "h265": "hevc", "hevc": "hevc", "vp9": "vp9", "av1": "av1"}
 
 
 class PyAVVideoDecompressor:
@@ -320,8 +323,8 @@ class PyAVVideoDecompressor:
     def _ensure_decoder(self, codec: str) -> VideoCodecContext:
         if self._decoder is not None:
             return self._decoder
-        codec_name = "h264" if codec == "h264" else "hevc"
-        self._decoder = av.CodecContext.create(codec_name, "r")
+        codec_name = _DECOMPRESS_CODECS.get(codec.lower(), "hevc")
+        self._decoder = cast("VideoCodecContext", av.CodecContext.create(codec_name, "r"))
         self._decoder.open()
         return self._decoder
 

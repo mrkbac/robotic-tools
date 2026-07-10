@@ -284,7 +284,7 @@ def process(
     ] = False,
     video_codec: Annotated[
         str,
-        Parameter(name=["--video-codec"], group=COMPRESS_GROUP, help="h264 or h265."),
+        Parameter(name=["--video-codec"], group=COMPRESS_GROUP, help="h264, h265, vp9, or av1."),
     ] = "h264",
     video_quality: Annotated[
         int,
