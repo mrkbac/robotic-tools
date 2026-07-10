@@ -4,6 +4,93 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.19.0, mcap-codec-support 0.9.0
+
+Headline: media compression becomes a first-class part of the processing
+pipeline. `roscompress` / `rosdecompress` are rebuilt on the processor chain
+(so they compose with topic filtering, splitting, and rechunking), `process`
+gains one-stop `--compress-video` / `--compress-pointcloud`, and a new
+`bridge proxy` brings the same transcoding live in front of a Foxglove bridge.
+Video encoding grows hardware backends (NVENC, Jetson GStreamer, hardware JPEG
+decode) and two new codecs (VP9, AV1).
+
+### pymcap-cli 0.19.0
+
+- `bridge proxy` (new) — a low-latency transforming proxy in front of a live
+  Foxglove WebSocket bridge. Converts `sensor_msgs/Image` /
+  `sensor_msgs/CompressedImage` to `foxglove_msgs/CompressedVideo` and
+  `PointCloud2` to compressed point clouds just-in-time, with per-topic
+  throttling, latest-only forwarding, and keyframe-aware dropping so a dropped
+  video packet never leaves the client stuck on a corrupt frame. Optional live
+  terminal dashboard (`--dashboard`, default on). Reuses the same processor
+  transcoders as the offline commands, superseding the standalone
+  `websocket-proxy`.
+- `bridge delay` (new) — measure a live bridge's clock offset and report each
+  topic's ROS header age, to spot lagging or stale publishers.
+- `process` gains `--compress-video` and `--compress-pointcloud` — run the image
+  and point-cloud transcodes inline in the general one-stop command, composed
+  with topic drop, time filter, split, and rechunking.
+- `roscompress` / `rosdecompress` are reimplemented on the processing pipeline,
+  so compression now composes with topic filtering, splitting, and rechunking in
+  a single pass instead of a standalone step.
+- Video compression adds the **VP9** and **AV1** codecs (`--codec vp9|av1` on
+  `roscompress`, `--video-codec` on `process`, `--image-codec` on
+  `bridge proxy`) alongside H.264/H.265.
+- `roscompress` can emit **PNG** `CompressedImage` (`--image-format png`) in
+  addition to JPEG and video.
+- Video transcoding runs a two-stage decode/encode pipeline — a shared decode
+  pool feeds one encoder thread per camera topic — so independent cameras encode
+  concurrently and decode overlaps encode, beating the standalone converter.
+
+### mcap-codec-support 0.9.0
+
+- Video compression backends for image→`CompressedVideo` transcoding: in-process
+  PyAV, an ffmpeg-CLI subprocess backend with portable NVENC selection, and an
+  opt-in Jetson (L4T `nv*`) GStreamer backend with hardware JPEG decode offload.
+  `auto` prefers the fastest working backend.
+- New codecs: **VP9** and **AV1** end-to-end — encode (ffmpeg muxes them into
+  IVF, split back into per-frame packets) and decode.
+- PNG image compression alongside JPEG.
+- Hardware JPEG-decode offload where available, so camera transcodes don't
+  bottleneck on CPU JPEG decoding.
+- One shared `VideoEncoderSession` (adaptive geometry + hardware→software
+  fallback) drives both the batch pipeline and the live `bridge proxy`, and the
+  video backends accept any structural image message (`DecodableImageMessage`),
+  not just `small_mcap`'s `DecodedMessage`.
+
+---
+
+## pymcap-cli 0.18.0, mcap-codec-support 0.8.0, pureini 0.6.0
+
+Headline: `roscompress` reaches ~parity with a plain `compress` — point clouds
+now encode in true parallel (the JIT codec releases the GIL) and the ffmpeg
+video path no longer serializes feeding against the encoder.
+
+### pymcap-cli 0.18.0
+
+- `roscompress` point-cloud encoding scales across cores instead of plateauing
+  at ~2-3x: with the codec releasing the GIL, the worker pool (capped at 4, the
+  measured knee) encodes clouds genuinely in parallel, bringing `roscompress` to
+  roughly the speed of a plain `compress`.
+- `roscompress` video is ~1.75x faster on a multi-camera file — feeding frames
+  to ffmpeg no longer blocks on the encoder's output.
+
+### mcap-codec-support 0.8.0
+
+- ffmpeg-CLI video encoder: feeding a frame no longer blocks up to 0.2s on the
+  encoder's output, and the reader thread blocks on `os.read` instead of
+  spinning.
+- Fix: the Annex-B splitter now recognizes both 3- and 4-byte start codes and
+  access-unit-opening NAL rules, so an SPS-led IDR frame is no longer merged into
+  the previous frame — previously one frame per GOP was lost.
+
+### pureini 0.6.0
+
+- `encode_chunk_jit` releases the GIL, so point-cloud compression parallelizes
+  across threads instead of serializing.
+
+---
+
 ## pymcap-cli 0.17.0, mcap-codec-support 0.7.0, robo-ws-bridge 0.5.0
 
 Headline: the `bridge` command grows from record/cat into a full live-bridge
