@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from mcap_codec_support._protocols import (
         AnyVideoBackend,
+        DecodableImageMessage,
         RawImageMessage,
         VideoDecompressorProtocol,
     )
@@ -65,7 +66,9 @@ class _PyAVCompressionBackend:
         frame = decode_compressed_frame(data)
         return frame, frame.width, frame.height
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[VideoFrame, int, int]:
+    def decode_image(
+        self, msg: DecodableImageMessage, schema_name: str
+    ) -> tuple[VideoFrame, int, int]:
         if schema_name in COMPRESSED_SCHEMAS:
             return self.decode_compressed(bytes(msg.decoded_message.data))
 
@@ -131,7 +134,7 @@ class _FfmpegCliCompressionBackend:
         width, height = probe_image_dimensions(data)
         return data, width, height
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[bytes, int, int]:
+    def decode_image(self, msg: DecodableImageMessage, schema_name: str) -> tuple[bytes, int, int]:
         data = bytes(msg.decoded_message.data)
         topic = msg.channel.topic
 

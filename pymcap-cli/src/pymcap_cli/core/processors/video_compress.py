@@ -29,7 +29,7 @@ import os
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.video import (
@@ -61,7 +61,11 @@ from pymcap_cli.core.processors.base import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from mcap_codec_support._protocols import AnyVideoBackend, VideoEncoderProtocol
+    from mcap_codec_support._protocols import (
+        AnyVideoBackend,
+        DecodableImageMessage,
+        VideoEncoderProtocol,
+    )
     from small_mcap import Channel
 
 logger = logging.getLogger(__name__)
@@ -98,17 +102,11 @@ class _FrameMeta:
 
 @dataclass(slots=True)
 class _TopicState:
-    encoder: VideoEncoderProtocol[Any]
+    session: VideoEncoderSession
     pool: ThreadPoolExecutor
     out_channel_id: int
     schema_name: str
-    width: int
-    height: int
-    pix_fmt: str | None
-    scale_dims: tuple[int, int] | None
-    # (decode+encode future, the DecodedMessage) — the message is kept so a
-    # hardware encoder that dies mid-stream can re-decode and retry on software.
-    futures: deque[tuple[Future[bytes | None], DecodedMessage]]
+    futures: deque[Future[EncodeOutcome]]
     pending: deque[_FrameMeta]
 
 
@@ -118,6 +116,20 @@ class ResolvedVideoCompressionBackend:
 
     backend: AnyVideoBackend
     encoder_name: str
+
+
+class VideoGeometryBackend(Protocol):
+    def get_pix_fmt(self, topic: str) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class VideoEncoderSettings:
+    """Resolved output geometry and pixel format for video compression."""
+
+    width: int
+    height: int
+    pix_fmt: str | None
+    scale_dims: tuple[int, int] | None
 
 
 def resolve_video_compression_backend(
@@ -135,6 +147,205 @@ def resolve_video_compression_backend(
     return ResolvedVideoCompressionBackend(
         resolved_backend, resolved_backend.resolve_encoder(codec)
     )
+
+
+def resolve_video_encoder_settings(
+    *,
+    backend: VideoGeometryBackend,
+    topic: str,
+    width: int,
+    height: int,
+    scale: int | None,
+) -> VideoEncoderSettings:
+    """Resolve scaled video dimensions exactly like roscompress."""
+    pix_fmt = backend.get_pix_fmt(topic)
+    scale_dims: tuple[int, int] | None = None
+    if scale is not None:
+        width, height = calculate_downscale_dimensions(width, height, scale)
+        if pix_fmt is None:
+            scale_dims = (width, height)
+    width -= width % 2
+    height -= height % 2
+    return VideoEncoderSettings(
+        width=width,
+        height=height,
+        pix_fmt=pix_fmt,
+        scale_dims=scale_dims,
+    )
+
+
+def build_compressed_video_payload(
+    *,
+    codec: str,
+    stamp_sec: int,
+    stamp_nanosec: int,
+    frame_id: str,
+    data: bytes,
+) -> dict[str, Any]:
+    """Build a ``foxglove_msgs/CompressedVideo`` payload dict for CDR encoding."""
+    return {
+        "timestamp": {"sec": stamp_sec, "nanosec": stamp_nanosec},
+        "frame_id": frame_id,
+        "data": data,
+        "format": codec,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class EncodeOutcome:
+    """Result of encoding one frame through a :class:`VideoEncoderSession`.
+
+    ``swapped`` flags that this frame triggered a hardware→software fallback,
+    so a buffered/async caller can drop the metadata of the frames the dead
+    hardware encoder had swallowed (they are unrecoverable). ``failed`` means
+    both hardware and software encoding failed and the frame should be dropped.
+    """
+
+    data: bytes | None
+    swapped: bool
+    failed: bool
+
+
+class VideoEncoderSession:
+    """One topic's stateful video encoder.
+
+    The single encoder implementation shared by the batch
+    :class:`VideoCompressProcessor` and the live ``bridge proxy``. It owns
+    encoder creation, adaptive geometry (recreating the encoder when a frame's
+    resolution or pixel format changes), and the hardware→software fallback
+    after an encoder failure. Callers differ only in how they schedule the work:
+    the proxy encodes each frame synchronously; the batch processor drives
+    ``encode_with_fallback`` from a per-topic encode thread and uses
+    ``EncodeOutcome.swapped`` to keep buffered-frame timestamps aligned.
+
+    Not thread-safe: a single session must be driven from one thread at a time
+    (the proxy's transform thread, or a topic's dedicated encode thread).
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: AnyVideoBackend,
+        encoder_name: str,
+        codec: str,
+        quality: int,
+        topic: str,
+        scale: int | None = None,
+    ) -> None:
+        self._backend = backend
+        self._encoder_name = encoder_name
+        self._codec = codec
+        self._quality = quality
+        self._topic = topic
+        self._scale = scale
+        self._encoder: VideoEncoderProtocol[Any] | None = None
+        self._settings: VideoEncoderSettings | None = None
+
+    @property
+    def backend(self) -> AnyVideoBackend:
+        return self._backend
+
+    @property
+    def encoder(self) -> VideoEncoderProtocol[Any] | None:
+        return self._encoder
+
+    @property
+    def codec(self) -> str:
+        return self._codec
+
+    @property
+    def topic(self) -> str:
+        return self._topic
+
+    def decode_image(
+        self, message: DecodableImageMessage, schema_name: str
+    ) -> tuple[Any, int, int]:
+        """Decode an image message to ``(frame, width, height)``."""
+        return self._backend.decode_image(message, schema_name)
+
+    def ensure_encoder(self, width: int, height: int) -> VideoEncoderProtocol[Any]:
+        """Return an encoder sized for ``width``x``height``, (re)creating on change."""
+        settings = resolve_video_encoder_settings(
+            backend=self._backend,
+            topic=self._topic,
+            width=width,
+            height=height,
+            scale=self._scale,
+        )
+        if self._encoder is not None and settings == self._settings:
+            return self._encoder
+        recreating = self._encoder is not None
+        self.close()
+        self._encoder = self._backend.create_encoder(
+            settings.width,
+            settings.height,
+            self._encoder_name,
+            self._quality,
+            input_pix_fmt=settings.pix_fmt,
+            scale=settings.scale_dims,
+        )
+        self._settings = settings
+        logger.info(
+            "%s %s: %dx%d using %s",
+            "Re-encoding" if recreating else "Encoding",
+            self._topic,
+            settings.width,
+            settings.height,
+            self._encoder_name,
+        )
+        return self._encoder
+
+    def swap_to_software(self) -> bool:
+        """Recreate the encoder on the software codec at the current geometry.
+
+        Returns ``False`` if the encoder already runs the software codec (so a
+        caller can tell whether this call is the one that dropped the dead
+        hardware encoder). Raises if no encoder has been created yet.
+        """
+        software = get_software_encoder(self._codec)
+        if self._encoder is not None and self._encoder.config.codec_name == software:
+            return False
+        if self._settings is None:
+            raise VideoEncoderError(
+                f"cannot fall back to software before an encoder exists for {self._topic}"
+            )
+        settings = self._settings
+        self.close()
+        self._encoder_name = software
+        self._encoder = self._backend.create_encoder(
+            settings.width,
+            settings.height,
+            software,
+            self._quality,
+            input_pix_fmt=settings.pix_fmt,
+            scale=settings.scale_dims,
+        )
+        self._settings = settings
+        logger.warning("Encoder failed for %s, falling back to %s", self._topic, software)
+        return True
+
+    def encode_with_fallback(self, frame: Any, width: int, height: int) -> EncodeOutcome:
+        """Encode one frame, retrying on the software encoder if hardware fails."""
+        try:
+            encoder = self.ensure_encoder(width, height)
+            return EncodeOutcome(data=encoder.encode(frame), swapped=False, failed=False)
+        except Exception:  # noqa: BLE001 — any encode/geometry failure retries on software
+            logger.debug("Hardware encode failed for %s; trying software", self._topic)
+        swapped = False
+        try:
+            swapped = self.swap_to_software()
+            encoder = self._encoder
+            if encoder is None:  # pragma: no cover - swap_to_software raises instead
+                return EncodeOutcome(data=None, swapped=swapped, failed=True)
+            return EncodeOutcome(data=encoder.encode(frame), swapped=swapped, failed=False)
+        except Exception:
+            logger.exception("Software encode failed for %s; dropping frame", self._topic)
+            return EncodeOutcome(data=None, swapped=swapped, failed=True)
+
+    def close(self) -> None:
+        if self._encoder is not None:
+            self._encoder.close()
+            self._encoder = None
 
 
 class VideoCompressProcessor(InputProcessor):
@@ -232,8 +443,8 @@ class VideoCompressProcessor(InputProcessor):
         # decode future, but later frames' decodes run ahead on the pool — so
         # decode and encode overlap instead of serializing.
         decode_future = self._decode_pool.submit(self._decode_frame, dm, schema_name)
-        encode_future = state.pool.submit(self._encode_frame, state.encoder, decode_future)
-        state.futures.append((encode_future, dm))
+        encode_future = state.pool.submit(self._encode_frame, state.session, decode_future)
+        state.futures.append(encode_future)
 
         # Drain completed packets (bounded) and emit them in order.
         while len(state.futures) > _INFLIGHT_PER_TOPIC:
@@ -248,7 +459,7 @@ class VideoCompressProcessor(InputProcessor):
                 yield from self._finalize_topic(topic, state)
         finally:
             for state in self._states.values():
-                state.encoder.close()
+                state.session.close()
                 state.pool.shutdown(wait=False)
             self._decode_pool.shutdown(wait=False)
 
@@ -260,8 +471,9 @@ class VideoCompressProcessor(InputProcessor):
                 yield emitted
         # Flush the encoder's internal buffer; each packet pairs with the oldest
         # still-pending frame, in order.
+        encoder = state.session.encoder
         try:
-            packets = state.encoder.flush_packets()
+            packets = encoder.flush_packets() if encoder is not None else []
         except VideoEncoderError:
             logger.exception("Failed to flush encoder for %s", topic)
             packets = []
@@ -291,24 +503,16 @@ class VideoCompressProcessor(InputProcessor):
         dm: DecodedMessage,
     ) -> _TopicState | None:
         _frame, width, height = self._backend.decode_image(dm, schema_name)
-        pix_fmt = self._backend.get_pix_fmt(channel.topic)
-        scale_dims: tuple[int, int] | None = None
-        if self._scale is not None:
-            width, height = calculate_downscale_dimensions(width, height, self._scale)
-            if pix_fmt is None:
-                scale_dims = (width, height)
-        width -= width % 2
-        height -= height % 2
-
+        session = VideoEncoderSession(
+            backend=self._backend,
+            encoder_name=self._encoder_name,
+            codec=self._codec,
+            quality=self._quality,
+            topic=channel.topic,
+            scale=self._scale,
+        )
         try:
-            encoder = self._backend.create_encoder(
-                width,
-                height,
-                self._encoder_name,
-                self._quality,
-                input_pix_fmt=pix_fmt,
-                scale=scale_dims,
-            )
+            session.ensure_encoder(width, height)
         except VideoEncoderError:
             logger.exception("Failed to create encoder for %s", channel.topic)
             return None
@@ -324,120 +528,78 @@ class VideoCompressProcessor(InputProcessor):
             replace(channel, schema_id=self._out_schema_id, metadata=dict(channel.metadata)),
             channel.id,
         )
-
-        logger.info(
-            "[green]✓[/green] Converting %s: %dx%d (%s → CompressedVideo)",
-            channel.topic,
-            width,
-            height,
-            schema_name,
-        )
         state = _TopicState(
-            encoder=encoder,
+            session=session,
             pool=ThreadPoolExecutor(max_workers=1),
             out_channel_id=out_channel.id,
             schema_name=schema_name,
-            width=width,
-            height=height,
-            pix_fmt=pix_fmt,
-            scale_dims=scale_dims,
             futures=deque(),
             pending=deque(),
         )
         self._states[channel.topic] = state
         return state
 
-    def _decode_frame(self, dm: DecodedMessage, schema_name: str) -> Any:
-        """Decode one image to a frame — runs on the shared decode pool."""
-        return self._backend.decode_image(dm, schema_name)[0]
+    def _decode_frame(self, dm: DecodedMessage, schema_name: str) -> tuple[Any, int, int]:
+        """Decode one image to ``(frame, width, height)`` — runs on the shared pool."""
+        return self._backend.decode_image(dm, schema_name)
 
     def _encode_frame(
-        self, encoder: VideoEncoderProtocol[Any], decode_future: Future[Any]
-    ) -> bytes | None:
+        self, session: VideoEncoderSession, decode_future: Future[tuple[Any, int, int]]
+    ) -> EncodeOutcome:
         """Encode a decoded frame — runs on the topic's single encode thread.
 
-        Blocks on the decode future, but the decode pool has already run later
-        frames' decodes ahead, so this rarely waits.
+        Blocks on the decode future (later frames' decodes have already run
+        ahead on the shared pool, so this rarely waits), then hands off to the
+        session, which owns the adaptive geometry and software fallback. Because
+        this runs on the topic's one encode thread, the session's encoder-state
+        mutations stay serialized.
         """
-        return encoder.encode(decode_future.result())
+        try:
+            frame, width, height = decode_future.result()
+        except Exception:
+            logger.exception("Failed to decode frame on %s", session.topic)
+            return EncodeOutcome(data=None, swapped=False, failed=True)
+        return session.encode_with_fallback(frame, width, height)
 
     def _drain_one(self, state: _TopicState) -> MessageWithContext | None:
-        """Resolve the oldest in-flight decode+encode; emit a packet if one came out.
+        """Resolve the oldest in-flight encode; emit a packet if one came out.
 
-        Any decode/encode failure falls back to the software encoder (see
-        ``_fallback_encode``); a frame that still cannot be encoded is dropped
-        (its metadata too, so later packets stay paired) rather than crashing
-        the whole transcode.
+        When the frame triggered a hardware→software swap, the dead hardware
+        encoder's buffered frames are unrecoverable: their ``_FrameMeta`` entries
+        still sit at the head of ``pending``, ahead of the frames re-encoded on
+        software (this frame plus everything still queued in ``futures``). Drop
+        exactly those orphaned metas so surviving packets keep pairing with the
+        right frame instead of shifting by the dead encoder's buffer depth.
         """
-        future, dm = state.futures.popleft()
-        try:
-            video_data = future.result()
-        except Exception:  # noqa: BLE001 — decode or encode of one frame failed
-            try:
-                video_data = self._fallback_encode(state, dm)
-            except Exception:
-                logger.exception("Dropping unencodable frame on %s", state.schema_name)
-                if state.pending:
-                    state.pending.popleft()
-                return None
-        if video_data is None:
+        outcome = state.futures.popleft().result()
+        if outcome.swapped:
+            orphaned = max(0, len(state.pending) - (len(state.futures) + 1))
+            for _ in range(orphaned):
+                state.pending.popleft()
+        if outcome.failed:
+            logger.warning("Dropping unencodable frame on %s", state.schema_name)
+            if state.pending:
+                state.pending.popleft()
+            return None
+        if outcome.data is None:
             return None
         meta = state.pending.popleft()
         return MessageWithContext(
-            message=self._build_video_message(state, meta, video_data),
+            message=self._build_video_message(state, meta, outcome.data),
             stream_id=meta.stream_id,
             input_channel_id=meta.input_channel_id,
         )
 
-    def _fallback_encode(self, state: _TopicState, dm: DecodedMessage) -> bytes | None:
-        """Encode one frame on the software encoder, swapping the topic to it once.
-
-        Called after a hardware-encode failure. The first call swaps the topic's
-        encoder to software (a fresh stream — its first frame is an IDR, so the
-        concatenation stays decodable); subsequent in-flight frames that also
-        failed on the now-dead hardware encoder are simply re-encoded here on the
-        software encoder. Only a software-encode failure propagates.
-
-        A crashed hardware encoder loses the packets for frames it had accepted
-        but not yet output; those frames are unrecoverable. Their ``_FrameMeta``
-        entries still sit at the head of ``pending``, ahead of the frames that
-        will re-encode on software (this frame plus everything still queued in
-        ``futures``). Drop exactly those orphaned metas on the swap so surviving
-        packets keep pairing with the right frame instead of shifting by the
-        dead encoder's buffer depth.
-        """
-        sw = get_software_encoder(self._codec)
-        if state.encoder.config.codec_name != sw:
-            orphaned = max(0, len(state.pending) - (len(state.futures) + 1))
-            logger.warning(
-                "Encoder failed for %s, falling back to %s (%d buffered frame(s) lost)",
-                state.schema_name,
-                sw,
-                orphaned,
-            )
-            state.encoder.close()
-            state.encoder = self._backend.create_encoder(
-                state.width,
-                state.height,
-                sw,
-                self._quality,
-                input_pix_fmt=state.pix_fmt,
-                scale=state.scale_dims,
-            )
-            for _ in range(orphaned):
-                state.pending.popleft()
-        frame: Any = self._backend.decode_image(dm, state.schema_name)[0]
-        return state.encoder.encode(frame)
-
     def _build_video_message(
         self, state: _TopicState, meta: _FrameMeta, video_data: bytes
     ) -> Message:
-        payload = {
-            "timestamp": {"sec": meta.stamp_sec, "nanosec": meta.stamp_nanosec},
-            "frame_id": meta.frame_id,
-            "data": video_data,
-            "format": self._codec,
-        }
+        payload = build_compressed_video_payload(
+            codec=self._codec,
+            stamp_sec=meta.stamp_sec,
+            stamp_nanosec=meta.stamp_nanosec,
+            frame_id=meta.frame_id,
+            data=video_data,
+        )
         return Message(
             channel_id=state.out_channel_id,
             sequence=0,

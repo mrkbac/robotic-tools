@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
     from av import VideoFrame
-    from small_mcap import DecodedMessage
 
     from mcap_codec_support.video.common import DecompressedFrame, EncoderConfig
 
@@ -31,6 +30,27 @@ class CompressedImageMsg(Protocol):
 
     @property
     def data(self) -> bytes | bytearray | memoryview: ...
+
+
+class _ChannelTopic(Protocol):
+    @property
+    def topic(self) -> str: ...
+
+
+class DecodableImageMessage(Protocol):
+    """Structural input to a backend's ``decode_image``.
+
+    Only the decoded ROS message and the channel topic it arrived on are read,
+    so both ``small_mcap.DecodedMessage`` and the live ``bridge proxy`` wrapper
+    qualify without either depending on the other. ``decoded_message`` mirrors
+    ``small_mcap``'s own ``Any`` — it is an arbitrary decoded ROS object.
+    """
+
+    @property
+    def decoded_message(self) -> Any: ...
+
+    @property
+    def channel(self) -> _ChannelTopic: ...
 
 
 class VideoEncoderProtocol(Protocol[FrameT]):
@@ -76,7 +96,9 @@ class VideoCompressionBackend(Protocol[FrameT]):
 
     def decode_compressed(self, data: bytes) -> tuple[FrameT, int, int]: ...
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[FrameT, int, int]: ...
+    def decode_image(
+        self, msg: DecodableImageMessage, schema_name: str
+    ) -> tuple[FrameT, int, int]: ...
 
     def create_encoder(
         self,

@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
 from mcap_codec_support.video.common import EncoderConfig
-from pymcap_cli.cmd.bridge.proxy import (
-    BridgeProxy,
-    _ImageConfig,
-    _is_video_keyframe,
-    _OutboundMessage,
-    _PointCloudConfig,
-    _ProxyConfig,
-    _ProxyMetrics,
-    _SendManager,
-    _TransformResult,
-    _VideoTransformer,
+from pymcap_cli.cmd.bridge._proxy_runtime import (
+    OutboundMessage,
+    ProxyMetrics,
+    SendManager,
+    TransformResult,
+)
+from pymcap_cli.cmd.bridge._proxy_transforms import (
+    ImageConfig,
+    PointCloudConfig,
+    ProcessorRule,
+    ProxyConfig,
+    VideoTransformer,
+    is_video_keyframe,
+)
+from pymcap_cli.cmd.bridge.proxy import BridgeProxy
+from pymcap_cli.core.processors.message_transform import (
+    MessageTransformProcessor,
+    TransformOutput,
 )
 from pymcap_cli.core.processors.video_compress import ResolvedVideoCompressionBackend
 from robo_ws_bridge.server import Channel as ServerChannel
@@ -39,9 +47,9 @@ async def _wait_for(predicate: Callable[[], bool]) -> None:
     raise AssertionError("condition was not reached")
 
 
-def _proxy_config() -> _ProxyConfig:
-    return _ProxyConfig(
-        image=_ImageConfig(
+def _proxy_config() -> ProxyConfig:
+    return ProxyConfig(
+        image=ImageConfig(
             image_format="none",
             codec="h264",
             quality=28,
@@ -50,7 +58,7 @@ def _proxy_config() -> _ProxyConfig:
             scale=None,
             jpeg_quality=90,
         ),
-        pointcloud=_PointCloudConfig(
+        pointcloud=PointCloudConfig(
             enabled=False,
             pc_format="cloudini",
             pc_schema="auto",
@@ -67,20 +75,20 @@ def _proxy_config() -> _ProxyConfig:
 
 
 def test_h264_keyframe_detection() -> None:
-    assert _is_video_keyframe(b"\x00\x00\x00\x01\x65\x88", "h264")
-    assert not _is_video_keyframe(b"\x00\x00\x01\x41\x9a", "h264")
+    assert is_video_keyframe(b"\x00\x00\x00\x01\x65\x88", "h264")
+    assert not is_video_keyframe(b"\x00\x00\x01\x41\x9a", "h264")
 
 
 def test_h265_keyframe_detection() -> None:
-    assert _is_video_keyframe(b"\x00\x00\x01\x26\x01", "h265")
-    assert not _is_video_keyframe(b"\x00\x00\x01\x02\x01", "h265")
+    assert is_video_keyframe(b"\x00\x00\x01\x26\x01", "h265")
+    assert not is_video_keyframe(b"\x00\x00\x01\x02\x01", "h265")
 
 
 def test_send_manager_latest_only_drops_stale_messages(monkeypatch) -> None:
     async def run() -> None:
         server = WebSocketBridgeServer()
-        metrics = _ProxyMetrics()
-        manager = _SendManager(server, metrics, queue_size=1)
+        metrics = ProxyMetrics()
+        manager = SendManager(server, metrics, queue_size=1)
         sent: list[bytes] = []
         release = asyncio.Event()
         websocket = object()
@@ -99,11 +107,11 @@ def test_send_manager_latest_only_drops_stale_messages(monkeypatch) -> None:
 
         monkeypatch.setattr(server, "send_message_to_subscription", fake_send)
 
-        manager.enqueue(websocket, 1, _OutboundMessage(1, 1, b"slow"))
+        manager.enqueue(websocket, 1, OutboundMessage(1, 1, b"slow"))
         await _wait_for(lambda: sent == [b"slow"])
 
-        manager.enqueue(websocket, 1, _OutboundMessage(1, 2, b"stale"))
-        manager.enqueue(websocket, 1, _OutboundMessage(1, 3, b"latest"))
+        manager.enqueue(websocket, 1, OutboundMessage(1, 2, b"stale"))
+        manager.enqueue(websocket, 1, OutboundMessage(1, 3, b"latest"))
 
         release.set()
         await _wait_for(lambda: sent == [b"slow", b"latest"])
@@ -117,8 +125,8 @@ def test_send_manager_latest_only_drops_stale_messages(monkeypatch) -> None:
 def test_send_manager_waits_for_keyframe_after_video_drop(monkeypatch) -> None:
     async def run() -> None:
         server = WebSocketBridgeServer()
-        metrics = _ProxyMetrics()
-        manager = _SendManager(server, metrics, queue_size=1)
+        metrics = ProxyMetrics()
+        manager = SendManager(server, metrics, queue_size=1)
         sent: list[bytes] = []
         release = asyncio.Event()
         websocket = object()
@@ -140,19 +148,19 @@ def test_send_manager_waits_for_keyframe_after_video_drop(monkeypatch) -> None:
         manager.enqueue(
             websocket,
             1,
-            _OutboundMessage(1, 1, b"first-key", is_compressed_video=True, is_keyframe=True),
+            OutboundMessage(1, 1, b"first-key", is_compressed_video=True, is_keyframe=True),
         )
         await _wait_for(lambda: sent == [b"first-key"])
 
         manager.enqueue(
             websocket,
             1,
-            _OutboundMessage(1, 2, b"stale-delta", is_compressed_video=True, is_keyframe=False),
+            OutboundMessage(1, 2, b"stale-delta", is_compressed_video=True, is_keyframe=False),
         )
         manager.enqueue(
             websocket,
             1,
-            _OutboundMessage(1, 3, b"latest-delta", is_compressed_video=True, is_keyframe=False),
+            OutboundMessage(1, 3, b"latest-delta", is_compressed_video=True, is_keyframe=False),
         )
 
         release.set()
@@ -162,7 +170,7 @@ def test_send_manager_waits_for_keyframe_after_video_drop(monkeypatch) -> None:
         manager.enqueue(
             websocket,
             1,
-            _OutboundMessage(1, 4, b"next-key", is_compressed_video=True, is_keyframe=True),
+            OutboundMessage(1, 4, b"next-key", is_compressed_video=True, is_keyframe=True),
         )
         await _wait_for(lambda: sent == [b"first-key", b"next-key"])
         await manager.close()
@@ -179,9 +187,9 @@ def test_bridge_proxy_advertises_transformed_channel(monkeypatch) -> None:
         output_schema_encoding = "ros2msg"
         output_message_encoding = "cdr"
 
-        def transform(self, decoded: object, timestamp_ns: int) -> _TransformResult:
+        def transform(self, decoded: object, timestamp_ns: int) -> TransformResult:
             del decoded, timestamp_ns
-            return _TransformResult({"data": "ok"})
+            return TransformResult({"data": "ok"})
 
         def close(self) -> None:
             return
@@ -263,6 +271,43 @@ def test_bridge_proxy_defers_upstream_subscribe_until_connected() -> None:
     asyncio.run(run())
 
 
+class _AppendLiveProcessor(MessageTransformProcessor):
+    def matches(self, _channel, schema) -> bool:
+        return schema is not None and schema.name == "std_msgs/msg/String"
+
+    def transform(self, channel, schema, decoded):
+        return [
+            TransformOutput(
+                topic=channel.topic,
+                schema_name=schema.name,
+                schema_encoding=schema.encoding,
+                schema_data=schema.data,
+                data={"data": f"{decoded.data}!"},
+            )
+        ]
+
+
+def test_processor_rule_wraps_message_transform_processor() -> None:
+    rule = ProcessorRule(processor_factory=_AppendLiveProcessor)
+
+    transformer = rule.create_transformer(
+        {
+            "id": 3,
+            "topic": "/chatter",
+            "encoding": "cdr",
+            "schemaName": "std_msgs/msg/String",
+            "schema": "string data",
+            "schemaEncoding": "ros2msg",
+        }
+    )
+
+    assert transformer is not None
+    result = transformer.transform(SimpleNamespace(data="ok"), 0)
+    assert result is not None
+    assert result.payload == {"data": "ok!"}
+    assert transformer.output_schema_name == "std_msgs/msg/String"
+
+
 class _FakeVideoEncoder:
     def __init__(self, codec_name: str) -> None:
         self.config = EncoderConfig(width=4, height=4, codec_name=codec_name)
@@ -322,8 +367,8 @@ def test_video_transformer_uses_roscompress_backend_resolver(
         fake_resolve_video_compression_backend,
     )
 
-    transformer = _VideoTransformer(
-        _ImageConfig(
+    transformer = VideoTransformer(
+        ImageConfig(
             image_format="video",
             codec="h264",
             quality=28,
@@ -336,4 +381,4 @@ def test_video_transformer_uses_roscompress_backend_resolver(
     )
 
     assert calls == [("h264", None, backend)]
-    assert transformer._encoder_name == "selected_encoder"
+    assert transformer._session._encoder_name == "selected_encoder"

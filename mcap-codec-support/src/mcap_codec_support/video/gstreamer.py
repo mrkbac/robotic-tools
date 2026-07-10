@@ -66,7 +66,7 @@ from mcap_codec_support.video.ffmpeg import (
 from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS
 
 if TYPE_CHECKING:
-    from small_mcap import DecodedMessage
+    from mcap_codec_support._protocols import DecodableImageMessage
 
 # ---------------------------------------------------------------------------
 # Element discovery
@@ -455,7 +455,7 @@ class GStreamerCompressionBackend:
         width, height = probe_image_dimensions(data)
         return data, width, height
 
-    def decode_image(self, msg: DecodedMessage, schema_name: str) -> tuple[bytes, int, int]:
+    def decode_image(self, msg: DecodableImageMessage, schema_name: str) -> tuple[bytes, int, int]:
         data = bytes(msg.decoded_message.data)
         topic = msg.channel.topic
         if schema_name in COMPRESSED_SCHEMAS:
