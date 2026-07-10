@@ -10,9 +10,10 @@ import io
 from typing import TYPE_CHECKING
 
 import numpy as np
+from mcap_codec_support.pointcloud.factories import CloudiniPointCloudDecompressFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.process_cmd import process
-from small_mcap import McapWriter, get_summary, read_message
+from small_mcap import McapWriter, get_summary, read_message, read_message_decoded
 
 from tests.fixtures.image_mcap_generator import (
     SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA,
@@ -59,16 +60,16 @@ _FIELDS = [
 
 def _pc_msg() -> dict:
     dtype = np.dtype({"names": ["x", "y", "z"], "formats": ["<f4", "<f4", "<f4"], "itemsize": 12})
-    pts = np.zeros(8, dtype=dtype)
-    pts["x"] = np.arange(1, 9, dtype=np.float32)
+    pts = np.zeros(10, dtype=dtype)
+    pts["x"][:8] = np.arange(1, 9, dtype=np.float32)
     return {
         "header": {"stamp": {"sec": 1, "nanosec": 0}, "frame_id": "lidar"},
         "height": 1,
-        "width": 8,
+        "width": 10,
         "fields": _FIELDS,
         "is_bigendian": False,
         "point_step": 12,
-        "row_step": 96,
+        "row_step": 120,
         "data": pts.tobytes(),
         "is_dense": True,
     }
@@ -94,8 +95,15 @@ def _write_mixed(path: Path, n: int = 8) -> None:
     for i in range(n):
         t = i * step
         w.add_message_encode(
-            1, t, {"header": {"stamp": {"sec": i, "nanosec": 0}, "frame_id": "c"},
-                   "format": "jpeg", "data": create_jpeg_frame(160, 120, i)}, t)
+            1,
+            t,
+            {
+                "header": {"stamp": {"sec": i, "nanosec": 0}, "frame_id": "c"},
+                "format": "jpeg",
+                "data": create_jpeg_frame(160, 120, i),
+            },
+            t,
+        )
         w.add_message_encode(2, t + 1, _pc_msg(), t + 1)
         w.add_message_encode(3, t + 2, {"data": f"ok {i}"}, t + 2)
         w.add_message_encode(4, t + 3, {"data": f"noise {i}"}, t + 3)
@@ -116,6 +124,17 @@ def _counts(path: Path) -> dict[str, int]:
         for _s, ch, _m in read_message(f):
             counts[ch.topic] = counts.get(ch.topic, 0) + 1
     return counts
+
+
+def _compressed_point_counts(path: Path) -> list[int]:
+    with path.open("rb") as f:
+        return [
+            int(msg.decoded_message["width"]) * int(msg.decoded_message["height"])
+            for msg in read_message_decoded(
+                f, decoder_factories=[CloudiniPointCloudDecompressFactory()]
+            )
+            if msg.channel.topic == "/lidar/points"
+        ]
 
 
 def test_process_compress_video_and_pointcloud_with_drop(tmp_path: Path):
@@ -143,6 +162,7 @@ def test_process_compress_video_and_pointcloud_with_drop(tmp_path: Path):
     assert counts["/cam/front"] == 8
     assert counts["/lidar/points"] == 8
     assert counts["/status"] == 8
+    assert _compressed_point_counts(out) == [8] * 8
 
 
 def test_process_compress_pointcloud_only_leaves_video_untouched(tmp_path: Path):
@@ -160,3 +180,4 @@ def test_process_compress_pointcloud_only_leaves_video_untouched(tmp_path: Path)
     assert schemas["/lidar/points"] == "point_cloud_interfaces/msg/CompressedPointCloud2"
     # Video left as CompressedImage (not requested).
     assert schemas["/cam/front"] == "sensor_msgs/msg/CompressedImage"
+    assert _compressed_point_counts(out) == [8] * 8

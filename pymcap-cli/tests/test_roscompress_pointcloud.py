@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 from mcap_codec_support.pointcloud.factories import CloudiniPointCloudDecompressFactory
 from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
+from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.roscompress_cmd import roscompress
-from small_mcap import CompressionType, McapWriter, read_message, read_message_decoded
+from small_mcap import CompressionType, McapWriter, get_summary, read_message, read_message_decoded
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,13 +96,14 @@ def test_roscompress_cleans_pointclouds_and_excludes_by_glob(tmp_path: Path):
     assert topics.count("/lidar/points") == 3
 
     # The compressed cloud decodes back with the (0,0,0) pads gone.
-    clouds = [
-        m.decoded_message
-        for m in read_message_decoded(
-            out.open("rb"), decoder_factories=[CloudiniPointCloudDecompressFactory()]
-        )
-        if m.channel.topic == "/lidar/points"
-    ]
+    with out.open("rb") as f:
+        clouds = [
+            m.decoded_message
+            for m in read_message_decoded(
+                f, decoder_factories=[CloudiniPointCloudDecompressFactory()]
+            )
+            if m.channel.topic == "/lidar/points"
+        ]
     assert len(clouds) == 3
     for cloud in clouds:
         n = int(cloud["width"]) * int(cloud["height"])
@@ -109,6 +111,37 @@ def test_roscompress_cleans_pointclouds_and_excludes_by_glob(tmp_path: Path):
         buf = np.frombuffer(bytes(cloud["data"]), np.uint8).reshape(n, int(cloud["point_step"]))
         xyz = np.ascontiguousarray(buf[:, :12]).view(np.float32).reshape(n, 3)
         assert int((xyz == 0).all(axis=1).sum()) == 0
+
+
+def test_roscompress_clean_pointcloud_without_compression(tmp_path: Path):
+    src = tmp_path / "in.mcap"
+    out = tmp_path / "out.mcap"
+    _write_input(src)
+
+    rc = roscompress(
+        str(src),
+        out,
+        force=True,
+        image_format="none",
+        pointcloud=False,
+        pointcloud_drop_invalid=True,
+    )
+    assert rc == 0
+
+    with out.open("rb") as f:
+        summary = get_summary(f)
+    assert summary is not None
+    schema_names = {schema.name for schema in summary.schemas.values()}
+    assert "sensor_msgs/msg/PointCloud2" in schema_names
+    assert all("CompressedPointCloud" not in name for name in schema_names)
+
+    with out.open("rb") as f:
+        clouds = [
+            m.decoded_message
+            for m in read_message_decoded(f, decoder_factories=[DecoderFactory()])
+            if m.channel.topic == "/lidar/points"
+        ]
+    assert [int(cloud.width) * int(cloud.height) for cloud in clouds] == [6, 6, 6]
 
 
 def _iter_raw(path: Path):

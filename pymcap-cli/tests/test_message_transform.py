@@ -134,6 +134,24 @@ class _DropShortStrings(MessageTransformProcessor):
         ]
 
 
+class _AppendBangStrings(MessageTransformProcessor):
+    """Value edit: append ``!`` to the ``data`` field, same schema + topic."""
+
+    def matches(self, channel: Channel, schema: Schema | None) -> bool:
+        return schema is not None and schema.name == "std_msgs/msg/String"
+
+    def transform(self, channel: Channel, schema: Schema, decoded: Any):
+        return [
+            TransformOutput(
+                topic=channel.topic,
+                schema_name=schema.name,
+                schema_encoding=schema.encoding,
+                schema_data=schema.data,
+                data={"data": f"{decoded.data}!"},
+            )
+        ]
+
+
 class _StringToShout(MessageTransformProcessor):
     """Transcode: std_msgs/String{data} -> test_msgs/Shout{text}, same topic."""
 
@@ -265,6 +283,35 @@ def test_timestamps_preserved(tmp_path: Path):
         msgs = read_message_decoded(f, decoder_factories=[DecoderFactory()])
         times = [m.message.log_time for m in msgs]
     assert times == [1, 2, 3]
+
+
+def test_adjacent_transforms_decode_each_message_once(tmp_path: Path, monkeypatch):
+    """Composed decoded transforms share one decoded payload per message."""
+    inp, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_strings(inp, [("/chat", "hello"), ("/chat", "world")])
+
+    decode_count = 0
+    original_decoder_for = DecoderFactory.decoder_for
+
+    def counting_decoder_for(self, message_encoding, schema):
+        decoder = original_decoder_for(self, message_encoding, schema)
+        if decoder is None or schema is None or schema.name != "std_msgs/msg/String":
+            return decoder
+
+        def counting_decoder(data):
+            nonlocal decode_count
+            decode_count += 1
+            return decoder(data)
+
+        return counting_decoder
+
+    monkeypatch.setattr(DecoderFactory, "decoder_for", counting_decoder_for)
+
+    _run(inp, out, [_UppercaseStrings(), _AppendBangStrings()])
+
+    processing_decode_count = decode_count
+    assert [value for _topic, _schema, value in _read(out)] == ["HELLO!", "WORLD!"]
+    assert processing_decode_count == 2
 
 
 def test_finalize_output_preserves_input_stream_context_for_routing(tmp_path: Path):

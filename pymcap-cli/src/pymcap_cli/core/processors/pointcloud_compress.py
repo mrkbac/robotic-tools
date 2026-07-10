@@ -2,8 +2,9 @@
 
 Transcodes ``sensor_msgs/PointCloud2`` messages to Cloudini
 ``CompressedPointCloud2`` or Draco ``CompressedPointCloud`` in-place on the
-same topic, via :class:`MessageTransformProcessor`. Synchronous — the codec
-runs inline in ``transform`` — so there is no ordering hazard; per-channel and
+same topic, via :class:`MessageTransformProcessor`. Cleanup is intentionally
+separate; compose :class:`PointcloudCleanProcessor` before this processor when
+invalid points should be removed before compression. Per-channel and
 per-message order are preserved by the base. Composes with the rest of the
 pipeline (topic drop, rechunk, per-schema compression split, splitting, …).
 """
@@ -24,7 +25,6 @@ from mcap_codec_support.pointcloud import (
     PointCloudCompressionError,
     build_compressed_pointcloud2_message,
     build_foxglove_compressed_pointcloud_message,
-    drop_invalid_and_reorder,
 )
 from typing_extensions import override
 
@@ -77,11 +77,9 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         pc_compression: Literal["zstd", "lz4", "none"] = "zstd",
         resolution: float = 0.01,
         draco_compression_level: int = 7,
-        clean: bool = True,
         workers: int = 0,
     ) -> None:
         super().__init__(workers=workers)
-        self._clean = clean
         self._compressor_args = (
             pc_format,
             pc_encoding,
@@ -125,8 +123,6 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
     def transform(
         self, channel: Channel, schema: Schema, decoded: Any
     ) -> list[TransformOutput] | None:
-        if self._clean:
-            decoded = drop_invalid_and_reorder(decoded)
         try:
             compressed = self._compressor().compress(decoded)
         except PointCloudCompressionError as exc:

@@ -18,6 +18,7 @@ from cyclopts import Group, Parameter
 from mcap_codec_support.video import EncoderMode, VideoEncoderError
 from rich.console import Console
 
+from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
@@ -145,13 +146,21 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = True,
-    clean_pointcloud: Annotated[
-        bool,
+    pointcloud_drop_invalid: Annotated[
+        bool | None,
         Parameter(
-            name=["--clean-pointcloud"],
+            name=["--pointcloud-drop-invalid"],
+            negative="--no-pointcloud-drop-invalid",
             group=POINTCLOUD_GROUP,
         ),
-    ] = True,
+    ] = None,
+    pointcloud_sort_field: Annotated[
+        str | None,
+        Parameter(
+            name=["--pointcloud-sort-field"],
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = None,
     exclude_topic_glob: Annotated[
         list[str] | None,
         Parameter(
@@ -206,10 +215,14 @@ def roscompress(
         JPEG quality (1-100, higher = better) when ``image_format=jpeg``. Default: 90.
     pointcloud
         Enable point cloud compression. Default: True.
-    clean_pointcloud
-        Before compressing, drop invalid ``(0,0,0)``/NaN points and group the
-        remaining points by laser ring (``line``). Shrinks such clouds ~30%%
-        at no extra time cost. Default: True.
+    pointcloud_drop_invalid
+        Drop invalid ``(0,0,0)``/NaN points from PointCloud2 messages. Defaults
+        to enabled when point cloud compression is enabled, and disabled when
+        compression is disabled unless a point-cloud cleanup flag is supplied.
+    pointcloud_sort_field
+        Stable-sort cleaned PointCloud2 points by this field. Defaults to
+        ``line`` whenever point-cloud cleanup is active. Use ``none`` to disable
+        sorting.
     exclude_topic_glob
         Drop topics whose name matches any of these shell-style globs
         (repeatable). Excluded topics are skipped before decoding, e.g.
@@ -224,6 +237,16 @@ def roscompress(
         return 1
     if not 0 <= draco_compression_level <= 10:
         logger.error(f"--draco-compression-level must be in [0, 10], got {draco_compression_level}")
+        return 1
+
+    try:
+        cleanup = resolve_pointcloud_cleanup(
+            pointcloud_compression_enabled=pointcloud,
+            pointcloud_drop_invalid=pointcloud_drop_invalid,
+            pointcloud_sort_field=pointcloud_sort_field,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
         return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
@@ -261,6 +284,18 @@ def roscompress(
                 )
             )
 
+        if cleanup.enabled:
+            from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
+                PointcloudCleanProcessor,
+            )
+
+            extras.append(
+                PointcloudCleanProcessor(
+                    drop_invalid=cleanup.drop_invalid,
+                    sort_field=cleanup.sort_field,
+                )
+            )
+
         if pointcloud:
             from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
                 PointcloudCompressProcessor,
@@ -274,7 +309,6 @@ def roscompress(
                     pc_compression=pc_compression,
                     resolution=resolution,
                     draco_compression_level=draco_compression_level,
-                    clean=clean_pointcloud,
                     # Parallelize point-cloud compression only when video isn't
                     # also being transcoded: with video, point clouds already
                     # ride for free in the main thread's idle time (hidden behind
@@ -312,10 +346,17 @@ def roscompress(
         logger.info(f"Scale (max dim): {scale}px")
     if pointcloud:
         logger.info(f"Point cloud: {pc_format} (schema={pc_schema})")
-        if clean_pointcloud:
-            logger.info("Point cloud cleanup: drop (0,0,0)/NaN points, group by line")
     else:
         logger.info("Point cloud compression: disabled")
+    if cleanup.enabled:
+        parts: list[str] = []
+        if cleanup.drop_invalid:
+            parts.append("drop (0,0,0)/NaN points")
+        if cleanup.sort_field is not None:
+            parts.append(f"group by {cleanup.sort_field}")
+        logger.info(f"Point cloud cleanup: {', '.join(parts)}")
+    else:
+        logger.info("Point cloud cleanup: disabled")
 
     input_options = InputOptions.from_args(
         exclude_topic_glob=exclude_topic_glob or None,

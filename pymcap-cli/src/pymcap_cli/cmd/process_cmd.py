@@ -12,6 +12,7 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
+from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy, build_output_processors
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
@@ -321,6 +322,23 @@ def process(
             help="Cloudini lossy point-cloud resolution (m).",
         ),
     ] = 0.01,
+    pointcloud_drop_invalid: Annotated[
+        bool | None,
+        Parameter(
+            name=["--pointcloud-drop-invalid"],
+            negative="--no-pointcloud-drop-invalid",
+            group=COMPRESS_GROUP,
+            help="Drop PointCloud2 (0,0,0)/NaN points before writing or compressing.",
+        ),
+    ] = None,
+    pointcloud_sort_field: Annotated[
+        str | None,
+        Parameter(
+            name=["--pointcloud-sort-field"],
+            group=COMPRESS_GROUP,
+            help="Stable-sort cleaned PointCloud2 points by this field; use 'none' to disable.",
+        ),
+    ] = None,
     # ----- Rechunking -----
     rechunk_strategy: Annotated[
         RechunkStrategy,
@@ -665,11 +683,21 @@ def process(
     if rename_rules:
         extras.append(TopicRewriteProcessor(rename_rules))
 
+    try:
+        pointcloud_cleanup = resolve_pointcloud_cleanup(
+            pointcloud_compression_enabled=compress_pointcloud,
+            pointcloud_drop_invalid=pointcloud_drop_invalid,
+            pointcloud_sort_field=pointcloud_sort_field,
+        )
+    except ValueError as e:
+        logger.error(str(e))  # noqa: TRY400
+        return 1
+
     # Payload transcodes run last among input processors: they consume matched
     # image / point-cloud channels and emit on new (compressed-schema) channels,
     # so upstream relabel/alias/dedup see the original messages first. Imported
     # lazily so a plain `process` run pays none of the codec import cost.
-    if compress_video or compress_pointcloud:
+    if compress_video or compress_pointcloud or pointcloud_cleanup.enabled:
         from mcap_codec_support.video import VideoEncoderError  # noqa: PLC0415
 
         try:
@@ -687,6 +715,17 @@ def process(
                         scale=video_scale,
                         backend=EncoderMode(video_backend),
                         encoder=video_encoder,
+                    )
+                )
+            if pointcloud_cleanup.enabled:
+                from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
+                    PointcloudCleanProcessor,
+                )
+
+                extras.append(
+                    PointcloudCleanProcessor(
+                        drop_invalid=pointcloud_cleanup.drop_invalid,
+                        sort_field=pointcloud_cleanup.sort_field,
                     )
                 )
             if compress_pointcloud:

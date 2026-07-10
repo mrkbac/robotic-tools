@@ -72,4 +72,33 @@ def build_input_processors(options: InputOptions) -> list[InputProcessor]:
 
     procs.extend(options.extra_processors)
 
-    return procs
+    return _coalesce_decoded_processors(procs)
+
+
+def _coalesce_decoded_processors(procs: list[InputProcessor]) -> list[InputProcessor]:
+    from pymcap_cli.core.processors.message_transform import (  # noqa: PLC0415
+        DecodedProcessorChain,
+        MessageTransformProcessor,
+    )
+
+    result: list[InputProcessor] = []
+    run: list[MessageTransformProcessor] = []
+
+    def flush_run() -> None:
+        if not run:
+            return
+        if len(run) == 1:
+            result.append(run[0])
+        else:
+            result.append(DecodedProcessorChain(list(run)))
+        run.clear()
+
+    for proc in procs:
+        if isinstance(proc, MessageTransformProcessor):
+            run.append(proc)
+            continue
+        flush_run()
+        result.append(proc)
+
+    flush_run()
+    return result

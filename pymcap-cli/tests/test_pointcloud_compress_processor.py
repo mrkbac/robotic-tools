@@ -12,6 +12,7 @@ from mcap_codec_support.pointcloud.schemas import (
     COMPRESSED_POINTCLOUD2_SCHEMA,
     POINTCLOUD2,
 )
+from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd._run_processor import run_processor
 from pymcap_cli.core.mcap_processor import (
@@ -20,6 +21,7 @@ from pymcap_cli.core.mcap_processor import (
     OverwriteCollisionPolicy,
 )
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
+from pymcap_cli.core.processors.pointcloud_clean import PointcloudCleanProcessor
 from pymcap_cli.core.processors.pointcloud_compress import PointcloudCompressProcessor
 from small_mcap import CompressionType, McapWriter, get_summary, read_message, read_message_decoded
 
@@ -109,8 +111,34 @@ def _topics(path: Path) -> list[str]:
         return [channel.topic for _s, channel, _m in read_message(f)]
 
 
-def test_pointcloud_processor_compresses_and_cleans(tmp_path: Path):
-    """PointCloud2 → CompressedPointCloud2, with (0,0,0) pads dropped; others copied."""
+def _compressed_cloud_point_counts(path: Path) -> list[int]:
+    with path.open("rb") as f:
+        clouds = [
+            m.decoded_message
+            for m in read_message_decoded(
+                f, decoder_factories=[CloudiniPointCloudDecompressFactory()]
+            )
+            if m.channel.topic == "/lidar/points"
+        ]
+    return [int(cloud["width"]) * int(cloud["height"]) for cloud in clouds]
+
+
+def _pointcloud_x_values(path: Path) -> list[list[float]]:
+    values: list[list[float]] = []
+    with path.open("rb") as f:
+        for msg in read_message_decoded(f, decoder_factories=[DecoderFactory()]):
+            if msg.channel.topic != "/lidar/points":
+                continue
+            cloud = msg.decoded_message
+            n = int(cloud.width) * int(cloud.height)
+            buf = np.frombuffer(bytes(cloud.data), np.uint8).reshape(n, int(cloud.point_step))
+            xyz = np.ascontiguousarray(buf[:, :12]).view(np.float32).reshape(n, 3)
+            values.append([float(x) for x in xyz[:, 0]])
+    return values
+
+
+def test_pointcloud_processor_compresses_without_cleanup(tmp_path: Path):
+    """PointCloud2 → CompressedPointCloud2 without dropping invalid pads."""
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_input(src)
 
@@ -132,17 +160,44 @@ def test_pointcloud_processor_compresses_and_cleans(tmp_path: Path):
     assert len(cloud_channels) == 1
     assert summary.schemas[cloud_channels[0].schema_id].name == COMPRESSED_POINTCLOUD2_SCHEMA
 
-    # Round-trips, pads gone.
-    clouds = [
-        m.decoded_message
-        for m in read_message_decoded(
-            out.open("rb"), decoder_factories=[CloudiniPointCloudDecompressFactory()]
-        )
-        if m.channel.topic == "/lidar/points"
-    ]
-    assert len(clouds) == 3
-    for cloud in clouds:
-        assert int(cloud["width"]) * int(cloud["height"]) == 6
+    assert _compressed_cloud_point_counts(out) == [10, 10, 10]
+
+
+def test_pointcloud_clean_then_compress_drops_invalid_points(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    _run(
+        src,
+        out,
+        extra_processors=[PointcloudCleanProcessor(), PointcloudCompressProcessor()],
+    )
+
+    assert _compressed_cloud_point_counts(out) == [6, 6, 6]
+
+
+def test_pointcloud_clean_only_keeps_pointcloud2_schema(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    _run(src, out, extra_processors=[PointcloudCleanProcessor()])
+
+    with out.open("rb") as f:
+        summary = get_summary(f)
+    assert summary is not None
+    cloud_channels = [c for c in summary.channels.values() if c.topic == "/lidar/points"]
+    assert len(cloud_channels) == 1
+    assert summary.schemas[cloud_channels[0].schema_id].name == "sensor_msgs/msg/PointCloud2"
+    assert _pointcloud_x_values(out) == [[1.0, 5.0, 2.0, 6.0, 3.0, 4.0]] * 3
+
+
+def test_pointcloud_clean_sort_field_none_preserves_original_order(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    _run(src, out, extra_processors=[PointcloudCleanProcessor(sort_field=None)])
+
+    assert _pointcloud_x_values(out) == [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]] * 3
 
 
 def test_pointcloud_compress_drop_topic_and_split_in_one_pass(tmp_path: Path):
@@ -153,7 +208,7 @@ def test_pointcloud_compress_drop_topic_and_split_in_one_pass(tmp_path: Path):
     _run(
         src,
         out,
-        extra_processors=[PointcloudCompressProcessor()],
+        extra_processors=[PointcloudCleanProcessor(), PointcloudCompressProcessor()],
         exclude=[r"/debug/.*"],
         output_processors=[SchemaCompressionGrouper([re.compile("CompressedPointCloud2")])],
     )
@@ -180,15 +235,7 @@ def test_pointcloud_compress_drop_topic_and_split_in_one_pass(tmp_path: Path):
     assert "" in compressions  # cloud group: no compression
     assert "zstd" in compressions  # telemetry group
 
-    # Clouds still decode.
-    clouds = [
-        m.decoded_message
-        for m in read_message_decoded(
-            out.open("rb"), decoder_factories=[CloudiniPointCloudDecompressFactory()]
-        )
-        if m.channel.topic == "/lidar/points"
-    ]
-    assert len(clouds) == 3
+    assert _compressed_cloud_point_counts(out) == [6, 6, 6]
 
 
 def test_pointcloud_processor_parallel_matches_inline(tmp_path: Path):
@@ -225,7 +272,5 @@ def test_pointcloud_processor_preserves_timestamps(tmp_path: Path):
     _run(src, out, extra_processors=[PointcloudCompressProcessor()])
 
     with out.open("rb") as f:
-        cloud_times = [
-            m.log_time for _s, c, m in read_message(f) if c.topic == "/lidar/points"
-        ]
+        cloud_times = [m.log_time for _s, c, m in read_message(f) if c.topic == "/lidar/points"]
     assert cloud_times == [1000, 1001, 1002]
