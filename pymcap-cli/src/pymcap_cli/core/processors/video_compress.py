@@ -112,6 +112,31 @@ class _TopicState:
     pending: deque[_FrameMeta]
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedVideoCompressionBackend:
+    """Backend plus encoder name selected with roscompress semantics."""
+
+    backend: AnyVideoBackend
+    encoder_name: str
+
+
+def resolve_video_compression_backend(
+    *,
+    codec: str,
+    encoder: str | None,
+    backend: EncoderMode,
+) -> ResolvedVideoCompressionBackend:
+    """Resolve the video backend and encoder exactly like roscompress."""
+    resolved_backend = create_video_compression_backend(backend, codec, do_video=True)
+    if encoder is not None:
+        if not resolved_backend.test_encoder(encoder):
+            raise VideoEncoderError(f"Encoder '{encoder}' not available on this system")
+        return ResolvedVideoCompressionBackend(resolved_backend, encoder)
+    return ResolvedVideoCompressionBackend(
+        resolved_backend, resolved_backend.resolve_encoder(codec)
+    )
+
+
 class VideoCompressProcessor(InputProcessor):
     """Encode image topics to CompressedVideo, one encoder thread per topic."""
 
@@ -127,15 +152,13 @@ class VideoCompressProcessor(InputProcessor):
         self._codec = codec
         self._quality = quality
         self._scale = scale
-        self._backend: AnyVideoBackend = create_video_compression_backend(
-            backend, codec, do_video=True
+        resolved = resolve_video_compression_backend(
+            codec=codec,
+            encoder=encoder,
+            backend=backend,
         )
-        if encoder is not None:
-            if not self._backend.test_encoder(encoder):
-                raise VideoEncoderError(f"Encoder '{encoder}' not available on this system")
-            self._encoder_name = encoder
-        else:
-            self._encoder_name = self._backend.resolve_encoder(codec)
+        self._backend = resolved.backend
+        self._encoder_name = resolved.encoder_name
 
         self._decoder_factory = DecoderFactory()
         # channel_id -> (channel, schema, schema_name) for matched image channels

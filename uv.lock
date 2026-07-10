@@ -2673,6 +2673,10 @@ all = [
 bridge = [
     { name = "robo-ws-bridge" },
 ]
+bridge-proxy = [
+    { name = "mcap-codec-support", extra = ["pointcloud", "video"] },
+    { name = "robo-ws-bridge" },
+]
 draco = [
     { name = "mcap-codec-support", extra = ["draco"] },
 ]
@@ -2727,6 +2731,7 @@ requires-dist = [
     { name = "mcap-codec-support", extras = ["pointcloud"], marker = "extra == 'parquet'", editable = "mcap-codec-support" },
     { name = "mcap-codec-support", extras = ["pointcloud"], marker = "extra == 'pointcloud'", editable = "mcap-codec-support" },
     { name = "mcap-codec-support", extras = ["video"], marker = "extra == 'video'", editable = "mcap-codec-support" },
+    { name = "mcap-codec-support", extras = ["video", "pointcloud"], marker = "extra == 'bridge-proxy'", editable = "mcap-codec-support" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "numpy", marker = "extra == 'parquet'", specifier = ">=1.24.0" },
     { name = "pillow", marker = "extra == 'image'", specifier = ">=10.0" },
@@ -2738,12 +2743,13 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "robo-ws-bridge", marker = "extra == 'bridge'", editable = "robo-ws-bridge" },
+    { name = "robo-ws-bridge", marker = "extra == 'bridge-proxy'", editable = "robo-ws-bridge" },
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
     { name = "xxhash", marker = "extra == 'xxhash'", specifier = ">=3.0.0" },
 ]
-provides-extras = ["all", "lite", "bridge", "draco", "image", "parquet", "plot", "pointcloud", "video", "xxhash", "serve"]
+provides-extras = ["all", "lite", "bridge", "bridge-proxy", "draco", "image", "parquet", "plot", "pointcloud", "video", "xxhash", "serve"]
 
 [[package]]
 name = "pytest"

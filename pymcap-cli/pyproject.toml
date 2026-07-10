@@ -49,6 +49,7 @@ dependencies = [
 all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco,bridge,xxhash,serve]"]
 lite = ["pymcap-cli[image,draco,bridge,xxhash]"]
 bridge = ["robo-ws-bridge"]
+bridge-proxy = ["robo-ws-bridge", "mcap-codec-support[video,pointcloud]"]
 draco = ["mcap-codec-support[draco]"]
 image = ["pillow>=10.0"]
 parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]

@@ -16,6 +16,7 @@ from pymcap_cli.cmd.bridge.diag import diag as _diag
 from pymcap_cli.cmd.bridge.fetch import fetch as _fetch
 from pymcap_cli.cmd.bridge.info import info as _info
 from pymcap_cli.cmd.bridge.params import params as _params
+from pymcap_cli.cmd.bridge.proxy import proxy as _proxy
 from pymcap_cli.cmd.bridge.pub import pub as _pub
 from pymcap_cli.cmd.bridge.record import record as _record
 from pymcap_cli.cmd.bridge.tf import tf as _tf
@@ -35,5 +36,6 @@ bridge_app.command(_call, name="call")
 bridge_app.command(_pub, name="pub")
 bridge_app.command(_params, name="params")
 bridge_app.command(_fetch, name="fetch")
+bridge_app.command(_proxy, name="proxy")
 
 __all__ = ["bridge_app"]
