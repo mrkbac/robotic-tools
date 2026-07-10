@@ -276,6 +276,11 @@ class VideoEncoderSession:
             return self._encoder
         recreating = self._encoder is not None
         self.close()
+        # Record geometry before creating the encoder so that a creation failure
+        # (e.g. a hardware encoder that probes available but cannot open on a
+        # GPU-less host) still leaves ``swap_to_software`` able to retry at this
+        # geometry — the first frame then falls back instead of passing through.
+        self._settings = settings
         self._encoder = self._backend.create_encoder(
             settings.width,
             settings.height,
@@ -284,7 +289,6 @@ class VideoEncoderSession:
             input_pix_fmt=settings.pix_fmt,
             scale=settings.scale_dims,
         )
-        self._settings = settings
         logger.info(
             "%s %s: %dx%d using %s",
             "Re-encoding" if recreating else "Encoding",
@@ -300,7 +304,10 @@ class VideoEncoderSession:
 
         Returns ``False`` if the encoder already runs the software codec (so a
         caller can tell whether this call is the one that dropped the dead
-        hardware encoder). Raises if no encoder has been created yet.
+        hardware encoder). Usable both after a mid-stream encoder failure and
+        after a failed initial creation (``ensure_encoder`` records the geometry
+        before creating, so the retry has dimensions); raises only if no
+        geometry has been resolved yet.
         """
         software = get_software_encoder(self._codec)
         if self._encoder is not None and self._encoder.config.codec_name == software:
@@ -514,8 +521,19 @@ class VideoCompressProcessor(InputProcessor):
         try:
             session.ensure_encoder(width, height)
         except VideoEncoderError:
-            logger.exception("Failed to create encoder for %s", channel.topic)
-            return None
+            # A hardware encoder can probe available yet fail to open (e.g.
+            # h264_nvenc on a GPU-less host). Fall back to software so the topic
+            # still transcodes to CompressedVideo instead of passing raw frames.
+            logger.warning(
+                "Encoder %s unavailable for %s; falling back to software",
+                self._encoder_name,
+                channel.topic,
+            )
+            try:
+                session.swap_to_software()
+            except VideoEncoderError:
+                logger.exception("Failed to create encoder for %s", channel.topic)
+                return None
 
         if self._out_schema_id is None:
             self._out_schema_id = context.input.register_schema(

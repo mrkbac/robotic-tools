@@ -310,6 +310,61 @@ class _FallbackBackend:
         return _StubSoftwareEncoder()
 
 
+class _CreateFailsHwBackend:
+    """Fake backend whose hardware encoder cannot be created (probes available,
+
+    fails to open — like ``h264_nvenc`` on a GPU-less CI host). The software
+    encoder works, so the topic must still transcode to CompressedVideo.
+    """
+
+    label = "fake"
+    prefetch_supported = False
+
+    def resolve_encoder(self, _codec: str) -> str:
+        return "hw_enc"
+
+    def get_pix_fmt(self, _topic: str) -> str | None:
+        return None
+
+    def decode_image(self, _dm: object, _schema_name: str) -> tuple[bytes, int, int]:
+        return b"frame", _W, _H
+
+    def create_encoder(
+        self, _w: int, _h: int, codec_name: str, _quality: int, **_kwargs: object
+    ) -> object:
+        if codec_name == "hw_enc":
+            raise VideoEncoderError("Failed to open encoder hw_enc: Operation not permitted")
+        return _StubSoftwareEncoder()
+
+
+def test_video_processor_falls_back_to_software_when_hw_create_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A hardware encoder that fails to open must not silently pass frames raw.
+
+    Regression for CI where ``h264_nvenc`` probes available but ``avcodec_open2``
+    fails: the topic must fall back to the software encoder and still emit
+    CompressedVideo rather than leaving the input CompressedImage untouched.
+    """
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_cameras(src, ["/cam/front"], n=4)
+
+    monkeypatch.setattr(
+        video_compress,
+        "create_video_compression_backend",
+        lambda *_a, **_k: _CreateFailsHwBackend(),
+    )
+    _run(src, out, extra_processors=[VideoCompressProcessor(codec="h264")])
+
+    assert _counts(out) == {"/cam/front": 4}
+    with out.open("rb") as f:
+        summary = get_summary(f)
+    assert summary is not None
+    chans = [c for c in summary.channels.values() if c.topic == "/cam/front"]
+    assert len(chans) == 1
+    assert summary.schemas[chans[0].schema_id].name == _VIDEO_SCHEMA
+
+
 def test_video_processor_fallback_after_hw_crash_keeps_timestamps_aligned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
