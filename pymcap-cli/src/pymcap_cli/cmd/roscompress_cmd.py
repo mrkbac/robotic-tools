@@ -20,6 +20,7 @@ from rich.console import Console
 
 from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
@@ -33,9 +34,12 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 # roscompress emits already-compressed payloads (CompressedVideo / CompressedImage
-# / CompressedPointCloud); route them to their own uncompressed chunk group so the
-# container zstd pass isn't wasted on data that won't shrink (and never touches
-# them on future reads).
+# / CompressedPointCloud); route them to a *per-topic* uncompressed chunk group so
+# the container zstd pass isn't wasted on data that won't shrink (and never touches
+# them on future reads). Per-topic (not one shared) groups keep each topic's
+# monotonic stream time-ordered: the video transcode emits topics with a per-topic
+# frame-count lag, so a shared group would interleave them into wide, heavily
+# overlapping chunks.
 _COMPRESSED_OUTPUT_PATTERN = re.compile(r"Compressed(Image|Video|PointCloud)")
 
 # Parameter groups
@@ -362,14 +366,21 @@ def roscompress(
         exclude_topic_glob=exclude_topic_glob or None,
         extra_processors=extras or None,
     )
-    # Route the compressed output into its own uncompressed chunk group — the
-    # payloads are already compressed, so a container zstd pass only burns CPU.
+    # Route the compressed output into a per-topic uncompressed chunk group — the
+    # payloads are already compressed, so a container zstd pass only burns CPU, and
+    # per-topic grouping keeps each topic time-ordered and non-overlapping. Cap the
+    # chunk span so a low-byte-rate topic doesn't accumulate one very wide chunk.
     output_processors: list[OutputProcessor] = []
+    max_chunk_span_ns: int | None = None
     if image_format != "none" or pointcloud:
-        output_processors.append(SchemaCompressionGrouper([_COMPRESSED_OUTPUT_PATTERN]))
+        output_processors.append(
+            SchemaCompressionGrouper([_COMPRESSED_OUTPUT_PATTERN], per_channel=True)
+        )
+        max_chunk_span_ns = DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
     output_options = OutputOptions(
         output_processors=output_processors,
         overwrite_policy=overwrite_policy,
+        max_chunk_span_ns=max_chunk_span_ns,
     )
 
     try:

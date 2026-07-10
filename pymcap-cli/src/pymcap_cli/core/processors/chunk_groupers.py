@@ -72,10 +72,16 @@ class SchemaCompressionGrouper(OutputProcessor):
     compressed elsewhere (H.264/H.265 video, Cloudini/Draco point clouds),
     where an extra zstd pass over the chunk gains under 1% (confirmed
     empirically) for real CPU cost on both write and every future read. Pass
-    ``compression`` to route matching schemas elsewhere instead. Matching
-    channels join one shared group; every other channel defers to whatever
-    grouping/compression is otherwise configured (composable with
-    ``PatternGrouper``/``PerChannelGrouper``).
+    ``compression`` to route matching schemas elsewhere instead.
+
+    By default matching channels join one shared group. With
+    ``per_channel=True`` each matching channel gets its own group instead —
+    used when the producers (e.g. per-topic video transcode) emit each topic
+    monotonically but interleave topics out of log-time order: a shared group
+    then buffers wildly out-of-order messages into wide, mutually-overlapping
+    chunks, whereas a per-topic group stays time-ordered and non-overlapping.
+    Every non-matching channel defers to whatever grouping/compression is
+    otherwise configured (composable with ``PatternGrouper``/``PerChannelGrouper``).
     """
 
     _MARKER = "schema-compression-override"
@@ -84,9 +90,12 @@ class SchemaCompressionGrouper(OutputProcessor):
         self,
         schema_patterns: list[Pattern[str]],
         compression: CompressionType = CompressionType.NONE,
+        *,
+        per_channel: bool = False,
     ) -> None:
         self.schema_patterns = schema_patterns
         self.compression = compression
+        self.per_channel = per_channel
 
     def _matches(self, schema: Schema | None) -> bool:
         return schema is not None and any(p.search(schema.name) for p in self.schema_patterns)
@@ -97,8 +106,10 @@ class SchemaCompressionGrouper(OutputProcessor):
         segment_key: OutputKey,
         channel: Channel,
         schema: Schema | None,
-    ) -> str | None:
-        return self._MARKER if self._matches(schema) else None
+    ) -> str | tuple[str, int] | None:
+        if not self._matches(schema):
+            return None
+        return (self._MARKER, channel.id) if self.per_channel else self._MARKER
 
     @override
     def chunk_compression(

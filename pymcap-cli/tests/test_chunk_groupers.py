@@ -7,8 +7,9 @@ import re
 from pymcap_cli.core.processors.chunk_groupers import (
     PatternGrouper,
     PerChannelGrouper,
+    SchemaCompressionGrouper,
 )
-from small_mcap import Channel, Schema
+from small_mcap import Channel, CompressionType, Schema
 
 
 def _channel(channel_id: int, topic: str, schema_id: int = 1) -> Channel:
@@ -98,3 +99,53 @@ class TestPatternGrouper:
         )
         ch = _channel(1, "/cam_a")
         assert grouper.chunk_group_key(0, ch, None) == -1
+
+
+# ---------------------------------------------------------------------------
+# SchemaCompressionGrouper
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaCompressionGrouper:
+    def test_matching_channels_share_one_group_by_default(self):
+        grouper = SchemaCompressionGrouper([re.compile("CompressedVideo")])
+        cam_a = _channel(1, "/cam_a")
+        cam_b = _channel(2, "/cam_b")
+        schema = _schema(1, "foxglove_msgs/CompressedVideo")
+
+        key_a = grouper.chunk_group_key(0, cam_a, schema)
+        key_b = grouper.chunk_group_key(0, cam_b, schema)
+        assert key_a == key_b
+        assert key_a is not None
+
+    def test_non_matching_schema_returns_none(self):
+        grouper = SchemaCompressionGrouper([re.compile("CompressedVideo")])
+        imu = _channel(3, "/imu")
+        assert grouper.chunk_group_key(0, imu, _schema(2, "sensor_msgs/Imu")) is None
+
+    def test_per_channel_splits_matching_channels_into_distinct_groups(self):
+        grouper = SchemaCompressionGrouper([re.compile("CompressedVideo")], per_channel=True)
+        cam_a = _channel(1, "/cam_a")
+        cam_b = _channel(2, "/cam_b")
+        schema = _schema(1, "foxglove_msgs/CompressedVideo")
+
+        key_a = grouper.chunk_group_key(0, cam_a, schema)
+        key_b = grouper.chunk_group_key(0, cam_b, schema)
+        assert key_a is not None
+        assert key_b is not None
+        assert key_a != key_b
+        # Non-matching channels still opt out even with per_channel set.
+        imu = _channel(3, "/imu")
+        assert grouper.chunk_group_key(0, imu, _schema(2, "sensor_msgs/Imu")) is None
+
+    def test_compression_override_applies_to_matching_regardless_of_per_channel(self):
+        for per_channel in (False, True):
+            grouper = SchemaCompressionGrouper(
+                [re.compile("CompressedVideo")], per_channel=per_channel
+            )
+            cam = _channel(1, "/cam_a")
+            assert (
+                grouper.chunk_compression(0, cam, _schema(1, "x/CompressedVideo"))
+                == CompressionType.NONE
+            )
+            assert grouper.chunk_compression(0, cam, _schema(2, "x/Imu")) is None

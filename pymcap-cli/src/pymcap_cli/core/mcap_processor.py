@@ -245,6 +245,10 @@ class OutputOptions:
     # Total uncompressed bytes buffered across all chunk groups in a segment.
     # When exceeded, the largest in-flight chunk is flushed prematurely.
     max_chunk_memory_bytes: int | None = None
+    # Max log-time span of a single chunk. When set, a chunk is also flushed once
+    # its buffered messages span this many nanoseconds, not only at chunk_size —
+    # keeps low-byte-rate groups (already-compressed payloads) time-local.
+    max_chunk_span_ns: int | None = None
 
     # Output routers (split routing, etc.)
     routers: list[OutputRouter] = field(default_factory=list)
@@ -380,9 +384,11 @@ class MessageGroup:
         writer: McapWriter,
         chunk_size: int,
         compression_type: CompressionType,
+        max_chunk_span_ns: int | None = None,
     ) -> None:
         self.writer = writer
         self.chunk_size = chunk_size
+        self.max_chunk_span_ns = max_chunk_span_ns
         self.message_count = 0
         self.compress_fail_counter = 0
         # Each group has its own chunk builder for independent chunking
@@ -404,13 +410,21 @@ class MessageGroup:
         return self.chunk_builder.buffer.tell()
 
     def _flush_if_full(self) -> None:
-        """Finalize and write the current chunk if it has reached the target size."""
-        if (
-            self.chunk_builder.buffer.tell() < self.chunk_builder.chunk_size
-            or self.chunk_builder.num_messages == 0
-        ):
+        """Finalize and write the current chunk if it is full by size or time span.
+
+        Runs before each append, so a span-capped chunk closes once its already
+        buffered messages span ``max_chunk_span_ns``; the message that would push
+        it over starts the next chunk.
+        """
+        if self.chunk_builder.num_messages == 0:
             return
-        self._finalize_and_reset()
+        if self.chunk_builder.buffer.tell() >= self.chunk_builder.chunk_size:
+            self._finalize_and_reset()
+            return
+        if self.max_chunk_span_ns is not None:
+            span = self.chunk_builder.message_end_time - self.chunk_builder.message_start_time
+            if span >= self.max_chunk_span_ns:
+                self._finalize_and_reset()
 
     def flush_premature(self) -> None:
         """Finalize the current chunk now (before chunk_size) and reset the builder.
@@ -886,7 +900,7 @@ class McapProcessor:
         """Create a MessageGroup attached to a specific segment."""
         opts = self.options.output_options
         compression = self._group_compression(segment.key, channel)
-        group = MessageGroup(segment.writer, opts.chunk_size, compression)
+        group = MessageGroup(segment.writer, opts.chunk_size, compression, opts.max_chunk_span_ns)
         segment.chunk_groups.append(group)
         return group
 
