@@ -79,6 +79,15 @@ class MessageContext:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageHeader:
+    channel_id: int
+    sequence: int
+    log_time: int
+    publish_time: int
+    data_length: int
+
+
+@dataclass(frozen=True, slots=True)
 class MessageWithContext:
     """A processor-emitted message with its original routing context.
 
@@ -123,6 +132,20 @@ class Action(IntFlag):
 
     CONTINUE = 0
     SKIP = auto()
+
+
+class MessageHeaderDecision(Enum):
+    """Header-only decision for unchunked message records.
+
+    ``SKIP`` means the message can be dropped without reading its payload.
+    ``READ`` means this processor must see the full ``Message`` before any
+    later header-only filter may skip it. ``CONTINUE`` means this processor has
+    no header-only objection and does not itself require the payload.
+    """
+
+    CONTINUE = auto()
+    SKIP = auto()
+    READ = auto()
 
 
 class ChunkDecision(Enum):
@@ -239,6 +262,17 @@ class InputProcessor:
           messages it produced.
         """
         yield message
+
+    def on_message_header(
+        self, context: MessageContext, header: MessageHeader
+    ) -> MessageHeaderDecision:
+        """Decide whether a message can be skipped from its fixed header alone.
+
+        The default is conservative because custom processors may need the
+        payload in ``on_message``. Pure filters/observers should override this
+        when they can safely make a header-only decision.
+        """
+        return MessageHeaderDecision.READ
 
     def on_metadata(self, context: InputContext, metadata: Metadata) -> Action:
         return Action.CONTINUE

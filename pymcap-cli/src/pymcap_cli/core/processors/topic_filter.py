@@ -9,6 +9,9 @@ from pymcap_cli.core.processors.base import (
     ChannelContext,
     ChunkContext,
     InputProcessor,
+    MessageContext,
+    MessageHeader,
+    MessageHeaderDecision,
     MessageScope,
 )
 from pymcap_cli.utils import compile_topic_patterns
@@ -52,6 +55,12 @@ class TopicFilterProcessor(InputProcessor):
     @override
     def message_scope(self, context: ChunkContext) -> MessageScope:
         return MessageScope.none()
+
+    @override
+    def on_message_header(
+        self, context: MessageContext, header: MessageHeader
+    ) -> MessageHeaderDecision:
+        return MessageHeaderDecision.CONTINUE
 
     @override
     def on_channel(

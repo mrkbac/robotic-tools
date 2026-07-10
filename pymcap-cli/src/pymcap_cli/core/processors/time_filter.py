@@ -11,6 +11,8 @@ from pymcap_cli.core.processors.base import (
     InputContext,
     InputProcessor,
     MessageContext,
+    MessageHeader,
+    MessageHeaderDecision,
     MessageScope,
     PipelineContext,
 )
@@ -149,6 +151,14 @@ class TimeFilterProcessor(InputProcessor):
         if self.start_ns is not None and log_time < self.start_ns:
             return False
         return not (self.end_ns is not None and log_time >= self.end_ns)
+
+    @override
+    def on_message_header(
+        self, context: MessageContext, header: MessageHeader
+    ) -> MessageHeaderDecision:
+        inside = self._in_window(header.log_time)
+        keep = inside ^ self._invert
+        return MessageHeaderDecision.CONTINUE if keep else MessageHeaderDecision.SKIP
 
     @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:

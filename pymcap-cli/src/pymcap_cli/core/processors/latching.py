@@ -26,6 +26,8 @@ from pymcap_cli.core.processors.base import (
     InputContext,
     InputProcessor,
     MessageContext,
+    MessageHeader,
+    MessageHeaderDecision,
     MessageScope,
     PipelineContext,
     SegmentContext,
@@ -136,6 +138,14 @@ class LatchingProcessor(InputProcessor):
         # Fast-copied chunks bypass on_message — if the chunk references a
         # latched channel we must DECODE so the latch cache stays current.
         return MessageScope.channels(set(self._latched_channel_ids))
+
+    @override
+    def on_message_header(
+        self, context: MessageContext, header: MessageHeader
+    ) -> MessageHeaderDecision:
+        if header.channel_id in self._latched_channel_ids:
+            return MessageHeaderDecision.READ
+        return MessageHeaderDecision.CONTINUE
 
     @override
     def on_message(self, context: MessageContext, message: Message) -> Iterable[Message]:

@@ -17,13 +17,19 @@ from rich.console import Console, ConsoleOptions, RenderResult
 from rich.panel import Panel
 from rich.text import Text
 from small_mcap import (
+    MAGIC,
+    MAGIC_SIZE,
+    OPCODE_TO_RECORD,
     Attachment,
     Channel,
     Chunk,
+    ChunkIndex,
     CompressionType,
     DataEnd,
+    EndOfFileError,
     Footer,
     Header,
+    InvalidMagicError,
     LazyChunk,
     McapError,
     McapRecord,
@@ -31,6 +37,8 @@ from small_mcap import (
     Message,
     MessageIndex,
     Metadata,
+    Opcode,
+    RecordLengthLimitExceededError,
     Remapper,
     Schema,
     Statistics,
@@ -38,11 +46,10 @@ from small_mcap import (
     breakup_chunk,
     get_header,
     get_summary,
-    stream_reader,
 )
 
 # Private helpers — small-mcap does not re-export these at the top level.
-from small_mcap.reader import _predecompress_chunk
+from small_mcap.reader import _MESSAGE_STRUCT, _RECORD_SIZE_LIMIT, _predecompress_chunk
 from small_mcap.records import OPCODE_AND_LEN_STRUCT
 from small_mcap.writer import _ChunkBuilder, _compress_chunk_data
 
@@ -58,6 +65,8 @@ from pymcap_cli.core.processors.base import (
     InputContext,
     InputProcessor,
     MessageContext,
+    MessageHeader,
+    MessageHeaderDecision,
     MessageScopeKind,
     MessageWithContext,
     OutputKey,
@@ -168,6 +177,15 @@ def _pread_exact(fd: int, length: int, offset: int) -> bytes:
         parts.append(more)
         got += len(more)
     return b"".join(parts)
+
+
+def _read_exact(stream: IO[bytes], length: int) -> bytes:
+    if length < 0:
+        raise EndOfFileError
+    data = stream.read(length)
+    if len(data) < length:
+        raise EndOfFileError
+    return data
 
 
 def _read_and_recompress_chunk(
@@ -1291,8 +1309,136 @@ class McapProcessor:
 
         self.output_manager.add_attachment(attachment)
 
+    def _message_header_decision(
+        self, header: MessageHeader, stream_id: int
+    ) -> MessageHeaderDecision:
+        if not self._is_channel_included(stream_id, header.channel_id):
+            return MessageHeaderDecision.SKIP
+
+        context = self._message_context(stream_id, header.channel_id)
+        for proc in self._get_processors(stream_id):
+            decision = proc.on_message_header(context, header)
+            if decision is MessageHeaderDecision.SKIP:
+                return decision
+            if decision is MessageHeaderDecision.READ:
+                return decision
+        return MessageHeaderDecision.READ
+
+    def _should_skip_message_payload(self, header: MessageHeader, stream_id: int) -> bool:
+        if self._message_header_decision(header, stream_id) is not MessageHeaderDecision.SKIP:
+            return False
+        self.stats.messages_processed += 1
+        self.stats.filter_rejections += 1
+        return True
+
+    def _handle_metadata_record(self, metadata: Metadata, stream_id: int) -> None:
+        self.stats.metadata_processed += 1
+        processors = self._get_processors(stream_id)
+        context = self._get_input_context(stream_id)
+        if not processors or all(
+            p.on_metadata(context, metadata) != Action.SKIP for p in processors
+        ):
+            assert self.output_manager is not None
+            self.output_manager.add_metadata(name=metadata.name, metadata=metadata.metadata)
+
+    def _lazy_chunk_from_index(self, chunk_index: ChunkIndex) -> LazyChunk:
+        return LazyChunk(
+            message_start_time=chunk_index.message_start_time,
+            message_end_time=chunk_index.message_end_time,
+            uncompressed_size=chunk_index.uncompressed_size,
+            uncompressed_crc=0,
+            compression=chunk_index.compression,
+            record_start=chunk_index.chunk_start_offset,
+            data_len=chunk_index.compressed_size,
+        )
+
+    def _chunk_context_from_index(
+        self,
+        stream_id: int,
+        chunk_index: ChunkIndex,
+    ) -> ChunkContext:
+        indexes = tuple(
+            MessageIndex(channel_id=channel_id, timestamps=[], offsets=[])
+            for channel_id in chunk_index.message_index_offsets
+        )
+        return ChunkContext(
+            input=self._get_input_context(stream_id),
+            message_indexes=indexes or None,
+            chunk_start_time=chunk_index.message_start_time,
+            chunk_end_time=chunk_index.message_end_time,
+        )
+
+    def _should_skip_indexed_chunk_before_indexes(
+        self,
+        chunk: LazyChunk,
+        chunk_index: ChunkIndex,
+        stream_id: int,
+    ) -> bool:
+        context = self._chunk_context_from_index(stream_id, chunk_index)
+        for proc in self._get_processors(stream_id):
+            decision = proc.on_chunk(context, chunk)
+            if decision == ChunkDecision.SKIP:
+                return True
+            if decision in (ChunkDecision.DECODE, ChunkDecision.DECODE_VERIFY):
+                return False
+
+        channel_ids = chunk_index.message_index_offsets
+        return bool(
+            channel_ids
+            and all(
+                not self._is_channel_included(stream_id, channel_id) for channel_id in channel_ids
+            )
+        )
+
+    def _indexed_chunk_scan_plan(
+        self,
+        stream_id: int,
+        summary: Summary | None,
+    ) -> list[ChunkIndex] | None:
+        if summary is None or not summary.chunk_indexes:
+            return None
+        input_options = self.options.inputs[stream_id].options
+        if input_options.include_metadata or input_options.include_attachments:
+            return None
+
+        selected: list[ChunkIndex] = []
+        skipped = 0
+        for chunk_index in sorted(summary.chunk_indexes, key=lambda item: item.message_start_time):
+            chunk = self._lazy_chunk_from_index(chunk_index)
+            if self._should_skip_indexed_chunk_before_indexes(chunk, chunk_index, stream_id):
+                skipped += 1
+                continue
+            selected.append(chunk_index)
+
+        return selected if skipped else None
+
+    def _read_message_indexes_for_chunk(
+        self,
+        input_stream: IO[bytes],
+        chunk_index: ChunkIndex,
+    ) -> list[MessageIndex]:
+        if not chunk_index.message_index_offsets:
+            return []
+        indexes: list[MessageIndex] = []
+        for offset in sorted(chunk_index.message_index_offsets.values()):
+            input_stream.seek(offset)
+            indexes.append(MessageIndex.read_record(input_stream))
+        return indexes
+
+    def _generate_indexed_chunks_from_plan(
+        self,
+        input_stream: IO[bytes],
+        stream_id: int,
+        chunk_indexes: list[ChunkIndex],
+    ) -> Iterator[PendingChunk]:
+        for chunk_index in chunk_indexes:
+            chunk = self._lazy_chunk_from_index(chunk_index)
+            indexes = self._read_message_indexes_for_chunk(input_stream, chunk_index)
+            self.stats.chunks_processed += 1
+            yield PendingChunk(chunk, indexes, stream_id, input_stream, chunk.message_start_time)
+
     def _generate_chunks_from_stream(
-        self, input_stream: IO[bytes], stream_id: int
+        self, input_stream: IO[bytes], stream_id: int, summary: Summary | None = None
     ) -> Iterator[PendingChunk]:
         """Generate chunks from a single stream in file order.
 
@@ -1300,13 +1446,87 @@ class McapProcessor:
         Non-chunk records (Schema, Channel, Message, Attachment, Metadata) are processed directly.
         Uses lazy_chunks=True for efficiency - chunk data is only read when needed.
         """
+        indexed_plan = self._indexed_chunk_scan_plan(stream_id, summary)
+        if indexed_plan is not None:
+            yield from self._generate_indexed_chunks_from_plan(
+                input_stream, stream_id, indexed_plan
+            )
+            return
+
         pending: PendingChunk | None = None
 
         try:
-            records = stream_reader(input_stream, emit_chunks=True, lazy_chunks=True)
             indexes: list[MessageIndex] = []
+            magic = _read_exact(input_stream, MAGIC_SIZE)
+            if magic != MAGIC:
+                raise InvalidMagicError(magic)
 
-            for record in records:
+            while True:
+                record_start = input_stream.tell()
+                header_bytes = input_stream.read(OPCODE_AND_LEN_STRUCT.size)
+                if len(header_bytes) == 0:
+                    break
+                if len(header_bytes) < OPCODE_AND_LEN_STRUCT.size:
+                    raise EndOfFileError
+                opcode, length = OPCODE_AND_LEN_STRUCT.unpack(header_bytes)
+                if length > _RECORD_SIZE_LIMIT:
+                    raise RecordLengthLimitExceededError(opcode, length, _RECORD_SIZE_LIMIT)
+
+                if opcode == Opcode.MESSAGE:
+                    if pending:
+                        yield pending
+                        pending = None
+                    if length < _MESSAGE_STRUCT.size:
+                        raise EndOfFileError
+                    message_header_bytes = _read_exact(input_stream, _MESSAGE_STRUCT.size)
+                    channel_id, sequence, log_time, publish_time = _MESSAGE_STRUCT.unpack(
+                        message_header_bytes
+                    )
+                    data_length = length - _MESSAGE_STRUCT.size
+                    message_header = MessageHeader(
+                        channel_id=channel_id,
+                        sequence=sequence,
+                        log_time=log_time,
+                        publish_time=publish_time,
+                        data_length=data_length,
+                    )
+                    if self._should_skip_message_payload(message_header, stream_id):
+                        input_stream.seek(data_length, os.SEEK_CUR)
+                        continue
+                    data = _read_exact(input_stream, data_length)
+                    self._handle_message_record(
+                        Message(
+                            channel_id=channel_id,
+                            sequence=sequence,
+                            log_time=log_time,
+                            publish_time=publish_time,
+                            data=data,
+                        ),
+                        stream_id,
+                    )
+                    continue
+
+                if opcode == Opcode.CHUNK:
+                    if pending:
+                        yield pending
+                    self.stats.chunks_processed += 1
+                    chunk = LazyChunk.read_from_stream(input_stream, record_start, length)
+                    pending = PendingChunk(
+                        chunk, indexes := [], stream_id, input_stream, chunk.message_start_time
+                    )
+                    continue
+
+                record: McapRecord | None
+                if opcode == Opcode.MESSAGE_INDEX:
+                    data = _read_exact(input_stream, length)
+                    record = MessageIndex.read(data)
+                elif record_cls := OPCODE_TO_RECORD.get(opcode):
+                    data = _read_exact(input_stream, length)
+                    record = record_cls.read(data)
+                else:
+                    input_stream.seek(length, os.SEEK_CUR)
+                    continue
+
                 # MessageIndex is by far the most common record on index-heavy
                 # files (one per channel per chunk). isinstance against the
                 # McapRecord ABC hits ABCMeta.__instancecheck__ and dominated the
@@ -1321,30 +1541,16 @@ class McapProcessor:
                     yield pending
                     pending = None
 
-                if isinstance(record, (Chunk, LazyChunk)):
-                    self.stats.chunks_processed += 1
-                    pending = PendingChunk(
-                        record, indexes := [], stream_id, input_stream, record.message_start_time
-                    )
-                elif isinstance(record, Header):
+                if isinstance(record, Header):
                     pass
                 elif isinstance(record, Schema):
                     self._handle_schema_record(record, stream_id)
                 elif isinstance(record, Channel):
                     self._handle_channel_record(record, stream_id)
-                elif isinstance(record, Message):
-                    self._handle_message_record(record, stream_id)
                 elif isinstance(record, Attachment):
                     self._handle_attachment_record(record, stream_id)
                 elif isinstance(record, Metadata):
-                    self.stats.metadata_processed += 1
-                    processors = self._get_processors(stream_id)
-                    context = self._get_input_context(stream_id)
-                    if not processors or all(
-                        p.on_metadata(context, record) != Action.SKIP for p in processors
-                    ):
-                        assert self.output_manager is not None
-                        self.output_manager.add_metadata(name=record.name, metadata=record.metadata)
+                    self._handle_metadata_record(record, stream_id)
                 elif isinstance(record, (DataEnd, Footer)):
                     break
 
@@ -1500,7 +1706,9 @@ class McapProcessor:
 
                 # Create chunk generators for each wrapped stream
                 chunk_generators = [
-                    self._generate_chunks_from_stream(wrapped_stream, stream_id)
+                    self._generate_chunks_from_stream(
+                        wrapped_stream, stream_id, summaries[stream_id]
+                    )
                     for stream_id, wrapped_stream in enumerate(wrapped_streams)
                 ]
 
