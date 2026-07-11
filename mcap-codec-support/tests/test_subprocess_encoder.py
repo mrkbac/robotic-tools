@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 
 import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.ffmpeg as ffmpeg_module
@@ -145,6 +146,26 @@ class TestFfmpegDiscovery:
     @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
     def test_check_encoder_cli_nonexistent(self) -> None:
         assert check_encoder_cli("totally_fake_encoder_xyz") is False
+
+    def test_resolve_encoder_skips_listed_but_unusable_hardware(self, monkeypatch) -> None:
+        monkeypatch.setattr(ffmpeg_module, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(ffmpeg_module.platform, "system", lambda: "Linux")
+
+        def fake_run(args, **_kwargs):
+            if "-encoders" in args:
+                stdout = " V..... h264_nvenc NVIDIA NVENC H.264 encoder\n"
+                return subprocess.CompletedProcess(args, 0, stdout, "")
+            if "h264_nvenc" in args:
+                return subprocess.CompletedProcess(args, 1, b"", b"no NVIDIA device")
+            raise AssertionError(f"unexpected ffmpeg command: {args}")
+
+        monkeypatch.setattr(ffmpeg_module.subprocess, "run", fake_run)
+
+        ffmpeg_module.probe_encoder_cli.cache_clear()
+        try:
+            assert ffmpeg_module.resolve_encoder("h264") == "libx264"
+        finally:
+            ffmpeg_module.probe_encoder_cli.cache_clear()
 
 
 @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")

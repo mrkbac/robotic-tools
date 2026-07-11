@@ -59,12 +59,59 @@ def check_encoder_cli(encoder_name: str) -> bool:
     return False
 
 
+@lru_cache(maxsize=32)
+def probe_encoder_cli(encoder_name: str, timeout: float = 5.0) -> bool:
+    """Check that *encoder_name* can encode a frame on this host.
+
+    FFmpeg may list hardware encoders compiled into the binary even when the
+    corresponding device or driver is unavailable. A small real encode keeps
+    automatic selection from choosing those unusable encoders.
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg or not check_encoder_cli(encoder_name):
+        return False
+    width = height = 64
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-s:v",
+                f"{width}x{height}",
+                "-r",
+                "1",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+                "-c:v",
+                encoder_name,
+                "-f",
+                "null",
+                "-",
+            ],
+            input=bytes(width * height * 3 // 2),
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
 def resolve_encoder(codec: str) -> str:
-    """Pick the best available encoder for *codec* using ffmpeg CLI to probe."""
+    """Pick the best working encoder for *codec* using ffmpeg CLI to probe."""
     if not find_ffmpeg():
         raise VideoEncoderError("ffmpeg not found on PATH")
     try:
-        return _resolve_encoder(codec, test_fn=check_encoder_cli)
+        return _resolve_encoder(codec, test_fn=probe_encoder_cli)
     except ValueError as exc:
         raise VideoEncoderError(str(exc)) from exc
 

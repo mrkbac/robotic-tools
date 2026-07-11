@@ -120,9 +120,9 @@ class _FfmpegCliCompressionBackend:
         return self._topic_pix_fmt.get(topic)
 
     def test_encoder(self, encoder_name: str) -> bool:
-        from mcap_codec_support.video.ffmpeg import check_encoder_cli  # noqa: PLC0415
+        from mcap_codec_support.video.ffmpeg import probe_encoder_cli  # noqa: PLC0415
 
-        return check_encoder_cli(encoder_name)
+        return probe_encoder_cli(encoder_name)
 
     def resolve_encoder(self, codec: str) -> str:
         from mcap_codec_support.video.ffmpeg import resolve_encoder  # noqa: PLC0415
