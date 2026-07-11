@@ -203,6 +203,14 @@ class TestHwMjpegDecodeProbe:
 
 
 class TestBackendSelection:
+    @pytest.fixture(autouse=True)
+    def _skip_gstreamer_auto(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            compression_module,
+            "_create_gstreamer_backend_if_healthy",
+            lambda *_: None,
+        )
+
     def test_auto_falls_back_to_ffmpeg_when_pyav_is_missing(self, monkeypatch) -> None:
         def raise_import_error(*_args):
             raise ImportError("No module named av")
@@ -237,6 +245,7 @@ class TestBackendSelection:
         assert backend.label == "ffmpeg-cli"
 
     def test_auto_keeps_pyav_when_it_has_hardware(self, monkeypatch) -> None:
+        monkeypatch.setattr(compression_module.os, "cpu_count", lambda: 4)
         monkeypatch.setattr(
             compression_module._PyAVCompressionBackend,
             "resolve_encoder",
@@ -245,8 +254,24 @@ class TestBackendSelection:
         backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
         assert backend.label != "ffmpeg-cli"
 
+    def test_auto_prefers_ffmpeg_for_hardware_on_high_core_hosts(self, monkeypatch) -> None:
+        monkeypatch.setattr(compression_module.os, "cpu_count", lambda: 8)
+        monkeypatch.setattr(
+            compression_module._PyAVCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "h264_nvenc",
+        )
+        monkeypatch.setattr(
+            compression_module._FfmpegCliCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "h264_nvenc",
+        )
+        backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
+        assert backend.label == "ffmpeg-cli"
+
     def test_auto_keeps_pyav_when_neither_has_hardware(self, monkeypatch) -> None:
         # No hardware anywhere → stay on PyAV (in-process, no subprocess/pipe cost).
+        monkeypatch.setattr(compression_module.os, "cpu_count", lambda: 8)
         monkeypatch.setattr(
             compression_module._PyAVCompressionBackend,
             "resolve_encoder",

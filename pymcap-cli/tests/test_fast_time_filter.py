@@ -18,8 +18,10 @@ class CountingBytesIO(io.BytesIO):
     def __init__(self, data: bytes) -> None:
         super().__init__(data)
         self.bytes_read = 0
+        self.read_sizes: list[int] = []
 
     def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
         data = super().read(size)
         self.bytes_read += len(data)
         return data
@@ -35,6 +37,7 @@ class ProcessorRun:
     stats: ProcessingStats
     output: bytes
     bytes_read: int
+    read_sizes: list[int]
 
 
 def _run_processor(data: bytes, input_options: InputOptions) -> ProcessorRun:
@@ -47,7 +50,10 @@ def _run_processor(data: bytes, input_options: InputOptions) -> ProcessorRun:
     )
     stats = McapProcessor(options).process(output_stream)
     return ProcessorRun(
-        stats=stats, output=output_stream.getvalue(), bytes_read=input_stream.bytes_read
+        stats=stats,
+        output=output_stream.getvalue(),
+        bytes_read=input_stream.bytes_read,
+        read_sizes=input_stream.read_sizes,
     )
 
 
@@ -127,6 +133,20 @@ def test_unchunked_time_filter_seeks_over_rejected_payloads() -> None:
 
     assert [log_time for _topic, log_time, _payload in _read_output(result.output)] == [0, 10]
     assert result.bytes_read < len(data) - (2 * payload_size)
+
+
+def test_unchunked_accepted_message_reads_body_once() -> None:
+    payload_size = 200_000
+    data = _build_unchunked([(10, 1, b"x" * payload_size)])
+
+    result = _run_processor(
+        data,
+        InputOptions.from_args(include_metadata=False, include_attachments=False),
+    )
+
+    assert _read_output(result.output) == [("/test", 10, b"x" * payload_size)]
+    assert payload_size + 22 in result.read_sizes
+    assert payload_size not in result.read_sizes
 
 
 def test_unchunked_time_filter_does_not_stop_on_non_monotonic_time() -> None:

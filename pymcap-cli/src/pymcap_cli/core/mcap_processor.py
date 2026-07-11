@@ -205,6 +205,12 @@ def _read_and_recompress_chunk(
     return _recompress_chunk(chunk, target, zstd_level)
 
 
+def _read_and_decode_chunk_records(fd: int, body_offset: int, body_length: int) -> list[McapRecord]:
+    """Worker-side: read a Chunk record body by absolute offset and decode records."""
+    chunk = Chunk.read(_pread_exact(fd, body_length, body_offset))
+    return _decode_chunk_records(chunk)
+
+
 @dataclass(slots=True)
 class PendingChunk:
     chunk: Chunk | LazyChunk
@@ -251,6 +257,7 @@ class OutputOptions:
     # zstd compression level; None uses the library default (3). Negative levels
     # select the fast modes (much higher throughput, slightly larger output).
     zstd_level: int | None = None
+    async_output_buffer_bytes: int = 0
 
     # Output processors (chunk grouping). When non-empty, each surviving
     # message is routed through a per-segment MessageGroup keyed by the
@@ -765,6 +772,13 @@ class McapProcessor:
         self._input_processors: list[list[InputProcessor]] = [
             build_input_processors(input_file.options) for input_file in self.options.inputs
         ]
+        self._has_payload_skipping_filters = tuple(
+            input_file.options.start_time_ns is not None
+            or input_file.options.end_time_ns is not None
+            or bool(input_file.options.include_topics)
+            or bool(input_file.options.exclude_topics)
+            for input_file in self.options.inputs
+        )
         self._input_contexts: list[InputContext | None] = [None for _ in self.options.inputs]
         self._validate_processor_roles()
 
@@ -1478,22 +1492,40 @@ class McapProcessor:
                         pending = None
                     if length < _MESSAGE_STRUCT.size:
                         raise EndOfFileError
-                    message_header_bytes = _read_exact(input_stream, _MESSAGE_STRUCT.size)
-                    channel_id, sequence, log_time, publish_time = _MESSAGE_STRUCT.unpack(
-                        message_header_bytes
-                    )
-                    data_length = length - _MESSAGE_STRUCT.size
-                    message_header = MessageHeader(
-                        channel_id=channel_id,
-                        sequence=sequence,
-                        log_time=log_time,
-                        publish_time=publish_time,
-                        data_length=data_length,
-                    )
-                    if self._should_skip_message_payload(message_header, stream_id):
-                        input_stream.seek(data_length, os.SEEK_CUR)
-                        continue
-                    data = _read_exact(input_stream, data_length)
+                    if self._has_payload_skipping_filters[stream_id]:
+                        message_header_bytes = _read_exact(input_stream, _MESSAGE_STRUCT.size)
+                        channel_id, sequence, log_time, publish_time = _MESSAGE_STRUCT.unpack(
+                            message_header_bytes
+                        )
+                        data_length = length - _MESSAGE_STRUCT.size
+                        message_header = MessageHeader(
+                            channel_id=channel_id,
+                            sequence=sequence,
+                            log_time=log_time,
+                            publish_time=publish_time,
+                            data_length=data_length,
+                        )
+                        if self._should_skip_message_payload(message_header, stream_id):
+                            input_stream.seek(data_length, os.SEEK_CUR)
+                            continue
+                        data: bytes | memoryview = _read_exact(input_stream, data_length)
+                    else:
+                        message_body = _read_exact(input_stream, length)
+                        channel_id, sequence, log_time, publish_time = _MESSAGE_STRUCT.unpack_from(
+                            message_body
+                        )
+                        data_length = length - _MESSAGE_STRUCT.size
+                        message_header = MessageHeader(
+                            channel_id=channel_id,
+                            sequence=sequence,
+                            log_time=log_time,
+                            publish_time=publish_time,
+                            data_length=data_length,
+                        )
+                        if self._should_skip_message_payload(message_header, stream_id):
+                            continue
+                        data = memoryview(message_body)[_MESSAGE_STRUCT.size :]
+
                     self._handle_message_record(
                         Message(
                             channel_id=channel_id,
@@ -2035,6 +2067,32 @@ class McapProcessor:
                         queue.append((pending, decision, future))
                         return True
 
+                if decision == ChunkDecision.DECODE and type(pending.chunk) is LazyChunk:
+                    fd = regular_file_fd(pending.stream_id, pending.stream)
+                    if fd is not None:
+                        record_start = pending.chunk.record_start
+                        try:
+                            opcode_and_len = _pread_exact(fd, 9, record_start)
+                        except EOFError as e:
+                            console.print(
+                                f"[yellow]Warning (stream {pending.stream_id}): "
+                                f"Failed to read chunk: {e}[/yellow]"
+                            )
+                            self.stats.errors_encountered += 1
+                            return True
+                        _opcode, record_length = OPCODE_AND_LEN_STRUCT.unpack(opcode_and_len)
+                        body_offset = record_start + 9
+                        if isinstance(pending.stream, ProgressTrackingIO):
+                            pending.stream.mark_read_to(body_offset + record_length)
+                        future = pool.submit(
+                            _read_and_decode_chunk_records,
+                            fd,
+                            body_offset,
+                            record_length,
+                        )
+                        queue.append((pending, decision, future))
+                        return True
+
                 if decision in (
                     ChunkDecision.DECODE,
                     ChunkDecision.DECODE_VERIFY,
@@ -2114,7 +2172,7 @@ class McapProcessor:
             assert future is not None
             try:
                 records = cast("Future[list[McapRecord]]", future).result()
-            except McapError as e:
+            except (EOFError, McapError) as e:
                 console.print(
                     f"[yellow]Warning (stream {pending.stream_id}): "
                     f"Failed to decode chunk: {e}[/yellow]"
@@ -2132,7 +2190,7 @@ class McapProcessor:
             assert future is not None
             try:
                 records = cast("Future[list[McapRecord]]", future).result()
-            except McapError as e:
+            except (EOFError, McapError) as e:
                 console.print(
                     f"[yellow]Warning (stream {pending.stream_id}): "
                     f"Failed to decode chunk: {e}[/yellow]"
@@ -2161,7 +2219,7 @@ class McapProcessor:
             assert future is not None
             try:
                 new_chunk = cast("Future[Chunk]", future).result()
-            except McapError as e:
+            except (EOFError, McapError) as e:
                 console.print(
                     f"[yellow]Warning (stream {pending.stream_id}): "
                     f"Failed to recompress chunk: {e}[/yellow]"

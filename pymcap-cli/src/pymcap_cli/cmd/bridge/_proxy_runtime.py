@@ -5,7 +5,7 @@ import contextlib
 import logging
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -25,6 +25,7 @@ class LiveTransformer(Protocol):
     output_schema_text: str
     output_schema_encoding: str
     output_message_encoding: str
+    worker_count: int
 
     def transform(self, decoded: object, timestamp_ns: int) -> "TransformResult | None": ...
 
@@ -42,6 +43,7 @@ class TransformResult:
 class IncomingMessage:
     timestamp_ns: int
     payload: bytes
+    arrival_index: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,7 @@ class ProxyMetrics:
     upstream_messages_throttled: int = 0
     transformed_channel_count: int = 0
     transform_queue_drops: int = 0
+    transform_stale_drops: int = 0
     transform_errors: int = 0
     send_queue_drops: int = 0
     send_errors: int = 0
@@ -184,14 +187,20 @@ class TransformWorker:
         self._queue: asyncio.Queue[IncomingMessage] = asyncio.Queue(maxsize=max(1, queue_size))
         self._emit = emit
         self._metrics = metrics
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor = ThreadPoolExecutor(max_workers=max(1, transformer.worker_count))
         self._decoder_factory = DecoderFactory()
         self._encoder_factory = ROS2EncoderFactory()
         self._decoder = self._decoder_for(channel)
         self._encoder = self._encoder_for(transformer)
-        self._task = asyncio.create_task(self._run())
+        self._next_arrival_index = 0
+        self._latest_emitted_index = -1
+        self._tasks = tuple(
+            asyncio.create_task(self._run()) for _ in range(max(1, transformer.worker_count))
+        )
 
     def enqueue(self, message: IncomingMessage) -> None:
+        message = replace(message, arrival_index=self._next_arrival_index)
+        self._next_arrival_index += 1
         while self._queue.full():
             self._queue.get_nowait()
             self._queue.task_done()
@@ -199,10 +208,10 @@ class TransformWorker:
         self._queue.put_nowait(message)
 
     async def close(self) -> None:
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-        self._executor.shutdown(wait=False)
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)
         self._transformer.close()
 
     async def _run(self) -> None:
@@ -217,6 +226,10 @@ class TransformWorker:
                     logger.exception("Transform failed for %s", self._channel["topic"])
                     continue
                 if outbound is not None:
+                    if message.arrival_index < self._latest_emitted_index:
+                        self._metrics.transform_stale_drops += 1
+                        continue
+                    self._latest_emitted_index = message.arrival_index
                     self._emit(outbound)
             finally:
                 self._queue.task_done()

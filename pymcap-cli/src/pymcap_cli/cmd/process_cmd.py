@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, TypeVar
@@ -12,7 +11,10 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
-from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
+from pymcap_cli.cmd._pointcloud_cleanup import (
+    pointcloud_worker_count,
+    resolve_pointcloud_cleanup,
+)
 from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy, build_output_processors
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
@@ -302,8 +304,8 @@ def process(
             help="Video encode backend: pyav (in-process), ffmpeg-cli (system "
             "ffmpeg subprocess — hardware NVENC without a custom PyAV build), or "
             "gstreamer (L4T GStreamer nvjpegdec + nvv4l2 — hardware JPEG decode + "
-            "encode; opt-in only, nvjpegdec can crush shadows on full-range "
-            "footage). auto never selects gstreamer.",
+            "encode; nvjpegdec can crush shadows on full-range footage). auto "
+            "uses it only when its hardware probe succeeds.",
         ),
     ] = "auto",
     video_encoder: Annotated[
@@ -733,12 +735,11 @@ def process(
                     PointcloudCompressProcessor,
                 )
 
-                # Parallelize only when video isn't also being compressed — with
-                # video, point clouds are hidden behind the video worker threads
-                # and a second pool just contends for CPU.
-                pc_workers = 0 if compress_video else min(4, max(2, (os.cpu_count() or 4) - 2))
                 extras.append(
-                    PointcloudCompressProcessor(resolution=pc_resolution, workers=pc_workers)
+                    PointcloudCompressProcessor(
+                        resolution=pc_resolution,
+                        workers=pointcloud_worker_count(),
+                    )
                 )
         except (ImportError, VideoEncoderError) as e:
             logger.error(str(e))  # noqa: TRY400

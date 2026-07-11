@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.gstreamer as gstreamer_module
 import pytest
@@ -11,6 +13,8 @@ from mcap_codec_support.video.gstreamer import (
     PROBE_JPEG,
     GStreamerCompressionBackend,
     _codec_key,
+    _gstreamer_env,
+    _quality_to_qp,
     check_encoder,
     find_gst_launch,
     gst_element_available,
@@ -40,6 +44,49 @@ class TestDiscovery:
         assert _codec_key("nvv4l2h264enc") == "h264"
         assert _codec_key("h265") == "h265"
         assert _codec_key("hevc") == "h265"
+
+    def test_quality_to_qp_offsets_nvenc_like_quality(self) -> None:
+        assert _quality_to_qp(28) == 35
+        assert _quality_to_qp(100) == 51
+        assert _quality_to_qp(-10) == 0
+
+    def test_gstreamer_env_prepends_cuda_nvjpeg_dirs(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            gstreamer_module,
+            "_nvjpeg_library_dirs",
+            lambda: ("/usr/local/cuda-13.0/targets/sbsa-linux/lib",),
+        )
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/existing")
+
+        env = _gstreamer_env()
+
+        assert env is not None
+        assert env["LD_LIBRARY_PATH"].split(":")[:2] == [
+            "/usr/local/cuda-13.0/targets/sbsa-linux/lib",
+            "/existing",
+        ]
+
+    def test_nvjpeg_library_dirs_finds_packaged_runtime(self, monkeypatch, tmp_path: Path) -> None:
+        relative_library = Path("nvidia/nvjpeg/lib/libnvjpeg.so.13")
+        library = tmp_path / relative_library
+        library.parent.mkdir(parents=True)
+        library.write_bytes(b"")
+
+        class FakeDistribution:
+            files = (relative_library,)
+
+            @staticmethod
+            def locate_file(path: Path) -> Path:
+                return tmp_path / path
+
+        monkeypatch.setattr(
+            gstreamer_module, "distribution", lambda _name: FakeDistribution(), raising=False
+        )
+        gstreamer_module._nvjpeg_library_dirs.cache_clear()
+        try:
+            assert str(library.parent) in gstreamer_module._nvjpeg_library_dirs()
+        finally:
+            gstreamer_module._nvjpeg_library_dirs.cache_clear()
 
     @pytest.mark.skipif(not _HAS_NV, reason="Jetson nv elements not available")
     def test_resolve_encoder_h264(self) -> None:
@@ -119,30 +166,43 @@ class TestBackendDecode:
 
 
 class TestBackendSelection:
-    @pytest.mark.skipif(not _HW_OK, reason="Jetson hardware pipeline not healthy")
     def test_explicit_gstreamer_mode(self) -> None:
-        # Explicit mode runs the liveness probe, then returns the backend.
         backend = create_video_compression_backend(EncoderMode.GSTREAMER, "h264", do_video=True)
         assert backend.label == "gstreamer"
 
-    def test_explicit_gstreamer_raises_when_pipeline_unhealthy(self, monkeypatch) -> None:
-        # A codec stack that hangs / produces nothing probes False → explicit
-        # mode raises a clear error rather than proceeding into a hang.
-        monkeypatch.setattr(gstreamer_module, "probe_hw_jpeg_pipeline", lambda *_a, **_k: False)
-        with pytest.raises(VideoEncoderError):
-            create_video_compression_backend(EncoderMode.GSTREAMER, "h264", do_video=True)
+    def test_explicit_gstreamer_mode_does_not_run_liveness_probe(self, monkeypatch) -> None:
+        def fail_probe(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("explicit backend selection should not run the encode probe")
 
-    def test_auto_never_selects_gstreamer(self, monkeypatch) -> None:
-        # Jetson is opt-in only (its nvjpegdec colour handling is not faithful on
-        # all inputs), so AUTO must never return it — even where gst is present.
+        monkeypatch.setattr(gstreamer_module, "probe_hw_jpeg_pipeline", fail_probe)
+        backend = create_video_compression_backend(EncoderMode.GSTREAMER, "h264", do_video=True)
+        assert backend.label == "gstreamer"
+
+    def test_auto_prefers_healthy_gstreamer(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            compression_module,
+            "_create_gstreamer_backend_if_healthy",
+            lambda *_: GStreamerCompressionBackend(),
+        )
+        backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
+        assert backend.label == "gstreamer"
+
+    def test_auto_skips_unhealthy_gstreamer(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            compression_module,
+            "_create_gstreamer_backend_if_healthy",
+            lambda *_: None,
+        )
         monkeypatch.setattr(
             compression_module._PyAVCompressionBackend, "resolve_encoder", lambda *_: "libx264"
         )
         monkeypatch.setattr(
-            compression_module._FfmpegCliCompressionBackend, "resolve_encoder", lambda *_: "libx264"
+            compression_module._FfmpegCliCompressionBackend,
+            "resolve_encoder",
+            lambda *_: "h264_nvenc",
         )
         backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
-        assert backend.label != "gstreamer"
+        assert backend.label == "ffmpeg-cli"
 
 
 # ---------------------------------------------------------------------------

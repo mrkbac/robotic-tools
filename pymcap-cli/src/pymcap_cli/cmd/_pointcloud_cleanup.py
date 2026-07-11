@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -8,6 +9,11 @@ class PointcloudCleanupConfig:
     enabled: bool
     drop_invalid: bool
     sort_field: str | None
+
+
+def pointcloud_worker_count(*, max_workers: int = 4) -> int:
+    """Return the measured throughput knee, bounded for the caller's workload."""
+    return min(max_workers, max(2, (os.cpu_count() or 4) - 2))
 
 
 def resolve_pointcloud_cleanup(
@@ -24,8 +30,6 @@ def resolve_pointcloud_cleanup(
         else pointcloud_compression_enabled or has_cleanup_flag
     )
     sort_field = _normalize_sort_field(pointcloud_sort_field)
-    if pointcloud_sort_field is None and (pointcloud_compression_enabled or has_cleanup_flag):
-        sort_field = "line"
 
     return PointcloudCleanupConfig(
         enabled=drop_invalid or sort_field is not None,

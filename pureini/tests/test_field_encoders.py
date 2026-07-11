@@ -470,5 +470,29 @@ def test_multi_chunk_zstd():
         assert abs(out[i] - values[i]) <= tolerance, f"Mismatch at {i}"
 
 
+def test_zstd_compresses_jit_buffer_without_intermediate_bytes_copy():
+    info = EncodingInfo(
+        width=4,
+        height=1,
+        point_step=4,
+        encoding_opt=EncodingOptions.LOSSY,
+        compression_opt=CompressionOption.ZSTD,
+        fields=[PointField(name="val", offset=0, type=FieldType.FLOAT32, resolution=0.01)],
+    )
+    encoder = PointcloudEncoder(info)
+    seen: list[type] = []
+
+    class RecordingCompressor:
+        def compress(self, data: memoryview) -> bytes:
+            seen.append(type(data))
+            return bytes(data)
+
+    encoder._zstd_cctx = RecordingCompressor()
+
+    encoder.encode(np.arange(4, dtype=np.float32).tobytes())
+
+    assert seen == [memoryview]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

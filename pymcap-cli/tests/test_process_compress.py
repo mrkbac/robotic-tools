@@ -10,6 +10,7 @@ import io
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pymcap_cli.core.processors.pointcloud_compress as pointcloud_compress
 from mcap_codec_support.pointcloud.factories import CloudiniPointCloudDecompressFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.process_cmd import process
@@ -22,6 +23,8 @@ from tests.fixtures.image_mcap_generator import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 _PC_SCHEMA = """std_msgs/Header header
 uint32 height
@@ -137,9 +140,29 @@ def _compressed_point_counts(path: Path) -> list[int]:
         ]
 
 
-def test_process_compress_video_and_pointcloud_with_drop(tmp_path: Path):
+def test_process_compress_video_and_pointcloud_with_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_mixed(src)
+    worker_counts: list[int] = []
+    real_processor = pointcloud_compress.PointcloudCompressProcessor
+
+    def recording_pointcloud_compress_processor(
+        *, resolution: float, workers: int
+    ) -> pointcloud_compress.PointcloudCompressProcessor:
+        worker_counts.append(workers)
+        return real_processor(resolution=resolution, workers=workers)
+
+    monkeypatch.setattr(
+        pointcloud_compress,
+        "PointcloudCompressProcessor",
+        recording_pointcloud_compress_processor,
+    )
+    monkeypatch.setattr(
+        "pymcap_cli.cmd._pointcloud_cleanup.os.cpu_count",
+        lambda: 14,
+    )
 
     rc = process(
         file=[str(src)],
@@ -163,6 +186,7 @@ def test_process_compress_video_and_pointcloud_with_drop(tmp_path: Path):
     assert counts["/lidar/points"] == 8
     assert counts["/status"] == 8
     assert _compressed_point_counts(out) == [8] * 8
+    assert worker_counts == [4]
 
 
 def test_process_compress_pointcloud_only_leaves_video_untouched(tmp_path: Path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import mcap_codec_support.pointcloud.preprocess as preprocess_module
 import numpy as np
 import pytest
 from mcap_codec_support.pointcloud import drop_invalid_and_reorder
@@ -100,5 +101,21 @@ def test_drop_invalid_preserves_all_field_values(sort_field):
     out = drop_invalid_and_reorder(_make_cloud(xyz, line), sort_field=sort_field)
     pts = read_points(out)
     # the line value must travel with its point through filtering/reordering
+    mapping = {float(p["x"]): int(p["line"]) for p in pts}
+    assert mapping == {1.0: 5, 2.0: 3}
+
+
+def test_drop_invalid_sort_none_falls_back_without_numba(monkeypatch):
+    def raise_import_error():
+        raise ImportError("numba unavailable")
+
+    monkeypatch.setattr(preprocess_module, "_copy_valid_word_points_numba", raise_import_error)
+    monkeypatch.setattr(preprocess_module, "_invalid_xyz_mask_numba", raise_import_error)
+
+    xyz = np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [2.0, 2.0, 2.0]], dtype=np.float32)
+    line = np.array([5, 9, 3], dtype=np.uint8)
+    out = drop_invalid_and_reorder(_make_cloud(xyz, line), sort_field=None)
+    pts = read_points(out)
+
     mapping = {float(p["x"]): int(p["line"]) for p in pts}
     assert mapping == {1.0: 5, 2.0: 3}

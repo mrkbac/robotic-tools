@@ -32,9 +32,9 @@ pronounced. libjpeg (PyAV/Pillow) and ffmpeg's ``mjpeg`` decoder both agree on
 full-range and do not exhibit this, so the Jetson output can look darker than the
 other backends. The nv GStreamer elements expose no range override that fixes it
 (the encoder rejects full-range NV12 input, and ``nvjpegdec`` will not renegotiate
-its output colorimetry). Because of this the backend is **opt-in only** and is
-never auto-selected. Prefer it when transcode throughput / freeing the CPU from
-JPEG decode matters more than exact shadow fidelity.
+its output colorimetry). AUTO may select this backend when the hardware pipeline
+probe succeeds because throughput is the priority for roscompress; use explicit
+``pyav`` or ``ffmpeg-cli`` when exact shadow fidelity matters more than speed.
 """
 
 from __future__ import annotations
@@ -46,6 +46,8 @@ import subprocess
 import threading
 import time
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING
 
@@ -85,6 +87,11 @@ _PIX_FMT_TO_RAW: dict[str, str] = {
     "bgr24": "bgr",
     "gray": "gray8",
 }
+
+# Large camera JPEG/raw frames overflow Python's BufferedWriter and reach the
+# child without an explicit flush. Tiny probe/live frames need the flush to keep
+# latency predictable and avoid buffered cleanup warnings during forced close.
+_SMALL_WRITE_FLUSH_BYTES = 64 * 1024
 
 
 def find_gst_launch() -> str | None:
@@ -141,6 +148,58 @@ def check_encoder(encoder_name: str) -> bool:
     )
 
 
+@lru_cache(maxsize=1)
+def _nvjpeg_library_dirs() -> tuple[str, ...]:
+    """CUDA package library directories that contain libnvjpeg, if installed."""
+    dirs: list[str] = []
+    seen: set[str] = set()
+
+    try:
+        package = distribution("nvidia-nvjpeg")
+    except PackageNotFoundError:
+        pass
+    else:
+        for relative_path in package.files or ():
+            if relative_path.name.startswith("libnvjpeg.so"):
+                library = Path(str(package.locate_file(relative_path)))
+                if library.is_file():
+                    path = str(library.parent)
+                    if path not in seen:
+                        seen.add(path)
+                        dirs.append(path)
+
+    system_candidates = [
+        *Path("/usr/local").glob("cuda*/targets/*/lib"),
+        *Path("/usr/local").glob("cuda*/lib64"),
+    ]
+    for candidate in system_candidates:
+        try:
+            has_nvjpeg = any(candidate.glob("libnvjpeg.so*"))
+        except OSError:
+            continue
+        if has_nvjpeg:
+            path = str(candidate)
+            if path not in seen:
+                seen.add(path)
+                dirs.append(path)
+    return tuple(dirs)
+
+
+def _gstreamer_env() -> dict[str, str] | None:
+    """Add CUDA libnvjpeg dirs to the child loader path when they are not global."""
+    nvjpeg_dirs = _nvjpeg_library_dirs()
+    if not nvjpeg_dirs:
+        return None
+
+    env = os.environ.copy()
+    entries = list(nvjpeg_dirs)
+    existing = env.get("LD_LIBRARY_PATH")
+    if existing:
+        entries.extend(existing.split(os.pathsep))
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(entry for entry in entries if entry))
+    return env
+
+
 # ---------------------------------------------------------------------------
 # GStreamerVideoEncoder
 # ---------------------------------------------------------------------------
@@ -153,11 +212,12 @@ def _quality_to_qp(quality: int) -> int:
     path — the buffers carry no framerate, so bits-*per-second* rate control has
     nothing to divide by and the stream comes out near-lossless (bigger than the
     source JPEGs). Constant-QP is both the mode that actually works and the right
-    semantic match: the ffmpeg-cli NVENC path uses ``rc=vbr cq=<quality>`` (also
-    constant-quality), so mapping ``quality`` straight to QP gives output-size
-    parity across backends rather than a quality change.
+    semantic match: the ffmpeg-cli NVENC path uses ``rc=vbr cq=<quality>``.
+    Jetson's V4L2 constant-QP scale is consistently less aggressive than NVENC's
+    CQ scale here, so apply a small offset to keep the default backend output
+    size in the same range.
     """
-    return max(0, min(51, quality))
+    return max(0, min(51, quality + 7))
 
 
 class GStreamerVideoEncoder:
@@ -260,6 +320,7 @@ class GStreamerVideoEncoder:
                 stdout=subprocess.DEVNULL,  # nv element chatter goes here
                 stderr=subprocess.PIPE,
                 pass_fds=(w_fd,),
+                env=_gstreamer_env(),
             )
         except OSError as exc:
             os.close(r_fd)
@@ -310,7 +371,8 @@ class GStreamerVideoEncoder:
             raise VideoEncoderError("gst-launch stdin is not available")
         try:
             self._process.stdin.write(frame)
-            self._process.stdin.flush()
+            if len(frame) < _SMALL_WRITE_FLUSH_BYTES:
+                self._process.stdin.flush()
         except BrokenPipeError as exc:
             stderr_tail = "\n".join(self._stderr_lines[-5:])
             raise VideoEncoderError(f"gst-launch died unexpectedly:\n{stderr_tail}") from exc
@@ -327,7 +389,8 @@ class GStreamerVideoEncoder:
     def flush_packets(self) -> list[bytes]:
         """Close the pipeline and return all remaining access units."""
         if self._process.stdin and not self._process.stdin.closed:
-            self._process.stdin.close()
+            with contextlib.suppress(BrokenPipeError):
+                self._process.stdin.close()
 
         self._stdout_thread.join(timeout=10)
         self._stderr_thread.join(timeout=5)
@@ -359,6 +422,9 @@ class GStreamerVideoEncoder:
     def close(self) -> None:
         """Terminate the gst-launch subprocess if still running (idempotent)."""
         try:
+            if self._process.stdin and not self._process.stdin.closed:
+                with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+                    self._process.stdin.close()
             if self._process.poll() is None:
                 self._process.kill()
                 self._process.wait(timeout=2)

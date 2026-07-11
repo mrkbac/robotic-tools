@@ -9,6 +9,7 @@ from mcap_codec_support._schemas import normalize_schema_name
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import Channel, Schema
 
+from pymcap_cli.cmd._pointcloud_cleanup import pointcloud_worker_count
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     MESSAGE_ENCODING,
     SCHEMA_ENCODING,
@@ -64,6 +65,8 @@ class PointCloudConfig:
     pc_compression: Literal["zstd", "lz4", "none"]
     resolution: float
     draco_compression_level: int
+    drop_invalid: bool = True
+    sort_field: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +99,7 @@ class ProcessorRule:
     """Apply an existing MessageTransformProcessor to a live topic/schema."""
 
     processor_factory: Callable[[], MessageTransformProcessor]
+    preprocessor_factories: tuple[Callable[[], MessageTransformProcessor], ...] = ()
     output_schema_name: str | None = None
     output_schema_text: str | None = None
     output_schema_encoding: str | None = None
@@ -106,11 +110,13 @@ class ProcessorRule:
             return None
         schema = schema_from_channel(channel)
         processor = self.processor_factory()
+        preprocessors = tuple(factory() for factory in self.preprocessor_factories)
         small_channel = _small_channel_from_info(channel, schema)
         if not processor.matches(small_channel, schema):
             return None
         return ProcessorTransformer(
             processor=processor,
+            preprocessors=preprocessors,
             channel=small_channel,
             schema=schema,
             output_schema_name=self.output_schema_name or schema.name,
@@ -129,6 +135,7 @@ class ProcessorTransformer:
         self,
         *,
         processor: MessageTransformProcessor,
+        preprocessors: tuple[MessageTransformProcessor, ...],
         channel: Channel,
         schema: Schema,
         output_schema_name: str,
@@ -140,13 +147,29 @@ class ProcessorTransformer:
         self.output_schema_text = output_schema_text
         self.output_schema_encoding = output_schema_encoding
         self.output_message_encoding = output_message_encoding
+        self.worker_count = max(
+            1,
+            processor.worker_count,
+            *(preprocessor.worker_count for preprocessor in preprocessors),
+        )
         self._processor = processor
+        self._preprocessors = preprocessors
         self._channel = channel
         self._schema = schema
 
     def transform(self, decoded: object, timestamp_ns: int) -> TransformResult | None:
         del timestamp_ns
-        outputs = self._processor.transform(self._channel, self._schema, decoded)
+        current = decoded
+        for preprocessor in self._preprocessors:
+            if not preprocessor.matches(self._channel, self._schema):
+                continue
+            output = _single_output(preprocessor.transform(self._channel, self._schema, current))
+            if output is None:
+                continue
+            _validate_output_schema(output, self._schema.name, self._schema.encoding)
+            current = output.data
+
+        outputs = self._processor.transform(self._channel, self._schema, current)
         output = _single_output(outputs)
         if output is None:
             return None
@@ -154,6 +177,9 @@ class ProcessorTransformer:
         return TransformResult(payload=cast("dict[str, object]", output.data))
 
     def close(self) -> None:
+        for preprocessor in self._preprocessors:
+            for _message in preprocessor.finalize():
+                logger.debug("Ignoring finalize output from live processor %s", type(preprocessor))
         for _message in self._processor.finalize():
             logger.debug("Ignoring finalize output from live processor %s", type(self._processor))
 
@@ -182,6 +208,7 @@ class VideoTransformer:
 
     output_schema_encoding = SCHEMA_ENCODING
     output_message_encoding = MESSAGE_ENCODING
+    worker_count = 1
 
     def __init__(self, config: ImageConfig, topic: str) -> None:
         from mcap_codec_support.video import (  # noqa: PLC0415
@@ -277,6 +304,19 @@ def build_transform_rules(config: ProxyConfig) -> list[LiveTransformRule]:
             PointcloudCompressProcessor,
         )
 
+        preprocessor_factories: tuple[Callable[[], MessageTransformProcessor], ...] = ()
+        if config.pointcloud.drop_invalid or config.pointcloud.sort_field is not None:
+            from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
+                PointcloudCleanProcessor,
+            )
+
+            preprocessor_factories = (
+                lambda: PointcloudCleanProcessor(
+                    drop_invalid=config.pointcloud.drop_invalid,
+                    sort_field=config.pointcloud.sort_field,
+                ),
+            )
+
         pc_schema = config.pointcloud.pc_schema
         if pc_schema == "auto":
             pc_schema = "foxglove" if config.pointcloud.pc_format == "draco" else "pointcloud2"
@@ -295,7 +335,9 @@ def build_transform_rules(config: ProxyConfig) -> list[LiveTransformRule]:
                     pc_compression=config.pointcloud.pc_compression,
                     resolution=config.pointcloud.resolution,
                     draco_compression_level=config.pointcloud.draco_compression_level,
+                    workers=pointcloud_worker_count(max_workers=8),
                 ),
+                preprocessor_factories=preprocessor_factories,
                 output_schema_name=output_schema_name,
                 output_schema_text=output_schema_text,
             )

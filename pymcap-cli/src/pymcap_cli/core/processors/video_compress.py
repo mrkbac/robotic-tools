@@ -73,7 +73,8 @@ logger = logging.getLogger(__name__)
 # Per-topic lookahead: frames submitted to a topic's encoder ahead of draining
 # its packets. Bounds decoded frames held in flight while giving the encoder
 # thread slack to run in parallel with the main loop.
-_INFLIGHT_PER_TOPIC = 128
+_DEFAULT_INFLIGHT_PER_TOPIC = 128
+_GSTREAMER_INFLIGHT_PER_TOPIC = 8
 
 
 def _decode_pool_size() -> int:
@@ -139,6 +140,17 @@ def resolve_video_compression_backend(
     backend: EncoderMode,
 ) -> ResolvedVideoCompressionBackend:
     """Resolve the video backend and encoder exactly like roscompress."""
+    if encoder is not None and backend is EncoderMode.AUTO:
+        for candidate_mode in (
+            EncoderMode.PYAV,
+            EncoderMode.FFMPEG_CLI,
+            EncoderMode.GSTREAMER,
+        ):
+            candidate = create_video_compression_backend(candidate_mode, codec, do_video=True)
+            if candidate.test_encoder(encoder):
+                return ResolvedVideoCompressionBackend(candidate, encoder)
+        raise VideoEncoderError(f"Encoder '{encoder}' not available on this system")
+
     resolved_backend = create_video_compression_backend(backend, codec, do_video=True)
     if encoder is not None:
         if not resolved_backend.test_encoder(encoder):
@@ -377,6 +389,12 @@ class VideoCompressProcessor(InputProcessor):
         )
         self._backend = resolved.backend
         self._encoder_name = resolved.encoder_name
+        self._prefetch_decode = resolved.backend.prefetch_supported
+        self._inflight_per_topic = (
+            _GSTREAMER_INFLIGHT_PER_TOPIC
+            if resolved.backend.label == "gstreamer"
+            else _DEFAULT_INFLIGHT_PER_TOPIC
+        )
 
         self._decoder_factory = DecoderFactory()
         # channel_id -> (channel, schema, schema_name) for matched image channels
@@ -388,7 +406,9 @@ class VideoCompressProcessor(InputProcessor):
         # Decode and encode are two pipelined stages: a shared pool decodes
         # frames (stateless, parallel across topics) while each topic's single
         # encode thread consumes them in order, so decode and encode overlap.
-        self._decode_pool = ThreadPoolExecutor(max_workers=_decode_pool_size())
+        self._decode_pool = (
+            ThreadPoolExecutor(max_workers=_decode_pool_size()) if self._prefetch_decode else None
+        )
 
     # ---------------------------------------------------------------- scoping
     @override
@@ -449,12 +469,17 @@ class VideoCompressProcessor(InputProcessor):
         # topic's single thread (serial, stateful). The encode task blocks on its
         # decode future, but later frames' decodes run ahead on the pool — so
         # decode and encode overlap instead of serializing.
-        decode_future = self._decode_pool.submit(self._decode_frame, dm, schema_name)
-        encode_future = state.pool.submit(self._encode_frame, state.session, decode_future)
+        if self._decode_pool is None:
+            encode_future = state.pool.submit(
+                self._decode_encode_frame, state.session, dm, schema_name
+            )
+        else:
+            decode_future = self._decode_pool.submit(self._decode_frame, dm, schema_name)
+            encode_future = state.pool.submit(self._encode_frame, state.session, decode_future)
         state.futures.append(encode_future)
 
         # Drain completed packets (bounded) and emit them in order.
-        while len(state.futures) > _INFLIGHT_PER_TOPIC:
+        while len(state.futures) > self._inflight_per_topic:
             emitted = self._drain_one(state)
             if emitted is not None:
                 yield emitted
@@ -468,7 +493,8 @@ class VideoCompressProcessor(InputProcessor):
             for state in self._states.values():
                 state.session.close()
                 state.pool.shutdown(wait=False)
-            self._decode_pool.shutdown(wait=False)
+            if self._decode_pool is not None:
+                self._decode_pool.shutdown(wait=False)
 
     def _finalize_topic(self, topic: str, state: _TopicState) -> Iterable[MessageWithContext]:
         # Drain everything still queued on the encoder thread.
@@ -574,6 +600,20 @@ class VideoCompressProcessor(InputProcessor):
         """
         try:
             frame, width, height = decode_future.result()
+        except Exception:
+            logger.exception("Failed to decode frame on %s", session.topic)
+            return EncodeOutcome(data=None, swapped=False, failed=True)
+        return session.encode_with_fallback(frame, width, height)
+
+    def _decode_encode_frame(
+        self,
+        session: VideoEncoderSession,
+        dm: DecodedMessage,
+        schema_name: str,
+    ) -> EncodeOutcome:
+        """Decode/parse and encode on the topic thread for subprocess backends."""
+        try:
+            frame, width, height = self._decode_frame(dm, schema_name)
         except Exception:
             logger.exception("Failed to decode frame on %s", session.topic)
             return EncodeOutcome(data=None, swapped=False, failed=True)

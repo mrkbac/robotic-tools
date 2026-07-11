@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
+from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
 from mcap_codec_support.video.common import EncoderConfig
 from pymcap_cli.cmd.bridge._proxy_dashboard import ProxyDashboard
 from pymcap_cli.cmd.bridge._proxy_runtime import (
+    IncomingMessage,
     OutboundMessage,
     ProxyMetrics,
     SendManager,
     TransformResult,
+    TransformWorker,
 )
 from pymcap_cli.cmd.bridge._proxy_transforms import (
     ImageConfig,
@@ -22,6 +28,8 @@ from pymcap_cli.cmd.bridge._proxy_transforms import (
     ProcessorRule,
     ProxyConfig,
     VideoTransformer,
+    build_transform_rules,
+    create_transformer,
     is_video_keyframe,
 )
 from pymcap_cli.cmd.bridge.proxy import BridgeProxy
@@ -205,6 +213,7 @@ def test_bridge_proxy_advertises_transformed_channel(monkeypatch) -> None:
         output_schema_text = "string data"
         output_schema_encoding = "ros2msg"
         output_message_encoding = "cdr"
+        worker_count = 1
 
         def transform(self, decoded: object, timestamp_ns: int) -> TransformResult:
             del decoded, timestamp_ns
@@ -367,6 +376,212 @@ def test_processor_rule_wraps_message_transform_processor() -> None:
     assert result is not None
     assert result.payload == {"data": "ok!"}
     assert transformer.output_schema_name == "std_msgs/msg/String"
+
+
+def test_pointcloud_rule_drops_invalid_points_before_compression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pymcap_cli.cmd._pointcloud_cleanup.os.cpu_count",
+        lambda: 14,
+    )
+    config = replace(
+        _proxy_config(),
+        pointcloud=PointCloudConfig(
+            enabled=True,
+            pc_format="cloudini",
+            pc_schema="auto",
+            pc_encoding="lossy",
+            pc_compression="zstd",
+            resolution=0.01,
+            draco_compression_level=7,
+        ),
+    )
+    transformer = create_transformer(
+        build_transform_rules(config),
+        {
+            "id": 9,
+            "topic": "/lidar/points",
+            "encoding": "cdr",
+            "schemaName": "sensor_msgs/msg/PointCloud2",
+            "schema": POINTCLOUD2,
+            "schemaEncoding": "ros2msg",
+        },
+    )
+    assert transformer is not None
+    assert transformer.worker_count == 8
+
+    dtype = np.dtype(
+        {
+            "names": ["x", "y", "z", "line"],
+            "formats": ["<f4", "<f4", "<f4", "u1"],
+            "itemsize": 16,
+        }
+    )
+    points = np.zeros(4, dtype=dtype)
+    points["x"][:2] = [1.0, 2.0]
+    points["y"][:2] = [1.0, 2.0]
+    points["z"][:2] = [1.0, 2.0]
+    cloud = SimpleNamespace(
+        header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=1, nanosec=0),
+            frame_id="lidar",
+        ),
+        height=1,
+        width=4,
+        fields=[
+            SimpleNamespace(name="x", offset=0, datatype=7, count=1),
+            SimpleNamespace(name="y", offset=4, datatype=7, count=1),
+            SimpleNamespace(name="z", offset=8, datatype=7, count=1),
+            SimpleNamespace(name="line", offset=12, datatype=2, count=1),
+        ],
+        is_bigendian=False,
+        point_step=16,
+        row_step=64,
+        data=points.tobytes(),
+        is_dense=True,
+    )
+
+    result = transformer.transform(cloud, 0)
+    transformer.close()
+
+    assert result is not None
+    assert result.payload["width"] == 2
+
+
+def test_transform_worker_uses_transformer_worker_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ConcurrentTransformer:
+        output_schema_name = "std_msgs/msg/String"
+        output_schema_text = "string data"
+        output_schema_encoding = "ros2msg"
+        output_message_encoding = "cdr"
+        worker_count = 2
+
+        def __init__(self) -> None:
+            self.release = threading.Event()
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def transform(self, decoded: object, timestamp_ns: int) -> TransformResult:
+            del timestamp_ns
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            self.release.wait(timeout=2)
+            with self.lock:
+                self.active -= 1
+            return TransformResult({"data": decoded})
+
+        def close(self) -> None:
+            return
+
+    async def run() -> None:
+        monkeypatch.setattr(
+            TransformWorker,
+            "_decoder_for",
+            lambda _self, _channel: lambda payload: payload,
+        )
+        monkeypatch.setattr(
+            TransformWorker,
+            "_encoder_for",
+            lambda _self, _transformer: lambda payload: payload["data"],
+        )
+        transformer = ConcurrentTransformer()
+        emitted: list[OutboundMessage] = []
+        worker = TransformWorker(
+            channel={
+                "id": 3,
+                "topic": "/points",
+                "encoding": "cdr",
+                "schemaName": "std_msgs/msg/String",
+                "schema": "string data",
+                "schemaEncoding": "ros2msg",
+            },
+            downstream_id=10,
+            transformer=transformer,
+            queue_size=1,
+            emit=emitted.append,
+            metrics=ProxyMetrics(),
+        )
+        try:
+            worker.enqueue(IncomingMessage(1, b"first"))
+            await _wait_for(lambda: transformer.active == 1)
+            worker.enqueue(IncomingMessage(2, b"second"))
+            await _wait_for(lambda: transformer.max_active == 2)
+        finally:
+            transformer.release.set()
+            await worker.close()
+
+    asyncio.run(run())
+
+
+def test_transform_worker_drops_stale_parallel_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OutOfOrderTransformer:
+        output_schema_name = "std_msgs/msg/String"
+        output_schema_text = "string data"
+        output_schema_encoding = "ros2msg"
+        output_message_encoding = "cdr"
+        worker_count = 2
+
+        def __init__(self) -> None:
+            self.first_started = threading.Event()
+            self.release_first = threading.Event()
+
+        def transform(self, decoded: object, timestamp_ns: int) -> TransformResult:
+            if timestamp_ns == 1:
+                self.first_started.set()
+                self.release_first.wait(timeout=2)
+            return TransformResult({"data": decoded})
+
+        def close(self) -> None:
+            return
+
+    async def run() -> None:
+        monkeypatch.setattr(
+            TransformWorker,
+            "_decoder_for",
+            lambda _self, _channel: lambda payload: payload,
+        )
+        monkeypatch.setattr(
+            TransformWorker,
+            "_encoder_for",
+            lambda _self, _transformer: lambda payload: payload["data"],
+        )
+        transformer = OutOfOrderTransformer()
+        metrics = ProxyMetrics()
+        emitted: list[OutboundMessage] = []
+        worker = TransformWorker(
+            channel={
+                "id": 3,
+                "topic": "/points",
+                "encoding": "cdr",
+                "schemaName": "std_msgs/msg/String",
+                "schema": "string data",
+                "schemaEncoding": "ros2msg",
+            },
+            downstream_id=10,
+            transformer=transformer,
+            queue_size=1,
+            emit=emitted.append,
+            metrics=metrics,
+        )
+        try:
+            worker.enqueue(IncomingMessage(1, b"first"))
+            await _wait_for(transformer.first_started.is_set)
+            worker.enqueue(IncomingMessage(2, b"second"))
+            await _wait_for(lambda: [message.timestamp_ns for message in emitted] == [2])
+            transformer.release_first.set()
+            await _wait_for(lambda: metrics.transform_stale_drops == 1)
+        finally:
+            transformer.release_first.set()
+            await worker.close()
+
+        assert [message.timestamp_ns for message in emitted] == [2]
+
+    asyncio.run(run())
 
 
 class _FakeVideoEncoder:

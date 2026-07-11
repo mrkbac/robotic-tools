@@ -2,12 +2,16 @@
 
 import contextlib
 import logging
+import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from types import TracebackType
+from typing import BinaryIO, cast
 from urllib.parse import urlparse
 
 from small_mcap import InvalidMagicError, McapError
+from typing_extensions import Self
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_processor import (
@@ -23,6 +27,138 @@ from pymcap_cli.core.rosbag2_layout import expand_bag_paths
 from pymcap_cli.utils import confirm_output_overwrite, read_info
 
 logger = logging.getLogger(__name__)
+
+
+class _AsyncOutputStream:
+    """Bounded, ordered output queue with a logical write position."""
+
+    def __init__(self, output: BinaryIO, max_buffer_bytes: int) -> None:
+        if max_buffer_bytes <= 0:
+            raise ValueError("max_buffer_bytes must be positive")
+        self._output = output
+        self._max_buffer_bytes = max_buffer_bytes
+        self._condition = threading.Condition()
+        self._pending: deque[bytes] = deque()
+        self._queued_bytes = 0
+        self._logical_position = output.tell()
+        self._is_closing = False
+        self._is_closed = False
+        self._worker_error: Exception | None = None
+        self._worker = threading.Thread(target=self._write_pending, name="mcap-output", daemon=True)
+        self._worker.start()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._is_closed
+
+    def writable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        return self._output.fileno()
+
+    def tell(self) -> int:
+        with self._condition:
+            self._raise_worker_error()
+            return self._logical_position
+
+    def write(self, data: bytes | bytearray | memoryview, /) -> int:
+        if self._is_closed:
+            raise ValueError("write to closed file")
+        stable_data = data if type(data) is bytes else bytes(data)
+        size = len(stable_data)
+        with self._condition:
+            while (
+                self._queued_bytes > 0
+                and self._queued_bytes + size > self._max_buffer_bytes
+                and self._worker_error is None
+            ):
+                self._condition.wait()
+            self._raise_worker_error()
+            if self._is_closing:
+                raise ValueError("write to closing file")
+            self._pending.append(stable_data)
+            self._queued_bytes += size
+            self._logical_position += size
+            self._condition.notify()
+        return size
+
+    def flush(self) -> None:
+        if self._is_closed:
+            raise ValueError("flush of closed file")
+        with self._condition:
+            while self._queued_bytes > 0 and self._worker_error is None:
+                self._condition.wait()
+            self._raise_worker_error()
+        self._output.flush()
+
+    def close(self) -> None:
+        if self._is_closed:
+            return
+        error: Exception | None = None
+        try:
+            self.flush()
+        except Exception as exc:  # noqa: BLE001 - preserve worker failures through cleanup
+            error = exc
+        with self._condition:
+            self._is_closing = True
+            self._condition.notify_all()
+        self._worker.join()
+        try:
+            self._output.close()
+        except Exception as exc:  # noqa: BLE001 - do not skip state cleanup on close failure
+            if error is None:
+                error = exc
+        self._is_closed = True
+        if error is not None:
+            raise error
+
+    def _write_pending(self) -> None:
+        try:
+            while True:
+                with self._condition:
+                    while not self._pending and not self._is_closing:
+                        self._condition.wait()
+                    if not self._pending:
+                        return
+                    data = self._pending.popleft()
+                view = memoryview(data)
+                written = 0
+                while written < len(view):
+                    count = self._output.write(view[written:])
+                    if count is None or count <= 0:
+                        raise OSError(  # noqa: TRY301 - relayed to the producer thread
+                            "output stream made no write progress"
+                        )
+                    written += count
+                with self._condition:
+                    self._queued_bytes -= len(data)
+                    self._condition.notify_all()
+        except Exception as exc:  # noqa: BLE001 - relay arbitrary stream errors to producer
+            with self._condition:
+                self._worker_error = exc
+                self._pending.clear()
+                self._queued_bytes = 0
+                self._is_closing = True
+                self._condition.notify_all()
+
+    def _raise_worker_error(self) -> None:
+        if self._worker_error is not None:
+            raise OSError("asynchronous output write failed") from self._worker_error
 
 
 @dataclass(slots=True)
@@ -44,14 +180,22 @@ def resolve_overwrite_policy(*, force: bool, no_clobber: bool) -> OverwriteColli
     return OverwriteCollisionPolicy.ASK
 
 
-def _open_output_stream(output: Path, overwrite_policy: OverwriteCollisionPolicy) -> BinaryIO:
+def _open_output_stream(
+    output: Path,
+    overwrite_policy: OverwriteCollisionPolicy,
+    *,
+    async_buffer_bytes: int = 0,
+) -> BinaryIO:
     """Open a single-output destination with the configured overwrite policy."""
     if overwrite_policy == OverwriteCollisionPolicy.ASK:
         confirm_output_overwrite(output, force=False)
     elif overwrite_policy == OverwriteCollisionPolicy.ERROR and output.exists():
         raise FileExistsError(f"Output file '{output}' already exists.")
 
-    return output.open("wb")
+    stream = output.open("wb", buffering=0 if async_buffer_bytes else -1)
+    if async_buffer_bytes:
+        return cast("BinaryIO", _AsyncOutputStream(stream, async_buffer_bytes))
+    return stream
 
 
 def run_processor(
@@ -60,6 +204,7 @@ def run_processor(
     output: Path,
     input_options: InputOptions,
     output_options: OutputOptions,
+    input_buffer_bytes: int = 8192,
 ) -> ProcessorResult:
     """Open files, build ProcessingOptions, run McapProcessor, return results.
 
@@ -70,11 +215,15 @@ def run_processor(
         input_files: list[InputFile] = []
 
         for f in files:
-            stream, size = stack.enter_context(open_input(f))
+            stream, size = stack.enter_context(open_input(f, buffering=input_buffer_bytes))
             input_files.append(InputFile(stream=stream, size=size, options=input_options))
 
         output_stream = stack.enter_context(
-            _open_output_stream(output, output_options.overwrite_policy)
+            _open_output_stream(
+                output,
+                output_options.overwrite_policy,
+                async_buffer_bytes=output_options.async_output_buffer_bytes,
+            )
         )
 
         processing_options = ProcessingOptions(

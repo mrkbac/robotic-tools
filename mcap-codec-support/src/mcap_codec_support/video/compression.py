@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -204,32 +205,20 @@ def create_video_compression_backend(
 ) -> AnyVideoBackend:
     """Select the roscompress video backend.
 
-    ``AUTO`` prefers PyAV (in-process, no subprocess/pipe overhead) but only
-    when PyAV can actually reach a hardware encoder. A pip-installed PyAV wheel
-    is typically software-only, so if PyAV would fall back to a CPU encoder
+    ``AUTO`` first tries the Jetson GStreamer JPEG-decode + encode pipeline when
+    its timed liveness probe succeeds. That path is fastest on Jetson because it
+    avoids CPU JPEG decode for compressed camera topics.
+
+    Otherwise, AUTO prefers PyAV (in-process, no subprocess/pipe overhead) but
+    only when PyAV can actually reach a hardware encoder. A pip-installed PyAV
+    wheel is typically software-only, so if PyAV would fall back to a CPU encoder
     (e.g. libx264) while the system ``ffmpeg`` exposes a hardware encoder (e.g.
     NVENC), AUTO picks the ffmpeg-cli backend instead — hardware encoding
     without needing a custom PyAV build.
-
-    ``GSTREAMER`` is **opt-in only**, never chosen by AUTO: it uses the Jetson
-    hardware JPEG decoder (``nvjpegdec``), whose full-range/limited-range colour
-    handling is not faithful to libjpeg on all inputs (it can crush shadows on
-    full-range JFIF footage — see :mod:`mcap_codec_support.video.gstreamer`), so it
-    must not be selected without the user asking for it. A timed liveness probe
-    guards the explicit path against a codec stack that hangs.
     """
     if mode is EncoderMode.GSTREAMER:
-        from mcap_codec_support.video.gstreamer import (  # noqa: PLC0415
-            GStreamerCompressionBackend,
-            probe_hw_jpeg_pipeline,
-        )
+        from mcap_codec_support.video.gstreamer import GStreamerCompressionBackend  # noqa: PLC0415
 
-        if not probe_hw_jpeg_pipeline(codec):
-            raise VideoEncoderError(
-                "GStreamer video pipeline did not produce output within the probe "
-                "timeout — the L4T GStreamer codec stack may be unavailable or "
-                "wedged. Use --video-backend ffmpeg-cli (or auto)."
-            )
         return GStreamerCompressionBackend()
     if mode is EncoderMode.FFMPEG_CLI:
         return _FfmpegCliCompressionBackend()
@@ -237,6 +226,10 @@ def create_video_compression_backend(
     pyav_backend = _PyAVCompressionBackend()
     if mode is not EncoderMode.AUTO or not do_video:
         return pyav_backend
+
+    gstreamer_backend = _create_gstreamer_backend_if_healthy(codec)
+    if gstreamer_backend is not None:
+        return gstreamer_backend
 
     try:
         pyav_encoder = pyav_backend.resolve_encoder(codec)
@@ -252,7 +245,36 @@ def create_video_compression_backend(
                 return ffmpeg_backend
         except (ImportError, ValueError, VideoEncoderError):
             pass  # no system ffmpeg / no encoder — stay on PyAV software
+        return pyav_backend
+
+    # PyAV can reach a hardware encoder in-process, but it holds the GIL during
+    # encode, so with several camera topics the per-topic PyAV encode threads
+    # serialize on the GIL. On multi-core hosts, per-topic ffmpeg subprocesses
+    # (one hardware encoder each) run truly in parallel and are measurably faster
+    # — profiled ~1.4x on a 14-core Jetson Thor. Prefer ffmpeg-cli there; keep
+    # in-process PyAV on low-core hosts where subprocess overhead would dominate.
+    if (os.cpu_count() or 1) >= 8:
+        ffmpeg_backend = _FfmpegCliCompressionBackend()
+        try:
+            if not _is_software_encoder(ffmpeg_backend.resolve_encoder(codec)):
+                return ffmpeg_backend
+        except (ImportError, ValueError, VideoEncoderError):
+            pass  # no system ffmpeg / no hw encoder — stay on in-process PyAV
     return pyav_backend
+
+
+def _create_gstreamer_backend_if_healthy(codec: str) -> AnyVideoBackend | None:
+    try:
+        from mcap_codec_support.video.gstreamer import (  # noqa: PLC0415
+            GStreamerCompressionBackend,
+            probe_hw_jpeg_pipeline,
+        )
+    except ImportError:
+        return None
+
+    if not probe_hw_jpeg_pipeline(codec):
+        return None
+    return GStreamerCompressionBackend()
 
 
 def _is_software_encoder(encoder_name: str) -> bool:

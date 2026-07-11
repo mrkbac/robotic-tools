@@ -19,6 +19,7 @@ from robo_ws_bridge import (
 from robo_ws_bridge.server import Channel
 from robo_ws_bridge.ws_types import ChannelInfo
 
+from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     MESSAGE_ENCODING,
     IncomingMessage,
@@ -467,6 +468,18 @@ def proxy(
         int,
         Parameter(name=["--draco-compression-level"], group=POINTCLOUD_GROUP),
     ] = 7,
+    pointcloud_drop_invalid: Annotated[
+        bool | None,
+        Parameter(
+            name=["--pointcloud-drop-invalid"],
+            negative="--no-pointcloud-drop-invalid",
+            group=POINTCLOUD_GROUP,
+        ),
+    ] = None,
+    pointcloud_sort_field: Annotated[
+        str | None,
+        Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
+    ] = None,
     send_queue_size: Annotated[
         int,
         Parameter(name=["--send-queue-size"], group=LATENCY_GROUP),
@@ -504,6 +517,15 @@ def proxy(
     if not 0 <= draco_compression_level <= 10:
         ERR.print("[red]Error:[/] --draco-compression-level must be in [0, 10]")
         return 1
+    try:
+        cleanup = resolve_pointcloud_cleanup(
+            pointcloud_compression_enabled=pointcloud,
+            pointcloud_drop_invalid=pointcloud_drop_invalid,
+            pointcloud_sort_field=pointcloud_sort_field,
+        )
+    except ValueError as exc:
+        ERR.print(f"[red]Error:[/] {exc}")
+        return 1
     config = ProxyConfig(
         image=ImageConfig(
             image_format=image_format,
@@ -522,6 +544,8 @@ def proxy(
             pc_compression=pc_compression,
             resolution=resolution,
             draco_compression_level=draco_compression_level,
+            drop_invalid=cleanup.drop_invalid,
+            sort_field=cleanup.sort_field,
         ),
         transform_queue_size=transform_queue_size,
         send_queue_size=send_queue_size,

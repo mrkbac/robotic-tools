@@ -9,7 +9,6 @@ and composes with everything else. The heavy lifting lives in the processors
 """
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -18,7 +17,10 @@ from cyclopts import Group, Parameter
 from mcap_codec_support.video import EncoderMode, VideoEncoderError
 from rich.console import Console
 
-from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
+from pymcap_cli.cmd._pointcloud_cleanup import (
+    pointcloud_worker_count,
+    resolve_pointcloud_cleanup,
+)
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
@@ -41,6 +43,8 @@ console = Console()
 # frame-count lag, so a shared group would interleave them into wide, heavily
 # overlapping chunks.
 _COMPRESSED_OUTPUT_PATTERN = re.compile(r"Compressed(Image|Video|PointCloud)")
+_INPUT_BUFFER_BYTES = 8 * 1024 * 1024
+_ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
 
 # Parameter groups
 ENCODING_GROUP = Group("Encoding")
@@ -224,9 +228,8 @@ def roscompress(
         to enabled when point cloud compression is enabled, and disabled when
         compression is disabled unless a point-cloud cleanup flag is supplied.
     pointcloud_sort_field
-        Stable-sort cleaned PointCloud2 points by this field. Defaults to
-        ``line`` whenever point-cloud cleanup is active. Use ``none`` to disable
-        sorting.
+        Stable-sort cleaned PointCloud2 points by this field. Defaults to no
+        sorting. Use ``line`` to group lidar rings.
     exclude_topic_glob
         Drop topics whose name matches any of these shell-style globs
         (repeatable). Excluded topics are skipped before decoding, e.g.
@@ -313,13 +316,13 @@ def roscompress(
                     pc_compression=pc_compression,
                     resolution=resolution,
                     draco_compression_level=draco_compression_level,
-                    # Parallelize point-cloud compression only when video isn't
-                    # also being transcoded: with video, point clouds already
-                    # ride for free in the main thread's idle time (hidden behind
-                    # the video worker threads), and a second pool just adds CPU
-                    # contention. Without video, the main thread would otherwise
-                    # compress them serially.
-                    workers=0 if image_format == "video" else _pointcloud_workers(),
+                    # Always parallelize point-cloud compression on its own pool.
+                    # Profiling the video path showed the main thread is NOT idle
+                    # (it drives reading + video dispatch/drain + writing), so
+                    # compressing point clouds inline on it serializes behind that
+                    # work rather than "riding for free". A dedicated pool lets
+                    # Cloudini/Draco work overlap the main loop.
+                    workers=pointcloud_worker_count(),
                 )
             )
     except ImportError:
@@ -381,6 +384,7 @@ def roscompress(
         output_processors=output_processors,
         overwrite_policy=overwrite_policy,
         max_chunk_span_ns=max_chunk_span_ns,
+        async_output_buffer_bytes=_ASYNC_OUTPUT_BUFFER_BYTES,
     )
 
     try:
@@ -389,6 +393,7 @@ def roscompress(
             output=output,
             input_options=input_options,
             output_options=output_options,
+            input_buffer_bytes=_INPUT_BUFFER_BYTES,
         )
     except Exception:
         logger.exception("Error during compression")
@@ -415,12 +420,3 @@ def _local_size(file: str) -> int:
         return Path(file).stat().st_size
     except OSError:
         return 0
-
-
-def _pointcloud_workers() -> int:
-    """Worker count for parallel point-cloud compression.
-
-    Point-cloud encode overlaps the read/re-chunk floor, so wall time stops
-    improving past ~4 workers (measured knee); more just occupies cores.
-    """
-    return min(4, max(2, (os.cpu_count() or 4) - 2))

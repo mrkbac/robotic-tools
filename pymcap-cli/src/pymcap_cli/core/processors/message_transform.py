@@ -436,7 +436,8 @@ class DecodedProcessorChain(InputProcessor):
                 modified=False,
             ),
         )
-        for processor in self._processors:
+        for processor_idx, processor in enumerate(self._processors):
+            is_last_processor = processor_idx == len(self._processors) - 1
             next_items: list[_DecodedItem] = []
             for item in items:
                 item_channel, item_schema = self._virtual_container(channel, schema, item)
@@ -454,7 +455,7 @@ class DecodedProcessorChain(InputProcessor):
                         schema_encoding=output.schema_encoding,
                         schema_data=output.schema_data,
                         message_encoding=output.message_encoding,
-                        data=_decoded_view(output.data),
+                        data=output.data if is_last_processor else _decoded_view(output.data),
                         modified=True,
                     )
                     for output in outputs
