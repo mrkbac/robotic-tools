@@ -86,12 +86,12 @@ PROBE_JPEG: bytes = base64.b64decode(
     "ii1tenFbVra9OKAP//Z"
 )
 
-# Mapping from short codec name to software (CPU) encoder name.
-SOFTWARE_CODEC_MAP: dict[str, str] = {
-    "h264": "libx264",
-    "h265": "libx265",
-    "vp9": "libvpx-vp9",
-    "av1": "libaom-av1",
+# Mapping from short codec name to software (CPU) encoders, preferred first.
+SOFTWARE_CODEC_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "h264": ("libx264",),
+    "h265": ("libx265",),
+    "vp9": ("libvpx-vp9",),
+    "av1": ("libaom-av1", "libsvtav1"),
 }
 
 # Mapping from short codec name to hardware encoder names per backend.
@@ -113,12 +113,14 @@ def get_software_encoder(codec: str) -> str:
     """Return the software encoder name for *codec*.
 
     Raises:
-        ValueError: If *codec* is not in SOFTWARE_CODEC_MAP.
+        ValueError: If *codec* is not in SOFTWARE_CODEC_CANDIDATES.
     """
-    sw = SOFTWARE_CODEC_MAP.get(codec)
-    if not sw:
-        raise ValueError(f"Unsupported codec '{codec}'. Supported: {', '.join(SOFTWARE_CODEC_MAP)}")
-    return sw
+    candidates = SOFTWARE_CODEC_CANDIDATES.get(codec)
+    if candidates is None:
+        raise ValueError(
+            f"Unsupported codec '{codec}'. Supported: {', '.join(SOFTWARE_CODEC_CANDIDATES)}"
+        )
+    return candidates[0]
 
 
 def build_encoder_options(
@@ -162,6 +164,8 @@ def build_encoder_options(
         if preset:
             opts["usage"] = preset
         return opts, None
+    if codec_name == "libsvtav1":
+        return {"preset": preset or "8", "crf": str(quality)}, None
     return {}, None
 
 
@@ -291,7 +295,15 @@ def resolve_encoder(
                 encoder = hw.get(backend_name)
                 if encoder and test_fn(encoder):
                     return encoder
-    return get_software_encoder(codec)
+    software_encoders = SOFTWARE_CODEC_CANDIDATES.get(codec)
+    if software_encoders is None:
+        raise ValueError(
+            f"Unsupported codec '{codec}'. Supported: {', '.join(SOFTWARE_CODEC_CANDIDATES)}"
+        )
+    for software_encoder in software_encoders:
+        if test_fn(software_encoder):
+            return software_encoder
+    raise ValueError(f"No available encoder for codec '{codec}'")
 
 
 def resolve_encoder_for_backend(
@@ -316,7 +328,7 @@ def resolve_encoder_for_backend(
 
     if backend == "software":
         try:
-            return get_software_encoder(codec)
+            return resolve_encoder(codec, test_fn=test_fn, use_hardware=False)
         except ValueError as exc:
             raise VideoEncoderError(str(exc)) from exc
 

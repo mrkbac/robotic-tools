@@ -13,7 +13,7 @@ from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.video.common import (
     DEFAULT_FPS,
     DEFAULT_GOP_SIZE,
-    SOFTWARE_CODEC_MAP,
+    SOFTWARE_CODEC_CANDIDATES,
     EncoderMode,
     VideoEncoderError,
     calculate_downscale_dimensions,
@@ -278,7 +278,7 @@ def _create_gstreamer_backend_if_healthy(codec: str) -> AnyVideoBackend | None:
 
 
 def _is_software_encoder(encoder_name: str) -> bool:
-    return encoder_name in set(SOFTWARE_CODEC_MAP.values())
+    return any(encoder_name in candidates for candidates in SOFTWARE_CODEC_CANDIDATES.values())
 
 
 def _is_image2pipe_fast_path(data: bytes) -> bool:

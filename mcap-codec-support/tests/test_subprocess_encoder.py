@@ -9,7 +9,7 @@ import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.ffmpeg as ffmpeg_module
 import pytest
 from mcap_codec_support.video import EncoderMode, create_video_compression_backend
-from mcap_codec_support.video.common import PROBE_JPEG
+from mcap_codec_support.video.common import PROBE_JPEG, resolve_encoder
 from mcap_codec_support.video.ffmpeg import (
     AnnexBParser,
     FFmpegVideoEncoder,
@@ -153,10 +153,15 @@ class TestFfmpegDiscovery:
 
         def fake_run(args, **_kwargs):
             if "-encoders" in args:
-                stdout = " V..... h264_nvenc NVIDIA NVENC H.264 encoder\n"
+                stdout = (
+                    " V..... h264_nvenc NVIDIA NVENC H.264 encoder\n"
+                    " V....D libx264 libx264 H.264 encoder\n"
+                )
                 return subprocess.CompletedProcess(args, 0, stdout, "")
             if "h264_nvenc" in args:
                 return subprocess.CompletedProcess(args, 1, b"", b"no NVIDIA device")
+            if "libx264" in args:
+                return subprocess.CompletedProcess(args, 0, b"", b"")
             raise AssertionError(f"unexpected ffmpeg command: {args}")
 
         monkeypatch.setattr(ffmpeg_module.subprocess, "run", fake_run)
@@ -245,6 +250,13 @@ class TestBackendSelection:
         backend = create_video_compression_backend(EncoderMode.AUTO, "h264", do_video=True)
 
         assert backend.label == "ffmpeg-cli"
+
+    def test_resolver_rejects_unavailable_software_encoder(self) -> None:
+        with pytest.raises(ValueError, match="No available encoder for codec 'av1'"):
+            resolve_encoder("av1", test_fn=lambda _encoder: False)
+
+    def test_resolver_uses_available_av1_software_encoder(self) -> None:
+        assert resolve_encoder("av1", test_fn=lambda encoder: encoder == "libsvtav1") == "libsvtav1"
 
     def test_auto_prefers_ffmpeg_when_pyav_only_software_but_ffmpeg_has_hardware(
         self, monkeypatch

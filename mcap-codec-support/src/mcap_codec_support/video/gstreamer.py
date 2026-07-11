@@ -55,7 +55,7 @@ from mcap_codec_support.video.common import (
     DEFAULT_FPS,
     DEFAULT_GOP_SIZE,
     PROBE_JPEG,
-    SOFTWARE_CODEC_MAP,
+    SOFTWARE_CODEC_CANDIDATES,
     EncoderConfig,
     VideoEncoderError,
 )
@@ -545,7 +545,7 @@ class GStreamerCompressionBackend:
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
     ) -> GStreamerVideoEncoder | FFmpegVideoEncoder:
-        if codec_name in set(SOFTWARE_CODEC_MAP.values()):
+        if any(codec_name in candidates for candidates in SOFTWARE_CODEC_CANDIDATES.values()):
             # Fallback path (hardware encoder died): reuse the proven CPU encoder.
             return FFmpegVideoEncoder(
                 width=width,
