@@ -134,6 +134,18 @@ def filter_cmd(
             help="Invert the time-window decision (drop messages INSIDE [start, end]).",
         ),
     ] = False,
+    is_early_bail_enabled: Annotated[
+        bool,
+        Parameter(
+            name=["--early-bail"],
+            group=TIME_FILTERING_GROUP,
+            help=(
+                "Assume input messages are ordered by log_time and stop scanning "
+                "after --end is reached. Unindexed out-of-order messages after "
+                "that point will be ignored."
+            ),
+        ),
+    ] = False,
     latch: Annotated[
         list[str] | None,
         Parameter(
@@ -205,6 +217,9 @@ def filter_cmd(
         Include messages before this time in seconds (ignored if --end used).
     end_nsecs
         (Deprecated, use --end) Include messages before this time in nanoseconds.
+    is_early_bail_enabled
+        Stop scanning at the first message at or after --end. Requires monotonic
+        input log_time ordering for correctness.
     metadata_mode
         Metadata handling: include or exclude metadata records.
     attachments_mode
@@ -250,6 +265,7 @@ def filter_cmd(
             latch_from_metadata=latch_from_metadata,
             invert_topics=invert_topics,
             invert_time=invert_time,
+            is_early_bail_enabled=is_early_bail_enabled,
         )
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400

@@ -1451,6 +1451,21 @@ class McapProcessor:
             self.stats.chunks_processed += 1
             yield PendingChunk(chunk, indexes, stream_id, input_stream, chunk.message_start_time)
 
+    def _early_bail_end_time_ns(self, stream_id: int) -> int | None:
+        input_options = self.options.inputs[stream_id].options
+        if not input_options.is_early_bail_enabled:
+            return None
+        if input_options.invert_time:
+            return None
+        if input_options.include_metadata or input_options.include_attachments:
+            return None
+        if input_options.always_decode_chunk or input_options.extra_processors:
+            return None
+        end_time_ns = input_options.end_time_ns
+        if not isinstance(end_time_ns, int):
+            return None
+        return end_time_ns
+
     def _generate_chunks_from_stream(
         self, input_stream: IO[bytes], stream_id: int, summary: Summary | None = None
     ) -> Iterator[PendingChunk]:
@@ -1468,6 +1483,7 @@ class McapProcessor:
             return
 
         pending: PendingChunk | None = None
+        early_bail_end_time_ns = self._early_bail_end_time_ns(stream_id)
 
         try:
             indexes: list[MessageIndex] = []
@@ -1505,6 +1521,10 @@ class McapProcessor:
                             publish_time=publish_time,
                             data_length=data_length,
                         )
+                        if early_bail_end_time_ns is not None and log_time >= early_bail_end_time_ns:
+                            self.stats.messages_processed += 1
+                            self.stats.filter_rejections += 1
+                            break
                         if self._should_skip_message_payload(message_header, stream_id):
                             input_stream.seek(data_length, os.SEEK_CUR)
                             continue
@@ -1525,7 +1545,6 @@ class McapProcessor:
                         if self._should_skip_message_payload(message_header, stream_id):
                             continue
                         data = memoryview(message_body)[_MESSAGE_STRUCT.size :]
-
                     self._handle_message_record(
                         Message(
                             channel_id=channel_id,

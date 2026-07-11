@@ -42,6 +42,7 @@ class InputOptions:
     latch_from_metadata: bool = False
     invert_topics: bool = False
     invert_time: bool = False
+    is_early_bail_enabled: bool = False
     extra_processors: list[InputProcessor] = field(default_factory=list)
 
     @classmethod
@@ -70,6 +71,7 @@ class InputOptions:
         # Inversion
         invert_topics: bool = False,
         invert_time: bool = False,
+        is_early_bail_enabled: bool = False,
         # Caller-supplied processors appended after the standard filter chain.
         extra_processors: list[InputProcessor] | None = None,
     ) -> InputOptions:
@@ -90,6 +92,7 @@ class InputOptions:
             latch_from_metadata=latch_from_metadata,
             invert_topics=invert_topics,
             invert_time=invert_time,
+            is_early_bail_enabled=is_early_bail_enabled,
             extra_processors=list(extra_processors) if extra_processors else [],
         )
 
@@ -109,5 +112,6 @@ class InputOptions:
             latch_from_metadata=self.latch_from_metadata or other.latch_from_metadata,
             invert_topics=self.invert_topics or other.invert_topics,
             invert_time=self.invert_time or other.invert_time,
+            is_early_bail_enabled=(self.is_early_bail_enabled or other.is_early_bail_enabled),
             extra_processors=[*self.extra_processors, *other.extra_processors],
         )

@@ -155,3 +155,24 @@ def test_rechunk_returns_one_when_processor_raises(monkeypatch):
     exit_code = rechunk_cmd.rechunk(file="input.mcap", output=Path("out.mcap"), force=True)
 
     assert exit_code == 1
+
+
+def test_filter_cmd_passes_early_bail_option(monkeypatch):
+    seen: list[bool] = []
+
+    def fake_run_processor(*, files, output, input_options, output_options):
+        _ = files, output, output_options
+        seen.append(input_options.is_early_bail_enabled)
+        return empty_processor_result()
+
+    monkeypatch.setattr(filter_cmd, "run_processor", fake_run_processor)
+
+    exit_code = filter_cmd.filter_cmd(
+        file="input.mcap",
+        output=Path("out.mcap"),
+        is_early_bail_enabled=True,
+        force=True,
+    )
+
+    assert exit_code == 0
+    assert seen == [True]

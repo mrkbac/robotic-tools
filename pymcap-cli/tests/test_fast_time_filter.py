@@ -173,6 +173,57 @@ def test_unchunked_time_filter_does_not_stop_on_non_monotonic_time() -> None:
     ]
 
 
+def test_unchunked_time_filter_early_bail_stops_at_end() -> None:
+    payload_size = 100_000
+    payload = b"x" * payload_size
+    data = _build_unchunked(
+        [
+            (0, 1, payload),
+            (10, 1, payload),
+            (100, 1, payload),
+            (200, 1, payload),
+            (300, 1, payload),
+        ]
+    )
+
+    result = _run_processor(
+        data,
+        InputOptions.from_args(
+            end_nsecs=50,
+            include_metadata=False,
+            include_attachments=False,
+            is_early_bail_enabled=True,
+        ),
+    )
+
+    assert [log_time for _topic, log_time, _payload in _read_output(result.output)] == [0, 10]
+    assert result.stats.messages_processed == 3
+
+
+def test_unchunked_time_filter_early_bail_trusts_monotonic_time() -> None:
+    data = _build_unchunked(
+        [
+            (0, 1, b"first"),
+            (100, 1, b"outside"),
+            (10, 1, b"late-inside"),
+        ]
+    )
+
+    result = _run_processor(
+        data,
+        InputOptions.from_args(
+            end_nsecs=50,
+            include_metadata=False,
+            include_attachments=False,
+            is_early_bail_enabled=True,
+        ),
+    )
+
+    assert [(log_time, payload) for _topic, log_time, payload in _read_output(result.output)] == [
+        (0, b"first"),
+    ]
+
+
 def test_unchunked_latched_message_is_read_before_time_filter_skip() -> None:
     data = _build_unchunked(
         [
