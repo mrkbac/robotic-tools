@@ -80,6 +80,31 @@ class TestChannelAwareDecoding:
         # Factory called only once for the channel, then cached
         assert call_count == 1
 
+    def test_chunk_payload_is_passed_to_decoder_without_copying(self):
+        buf = io.BytesIO()
+        writer = McapWriter(buf)
+        writer.start()
+        writer.add_schema(schema_id=1, name="test", encoding="raw", data=b"")
+        writer.add_channel(channel_id=1, topic="/a", message_encoding="raw", schema_id=1)
+        writer.add_message(channel_id=1, log_time=1, publish_time=1, data=b"payload")
+        writer.finish()
+        buf.seek(0)
+
+        received_types: list[type] = []
+
+        class RecordingFactory:
+            def decoder_for(self, message_encoding, schema):
+                def decode(data):
+                    received_types.append(type(data))
+                    return bytes(data)
+
+                return decode
+
+        message = next(iter(read_message_decoded(buf, decoder_factories=[RecordingFactory()])))
+
+        assert message.decoded_message == b"payload"
+        assert received_types == [memoryview]
+
     def test_mixed_factory_types(self):
         """Regular and channel-aware factories should work together."""
         buf = io.BytesIO()

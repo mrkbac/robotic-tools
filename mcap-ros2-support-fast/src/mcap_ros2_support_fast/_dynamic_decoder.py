@@ -219,7 +219,10 @@ class DecoderGeneratorFactory:
             self._ensure_dynamic()
             struct_name = TYPE_INFO[type_id]
             struct_size = struct.calcsize(struct_name)
-            self.generate_alignment(struct_size)
+            if self.current_alignment < struct_size:
+                mask = struct_size - 1
+                with self.code.indent("if _array_size:"):
+                    self.code.append(f"_offset = (_offset + {mask}) & ~{mask}")
             # Optimize: use fast .cast() when no byteswap needed
             if not self.needs_byteswap or struct_size == 1:
                 # Fast path: matching endianness, use memoryview.cast() via _data
@@ -235,6 +238,9 @@ class DecoderGeneratorFactory:
                 )
                 self.code.append(f"{target}.byteswap()")
             self.code.append(f"_offset += _array_size * {struct_size}")
+            # The end offset depends on both the size and whether element
+            # alignment was applied, so the next field must align at runtime.
+            self.reset_alignment()
         else:
             # Fixed-size array
             struct_name = TYPE_INFO[type_id]

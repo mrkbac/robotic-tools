@@ -301,7 +301,17 @@ class JpegEncoder:
 # ---------------------------------------------------------------------------
 
 # CompressedVideo ``format`` string -> PyAV decoder codec name.
-_DECOMPRESS_CODECS = {"h264": "h264", "h265": "hevc", "hevc": "hevc", "vp9": "vp9", "av1": "av1"}
+_DECOMPRESS_CODECS = {
+    "h264": ("h264",),
+    "h265": ("hevc",),
+    "hevc": ("hevc",),
+    "vp9": ("vp9",),
+    # PyAV/FFmpeg may expose the generic ``av1`` codec as an encoder-only
+    # implementation. Prefer explicit decoders that implement packet decode.
+    # libdav1d buffers this packetized stream until EOF, while libaom emits one
+    # frame per packet and therefore preserves read_message_decoded streaming.
+    "av1": ("libaom-av1", "libdav1d", "av1"),
+}
 
 
 class PyAVVideoDecompressor:
@@ -319,17 +329,30 @@ class PyAVVideoDecompressor:
         self._jpeg_quality = jpeg_quality
         self._decoder: VideoCodecContext | None = None
         self._jpeg_encoder: VideoCodecContext | None = None
+        self._jpeg_pts = 0
 
     def _ensure_decoder(self, codec: str) -> VideoCodecContext:
         if self._decoder is not None:
             return self._decoder
-        codec_name = _DECOMPRESS_CODECS.get(codec.lower(), "hevc")
-        self._decoder = cast("VideoCodecContext", av.CodecContext.create(codec_name, "r"))
-        self._decoder.open()
-        return self._decoder
+        codec_names = _DECOMPRESS_CODECS.get(codec.lower(), ("hevc",))
+        last_error: av.error.FFmpegError | ValueError | None = None
+        for codec_name in codec_names:
+            try:
+                decoder = cast("VideoCodecContext", av.CodecContext.create(codec_name, "r"))
+                decoder.open()
+            except (av.error.FFmpegError, ValueError) as exc:
+                last_error = exc
+                continue
+            self._decoder = decoder
+            return decoder
+        raise VideoEncoderError(f"No usable decoder for {codec}: {last_error}")
 
     def _ensure_jpeg_encoder(self, width: int, height: int) -> VideoCodecContext:
-        if self._jpeg_encoder is not None:
+        if (
+            self._jpeg_encoder is not None
+            and self._jpeg_encoder.width == width
+            and self._jpeg_encoder.height == height
+        ):
             return self._jpeg_encoder
         self._jpeg_encoder = cast("VideoCodecContext", av.CodecContext.create("mjpeg", "w"))
         self._jpeg_encoder.width = width
@@ -340,7 +363,21 @@ class PyAVVideoDecompressor:
             "q:v": str(max(1, 31 - self._jpeg_quality * 31 // 100)),
         }
         self._jpeg_encoder.open()
+        self._jpeg_pts = 0
         return self._jpeg_encoder
+
+    def _frame_to_jpeg(self, frame: VideoFrame) -> DecompressedFrame:
+        encoder = self._ensure_jpeg_encoder(frame.width, frame.height)
+        reformatted = frame.reformat(format="yuvj420p")
+        reformatted.pts = self._jpeg_pts
+        self._jpeg_pts += 1
+        packets = encoder.encode(reformatted)
+        return DecompressedFrame(
+            data=b"".join(bytes(packet) for packet in packets),
+            width=frame.width,
+            height=frame.height,
+            is_jpeg=True,
+        )
 
     def decompress(self, video_data: bytes, codec: str) -> DecompressedFrame | None:
         decoder = self._ensure_decoder(codec)
@@ -350,17 +387,7 @@ class PyAVVideoDecompressor:
         frame = frames[-1]
 
         if self._video_format == "compressed":
-            encoder = self._ensure_jpeg_encoder(frame.width, frame.height)
-            reformatted = frame.reformat(format="yuvj420p")
-            reformatted.pts = 0
-            packets = encoder.encode(reformatted)
-            jpeg_data = b"".join(bytes(p) for p in packets)
-            return DecompressedFrame(
-                data=jpeg_data,
-                width=frame.width,
-                height=frame.height,
-                is_jpeg=True,
-            )
+            return self._frame_to_jpeg(frame)
 
         rgb_frame = frame.reformat(format="rgb24")
         raw_data = rgb_frame.to_ndarray().tobytes()
@@ -389,19 +416,7 @@ class PyAVVideoDecompressor:
         results: list[DecompressedFrame] = []
         for frame in frames:
             if self._video_format == "compressed":
-                encoder = self._ensure_jpeg_encoder(frame.width, frame.height)
-                reformatted = frame.reformat(format="yuvj420p")
-                reformatted.pts = 0
-                packets = encoder.encode(reformatted)
-                jpeg_data = b"".join(bytes(p) for p in packets)
-                results.append(
-                    DecompressedFrame(
-                        data=jpeg_data,
-                        width=frame.width,
-                        height=frame.height,
-                        is_jpeg=True,
-                    )
-                )
+                results.append(self._frame_to_jpeg(frame))
             else:
                 rgb_frame = frame.reformat(format="rgb24")
                 raw_data = rgb_frame.to_ndarray().tobytes()

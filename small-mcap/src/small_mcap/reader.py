@@ -1287,14 +1287,12 @@ def read_message_decoded(
         cache_key = (schema.id if schema else 0, channel.id)
 
         if decoder := decoders.get(cache_key):
-            data = message.data if isinstance(message.data, bytes) else bytes(message.data)
-            return decoder(data)
+            return decoder(message.data)
 
         decoder = _resolve(channel.message_encoding, schema, channel)
         if decoder:
             decoders[cache_key] = decoder
-            data = message.data if isinstance(message.data, bytes) else bytes(message.data)
-            return decoder(data)
+            return decoder(message.data)
 
         # No decoder found - return raw data for schemaless, raise for schema-based
         if schema is None:

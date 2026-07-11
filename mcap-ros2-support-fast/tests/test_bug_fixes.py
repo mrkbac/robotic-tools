@@ -2,6 +2,57 @@
 
 from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 
+PARAMETER_EVENT_SCHEMA = """\
+builtin_interfaces/Time stamp
+string node
+Parameter[] new_parameters
+Parameter[] changed_parameters
+Parameter[] deleted_parameters
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+================================================================================
+MSG: rcl_interfaces/Parameter
+string name
+ParameterValue value
+================================================================================
+MSG: rcl_interfaces/ParameterValue
+uint8 type
+bool bool_value
+int64 integer_value
+float64 double_value
+string string_value
+byte[] byte_array_value
+bool[] bool_array_value
+int64[] integer_array_value
+float64[] double_array_value
+string[] string_array_value
+"""
+
+
+def test_parameter_event_empty_primitive_arrays_preserve_sequence_alignment() -> None:
+    payload = bytes.fromhex(
+        "00010000e0944a68612ef025100000002f7265636f72645f6e6f705f62696700"
+        "010000000d0000007573655f73696d5f74696d65000100000000000000000000"
+        "0000000000000000000000010000000000000000000000000000000000000000"
+        "00000000000000000000000000000000"
+    )
+    decoder = create_decoder_function("rcl_interfaces/msg/ParameterEvent", PARAMETER_EVENT_SCHEMA)
+
+    event = decoder(payload)
+
+    assert event.node == "/record_nop_big"
+    assert len(event.new_parameters) == 1
+    parameter = event.new_parameters[0]
+    assert parameter.name == "use_sim_time"
+    assert parameter.value.type == 1
+    assert list(parameter.value.integer_array_value) == []
+    assert list(parameter.value.double_array_value) == []
+    assert parameter.value.string_array_value == []
+    assert event.changed_parameters == []
+    assert event.deleted_parameters == []
+
 
 class TestCharTypeBugFix:
     """Test that char type is correctly mapped to signed byte."""

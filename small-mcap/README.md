@@ -67,9 +67,9 @@ from small_mcap import read_message_decoded
 import json
 
 class JsonDecoderFactory:
-    def decoder_for(self, schema):
-        if schema.encoding == "json":
-            return lambda data: json.loads(data)
+    def decoder_for(self, message_encoding, schema):
+        if message_encoding == "json":
+            return lambda data: json.loads(bytes(data))
         return None
 
 with open("input.mcap", "rb") as f:

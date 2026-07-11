@@ -4,6 +4,34 @@ User-facing notes for releases.
 
 ---
 
+## Unreleased
+
+### pymcap-cli
+
+- Interrupting video compression now aborts active processor backends and keeps
+  progress and error output on the correct terminal stream.
+
+### mcap-codec-support
+
+- Video decoding now covers H.264, H.265, VP9, and AV1 with working decoder
+  fallbacks. Multi-frame JPEG output uses monotonic timestamps and safely
+  recreates its encoder when frame dimensions change.
+- `create_decoder_factories()` provides the correctly ordered video,
+  point-cloud, and general ROS2 decoder stack for `small-mcap` readers.
+- AV1 software encoding falls back to SVT-AV1 when libaom is unavailable.
+
+### mcap-ros2-support-fast
+
+- Fix CDR alignment after empty primitive sequences, including nested
+  `ParameterEvent` messages found in real recordings.
+
+### small-mcap
+
+- Decoded reads pass chunk-backed memoryviews directly to compatible decoder
+  factories instead of copying every message payload to `bytes`.
+
+---
+
 ## pymcap-cli 0.20.0, mcap-codec-support 0.10.0, pureini 0.7.0
 
 Headline: filtered MCAP reads skip work at every level, `roscompress` produces

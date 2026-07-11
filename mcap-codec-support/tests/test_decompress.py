@@ -449,6 +449,64 @@ class TestVideoDecompressFactory:
         # Factory should have created 2 separate decompressors
         assert len(factory._decompressors) == 2
 
+    def test_multi_frame_jpeg_output(self):
+        from mcap_codec_support.video import VideoDecompressFactory
+
+        h264_data = _make_h264_keyframe()
+        buf = _create_compressed_video_mcap(
+            [
+                (1_000_000_000, h264_data, "h264"),
+                (2_000_000_000, h264_data, "h264"),
+            ]
+        )
+        messages = read_message_decoded(
+            buf,
+            decoder_factories=[VideoDecompressFactory(video_format="compressed")],
+        )
+
+        decoded = [message.decoded_message for message in messages]
+
+        assert len(decoded) == 2
+        assert all(frame is not None and frame["data"][:2] == b"\xff\xd8" for frame in decoded)
+
+    @pytest.mark.parametrize("codec", ["h264", "h265", "vp9", "av1"])
+    def test_video_codec_matrix_raw_output(self, codec):
+        import av
+        import numpy as np
+        from mcap_codec_support.video import (
+            VideoDecompressFactory,
+            VideoEncoderError,
+            get_software_encoder,
+        )
+        from mcap_codec_support.video.pyav import VideoEncoder
+
+        try:
+            encoder = VideoEncoder(64, 64, get_software_encoder(codec))
+        except VideoEncoderError as exc:
+            pytest.skip(str(exc))
+
+        packets = []
+        for index in range(3):
+            pixels = np.full((64, 64, 3), index * 50, dtype=np.uint8)
+            packet = encoder.encode(av.VideoFrame.from_ndarray(pixels, format="rgb24"))
+            if packet is not None:
+                packets.append(packet)
+        packets.extend(encoder.flush_packets())
+        assert len(packets) == 3
+
+        buf = _create_compressed_video_mcap(
+            [((index + 1) * 1_000_000_000, packet, codec) for index, packet in enumerate(packets)]
+        )
+        messages = read_message_decoded(
+            buf,
+            decoder_factories=[VideoDecompressFactory(video_format="raw")],
+        )
+
+        decoded = [message.decoded_message for message in messages]
+
+        assert len(decoded) == 3
+        assert all(frame is not None and len(frame["data"]) == 64 * 64 * 3 for frame in decoded)
+
 
 class TestVideoDecompressFactoryFlush:
     def test_flush_all_empty(self):
@@ -571,6 +629,20 @@ class TestPointCloudDecompressFactory:
 
 
 class TestBothFactoriesTogether:
+    def test_create_decoder_factories_includes_specialized_and_fallback(self):
+        from mcap_codec_support import create_decoder_factories
+        from mcap_codec_support.pointcloud import PointCloudDecompressFactory
+        from mcap_codec_support.video import VideoDecompressFactory
+        from mcap_ros2_support_fast.decoder import DecoderFactory
+
+        factories = create_decoder_factories()
+
+        assert [type(factory) for factory in factories] == [
+            VideoDecompressFactory,
+            PointCloudDecompressFactory,
+            DecoderFactory,
+        ]
+
     def test_non_compressed_topics_pass_through(self):
         """With both factories, non-matching schemas should raise (no CDR fallback)."""
         from mcap_codec_support.pointcloud import PointCloudDecompressFactory
