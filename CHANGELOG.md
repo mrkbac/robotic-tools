@@ -4,6 +4,63 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.20.0, mcap-codec-support 0.10.0, pureini 0.7.0
+
+Headline: filtered MCAP reads skip work at every level, `roscompress` produces
+time-local non-overlapping chunks, and media transforms make better use of
+hardware and CPU parallelism. Point-cloud cleanup is substantially faster and
+is now available in the live bridge proxy; automatic sorting by lidar ring is
+removed in favor of explicit `--pointcloud-sort-field line`.
+
+### pymcap-cli 0.20.0
+
+- `filter --early-bail` stops scanning at the first message at or after `--end`
+  when an unindexed input is ordered by `log_time`. This is opt-in because later
+  out-of-order messages would be ignored.
+- Time and topic filters can reject unchunked messages from their fixed headers
+  and seek past the payload instead of reading it. Indexed inputs preselect the
+  surviving chunks from the summary and seek directly to them; lazy chunk reads
+  and decoding are also dispatched concurrently where positional I/O is
+  available.
+- Fix: `roscompress` no longer combines delayed outputs from different video or
+  point-cloud topics into wide, heavily overlapping chunks. Already-compressed
+  schemas are grouped per topic, and their chunks are capped at a 10-second log
+  time span for predictable seeking.
+- `roscompress` uses larger input buffers, asynchronous output writes, and a
+  dedicated point-cloud worker pool even when video compression is also active,
+  allowing point-cloud work to overlap the read, video, and write pipeline.
+- `bridge proxy` gains `--pointcloud-drop-invalid`,
+  `--no-pointcloud-drop-invalid`, and `--pointcloud-sort-field`, applying the
+  same cleanup pipeline used by offline compression. Live point-cloud transforms
+  run across multiple workers while stale out-of-order completions are dropped.
+- Point-cloud cleanup no longer sorts by the `line` field automatically. Invalid
+  points are still dropped by default when point-cloud compression is enabled;
+  pass `--pointcloud-sort-field line` to group lidar rings explicitly.
+- Video backend selection probes the Jetson GStreamer hardware JPEG pipeline in
+  `auto` mode and uses it when healthy. On high-core systems, `auto` prefers a
+  hardware ffmpeg subprocess over hardware PyAV so independent camera encoders
+  can run outside the GIL. Explicit encoder selection now searches all backends.
+
+### mcap-codec-support 0.10.0
+
+- Point-cloud preprocessing adds fast raw-buffer paths for removing invalid
+  points and stable-grouping small discrete fields such as lidar ring. Numba
+  kernels copy complete points and use counting sort where the layout permits,
+  with the structured-array implementation retained as a fallback.
+- Video backends expose whether decode prefetch is useful, allowing the batch
+  pipeline to avoid redundant decode pools for subprocess and GStreamer paths.
+  GStreamer uses a smaller in-flight queue and a timed hardware liveness probe.
+- The `video` extra installs NVIDIA's nvJPEG Python package on ARM64 Linux for
+  Jetson hardware JPEG decoding.
+
+### pureini 0.7.0
+
+- Point-cloud encoding accepts general readable buffers and builds compressed
+  output from exact-size parts instead of allocating a conservative worst-case
+  buffer, reducing allocation and copying overhead.
+
+---
+
 ## pymcap-cli 0.19.0, mcap-codec-support 0.9.0
 
 Headline: media compression becomes a first-class part of the processing
