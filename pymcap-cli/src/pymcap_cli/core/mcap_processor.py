@@ -1521,7 +1521,10 @@ class McapProcessor:
                             publish_time=publish_time,
                             data_length=data_length,
                         )
-                        if early_bail_end_time_ns is not None and log_time >= early_bail_end_time_ns:
+                        if (
+                            early_bail_end_time_ns is not None
+                            and log_time >= early_bail_end_time_ns
+                        ):
                             self.stats.messages_processed += 1
                             self.stats.filter_rejections += 1
                             break
