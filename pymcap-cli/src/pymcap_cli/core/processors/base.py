@@ -298,6 +298,9 @@ class InputProcessor:
         """
         return ()
 
+    def abort(self) -> None:
+        """Release resources after processing exits before ``finalize()``."""
+
 
 class OutputRouter:
     """Output-side router.

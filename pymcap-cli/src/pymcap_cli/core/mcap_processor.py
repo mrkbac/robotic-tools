@@ -1,6 +1,7 @@
 """Unified MCAP processor combining recovery and filtering capabilities."""
 
 import heapq
+import logging
 import os
 import stat
 from collections import deque
@@ -77,6 +78,7 @@ from pymcap_cli.core.processors.base import (
     RouteKey,
     SegmentContext,
 )
+from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.types_manual import (
     CompressionName,
     str_to_compression_type,
@@ -90,7 +92,8 @@ from pymcap_cli.utils import (
     output_overwrites_input,
 )
 
-console = Console()
+logger = logging.getLogger(__name__)
+console = ERR
 OUTPUT_LIBRARY = "pymcap-cli"
 OutputStreamOpener = Callable[[OutputKey, int, int, int], tuple[str, BinaryIO]]
 
@@ -1158,6 +1161,13 @@ class McapProcessor:
                     message, stream_id=stream_id, input_channel_id=input_channel_id
                 )
 
+    def _abort_input_processors(self) -> None:
+        for proc in self._iter_unique_input_processors():
+            try:
+                proc.abort()
+            except Exception:
+                logger.exception("Failed to abort %s", type(proc).__name__)
+
     def _write_survivor(
         self,
         message: Message,
@@ -1782,6 +1792,9 @@ class McapProcessor:
                 # Complete progress
                 progress.update(task, completed=total_size)
 
+        except BaseException:
+            self._abort_input_processors()
+            raise
         finally:
             assert self.output_manager is not None
             segment_stats = self.output_manager.finish_all()

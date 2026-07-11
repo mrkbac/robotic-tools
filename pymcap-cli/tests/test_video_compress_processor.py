@@ -23,7 +23,7 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     OverwriteCollisionPolicy,
 )
-from pymcap_cli.core.processors.video_compress import VideoCompressProcessor
+from pymcap_cli.core.processors.video_compress import VideoCompressProcessor, VideoEncoderSession
 from small_mcap import McapWriter, get_summary, read_message, read_message_decoded
 
 from tests.fixtures.image_mcap_generator import (
@@ -335,6 +335,25 @@ class _CreateFailsHwBackend:
         if codec_name == "hw_enc":
             raise VideoEncoderError("Failed to open encoder hw_enc: Operation not permitted")
         return _StubSoftwareEncoder()
+
+
+def test_video_session_does_not_fallback_while_aborting():
+    backend = _FallbackBackend(buffer_depth=0)
+    session = VideoEncoderSession(
+        backend=backend,
+        encoder_name="hw_enc",
+        codec="h264",
+        quality=28,
+        topic="/cam/front",
+        scale=None,
+    )
+    session.ensure_encoder(_W, _H)
+
+    session.abort()
+    outcome = session.encode_with_fallback(b"frame", _W, _H)
+
+    assert outcome.failed
+    assert not outcome.swapped
 
 
 def test_video_processor_falls_back_to_software_when_hw_create_fails(

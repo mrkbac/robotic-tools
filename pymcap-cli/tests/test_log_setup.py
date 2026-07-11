@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 
 import pytest
-from pymcap_cli.log_setup import setup_logging
+from pymcap_cli.core import mcap_processor
+from pymcap_cli.log_setup import ERR, setup_logging
 from rich.logging import RichHandler
 
 
@@ -100,3 +101,7 @@ def test_setup_logging_clears_prior_handlers():
     logger.addHandler(sentinel)
     setup_logging()
     assert sentinel not in logger.handlers
+
+
+def test_processor_progress_uses_logging_console():
+    assert mcap_processor.console is ERR

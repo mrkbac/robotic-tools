@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd._run_processor import run_processor
@@ -336,3 +337,31 @@ def test_finalize_output_preserves_input_stream_context_for_routing(tmp_path: Pa
     assert [value for _topic, _schema, value in _read(tmp_path / "stream_1.mcap")] == [
         "from second"
     ]
+
+
+def test_processor_abort_runs_when_processing_is_interrupted(tmp_path: Path):
+    inp, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_strings(inp, [("/chat", "stop")])
+
+    class _InterruptingProcessor(InputProcessor):
+        def __init__(self) -> None:
+            self.was_aborted = False
+
+        def on_message(
+            self, context: MessageContext, message: Message
+        ) -> Iterable[Message | MessageWithContext]:
+            raise KeyboardInterrupt
+
+        def abort(self) -> None:
+            self.was_aborted = True
+
+    processor = _InterruptingProcessor()
+    with pytest.raises(KeyboardInterrupt):
+        run_processor(
+            files=[str(inp)],
+            output=out,
+            input_options=InputOptions.from_args(extra_processors=[processor]),
+            output_options=OutputOptions(overwrite_policy=OverwriteCollisionPolicy.OVERWRITE),
+        )
+
+    assert processor.was_aborted

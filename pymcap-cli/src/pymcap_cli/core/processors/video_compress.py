@@ -29,6 +29,7 @@ import os
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from threading import Event
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mcap_codec_support._schemas import normalize_schema_name
@@ -230,8 +231,8 @@ class VideoEncoderSession:
     ``encode_with_fallback`` from a per-topic encode thread and uses
     ``EncodeOutcome.swapped`` to keep buffered-frame timestamps aligned.
 
-    Not thread-safe: a single session must be driven from one thread at a time
-    (the proxy's transform thread, or a topic's dedicated encode thread).
+    Encoding is not thread-safe: a single session must be driven from one
+    thread at a time. ``abort()`` may be called from the coordinating thread.
     """
 
     def __init__(
@@ -252,6 +253,7 @@ class VideoEncoderSession:
         self._scale = scale
         self._encoder: VideoEncoderProtocol[Any] | None = None
         self._settings: VideoEncoderSettings | None = None
+        self._is_aborting = Event()
 
     @property
     def backend(self) -> AnyVideoBackend:
@@ -268,6 +270,13 @@ class VideoEncoderSession:
     @property
     def topic(self) -> str:
         return self._topic
+
+    @property
+    def is_aborting(self) -> bool:
+        return self._is_aborting.is_set()
+
+    def abort(self) -> None:
+        self._is_aborting.set()
 
     def decode_image(
         self, message: DecodableImageMessage, schema_name: str
@@ -349,6 +358,8 @@ class VideoEncoderSession:
             encoder = self.ensure_encoder(width, height)
             return EncodeOutcome(data=encoder.encode(frame), swapped=False, failed=False)
         except Exception:  # noqa: BLE001 — any encode/geometry failure retries on software
+            if self.is_aborting:
+                return EncodeOutcome(data=None, swapped=False, failed=True)
             logger.debug("Hardware encode failed for %s; trying software", self._topic)
         swapped = False
         try:
@@ -496,6 +507,20 @@ class VideoCompressProcessor(InputProcessor):
             if self._decode_pool is not None:
                 self._decode_pool.shutdown(wait=False)
 
+    @override
+    def abort(self) -> None:
+        for state in self._states.values():
+            state.session.abort()
+            for future in state.futures:
+                future.cancel()
+        if self._decode_pool is not None:
+            self._decode_pool.shutdown(wait=False, cancel_futures=True)
+        for state in self._states.values():
+            state.pool.shutdown(wait=True, cancel_futures=True)
+            state.session.close()
+        if self._decode_pool is not None:
+            self._decode_pool.shutdown(wait=True, cancel_futures=True)
+
     def _finalize_topic(self, topic: str, state: _TopicState) -> Iterable[MessageWithContext]:
         # Drain everything still queued on the encoder thread.
         while state.futures:
@@ -601,6 +626,8 @@ class VideoCompressProcessor(InputProcessor):
         try:
             frame, width, height = decode_future.result()
         except Exception:
+            if session.is_aborting:
+                return EncodeOutcome(data=None, swapped=False, failed=True)
             logger.exception("Failed to decode frame on %s", session.topic)
             return EncodeOutcome(data=None, swapped=False, failed=True)
         return session.encode_with_fallback(frame, width, height)
@@ -615,6 +642,8 @@ class VideoCompressProcessor(InputProcessor):
         try:
             frame, width, height = self._decode_frame(dm, schema_name)
         except Exception:
+            if session.is_aborting:
+                return EncodeOutcome(data=None, swapped=False, failed=True)
             logger.exception("Failed to decode frame on %s", session.topic)
             return EncodeOutcome(data=None, swapped=False, failed=True)
         return session.encode_with_fallback(frame, width, height)
