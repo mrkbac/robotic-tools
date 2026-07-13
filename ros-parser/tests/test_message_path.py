@@ -13,6 +13,7 @@ from ros_parser.message_path import (
     Comparison,
     ComparisonOperator,
     CompoundFilter,
+    CurrentValueComparison,
     FieldAccess,
     Filter,
     FilterFieldRef,
@@ -283,6 +284,88 @@ class TestExtendedFilters:
     """Test extended filter syntax: ||, &&, !, (), in, cross-field comparison."""
 
     # --- Parsing tests ---
+
+    @pytest.mark.parametrize(
+        ("operator", "expected", "accepted", "rejected"),
+        [
+            ("==", ComparisonOperator.EQUAL, 5, 4),
+            ("!=", ComparisonOperator.NOT_EQUAL, 4, 5),
+            ("<", ComparisonOperator.LESS_THAN, 4, 5),
+            ("<=", ComparisonOperator.LESS_THAN_OR_EQUAL, 5, 6),
+            (">", ComparisonOperator.GREATER_THAN, 6, 5),
+            (">=", ComparisonOperator.GREATER_THAN_OR_EQUAL, 5, 4),
+        ],
+    )
+    def test_current_value_comparison_operators(
+        self,
+        operator: str,
+        expected: ComparisonOperator,
+        accepted: int,
+        rejected: int,
+    ) -> None:
+        path = parse_message_path(f"/topic.value{{{operator}5}}")
+
+        expression = path.segments[-1].expression
+        assert isinstance(expression, CurrentValueComparison)
+        assert expression.operator is expected
+        assert expression.value == 5
+        assert path.apply({"value": accepted}) == accepted
+        assert path.apply({"value": rejected}) is None
+
+    def test_current_value_comparison_negative_scientific_literal(self) -> None:
+        path = parse_message_path("/topic.value{>=-1.25e-3}")
+
+        expression = path.segments[-1].expression
+        assert isinstance(expression, CurrentValueComparison)
+        assert expression.value == -1.25e-3
+
+    def test_current_value_comparison_variable(self) -> None:
+        path = parse_message_path("/topic.value{<=$limit}")
+
+        assert path.apply({"value": 10}, {"limit": 10}) == 10
+        assert path.apply({"value": 11}, {"limit": 10}) is None
+
+    def test_current_value_comparison_rejects_field_reference(self) -> None:
+        with pytest.raises(LarkError):
+            parse_message_path("/topic.value{<=limit}")
+
+    def test_current_value_compound_filter(self) -> None:
+        path = parse_message_path("/topic.value{>=-40 && <=125}")
+
+        assert path.apply({"value": -40}) == -40
+        assert path.apply({"value": 125}) == 125
+        assert path.apply({"value": -41}) is None
+        assert path.apply({"value": 126}) is None
+
+    def test_current_value_or_filter(self) -> None:
+        path = parse_message_path("/topic.value{<0 || >100}")
+
+        assert path.apply({"value": -1}) == -1
+        assert path.apply({"value": 101}) == 101
+        assert path.apply({"value": 50}) is None
+
+    def test_current_value_filter_primitive_array(self) -> None:
+        path = parse_message_path("/topic.values[:]{<=30}")
+
+        assert path.apply({"values": [10, 31, 20, 99]}) == [10, 20]
+
+    def test_current_value_filter_memoryview(self) -> None:
+        path = parse_message_path("/topic.values[:]{<=30}")
+        values = memoryview(array.array("d", [10, 31, 20, 99]))
+
+        assert path.apply({"values": values}) == [10, 20]
+
+    def test_current_value_filter_after_arithmetic_modifier(self) -> None:
+        path = parse_message_path("/topic.value.@mul(2){<=10}")
+
+        assert path.apply({"value": 5}) == 10
+        assert path.apply({"value": 6}) is None
+
+    def test_current_value_filter_after_norm_modifier(self) -> None:
+        path = parse_message_path("/imu.linear_acceleration.@norm{<=30}")
+
+        assert path.apply({"linear_acceleration": {"x": 10.0, "y": 20.0, "z": 20.0}}) == 30
+        assert path.apply({"linear_acceleration": {"x": 20.0, "y": 20.0, "z": 20.0}}) is None
 
     def test_or_expression(self):
         """Test OR boolean logic in filters."""

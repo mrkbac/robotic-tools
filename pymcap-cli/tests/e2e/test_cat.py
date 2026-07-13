@@ -234,6 +234,18 @@ class TestCatQueryValidation:
         """Test valid nested field access."""
         cat(file=str(image_small_mcap), query="/camera/image_compressed.header.stamp.sec", limit=1)
 
+    def test_query_current_value_filter_skips_rejected_scalars(
+        self, simple_mcap: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+
+        exit_code = cat(file=str(simple_mcap), query="/test.i{>=99}")
+
+        assert exit_code == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["message"] == 99
+
     def test_query_invalid_nested_field(self, image_small_mcap: Path, capsys):
         """Test invalid nested field access fails."""
         exit_code = cat(

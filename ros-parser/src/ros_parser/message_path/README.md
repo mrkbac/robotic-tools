@@ -60,6 +60,23 @@ Filter messages using curly braces with comparison expressions:
 /my_topic.items[:]{active == true}
 ```
 
+As a `ros-parser` extension, filters can also compare the current scalar value
+directly by starting the expression with an operator. This is useful after
+selecting a primitive field or calculating a derived value with a modifier:
+
+```
+/temperature{>=-40 && <=125}
+/wheel_speed{!=0}
+/imu.linear_acceleration.@norm{<=30}
+/samples[:]{<=30}
+```
+
+For a scalar, a matching filter returns the original value and a non-matching
+filter returns no value. For a primitive array, the comparison is applied to
+each element. The right side of a current-value comparison may be a literal or
+`$variable`, but not a field reference; use a named-field filter when comparing
+fields on an object.
+
 #### Comparison Operators
 
 | Operator | Description           | Example                |
@@ -366,11 +383,18 @@ filter_expr     : or_expr
 or_expr         : and_expr ("||" and_expr)*
 and_expr        : not_expr ("&&" not_expr)*
 not_expr        : "!" not_expr | filter_atom
-filter_atom     : comparison | in_expr | "(" filter_expr ")"
+filter_atom     : comparison
+                | current_value_comparison
+                | in_expr
+                | "(" filter_expr ")"
 comparison      : field_path operator filter_value
+current_value_comparison
+                : operator current_filter_value
 in_expr         : field_path "in" "[" filter_value ("," filter_value)* "]"
 
 filter_value    : number | string | boolean | variable | field_path
+current_filter_value
+                : number | string | boolean | variable
 
 operator        : "==" | "!=" | "<" | "<=" | ">" | ">="
 

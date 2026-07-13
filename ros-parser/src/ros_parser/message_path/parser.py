@@ -10,6 +10,8 @@ from .models import (
     Comparison,
     ComparisonOperator,
     CompoundFilter,
+    CurrentFilterValue,
+    CurrentValueComparison,
     FieldAccess,
     Filter,
     FilterExpression,
@@ -99,6 +101,12 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         operator = ComparisonOperator(str(items[1]))
         value: FilterValue = items[2]
         return Comparison(field_path=field_path, operator=operator, value=value)
+
+    def current_value_comparison(self, items: list[Any]) -> CurrentValueComparison:
+        """Build a comparison against the scalar currently flowing through the path."""
+        operator = ComparisonOperator(str(items[0]))
+        value: CurrentFilterValue = items[1]
+        return CurrentValueComparison(operator=operator, value=value)
 
     def in_expr(self, items: list[Any]) -> InExpression:
         """Build InExpression from field path and list of values."""

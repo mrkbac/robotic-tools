@@ -273,6 +273,39 @@ class TestFilterValidation:
         path = parse_message_path("/topic.items{value>5.0}")
         path.validate(msgdef, all_defs)
 
+    def test_current_value_filter_valid_on_primitive(self) -> None:
+        msgdef = MessageDefinition(
+            name="test_msgs/Message",
+            fields_all=[Field(Type(type_name="float64"), "value")],
+        )
+
+        parse_message_path("/topic.value{<=30}").validate(msgdef, {"test_msgs/Message": msgdef})
+
+    def test_current_value_filter_valid_on_primitive_array(self) -> None:
+        msgdef = MessageDefinition(
+            name="test_msgs/Message",
+            fields_all=[Field(Type(type_name="float64", is_array=True, array_size=None), "values")],
+        )
+
+        parse_message_path("/topic.values[:]{<=30}").validate(msgdef, {"test_msgs/Message": msgdef})
+
+    def test_current_value_filter_rejects_complex_object(self) -> None:
+        point_def = MessageDefinition(
+            name="geometry_msgs/Point",
+            fields_all=[Field(Type(type_name="float64"), "x")],
+        )
+        msgdef = MessageDefinition(
+            name="test_msgs/Message",
+            fields_all=[Field(Type(type_name="Point", package_name="geometry_msgs"), "point")],
+        )
+        definitions = {
+            "test_msgs/Message": msgdef,
+            "geometry_msgs/Point": point_def,
+        }
+
+        with pytest.raises(ValidationError, match=r"current-value filter.*primitive"):
+            parse_message_path("/topic.point{<=30}").validate(msgdef, definitions)
+
     def test_filter_with_field_path_valid(self):
         """Test filter with field path."""
         point_def = MessageDefinition(

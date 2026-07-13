@@ -305,6 +305,7 @@ class FilterFieldRef:
 
 
 FilterValue = int | float | str | bool | Variable | FilterFieldRef
+CurrentFilterValue = int | float | str | bool | Variable
 
 
 def _resolve_parts(obj: Any, parts: tuple[str, ...]) -> Any:
@@ -382,6 +383,18 @@ class Comparison(FilterExpression):
 
 
 @dataclass
+class CurrentValueComparison(FilterExpression):
+    """A comparison against the current scalar or primitive sequence element."""
+
+    operator: ComparisonOperator
+    value: CurrentFilterValue
+
+    def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
+        compare_value = _resolve_filter_value(self.value, obj, variables)
+        return _compare(obj, self.operator, compare_value)
+
+
+@dataclass
 class InExpression(FilterExpression):
     """Membership test: field_path in [val1, val2, ...]."""
 
@@ -422,10 +435,10 @@ class Filter(Action):
         """
         Filter a sequence or single object based on a filter expression.
 
-        For sequences (list/tuple): Returns a new list with only matching items.
+        For sequences: Returns a new list with only matching items.
         For single objects: Returns the object if it matches, or None if it doesn't.
         """
-        if not isinstance(obj, (list, tuple)):
+        if not isinstance(obj, _ARRAY_TYPES):
             try:
                 return obj if self.expression.evaluate(obj, variables) else None
             except FieldResolutionError:
@@ -486,6 +499,12 @@ class Filter(Action):
             if isinstance(expr.value, FilterFieldRef):
                 _validate_field_path(
                     expr.value.field_path, validate_type, validate_msgdef, all_definitions
+                )
+        elif isinstance(expr, CurrentValueComparison):
+            if not validate_type.is_primitive:
+                raise ValidationError(
+                    "current-value filter can only be applied to a primitive scalar "
+                    f"or array of primitives, got '{validate_type}'"
                 )
         elif isinstance(expr, InExpression):
             _validate_field_path(expr.field_path, validate_type, validate_msgdef, all_definitions)
