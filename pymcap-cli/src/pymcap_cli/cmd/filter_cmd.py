@@ -6,6 +6,14 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     resolve_overwrite_policy,
@@ -43,39 +51,8 @@ def filter_cmd(
     file: str,
     output: OutputPathOption,
     *,
-    include_topic_regex: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-t", "--topics", "--include-topic-regex", "-y"],
-            group=TOPIC_FILTERING_GROUP,
-        ),
-    ] = None,
-    exclude_topic_regex: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-x", "--exclude-topics", "--exclude-topic-regex", "-n"],
-            group=TOPIC_FILTERING_GROUP,
-        ),
-    ] = None,
-    include_topic_glob: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--topic-glob"],
-            group=TOPIC_FILTERING_GROUP,
-            help=(
-                "Include topics matching this shell-style glob "
-                "(repeatable, combines with --topics)."
-            ),
-        ),
-    ] = None,
-    exclude_topic_glob: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--exclude-topic-glob"],
-            group=TOPIC_FILTERING_GROUP,
-            help="Exclude topics matching this shell-style glob (repeatable).",
-        ),
-    ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
     invert_topics: Annotated[
         bool,
         Parameter(
@@ -84,48 +61,8 @@ def filter_cmd(
             help="Invert the include/exclude topic decision.",
         ),
     ] = False,
-    start: Annotated[
-        str,
-        Parameter(
-            name=["-S", "--start"],
-            group=TIME_FILTERING_GROUP,
-        ),
-    ] = "",
-    start_secs: Annotated[
-        int,
-        Parameter(
-            name=["--start-secs"],
-            group=TIME_FILTERING_GROUP,
-        ),
-    ] = 0,
-    start_nsecs: Annotated[
-        int,
-        Parameter(
-            name=["--start-nsecs"],
-            group=TIME_FILTERING_GROUP,
-        ),
-    ] = 0,
-    end: Annotated[
-        str,
-        Parameter(
-            name=["-E", "--end"],
-            group=TIME_FILTERING_GROUP,
-        ),
-    ] = "",
-    end_secs: Annotated[
-        int,
-        Parameter(
-            name=["--end-secs"],
-            group=TIME_FILTERING_GROUP,
-        ),
-    ] = 0,
-    end_nsecs: Annotated[
-        int,
-        Parameter(
-            name=["--end-nsecs"],
-            group=TIME_FILTERING_GROUP,
-        ),
-    ] = 0,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
     invert_time: Annotated[
         bool,
         Parameter(
@@ -134,18 +71,7 @@ def filter_cmd(
             help="Invert the time-window decision (drop messages INSIDE [start, end]).",
         ),
     ] = False,
-    is_early_bail_enabled: Annotated[
-        bool,
-        Parameter(
-            name=["--early-bail"],
-            group=TIME_FILTERING_GROUP,
-            help=(
-                "Assume input messages are ordered by log_time and stop scanning "
-                "after --end is reached. Unindexed out-of-order messages after "
-                "that point will be ignored."
-            ),
-        ),
-    ] = False,
+    early_bail: EarlyBailOption = False,
     latch: Annotated[
         list[str] | None,
         Parameter(
@@ -153,7 +79,7 @@ def filter_cmd(
             group=LATCHING_GROUP,
             help=(
                 "Topic regex (repeatable) whose latest message should be replayed "
-                "into the output even if --topics or --start would otherwise drop "
+                "into the output even if --topic or --start would otherwise drop "
                 "it. Useful for /tf_static and other transient-local topics."
             ),
         ),
@@ -201,23 +127,15 @@ def filter_cmd(
         Path to the MCAP file to filter (local file or HTTP/HTTPS URL).
     output
         Output filename.
-    include_topic_regex
-        Include messages with topic names matching this regex (can be used multiple times).
-    exclude_topic_regex
-        Exclude messages with topic names matching this regex (can be used multiple times).
+    topic
+        Include a topic regex using full-match semantics (repeatable).
+    exclude_topic
+        Exclude a topic regex using full-match semantics (repeatable).
     start
         Include messages at or after this time (nanoseconds or RFC3339 date).
-    start_secs
-        Include messages at or after this time in seconds (ignored if --start used).
-    start_nsecs
-        (Deprecated, use --start) Include messages at or after this time in nanoseconds.
     end
         Include messages before this time (nanoseconds or RFC3339 date).
-    end_secs
-        Include messages before this time in seconds (ignored if --end used).
-    end_nsecs
-        (Deprecated, use --end) Include messages before this time in nanoseconds.
-    is_early_bail_enabled
+    early_bail
         Stop scanning at the first message at or after --end. Requires monotonic
         input log_time ordering for correctness.
     metadata_mode
@@ -239,33 +157,33 @@ def filter_cmd(
     Examples
     --------
     ```
-    mcap filter in.mcap -o out.mcap -y /diagnostics -y /tf -y /camera_.*
+    pymcap-cli filter in.mcap -o out.mcap -t /diagnostics -t /tf -t '/camera_.*'
     ```
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
     if overwrite_policy is None:
         logger.error("--force and --no-clobber cannot be used together.")
         return 1
+    if early_bail and invert_time:
+        logger.error("--early-bail cannot be combined with --invert-time")
+        return 1
 
     try:
-        input_options = InputOptions.from_args(
-            include_topic_regex=include_topic_regex,
-            exclude_topic_regex=exclude_topic_regex,
-            include_topic_glob=include_topic_glob,
-            exclude_topic_glob=exclude_topic_glob,
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
             start=start,
-            start_nsecs=start_nsecs,
-            start_secs=start_secs,
             end=end,
-            end_nsecs=end_nsecs,
-            end_secs=end_secs,
+            early_bail=early_bail,
+        )
+        input_options = InputOptions.from_message_filter(
+            message_filter,
             include_metadata=metadata_mode == MetadataMode.INCLUDE,
             include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
             latch_topics=latch,
             latch_from_metadata=latch_from_metadata,
             invert_topics=invert_topics,
             invert_time=invert_time,
-            is_early_bail_enabled=is_early_bail_enabled,
         )
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400

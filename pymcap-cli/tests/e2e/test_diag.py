@@ -190,7 +190,7 @@ class TestDiag:
 
     def test_single_topic(self, diag_mcap: Path, capsys):
         """Passing a single topic via -t works."""
-        result = diag(file=str(diag_mcap), topics=["/diagnostics"])
+        result = diag(file=str(diag_mcap), topic=["/diagnostics"])
 
         assert result == 0
         captured = capsys.readouterr()

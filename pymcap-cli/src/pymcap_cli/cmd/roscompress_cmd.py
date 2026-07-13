@@ -17,6 +17,13 @@ from cyclopts import Group, Parameter
 from mcap_codec_support.video import EncoderMode, VideoEncoderError
 from rich.console import Console
 
+from pymcap_cli.cmd._message_filter_options import (
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.cmd._pointcloud_cleanup import (
     pointcloud_worker_count,
     resolve_pointcloud_cleanup,
@@ -169,13 +176,10 @@ def roscompress(
             group=POINTCLOUD_GROUP,
         ),
     ] = None,
-    exclude_topic_glob: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--exclude-topic-glob", "-x"],
-            help="Drop topics matching this shell-style glob (repeatable), e.g. '/debug/*'.",
-        ),
-    ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
 ) -> int:
     """Compress ROS MCAP by converting image and point cloud topics.
 
@@ -230,10 +234,9 @@ def roscompress(
     pointcloud_sort_field
         Stable-sort cleaned PointCloud2 points by this field. Defaults to no
         sorting. Use ``line`` to group lidar rings.
-    exclude_topic_glob
-        Drop topics whose name matches any of these shell-style globs
-        (repeatable). Excluded topics are skipped before decoding, e.g.
-        ``--exclude-topic-glob '/debug/*'``.
+    exclude_topic
+        Drop topics matching a full-match regex (repeatable). Excluded topics
+        are skipped before decoding, e.g. ``-x '/debug/.*'``.
     """
     if output_overwrites_input(file, output):
         logger.error("Output path is the same file as the input; choose a different output file.")
@@ -338,8 +341,8 @@ def roscompress(
 
     logger.info(f"Input: {file}")
     logger.info(f"Output: {output}")
-    if exclude_topic_glob:
-        logger.info(f"Excluding topics matching: {', '.join(exclude_topic_glob)}")
+    if exclude_topic:
+        logger.info(f"Excluding topics matching: {', '.join(exclude_topic)}")
     if image_format == "video":
         logger.info(f"Image mode: video ({encoder or 'auto'}, {codec}, backend={backend.value})")
         logger.info(f"Quality (CRF): {quality}")
@@ -365,8 +368,20 @@ def roscompress(
     else:
         logger.info("Point cloud cleanup: disabled")
 
-    input_options = InputOptions.from_args(
-        exclude_topic_glob=exclude_topic_glob or None,
+    try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=False,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
+    input_options = InputOptions.from_message_filter(
+        message_filter,
         extra_processors=extras or None,
     )
     # Route the compressed output into a per-topic uncompressed chunk group — the

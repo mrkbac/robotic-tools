@@ -10,6 +10,14 @@ from typing import Annotated, Literal, TypedDict
 
 from cyclopts import Group, Parameter
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.core.tf_findings import detect_cycles, detect_multiple_parents
 from pymcap_cli.core.tf_tree import (
     TransformData,
@@ -154,6 +162,11 @@ def tf_export(
             help="Resolve multi-parent frames by keeping the most recent parent.",
         ),
     ] = False,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
 ) -> int:
     """Export the TF tree from an MCAP file as URDF, SDF, or JSON.
 
@@ -173,10 +186,23 @@ def tf_export(
         include_dynamic = True
 
     try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
+    except ValueError as exc:
+        ERR.print(f"[red]Invalid message filter:[/red] {exc}")
+        return 1
+
+    try:
         transforms = read_transforms(
             file,
             include_dynamic=include_dynamic,
             snapshot_ns=snapshot_ns,
+            message_filter=message_filter,
         )
     except (OSError, ValueError, RuntimeError):
         logger.exception("Error reading MCAP file")

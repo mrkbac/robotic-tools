@@ -170,7 +170,8 @@ def test_filter_cmd_passes_early_bail_option(monkeypatch):
     exit_code = filter_cmd.filter_cmd(
         file="input.mcap",
         output=Path("out.mcap"),
-        is_early_bail_enabled=True,
+        end="100",
+        early_bail=True,
         force=True,
     )
 

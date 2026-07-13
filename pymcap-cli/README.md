@@ -63,6 +63,29 @@ pymcap-cli info file1.mcap file2.mcap file3.mcap
 pymcap-cli info-json data.mcap
 ```
 
+### Common Message Filters
+
+File-reading commands use the same selectors, including `cat`, `filter`,
+`process`, `roscompress`, the exporters, and the diagnostic/TF readers:
+
+```bash
+# Exact topics (repeatable)
+pymcap-cli export-json data.mcap -o ./json -t /odom -t /imu
+
+# Regex selectors use full-match semantics; exclusions always win
+pymcap-cli cat data.mcap -t '/camera/.*' -x '.*/debug'
+
+# Inclusive start, exclusive end; recording-relative values are supported
+pymcap-cli export-images data.mcap -o ./images --start @10s --end end-5s
+```
+
+Every `--topic` / `--exclude-topic` value is a regular expression evaluated
+with full-match semantics. Thus `/camera/front` matches only that topic,
+`/camera/.*` matches the camera namespace, and `.*camera.*` performs a
+substring-style match. Escape regex metacharacters in arbitrary non-ROS MCAP
+topic names when you mean them literally. See each command's `--help` for
+domain-specific options.
+
 ### `cat` — Stream Messages
 
 Stream MCAP messages to stdout. Outputs as Rich tables when interactive, JSONL when piped.
@@ -79,11 +102,11 @@ Use `--query` to extract nested fields from deeply structured ROS messages with 
 # Display messages in a table
 pymcap-cli cat recording.mcap
 
-# Filter specific topics
-pymcap-cli cat recording.mcap --topics /camera/image
+# Filter an exact topic
+pymcap-cli cat recording.mcap --topic /camera/image
 
-# Filter by time range
-pymcap-cli cat recording.mcap --start-secs 10 --end-secs 20
+# Filter by recording-relative time range
+pymcap-cli cat recording.mcap --start @10s --end @20s
 
 # Limit output
 pymcap-cli cat recording.mcap --limit 100
@@ -209,19 +232,23 @@ The most powerful command — combines recovery, filtering, and optimization in 
 
 ```bash
 # Filter by topic regex
-pymcap-cli process data.mcap -o filtered.mcap -y "/camera.*" -y "/lidar.*"
+pymcap-cli process data.mcap -o filtered.mcap \
+  -t '/camera/.*' -t '/lidar/.*'
 
 # Time range filtering (nanoseconds or RFC3339)
 pymcap-cli process data.mcap -o subset.mcap -S "2022-01-01T00:00:00Z" -E "2022-01-01T01:00:00Z"
 
 # Exclude topics and metadata
-pymcap-cli process data.mcap -o clean.mcap -n "/debug.*" --exclude-metadata
+pymcap-cli process data.mcap -o clean.mcap \
+  -x '/debug/.*' --metadata exclude
 
 # Change compression with filtering
-pymcap-cli process zstd.mcap -o lz4.mcap --compression lz4 -y "/important.*"
+pymcap-cli process zstd.mcap -o lz4.mcap --compression lz4 \
+  -t '/important/.*'
 
 # Recovery mode with filtering (handles corrupt files)
-pymcap-cli process corrupt.mcap -o recovered.mcap -y "/camera.*" --recovery-mode
+pymcap-cli process corrupt.mcap -o recovered.mcap \
+  -t '/camera/.*' --recovery-mode
 ```
 
 ### `recover` — Advanced Recovery
@@ -337,16 +364,18 @@ pymcap-cli rechunk data.mcap -o rechunked.mcap \
   -p "/radar.*"
 ```
 
-### `filter` — Topic Filtering
+### `filter` — Message Filtering
 
-Filter messages by topic patterns (simpler version of `process`).
+Filter messages by topic and time (simpler version of `process`).
 
 ```bash
 # Include specific topics
-pymcap-cli filter data.mcap -o filtered.mcap --topics "/camera/image" "/lidar/points"
+pymcap-cli filter data.mcap -o filtered.mcap \
+  -t /camera/image -t /lidar/points
 
 # Exclude topics
-pymcap-cli filter data.mcap -o filtered.mcap --exclude-topics "/debug.*" "/test.*"
+pymcap-cli filter data.mcap -o filtered.mcap \
+  -x '/debug/.*' -x '/test/.*'
 ```
 
 ### `compress` — Compression Tool
@@ -670,18 +699,20 @@ pymcap-cli --show-completion fish | source    # fish
 ```bash
 # Remove debug topics and compress
 pymcap-cli process raw.mcap -o clean.mcap \
-  -n "/debug.*" -n "/test.*" --exclude-metadata --compression zstd
+  -x '/debug/.*' -x '/test/.*' \
+  --metadata exclude --compression zstd
 
 # Extract camera data with time range
 pymcap-cli process full_log.mcap -o camera.mcap \
-  -y "/camera.*" -S "2024-01-01T10:00:00Z" -E "2024-01-01T11:00:00Z"
+  -t '/camera/.*' \
+  -S "2024-01-01T10:00:00Z" -E "2024-01-01T11:00:00Z"
 
 # Recover corrupt file and compress in one pass
 pymcap-cli process corrupt.mcap -o recovered.mcap --recovery-mode --compression lz4
 
 # Fast filtering with automatic chunk copying when possible
 pymcap-cli process 100gb_file.mcap -o filtered.mcap \
-  -y "/lidar.*" --compression zstd
+  -t '/lidar/.*' --compression zstd
 
 # Optimize for topic-specific playback
 pymcap-cli rechunk robot_log.mcap -o optimized.mcap \

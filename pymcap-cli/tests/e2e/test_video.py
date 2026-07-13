@@ -28,7 +28,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(image_compressed_mcap),
-            topics=["/camera/image_compressed"],
+            topic=["/camera/image_compressed"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,
@@ -46,7 +46,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(image_rgb_mcap),
-            topics=["/camera/image_raw"],
+            topic=["/camera/image_raw"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,
@@ -64,7 +64,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(image_small_mcap),
-            topics=["/camera/image_compressed"],
+            topic=["/camera/image_compressed"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,
@@ -82,7 +82,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(image_compressed_mcap),
-            topics=["/nonexistent/topic"],
+            topic=["/nonexistent/topic"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,
@@ -98,7 +98,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(simple_mcap),
-            topics=["/test"],
+            topic=["/test"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,
@@ -114,7 +114,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(image_compressed_mcap),
-            topics=["/camera/image_compressed"],
+            topic=["/camera/image_compressed"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,
@@ -138,7 +138,7 @@ class TestVideoCommand:
 
         rc = video(
             file=str(image_compressed_mcap),
-            topics=["/camera/image_compressed"],
+            topic=["/camera/image_compressed"],
             output=out_dir,
             codec=VideoCodec.H264,
             encoder=EncoderBackend.SOFTWARE,

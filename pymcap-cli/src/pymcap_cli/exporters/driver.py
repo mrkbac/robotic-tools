@@ -8,13 +8,14 @@ selected :class:`~pymcap_cli.exporters.base.Exporter`.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 from small_mcap import get_summary, read_message_decoded
 
-from pymcap_cli.constants import MAX_INT64
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_transform import count_included_messages, create_progress
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.exporters._common import (
     make_should_include,
     unique_topic_filename,
@@ -35,11 +36,10 @@ def run_export(
     file: str,
     output: str | Path | None,
     exporter: Exporter,
-    topics: list[str] | None = None,
+    message_filter: MessageFilterOptions | None = None,
+    required_topics: list[str] | None = None,
     force: bool = False,
     num_workers: int = 8,
-    start_time_ns: int = 0,
-    end_time_ns: int | None = None,
 ) -> int:
     """Drive an export run end-to-end.
 
@@ -50,14 +50,16 @@ def run_export(
     location internally (e.g. plot's optional ``--output``: when omitted,
     the figure is shown interactively).
 
-    ``start_time_ns`` / ``end_time_ns`` filter messages at the reader level.
-    ``end_time_ns=None`` means "no upper bound".
+    ``message_filter`` is the canonical topic/time selection shared by every
+    file-reading command. ``required_topics`` is an additional command-owned
+    restriction, used by plot paths and other semantic readers.
     """
-    resolved_output = exporter.validate_output(output, force=force)
-    if resolved_output is None:
-        return 1
-
-    should_include = make_should_include(topics=topics, accepts_schema=exporter.accepts)
+    filters = message_filter or MessageFilterOptions()
+    should_include = make_should_include(
+        message_filter=filters,
+        accepts_schema=exporter.accepts,
+        required_topics=required_topics,
+    )
 
     # Read the summary exactly once, then derive both the progress total and
     # the pre-scan coverage warnings from it.
@@ -68,8 +70,18 @@ def run_export(
         logger.exception(f"Error reading {file}")
         return 1
 
+    try:
+        resolved_filter = filters.resolve(summary)
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
+    resolved_output = exporter.validate_output(output, force=force)
+    if resolved_output is None:
+        return 1
+
     total = count_included_messages(summary, should_include)
-    warn_topic_coverage(summary, file, topics)
+    warn_topic_coverage(summary, file, None)
 
     writers: dict[int, TopicWriter] = {}
     used_filenames: set[str] = set()
@@ -90,14 +102,18 @@ def run_export(
         ):
             task_id = progress.add_task("Processing messages", total=total)
 
+            reader_end = sys.maxsize if resolved_filter.early_bail else resolved_filter.end_time_ns
             for msg in read_message_decoded(
                 stream,
                 should_include=should_include,
                 decoder_factories=exporter.decoder_factories(),
                 num_workers=num_workers,
-                start_time_ns=start_time_ns,
-                end_time_ns=end_time_ns if end_time_ns is not None else MAX_INT64,
+                start_time_ns=resolved_filter.start_time_ns,
+                end_time_ns=reader_end,
             ):
+                log_time = msg.message.log_time
+                if resolved_filter.early_bail and log_time >= resolved_filter.end_time_ns:
+                    break
                 progress.advance(task_id)
                 topic = msg.channel.topic
                 writer_key = int(msg.channel.id)

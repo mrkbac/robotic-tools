@@ -76,7 +76,7 @@ def _write_input(path: Path) -> None:
         writer.finish()
 
 
-def test_roscompress_cleans_pointclouds_and_excludes_by_glob(tmp_path: Path):
+def test_roscompress_cleans_pointclouds_and_excludes_by_regex(tmp_path: Path):
     src = tmp_path / "in.mcap"
     out = tmp_path / "out.mcap"
     _write_input(src)
@@ -86,7 +86,7 @@ def test_roscompress_cleans_pointclouds_and_excludes_by_glob(tmp_path: Path):
         out,
         force=True,
         image_format="none",
-        exclude_topic_glob=["*/secondary"],
+        exclude_topic=[r".*/secondary"],
     )
     assert rc == 0
 

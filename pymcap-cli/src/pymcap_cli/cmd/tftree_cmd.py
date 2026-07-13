@@ -1,14 +1,23 @@
 """TF tree command - display transform tree from MCAP file."""
 
 import logging
+import sys
 from typing import Annotated
 
 from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.live import Live
-from small_mcap import include_topics, read_message_decoded
+from small_mcap import get_summary, include_topics, read_message_decoded
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.tf_findings import collect_tf_findings, has_error_findings
 from pymcap_cli.core.tf_tree import TF_STATIC_TOPIC, TF_TOPIC, TfGraph, add_tf_message
@@ -37,6 +46,11 @@ def tftree(
             group=DISPLAY_GROUP,
         ),
     ] = False,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
 ) -> int:
     """Display TF transform tree from MCAP file.
 
@@ -56,12 +70,34 @@ def tftree(
         topics.append(TF_TOPIC)
 
     try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
+    try:
         with open_input(file) as (f, _file_size), Live(console=console) as live:
+            resolved_filter = message_filter.resolve(get_summary(f))
             for msg in read_message_decoded(
                 f,
-                should_include=include_topics(topics),
+                should_include=message_filter.create_channel_predicate(include_topics(topics)),
                 decoder_factories=[DecoderFactory()],
+                start_time_ns=resolved_filter.start_time_ns,
+                end_time_ns=(
+                    sys.maxsize if resolved_filter.early_bail else resolved_filter.end_time_ns
+                ),
             ):
+                if (
+                    resolved_filter.early_bail
+                    and msg.message.log_time >= resolved_filter.end_time_ns
+                ):
+                    break
                 tree_changed = add_tf_message(graph, msg.channel.topic, msg.decoded_message)
 
                 compact = console.width < TF_COMPACT_WIDTH

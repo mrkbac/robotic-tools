@@ -24,6 +24,14 @@ from typing import Annotated
 
 from cyclopts import Parameter
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.parquet_exporter import ParquetExporter
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
@@ -40,7 +48,11 @@ def export_parquet(
     num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
     writer_threads: Annotated[int, Parameter(name=["--writer-threads"])] = 4,
     compression: Annotated[str, Parameter(name=["--compression"])] = "zstd",
-    topic: Annotated[list[str] | None, Parameter(name=["--topic", "-t"])] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     include_blobs: Annotated[bool, Parameter(name=["--include-blobs"])] = False,
     skip_schema: Annotated[list[str] | None, Parameter(name=["--skip-schema"])] = None,
 ) -> int:
@@ -72,6 +84,13 @@ def export_parquet(
         Extra schema names to exclude (in addition to the built-in blob list).
     """
     try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
         exporter = ParquetExporter(
             batch_size=batch_size,
             writer_threads=writer_threads,
@@ -79,6 +98,9 @@ def export_parquet(
             include_blobs=include_blobs,
             skip_schema=skip_schema,
         )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
     except ImportError:
         logger.exception(
             "The 'pyarrow' package is required. Install with: uv add 'pymcap-cli[parquet]'"
@@ -89,7 +111,7 @@ def export_parquet(
         file=file,
         output=output,
         exporter=exporter,
-        topics=topic,
+        message_filter=message_filter,
         force=force,
         num_workers=num_workers,
     )

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from pymcap_cli.utils import parse_timestamp_args
 
 if TYPE_CHECKING:
+    from pymcap_cli.core.message_filter import MessageFilterOptions
     from pymcap_cli.core.processors.base import InputProcessor
     from pymcap_cli.utils import RelativeTime
 
@@ -93,6 +94,37 @@ class InputOptions:
             invert_topics=invert_topics,
             invert_time=invert_time,
             is_early_bail_enabled=is_early_bail_enabled,
+            extra_processors=list(extra_processors) if extra_processors else [],
+        )
+
+    @classmethod
+    def from_message_filter(
+        cls,
+        message_filter: MessageFilterOptions,
+        *,
+        always_decode_chunk: bool = False,
+        include_metadata: bool = True,
+        include_attachments: bool = True,
+        latch_topics: list[str] | None = None,
+        latch_from_metadata: bool = False,
+        invert_topics: bool = False,
+        invert_time: bool = False,
+        extra_processors: list[InputProcessor] | None = None,
+    ) -> InputOptions:
+        """Adapt the canonical CLI filter to the processor input pipeline."""
+        return cls(
+            always_decode_chunk=always_decode_chunk,
+            start_time_ns=message_filter.start_time,
+            end_time_ns=message_filter.end_time,
+            include_topics=message_filter.include_patterns(),
+            exclude_topics=message_filter.exclude_patterns(),
+            include_metadata=include_metadata,
+            include_attachments=include_attachments,
+            latch_topics=latch_topics or [],
+            latch_from_metadata=latch_from_metadata,
+            invert_topics=invert_topics,
+            invert_time=invert_time,
+            is_early_bail_enabled=message_filter.early_bail,
             extra_processors=list(extra_processors) if extra_processors else [],
         )
 

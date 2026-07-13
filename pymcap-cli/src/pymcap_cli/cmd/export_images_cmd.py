@@ -1,12 +1,23 @@
 """Export image topics from an MCAP file to a folder of image files."""
 
+import logging
 from typing import Annotated
 
 from cyclopts import Parameter
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.image_exporter import ImageExporter
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
+
+logger = logging.getLogger(__name__)
 
 
 def export_images(
@@ -14,7 +25,11 @@ def export_images(
     output: OutputPathOption,
     *,
     force: ForceOverwriteOption = False,
-    topic: Annotated[list[str] | None, Parameter(name=["--topic", "-t"])] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     raw_format: Annotated[str, Parameter(name=["--raw-format"])] = "png",
     output_format: Annotated[str, Parameter(name=["--format"])] = "native",
     num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
@@ -27,11 +42,23 @@ def export_images(
     Raw ``Image`` messages are always encoded with ``--raw-format`` (default
     ``png``). Requires the ``image`` extra.
     """
+    try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
     return run_export(
         file=file,
         output=output,
         exporter=ImageExporter(raw_format=raw_format, output_format=output_format),
-        topics=topic,
+        message_filter=message_filter,
         force=force,
         num_workers=num_workers,
     )

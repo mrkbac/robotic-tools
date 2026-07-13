@@ -21,8 +21,16 @@ from ros_parser.message_path import (
     MessagePathError,
     parse_message_path,
 )
-from small_mcap import Channel, JSONDecoderFactory, read_message_decoded
+from small_mcap import Channel, JSONDecoderFactory, get_summary, read_message_decoded
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query, query_result_is_empty
 from pymcap_cli.display.message_render import (
@@ -35,7 +43,7 @@ from pymcap_cli.display.message_render import (
     render_message_flat,
     render_message_tree,
 )
-from pymcap_cli.utils import ProgressTrackingIO, file_progress, parse_timestamp_bounds_absolute
+from pymcap_cli.utils import ProgressTrackingIO, file_progress
 
 logger = logging.getLogger(__name__)
 console_out = Console()
@@ -47,20 +55,8 @@ OUTPUT_GROUP = Group("Output")
 def cat(
     file: str,
     *,
-    topics: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-t", "--topics"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
-    exclude_topics: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-x", "--exclude-topics", "-n"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
     query: Annotated[
         str | None,
         Parameter(
@@ -88,34 +84,9 @@ def cat(
             group=FILTERING_GROUP,
         ),
     ] = False,
-    start: Annotated[
-        str,
-        Parameter(
-            name=["-S", "--start"],
-            group=FILTERING_GROUP,
-        ),
-    ] = "",
-    start_secs: Annotated[
-        int,
-        Parameter(
-            name=["-s", "--start-secs"],
-            group=FILTERING_GROUP,
-        ),
-    ] = 0,
-    end: Annotated[
-        str,
-        Parameter(
-            name=["-E", "--end"],
-            group=FILTERING_GROUP,
-        ),
-    ] = "",
-    end_secs: Annotated[
-        int,
-        Parameter(
-            name=["-e", "--end-secs"],
-            group=FILTERING_GROUP,
-        ),
-    ] = 0,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     limit: Annotated[
         int | None,
         Parameter(
@@ -184,10 +155,10 @@ def cat(
       pymcap-cli cat recording.mcap -o messages.jsonl
 
       # Filter specific topics
-      pymcap-cli cat recording.mcap --topics /camera/image
+      pymcap-cli cat recording.mcap --topic /camera/image
 
       # Filter by time range
-      pymcap-cli cat recording.mcap --start-secs 10 --end-secs 20
+      pymcap-cli cat recording.mcap --start @10s --end @20s
 
       # Limit output
       pymcap-cli cat recording.mcap --limit 100
@@ -206,14 +177,15 @@ def cat(
     """
 
     try:
-        start_time_ns, end_time_ns = parse_timestamp_bounds_absolute(
-            start,
-            start_secs,
-            end,
-            end_secs,
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
         )
-    except ValueError as e:
-        logger.error(str(e))  # noqa: TRY400
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
         return 1
 
     parsed_query = None
@@ -232,15 +204,6 @@ def cat(
             logger.exception("Invalid --grep regex")
             return 1
 
-    try:
-        topic_patterns = [re.compile(pattern) for pattern in topics] if topics else []
-        exclude_topic_patterns = (
-            [re.compile(pattern) for pattern in exclude_topics] if exclude_topics else []
-        )
-    except re.error:
-        logger.exception("Invalid topic regex")
-        return 1
-
     writing_to_file = output is not None
     is_tty = not writing_to_file and sys.stdout.isatty()
 
@@ -249,20 +212,13 @@ def cat(
     schema_cache = SchemaCache()
     previous_by_topic: dict[str, Any] = {}
 
-    def should_include_message(
+    def base_predicate(
         channel: Channel,
         _schema: Schema | None,
     ) -> bool:
-        topic = channel.topic
+        return parsed_query is None or channel.topic == parsed_query.topic
 
-        if parsed_query:
-            return topic == parsed_query.topic and not any(
-                p.search(topic) for p in exclude_topic_patterns
-            )
-        if topic_patterns and not any(p.search(topic) for p in topic_patterns):
-            return False
-
-        return not any(p.search(topic) for p in exclude_topic_patterns)
+    should_include_message = message_filter.create_channel_predicate(base_predicate)
 
     def _to_jsonl(msg: "DecodedMessage", data: Any) -> str:
         entry: dict[str, Any] = {
@@ -278,6 +234,11 @@ def cat(
 
     try:
         with open_input(file) as (input_stream, file_size), ExitStack() as stack:
+            try:
+                resolved_filter = message_filter.resolve(get_summary(input_stream))
+            except ValueError as exc:
+                logger.error(str(exc))  # noqa: TRY400
+                return 1
             stream: IO[bytes] = input_stream
             if writing_to_file and file_size:
                 progress = file_progress("[bold blue]Reading MCAP...")
@@ -291,10 +252,17 @@ def cat(
             for msg in read_message_decoded(
                 stream,
                 decoder_factories=[JSONDecoderFactory(), DecoderFactory()],
-                start_time_ns=start_time_ns,
-                end_time_ns=end_time_ns,
+                start_time_ns=resolved_filter.start_time_ns,
+                end_time_ns=(
+                    sys.maxsize if resolved_filter.early_bail else resolved_filter.end_time_ns
+                ),
                 should_include=should_include_message,
             ):
+                if (
+                    resolved_filter.early_bail
+                    and msg.message.log_time >= resolved_filter.end_time_ns
+                ):
+                    break
                 if limit is not None and message_count >= limit:
                     break
 
@@ -344,12 +312,12 @@ def cat(
 
                     changed_paths = None
                     if changed:
-                        topic = msg.channel.topic
-                        previous = previous_by_topic.get(topic)
+                        current_topic = msg.channel.topic
+                        previous = previous_by_topic.get(current_topic)
                         changed_paths = (
                             changed_leaf_paths(previous, data) if previous is not None else None
                         )
-                        previous_by_topic[topic] = data
+                        previous_by_topic[current_topic] = data
 
                     if flat:
                         console_out.print(header)

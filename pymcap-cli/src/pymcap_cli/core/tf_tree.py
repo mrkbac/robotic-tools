@@ -6,6 +6,7 @@ Shared by `tftree`, `tf-get`, and `tf-export`.
 from __future__ import annotations
 
 import math
+import sys
 from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -16,10 +17,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
-from small_mcap import include_topics, read_message_decoded
+from small_mcap import get_summary, include_topics, read_message_decoded
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.message_filter import MessageFilterOptions
 
 TF_TOPIC = "/tf"
 TF_STATIC_TOPIC = "/tf_static"
@@ -361,18 +363,28 @@ def read_tf_graph(
     include_dynamic: bool = False,
     snapshot_ns: int | None = None,
     keep_series: bool = False,
+    message_filter: MessageFilterOptions | None = None,
 ) -> TfGraph:
     topics = [TF_STATIC_TOPIC]
     if include_dynamic:
         topics.append(TF_TOPIC)
 
     graph = TfGraph(snapshot_ns=snapshot_ns, keep_series=keep_series)
+    filters = message_filter or MessageFilterOptions()
     with open_input(file) as (stream, _file_size):
+        resolved_filter = filters.resolve(get_summary(stream))
+        should_include = filters.create_channel_predicate(include_topics(topics))
         for msg in read_message_decoded(
             stream,
-            should_include=include_topics(topics),
+            should_include=should_include,
             decoder_factories=[DecoderFactory()],
+            start_time_ns=resolved_filter.start_time_ns,
+            end_time_ns=(
+                sys.maxsize if resolved_filter.early_bail else resolved_filter.end_time_ns
+            ),
         ):
+            if resolved_filter.early_bail and msg.message.log_time >= resolved_filter.end_time_ns:
+                break
             add_tf_message(graph, msg.channel.topic, msg.decoded_message)
     return graph
 
@@ -382,12 +394,14 @@ def read_transforms(
     *,
     include_dynamic: bool = False,
     snapshot_ns: int | None = None,
+    message_filter: MessageFilterOptions | None = None,
 ) -> dict[Edge, TransformData]:
     """Collapse all transforms to one per (parent, child)."""
     return read_tf_graph(
         file,
         include_dynamic=include_dynamic,
         snapshot_ns=snapshot_ns,
+        message_filter=message_filter,
     ).transforms
 
 

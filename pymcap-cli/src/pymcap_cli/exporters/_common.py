@@ -13,12 +13,12 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from small_mcap import include_topics
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from small_mcap import Channel, DecodedMessage, Schema
+
+    from pymcap_cli.core.message_filter import MessageFilterOptions
 
 logger = logging.getLogger(__name__)
 _TABLE_NAME_RE = re.compile(r"[^0-9a-zA-Z_]+")
@@ -181,22 +181,21 @@ def exclude_topic_globs(
 
 def make_should_include(
     *,
-    topics: list[str] | None,
+    message_filter: MessageFilterOptions,
     accepts_schema: Callable[[Schema | None], bool],
+    required_topics: list[str] | None = None,
 ) -> Callable[[Channel, Schema | None], bool]:
     """Build a ``should_include`` predicate for ``small_mcap.read_message_decoded``.
 
-    Composes :func:`small_mcap.include_topics` (topic filter) with the
-    exporter's schema acceptance test, so unsupported / blob schemas are
-    rejected at chunk-decode time instead of after CDR decoding.
+    Composes the shared user topic filter with exporter schema acceptance and
+    optional command-required topics, so rejected channels are skipped before
+    payload decoding.
     """
-    topic_predicate = include_topics(topics) if topics else None
+    required = frozenset(required_topics or ())
 
-    def _should_include(channel: Channel, schema: Schema | None) -> bool:
+    def base_predicate(channel: Channel, schema: Schema | None) -> bool:
         if not accepts_schema(schema):
             return False
-        if topic_predicate is None:
-            return True
-        return topic_predicate(channel, schema)
+        return not required or channel.topic in required
 
-    return _should_include
+    return message_filter.create_channel_predicate(base_predicate)

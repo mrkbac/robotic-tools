@@ -10,6 +10,14 @@ from cyclopts import Group, Parameter
 from rich.console import Console
 from rich.table import Table
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.core.tf_findings import (
     TfFinding,
     TfSeverity,
@@ -48,6 +56,11 @@ def tf_get(
             ),
         ),
     ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
 ) -> int:
     """Lookup TARGET_T_SOURCE in a TF tree from an MCAP file.
 
@@ -63,7 +76,24 @@ def tf_get(
             return 1
 
     try:
-        graph = read_tf_graph(file, include_dynamic=True, keep_series=time_ns is not None)
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
+    try:
+        graph = read_tf_graph(
+            file,
+            include_dynamic=True,
+            keep_series=time_ns is not None,
+            message_filter=message_filter,
+        )
     except (OSError, ValueError, RuntimeError):
         logger.exception("Error reading MCAP file")
         return 1

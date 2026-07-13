@@ -11,6 +11,14 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.cmd._pointcloud_cleanup import (
     pointcloud_worker_count,
     resolve_pointcloud_cleanup,
@@ -130,27 +138,12 @@ def process(
         Parameter(name=["-a", "--always-decode-chunk"], group=RECOVERY_GROUP),
     ] = False,
     # ----- Topic filtering -----
-    include_topic_regex: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-t", "--topics", "--include-topic-regex", "-y"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
-    exclude_topic_regex: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-x", "--exclude-topics", "--exclude-topic-regex", "-n"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
     # ----- Time filtering -----
-    start: Annotated[str, Parameter(name=["-S", "--start"], group=TIME_FILTERING_GROUP)] = "",
-    start_secs: Annotated[int, Parameter(name=["--start-secs"], group=TIME_FILTERING_GROUP)] = 0,
-    start_nsecs: Annotated[int, Parameter(name=["--start-nsecs"], group=TIME_FILTERING_GROUP)] = 0,
-    end: Annotated[str, Parameter(name=["-E", "--end"], group=TIME_FILTERING_GROUP)] = "",
-    end_secs: Annotated[int, Parameter(name=["--end-secs"], group=TIME_FILTERING_GROUP)] = 0,
-    end_nsecs: Annotated[int, Parameter(name=["--end-nsecs"], group=TIME_FILTERING_GROUP)] = 0,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     # ----- Content filtering -----
     metadata_mode: Annotated[
         MetadataMode,
@@ -530,22 +523,14 @@ def process(
         Output filename. Required unless a --split-* flag is set.
     always_decode_chunk
         Always decode chunks, never use fast copying.
-    include_topic_regex
-        Include messages with topic names matching this regex (repeatable).
-    exclude_topic_regex
-        Exclude messages with topic names matching this regex (repeatable).
+    topic
+        Include a topic regex using full-match semantics (repeatable).
+    exclude_topic
+        Exclude a topic regex using full-match semantics (repeatable).
     start
         Include messages at or after this time (nanoseconds or RFC3339 date).
-    start_secs
-        Include messages at or after this time in seconds.
-    start_nsecs
-        [DEPRECATED — use --start instead] Same in nanoseconds.
     end
         Include messages before this time (nanoseconds or RFC3339 date).
-    end_secs
-        Include messages before this time in seconds.
-    end_nsecs
-        [DEPRECATED — use --end instead] Same in nanoseconds.
     metadata_mode
         Metadata handling: include or exclude metadata records.
     attachments_mode
@@ -573,7 +558,7 @@ def process(
     pymcap-cli process corrupt.mcap -o fixed.mcap --compression lz4
 
     # Filter by topic and time
-    pymcap-cli process in.mcap -o out.mcap -y '/camera.*' --start-secs 10
+    pymcap-cli process in.mcap -o out.mcap -t '/camera/.*' --start @10s
 
     # Merge multiple files with dedup
     pymcap-cli process a.mcap b.mcap -o merged.mcap --dedup-identical
@@ -753,25 +738,35 @@ def process(
 
     # --- Build InputOptions ----------------------------------------------------
     try:
-        input_options = InputOptions.from_args(
-            include_topic_regex=include_topic_regex,
-            exclude_topic_regex=exclude_topic_regex,
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
             start=start,
-            start_nsecs=start_nsecs,
-            start_secs=start_secs,
             end=end,
-            end_nsecs=end_nsecs,
-            end_secs=end_secs,
-            include_metadata=metadata_mode == MetadataMode.INCLUDE,
-            include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
-            always_decode_chunk=always_decode_chunk,
-            latch_topics=latch,
-            latch_from_metadata=latch_from_metadata,
-            extra_processors=extras or None,
+            early_bail=early_bail,
         )
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400
         return 1
+    if early_bail and (
+        metadata_mode == MetadataMode.INCLUDE
+        or attachments_mode == AttachmentsMode.INCLUDE
+        or always_decode_chunk
+        or extras
+    ):
+        logger.error(
+            "--early-bail requires metadata/attachments exclusion and no decode processors"
+        )
+        return 1
+    input_options = InputOptions.from_message_filter(
+        message_filter,
+        include_metadata=metadata_mode == MetadataMode.INCLUDE,
+        include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+        always_decode_chunk=always_decode_chunk,
+        latch_topics=latch,
+        latch_from_metadata=latch_from_metadata,
+        extra_processors=extras or None,
+    )
 
     # --- Build split routers ---------------------------------------------------
     routers: list[OutputRouter] = []

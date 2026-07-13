@@ -70,7 +70,7 @@ class TestCat:
     def test_cat_topic_filter(self, multi_topic_mcap: Path, capsys):
         """Test topic filtering."""
         # Filter to camera topics only
-        cat(file=str(multi_topic_mcap), topics=["/camera/.*"], limit=5)
+        cat(file=str(multi_topic_mcap), topic=["/camera/.*"], limit=5)
 
         captured = capsys.readouterr()
         lines = captured.out.strip().split("\n")
@@ -82,7 +82,7 @@ class TestCat:
     def test_cat_exclude_topics(self, multi_topic_mcap: Path, capsys):
         """Test topic exclusion."""
         # Exclude camera topics
-        cat(file=str(multi_topic_mcap), exclude_topics=["/camera/.*"], limit=5)
+        cat(file=str(multi_topic_mcap), exclude_topic=["/camera/.*"], limit=5)
 
         captured = capsys.readouterr()
         lines = captured.out.strip().split("\n")
@@ -104,7 +104,7 @@ class TestCat:
         # Mock isatty to ensure JSONL output format
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)
 
-        cat(file=str(image_small_mcap), topics=["/camera.*"], limit=2)
+        cat(file=str(image_small_mcap), topic=["/camera.*"], limit=2)
 
         captured = capsys.readouterr()
         lines = captured.out.strip().split("\n")
@@ -157,7 +157,7 @@ class TestCat:
 
     def test_cat_empty_filter(self, multi_topic_mcap: Path, capsys):
         """Test cat with filter that matches nothing."""
-        cat(file=str(multi_topic_mcap), topics=["/nonexistent/.*"], limit=10)
+        cat(file=str(multi_topic_mcap), topic=["/nonexistent/.*"], limit=10)
 
         captured = capsys.readouterr()
         # Should output nothing or very few lines (if limit not reached)
@@ -165,7 +165,11 @@ class TestCat:
 
     def test_cat_multiple_topic_filters(self, multi_topic_mcap: Path, capsys):
         """Test cat with multiple topic filters."""
-        cat(file=str(multi_topic_mcap), topics=["/camera/.*", "/lidar/.*"], limit=10)
+        cat(
+            file=str(multi_topic_mcap),
+            topic=["/camera/.*", "/lidar/.*"],
+            limit=10,
+        )
 
         captured = capsys.readouterr()
         lines = captured.out.strip().split("\n")

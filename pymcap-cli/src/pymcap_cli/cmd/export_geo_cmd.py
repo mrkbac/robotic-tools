@@ -6,6 +6,14 @@ from typing import Annotated, Literal
 from cyclopts import Parameter
 from rich.console import Console
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.geojson_exporter import GeoJsonExporter
 from pymcap_cli.exporters.gpx_exporter import GpxExporter
@@ -25,7 +33,11 @@ def export_geo(
     mode: Annotated[
         Literal["points", "track", "track+points"], Parameter(name=["--mode"])
     ] = "track+points",
-    topic: Annotated[list[str] | None, Parameter(name=["--topic", "-t"])] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     max_gap: Annotated[str, Parameter(name=["--max-gap"])] = "30s",
     stride_n: Annotated[int, Parameter(name=["--stride"])] = 1,
     include_no_fix: Annotated[bool, Parameter(name=["--include-no-fix"])] = False,
@@ -72,6 +84,13 @@ def export_geo(
         MCAP chunk-decompression worker threads.
     """
     try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
         max_gap_ns = parse_duration_ns(max_gap)
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
@@ -103,7 +122,7 @@ def export_geo(
         file=file,
         output=output,
         exporter=exporter,
-        topics=topic,
+        message_filter=message_filter,
         force=force,
         num_workers=num_workers,
     )

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from pymcap_cli.constants import NS_TO_SEC
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters._common import exclude_topic_globs
 from pymcap_cli.exporters.csv_exporter import CsvExporter
@@ -129,6 +130,23 @@ def test_json_exporter_ndjson_line_count_matches_messages(tmp_path):
     record = json.loads(lines[0])
     assert "_log_time_ns" in record
     assert "data" in record
+
+
+def test_json_exporter_applies_shared_time_window(tmp_path):
+    src = tmp_path / "src.mcap"
+    _make_pose_mcap(src, num_messages=5)
+
+    out = tmp_path / "out"
+    rc = run_export(
+        file=str(src),
+        output=out,
+        exporter=JsonExporter(),
+        message_filter=MessageFilterOptions.from_args(start="@1s", end="@3s"),
+    )
+
+    assert rc == 0
+    records = [json.loads(line) for line in next(out.glob("*.ndjson")).read_text().splitlines()]
+    assert [record["_log_time_ns"] for record in records] == [NS_TO_SEC, 2 * NS_TO_SEC]
 
 
 def test_json_exporter_per_message_writes_one_file_per_message(tmp_path):

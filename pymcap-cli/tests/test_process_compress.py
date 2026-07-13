@@ -170,7 +170,7 @@ def test_process_compress_video_and_pointcloud_with_drop(
         compress_video=True,
         compress_pointcloud=True,
         video_codec="h264",
-        exclude_topic_regex=[r"/debug/.*"],
+        exclude_topic=[r"/debug/.*"],
         force=True,
     )
     assert rc == 0

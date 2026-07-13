@@ -88,10 +88,9 @@ class TestTopicFilterProcessor:
         proc = TopicFilterProcessor(exclude=["/foo"])
         assert _on_channel(proc, _channel("/bar")) == Action.CONTINUE
 
-    def test_include_takes_priority_over_exclude(self):
-        # When include patterns are set, exclude is ignored
+    def test_exclude_takes_priority_over_include(self):
         proc = TopicFilterProcessor(include=["/foo"], exclude=["/foo"])
-        assert _on_channel(proc, _channel("/foo")) == Action.CONTINUE
+        assert _on_channel(proc, _channel("/foo")) == Action.SKIP
 
     def test_multiple_include_patterns(self):
         proc = TopicFilterProcessor(include=["/cam", "/lidar"])

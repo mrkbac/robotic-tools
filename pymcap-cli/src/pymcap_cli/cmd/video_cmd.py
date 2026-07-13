@@ -18,13 +18,20 @@ from mcap_codec_support.video import (
 )
 from rich.console import Console
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.video_exporter import VideoExporter
 
 logger = logging.getLogger(__name__)
 console = Console()
 
-INPUT_GROUP = Group("Input Options")
 OUTPUT_GROUP = Group("Output Options")
 ENCODING_GROUP = Group("Encoding Options")
 
@@ -47,10 +54,11 @@ _QUALITY_PRESETS: dict[VideoCodec, dict[QualityPreset, int]] = {
 def video(
     file: str,
     *,
-    topics: Annotated[
-        list[str],
-        Parameter(name=["-t", "--topics", "--topic"], group=INPUT_GROUP),
-    ],
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     output: Annotated[
         Path,
         Parameter(name=["-o", "--output"], group=OUTPUT_GROUP),
@@ -89,7 +97,19 @@ def video(
         pymcap-cli video data.mcap -t /camera/front -o ./out
         pymcap-cli video data.mcap -t /cam/left -t /cam/right -o ./out
     """
-    if not topics:
+    try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
+    if not message_filter.has_positive_topics:
         logger.error("At least one --topic is required.")
         return 1
 
@@ -110,6 +130,6 @@ def video(
         file=file,
         output=output,
         exporter=exporter,
-        topics=topics,
+        message_filter=message_filter,
         force=force,
     )

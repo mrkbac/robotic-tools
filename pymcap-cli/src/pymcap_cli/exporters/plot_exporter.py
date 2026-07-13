@@ -312,7 +312,7 @@ class PlotExporter(JsonRos2Exporter):
         return list(self._series_by_topic.keys())
 
     def accepts(self, schema: Schema | None) -> bool:  # noqa: ARG002
-        # Topic filtering is handled upstream by run_export(topics=...).
+        # Topic filtering is handled upstream by the shared message filter.
         # Per-schema validation happens lazily on the first message inside
         # the writer.
         return True

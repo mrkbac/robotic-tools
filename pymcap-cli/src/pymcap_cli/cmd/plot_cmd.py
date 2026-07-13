@@ -10,13 +10,19 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from ros_parser.message_path import ValidationError
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.plot_exporter import PlotExporter
-from pymcap_cli.utils import parse_timestamp_bounds_absolute
 
 logger = logging.getLogger(__name__)
 
-FILTERING_GROUP = Group("Filtering")
 OUTPUT_GROUP = Group("Output")
 
 
@@ -24,22 +30,11 @@ def plot(
     file: str,
     paths: list[str],
     *,
-    start: Annotated[
-        str,
-        Parameter(name=["-S", "--start"], group=FILTERING_GROUP),
-    ] = "",
-    start_secs: Annotated[
-        int,
-        Parameter(name=["-s", "--start-secs"], group=FILTERING_GROUP),
-    ] = 0,
-    end: Annotated[
-        str,
-        Parameter(name=["-E", "--end"], group=FILTERING_GROUP),
-    ] = "",
-    end_secs: Annotated[
-        int,
-        Parameter(name=["-e", "--end-secs"], group=FILTERING_GROUP),
-    ] = 0,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     output: Annotated[
         str | None,
         Parameter(name=["-o", "--output"], group=OUTPUT_GROUP),
@@ -79,7 +74,7 @@ def plot(
       pymcap-cli plot recording.mcap "Vel X=/odom.twist.twist.linear.x"
       pymcap-cli plot recording.mcap --xy /odom.pose.position.x /odom.pose.position.y
       pymcap-cli plot recording.mcap /odom.pose.position.x -d 1000
-      pymcap-cli plot recording.mcap /odom.pose.position.x -s 10 -e 20 -o plot.html
+      pymcap-cli plot recording.mcap /odom.pose.position.x -S @10s -E @20s -o plot.html
       pymcap-cli plot recording.mcap "/joints.position[:].@degrees" -o joints.svg
     """
     if not paths:
@@ -109,11 +104,12 @@ def plot(
         return 1
 
     try:
-        start_time_ns, end_time_ns = parse_timestamp_bounds_absolute(
-            start,
-            start_secs,
-            end,
-            end_secs,
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
         )
     except ValueError as e:
         logger.error(str(e))  # noqa: TRY400
@@ -123,8 +119,7 @@ def plot(
         file=file,
         output=output_path,
         exporter=exporter,
-        topics=exporter.topics_needed,
+        message_filter=message_filter,
+        required_topics=exporter.topics_needed,
         force=force,
-        start_time_ns=start_time_ns,
-        end_time_ns=end_time_ns,
     )

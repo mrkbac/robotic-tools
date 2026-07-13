@@ -10,8 +10,16 @@ from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from small_mcap import include_topics, read_message_decoded
+from small_mcap import get_summary, include_topics, read_message_decoded
 
+from pymcap_cli.cmd._message_filter_options import (
+    EarlyBailOption,
+    EndTimeOption,
+    ExcludeTopicOption,
+    StartTimeOption,
+    TopicOption,
+    create_message_filter,
+)
 from pymcap_cli.core.diagnostics import (
     DEFAULT_TOPICS,
     DiagEntry,
@@ -20,6 +28,7 @@ from pymcap_cli.core.diagnostics import (
     level_totals,
 )
 from pymcap_cli.core.input_handler import open_input
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.display.diag_render import (
     build_inspect_view,
     build_json_output,
@@ -35,7 +44,7 @@ FILTERING_GROUP = Group("Filtering")
 DISPLAY_GROUP = Group("Display")
 
 
-def _collect_diagnostics(file: str, topics: list[str]) -> dict[str, DiagEntry]:
+def _collect_diagnostics(file: str, message_filter: MessageFilterOptions) -> dict[str, DiagEntry]:
     """Stream all diagnostics messages and accumulate per-component state."""
     entries: dict[str, DiagEntry] = {}
     msg_count = 0
@@ -53,6 +62,11 @@ def _collect_diagnostics(file: str, topics: list[str]) -> dict[str, DiagEntry]:
             transient=True,
         ) as progress,
     ):
+        resolved_filter = message_filter.resolve(get_summary(f))
+        base_predicate = None
+        if not message_filter.has_positive_topics:
+            base_predicate = include_topics(DEFAULT_TOPICS)
+        should_include = message_filter.create_channel_predicate(base_predicate)
         task = progress.add_task(
             "Scanning diagnostics...",
             total=file_size or None,
@@ -62,9 +76,15 @@ def _collect_diagnostics(file: str, topics: list[str]) -> dict[str, DiagEntry]:
 
         for msg in read_message_decoded(
             f,
-            should_include=include_topics(topics),
+            should_include=should_include,
             decoder_factories=[DecoderFactory()],
+            start_time_ns=resolved_filter.start_time_ns,
+            end_time_ns=(
+                sys.maxsize if resolved_filter.early_bail else resolved_filter.end_time_ns
+            ),
         ):
+            if resolved_filter.early_bail and msg.message.log_time >= resolved_filter.end_time_ns:
+                break
             msg_count += 1
             add_diagnostic_message(entries, msg.message.log_time, msg.decoded_message)
 
@@ -137,13 +157,11 @@ def diag(
             group=DISPLAY_GROUP,
         ),
     ] = False,
-    topics: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-t", "--topics"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    start: StartTimeOption = "",
+    end: EndTimeOption = "",
+    early_bail: EarlyBailOption = False,
     json_output: Annotated[
         bool,
         Parameter(
@@ -210,7 +228,17 @@ def diag(
     json_output
         Output as JSON for scripting.
     """
-    resolved_topics = topics if topics is not None else DEFAULT_TOPICS
+    try:
+        message_filter = create_message_filter(
+            topic=topic,
+            exclude_topic=exclude_topic,
+            start=start,
+            end=end,
+            early_bail=early_bail,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
 
     # Compile regex patterns upfront so invalid patterns fail fast
     name_re = _compile_pattern(name, "--name") if name else None
@@ -220,7 +248,7 @@ def diag(
     inspect_re = _compile_pattern(inspect, "--inspect") if inspect else None
 
     try:
-        entries = _collect_diagnostics(file, resolved_topics)
+        entries = _collect_diagnostics(file, message_filter)
     except (OSError, ValueError, RuntimeError):
         logger.exception("Error reading MCAP file")
         return 1
@@ -229,8 +257,7 @@ def diag(
         return 0
 
     if not entries:
-        topic_str = ", ".join(resolved_topics)
-        logger.warning(f"No diagnostics found on topic(s) '{topic_str}'")
+        logger.warning("No diagnostics found for the selected topics and time range")
         return 0
 
     totals = level_totals(entries)

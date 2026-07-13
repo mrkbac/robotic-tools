@@ -42,12 +42,10 @@ class TopicFilterProcessor(InputProcessor):
         self._invert = invert
 
     def _decide(self, topic: str) -> Action:
-        if self.include:
-            if any(pattern.search(topic) for pattern in self.include):
-                return Action.CONTINUE
+        if self.exclude and any(pattern.search(topic) for pattern in self.exclude):
             return Action.SKIP
 
-        if self.exclude and any(pattern.search(topic) for pattern in self.exclude):
+        if self.include and not any(pattern.search(topic) for pattern in self.include):
             return Action.SKIP
 
         return Action.CONTINUE

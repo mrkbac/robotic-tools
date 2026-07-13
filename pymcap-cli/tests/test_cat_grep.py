@@ -102,7 +102,7 @@ def test_cat_grep_ignore_case(grep_mcap: Path, tmp_path: Path) -> None:
 
 def test_cat_grep_composes_with_topic_filter(grep_mcap: Path, tmp_path: Path) -> None:
     out = tmp_path / "out.jsonl"
-    rc = cat(str(grep_mcap), grep="base_link", topics=["/odom"], output=out)
+    rc = cat(str(grep_mcap), grep="base_link", topic=["/odom"], output=out)
     assert rc == 0
     rows = _read_jsonl(out)
     assert len(rows) == 1
