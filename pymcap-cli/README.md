@@ -86,6 +86,47 @@ substring-style match. Escape regex metacharacters in arbitrary non-ROS MCAP
 topic names when you mean them literally. See each command's `--help` for
 domain-specific options.
 
+#### Time-filter cheat sheet
+
+`--start` / `-S` is inclusive. `--end` / `-E` is exclusive.
+
+| Input | Meaning |
+|---|---|
+| `1234567890` | Absolute timestamp in nanoseconds |
+| `20ns` | Absolute 20 nanoseconds |
+| `500us` | Absolute 500 microseconds |
+| `250ms` | Absolute 250 milliseconds |
+| `20s` | Absolute 20 seconds |
+| `5m` | Absolute 5 minutes |
+| `1h` | Absolute 1 hour |
+| `2026-07-13T12:00:00Z` | Absolute RFC3339 timestamp |
+| `+1m` | One minute after recording start |
+| `-1m` | One minute before recording end |
+| `@1m` | Alias for `+1m` |
+| `start+1m` | Explicitly one minute after recording start |
+| `end-1m` | Explicitly one minute before recording end |
+
+```bash
+# Keep [10s, 20s) relative to recording start
+-S +10s -E +20s
+
+# Keep everything except the final 30 seconds
+-E=-30s
+
+# Keep the final minute
+-S=-1m
+
+# Absolute RFC3339 window
+-S 2026-07-13T12:00:00Z -E 2026-07-13T12:10:00Z
+```
+
+Use `=` with negative shorthand so it is not mistaken for another option:
+
+```bash
+--start=-1m
+--end=-30s
+```
+
 ### `cat` — Stream Messages
 
 Stream MCAP messages to stdout. Outputs as Rich tables when interactive, JSONL when piped.

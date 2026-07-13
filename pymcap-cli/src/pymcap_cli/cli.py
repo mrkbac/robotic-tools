@@ -1,6 +1,7 @@
 """Main CLI entry point for pymcap-cli using Cyclopts."""
 
 import importlib
+import sys
 from collections.abc import Callable
 from typing import Annotated, TypeAlias, cast
 
@@ -263,6 +264,19 @@ app.command(name="tf-export", group=transform_group)(tf_export_cmd.tf_export)
 app.command(name="video", group=transform_group)(video)
 
 
+def _normalize_time_filter_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """Expand short time options using ``=`` for Cyclopts compatibility."""
+    normalized: list[str] = []
+    for token in tokens:
+        if token.startswith("-S="):
+            normalized.append(f"--start={token[3:]}")
+        elif token.startswith("-E="):
+            normalized.append(f"--end={token[3:]}")
+        else:
+            normalized.append(token)
+    return tuple(normalized)
+
+
 @app.meta.default
 def launcher(
     *tokens: Annotated[str, Parameter(allow_leading_hyphen=True)],
@@ -288,6 +302,7 @@ def launcher(
 
 
 def main() -> None:
+    sys.argv[1:] = _normalize_time_filter_tokens(tuple(sys.argv[1:]))
     app.meta()
 
 

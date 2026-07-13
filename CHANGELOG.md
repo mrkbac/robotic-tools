@@ -12,7 +12,8 @@ User-facing notes for releases.
   repeatable `-t/--topic` and `-x/--exclude-topic` for full-match regexes;
   ordinary ROS topic names naturally match exactly. Time windows consistently use
   inclusive `-S/--start` and exclusive `-E/--end`, accepting nanoseconds,
-  RFC3339, or recording-relative values such as `@10s` and `end-30s`. The old
+  unit-suffixed absolute values, RFC3339, or recording-relative values such as
+  `+10s`, `-30s`, `@10s`, and `end-30s`. The old
   `--topics`, `--exclude-topics`, separate regex/glob flags, `--start-secs`,
   `--end-secs`, `--start-nsecs`, and `--end-nsecs` aliases were removed.
 - Interrupting video compression now aborts active processor backends and keeps

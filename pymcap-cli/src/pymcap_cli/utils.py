@@ -377,6 +377,9 @@ class AttachmentsMode(str, Enum):
     EXCLUDE = "exclude"
 
 
+_TIME_DURATION_RE = re.compile(r"^([+-]?)([0-9]*\.?[0-9]+(?:ns|us|ms|s|m|h))$")
+
+
 @dataclass(frozen=True, slots=True)
 class RelativeTime:
     """A time anchored to the file's start or end with a signed offset.
@@ -402,9 +405,14 @@ def parse_time_arg(time_str: str, *, allow_relative: Literal[True]) -> int | Rel
 
 
 def parse_time_arg(time_str: str, *, allow_relative: bool = False) -> int | RelativeTime:
-    """Parse time argument: nanoseconds, RFC3339 date, or optionally relative anchor.
+    """Parse an absolute timestamp or, when enabled, a recording-relative bound.
+
+    Absolute forms are integer nanoseconds, unit-suffixed values such as
+    ``20ns`` / ``500ms`` / ``20s``, and RFC3339 timestamps.
 
     Relative anchors:
+      ``+5s``        — 5 s after file start
+      ``-30s``       — 30 s before file end
       ``@5s``        — 5 s after file start (sugar for ``start+5s``)
       ``start+5s``   — 5 s after file start
       ``start-1s``   — 1 s before file start (rarely useful but accepted)
@@ -439,6 +447,17 @@ def parse_time_arg(time_str: str, *, allow_relative: bool = False) -> int | Rela
                         offset = -offset
                     return RelativeTime(anchor=prefix, offset_ns=offset)
 
+    duration_match = _TIME_DURATION_RE.fullmatch(stripped)
+    if duration_match:
+        sign, duration = duration_match.groups()
+        duration_ns = parse_duration_ns(duration)
+        if sign and allow_relative:
+            if sign == "+":
+                return RelativeTime(anchor="start", offset_ns=duration_ns)
+            return RelativeTime(anchor="end", offset_ns=-duration_ns)
+        if not sign:
+            return duration_ns
+
     # Try parsing as integer nanoseconds first
     try:
         return int(stripped)
@@ -450,11 +469,12 @@ def parse_time_arg(time_str: str, *, allow_relative: bool = False) -> int | Rela
         dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         return int(dt.timestamp() * NS_TO_SEC)
     except ValueError:
-        relative_help = " or a relative anchor like '@5s' / 'start+5s' / 'end-30s'"
+        relative_help = " or a relative bound like '+5s' / '-30s' / 'start+5s'"
         if not allow_relative:
             relative_help = ""
         raise ValueError(
-            f"Invalid time format: {time_str}. Use nanoseconds, RFC3339{relative_help}."
+            f"Invalid time format: {time_str}. Use nanoseconds, a unit-suffixed "
+            f"value like '20s', RFC3339{relative_help}."
         ) from None
 
 
@@ -500,7 +520,8 @@ def parse_timestamp_args(
     """Parse timestamp with precedence: date_or_nanos > seconds > nanoseconds.
 
     Returns ``None`` if no time filter is specified (all args are empty/zero).
-    The string form may be a relative anchor (``@5s``, ``start+5s``,
+    The string form accepts absolute unit values such as ``20s``. It may also
+    be a relative bound (``+5s``, ``-30s``, ``@5s``, ``start+5s``,
     ``end-30s``) when ``allow_relative`` is true; the integer/seconds forms
     always produce an absolute nanosecond timestamp.
     """

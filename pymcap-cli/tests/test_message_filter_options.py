@@ -57,6 +57,21 @@ def test_message_filter_resolves_relative_bounds() -> None:
     assert resolved.end_time_ns == 19_000_000_000
 
 
+def test_message_filter_resolves_relative_shorthand() -> None:
+    options = MessageFilterOptions.from_args(start="+2s", end="-1s")
+    summary = SimpleNamespace(
+        statistics=SimpleNamespace(
+            message_start_time=10_000_000_000,
+            message_end_time=20_000_000_000,
+        )
+    )
+
+    resolved = options.resolve(summary)  # type: ignore[arg-type]
+
+    assert resolved.start_time_ns == 12_000_000_000
+    assert resolved.end_time_ns == 19_000_000_000
+
+
 def test_message_filter_relative_bounds_require_summary() -> None:
     options = MessageFilterOptions.from_args(start="@2s")
 

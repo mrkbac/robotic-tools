@@ -31,8 +31,8 @@ StartTimeOption = Annotated[
         name=["-S", "--start"],
         group=TIME_FILTERING_GROUP,
         help=(
-            "Inclusive log-time bound: nanoseconds, RFC3339, or a recording-relative "
-            "value such as @10s/start+10s/end-30s."
+            "Inclusive log-time bound: nanoseconds, a unit value like 20s, RFC3339, "
+            "or recording-relative +10s/-30s."
         ),
     ),
 ]
@@ -42,8 +42,8 @@ EndTimeOption = Annotated[
         name=["-E", "--end"],
         group=TIME_FILTERING_GROUP,
         help=(
-            "Exclusive log-time bound: nanoseconds, RFC3339, or a recording-relative "
-            "value such as @20s/start+20s/end-5s."
+            "Exclusive log-time bound: nanoseconds, a unit value like 20s, RFC3339, "
+            "or recording-relative +10s/-30s."
         ),
     ),
 ]

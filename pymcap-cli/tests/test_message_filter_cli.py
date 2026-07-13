@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pymcap_cli.cli import app
+from pymcap_cli.cli import _normalize_time_filter_tokens, app
 
 COMMANDS = (
     "video",
@@ -43,6 +43,15 @@ REMOVED_OPTIONS = (
     "--topic-glob",
     "--exclude-topic-glob",
 )
+
+
+def test_short_time_options_with_equals_are_normalized() -> None:
+    assert _normalize_time_filter_tokens(("cat", "recording.mcap", "-S=+10s", "-E=-30s")) == (
+        "cat",
+        "recording.mcap",
+        "--start=+10s",
+        "--end=-30s",
+    )
 
 
 @pytest.mark.parametrize("command", COMMANDS)

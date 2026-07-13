@@ -61,6 +61,20 @@ class TestParseTimeArg:
     def test_integer_nanoseconds(self):
         assert parse_time_arg("1000000000") == 1_000_000_000
 
+    @pytest.mark.parametrize(
+        ("value", "expected_ns"),
+        [
+            ("20ns", 20),
+            ("500us", 500_000),
+            ("250ms", 250 * NS_TO_MS),
+            ("20s", 20 * NS_TO_SEC),
+            ("5m", 5 * 60 * NS_TO_SEC),
+            ("1h", 60 * 60 * NS_TO_SEC),
+        ],
+    )
+    def test_absolute_duration(self, value: str, expected_ns: int):
+        assert parse_time_arg(value) == expected_ns
+
     def test_zero(self):
         assert parse_time_arg("0") == 0
 
@@ -88,6 +102,17 @@ class TestParseTimeArg:
     def test_relative_anchor_rejected_by_default(self):
         with pytest.raises(ValueError, match="Invalid time format"):
             parse_time_arg("@5s")
+
+    @pytest.mark.parametrize("value", ["+1m", "-1m"])
+    def test_relative_shorthand_rejected_by_default(self, value: str):
+        with pytest.raises(ValueError, match="Invalid time format"):
+            parse_time_arg(value)
+
+    def test_plus_shorthand_anchors_to_start(self):
+        assert parse_time_arg("+1m", allow_relative=True) == RelativeTime("start", 60 * NS_TO_SEC)
+
+    def test_minus_shorthand_anchors_to_end(self):
+        assert parse_time_arg("-1m", allow_relative=True) == RelativeTime("end", -60 * NS_TO_SEC)
 
     def test_at_anchor_seconds(self):
         result = parse_time_arg("@5s", allow_relative=True)

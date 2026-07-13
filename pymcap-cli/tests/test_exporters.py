@@ -141,7 +141,7 @@ def test_json_exporter_applies_shared_time_window(tmp_path):
         file=str(src),
         output=out,
         exporter=JsonExporter(),
-        message_filter=MessageFilterOptions.from_args(start="@1s", end="@3s"),
+        message_filter=MessageFilterOptions.from_args(start="+1s", end="+3s"),
     )
 
     assert rc == 0
