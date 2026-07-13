@@ -407,39 +407,3 @@ class TestTopicFilterProcessorInvert:
         # Without invert, /foo would be SKIP. With invert, CONTINUE.
         assert _on_channel(proc, _channel("/foo")) == Action.CONTINUE
         assert _on_channel(proc, _channel("/bar")) == Action.SKIP
-
-
-# ---------------------------------------------------------------------------
-# Topic glob → regex via InputOptions.from_args
-# ---------------------------------------------------------------------------
-
-
-class TestTopicGlobConversion:
-    def test_glob_translated_into_include_topics(self):
-        from pymcap_cli.core.input_options import InputOptions  # noqa: PLC0415
-        from pymcap_cli.core.input_processor_chain import (  # noqa: PLC0415
-            build_input_processors,
-        )
-
-        opts = InputOptions.from_args(include_topic_glob=["sensors/*"])
-        # fnmatch.translate produces a Python regex string
-        assert any("sensors" in regex for regex in opts.include_topics)
-        # That regex compiles and matches as expected
-        processors = build_input_processors(opts)
-        topic_filter = next(p for p in processors if isinstance(p, TopicFilterProcessor))
-        assert _on_channel(topic_filter, _channel("sensors/lidar")) == Action.CONTINUE
-        assert _on_channel(topic_filter, _channel("/prefix/sensors/lidar")) == Action.SKIP
-        assert _on_channel(topic_filter, _channel("/scan")) == Action.SKIP
-
-    def test_exclude_glob_translated(self):
-        from pymcap_cli.core.input_options import InputOptions  # noqa: PLC0415
-        from pymcap_cli.core.input_processor_chain import (  # noqa: PLC0415
-            build_input_processors,
-        )
-
-        opts = InputOptions.from_args(exclude_topic_glob=["debug/*"])
-        processors = build_input_processors(opts)
-        topic_filter = next(p for p in processors if isinstance(p, TopicFilterProcessor))
-        assert _on_channel(topic_filter, _channel("debug/log")) == Action.SKIP
-        assert _on_channel(topic_filter, _channel("/prefix/debug/log")) == Action.CONTINUE
-        assert _on_channel(topic_filter, _channel("/scan")) == Action.CONTINUE

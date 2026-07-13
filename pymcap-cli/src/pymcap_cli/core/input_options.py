@@ -10,7 +10,6 @@ pulling the entire processor subtree into their import graph.
 
 from __future__ import annotations
 
-import fnmatch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -60,9 +59,6 @@ class InputOptions:
         # Raw CLI args for topics (regex strings, not compiled)
         include_topic_regex: list[str] | None = None,
         exclude_topic_regex: list[str] | None = None,
-        # Topic globs (shell-style patterns, converted to regex)
-        include_topic_glob: list[str] | None = None,
-        exclude_topic_glob: list[str] | None = None,
         # Content filtering
         include_metadata: bool = True,
         include_attachments: bool = True,
@@ -77,9 +73,7 @@ class InputOptions:
         extra_processors: list[InputProcessor] | None = None,
     ) -> InputOptions:
         include_topics = list(include_topic_regex or [])
-        include_topics.extend(r"\A" + fnmatch.translate(glob) for glob in include_topic_glob or [])
         exclude_topics = list(exclude_topic_regex or [])
-        exclude_topics.extend(r"\A" + fnmatch.translate(glob) for glob in exclude_topic_glob or [])
 
         return cls(
             always_decode_chunk=always_decode_chunk,

@@ -353,28 +353,6 @@ class TestFilter:
         assert stats.writer_statistics.message_count > 0
         assert stats.writer_statistics.message_count < 200
 
-    def test_filter_topic_glob(self, multi_topic_mcap: Path, output_file: Path):
-        """--topic-glob translates shell patterns into the include list."""
-        file_size = multi_topic_mcap.stat().st_size
-
-        with multi_topic_mcap.open("rb") as input_stream, output_file.open("wb") as output_stream:
-            options = ProcessingOptions(
-                inputs=[
-                    InputFile(
-                        stream=input_stream,
-                        size=file_size,
-                        options=InputOptions.from_args(include_topic_glob=["/camera/*"]),
-                    )
-                ],
-                input_options=InputOptions.from_args(),
-                output_options=OutputOptions(compression="zstd", chunk_size=DEFAULT_CHUNK_SIZE),
-            )
-
-            stats = McapProcessor(options).process(output_stream)
-
-        # /camera/front and /camera/back match
-        assert stats.writer_statistics.channel_count == 2
-
     def test_filter_relative_time_anchor(self, multi_topic_mcap: Path, output_file: Path):
         """``@5ms`` resolves against the file's first message timestamp."""
         file_size = multi_topic_mcap.stat().st_size
