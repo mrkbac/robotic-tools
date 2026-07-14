@@ -370,11 +370,10 @@ def test_validator_mismatched_channel_returns_false() -> None:
     assert _chunk_records_match_writer_view([in_chunk], {}, {1: in_writer}) is False
 
 
-def test_validator_early_exits_on_first_message() -> None:
-    """A Schema record placed AFTER a Message is not inspected — by spec
-    convention metadata always appears as a small prefix. This documents
-    that assumption; if a writer ever interleaves we'd need a full scan."""
-    bad_schema = _schema(99, name="WouldNotMatch")
-    records = [_msg(), bad_schema]
-    # bad_schema is never validated because we early-exit on the first Message.
-    assert _chunk_records_match_writer_view(records, {}, {}) is True
+def test_validator_detects_stale_metadata_after_message() -> None:
+    """Interleaved Channel/Schema records must not bypass verification."""
+    stale_schema = _schema(99, name="Stale")
+    stale_channel = _channel(99, schema_id=99, topic="/stale")
+    records = [_msg(), stale_schema, stale_channel]
+
+    assert _chunk_records_match_writer_view(records, {}, {}) is False

@@ -121,10 +121,9 @@ def _chunk_records_match_writer_view(
     matches the writer's current view — i.e. the chunk's compressed bytes
     can be fast-copied without leaking stale records into the output.
 
-    Uses ``type(record) is X`` dispatch (faster than isinstance) and exits
-    on the first non-metadata record. MCAP writers in practice place
-    Schema and Channel records as a small prefix before any Message that
-    references them, so the first Message marks the end of metadata.
+    Uses ``type(record) is X`` dispatch (faster than isinstance) and scans the
+    entire chunk. Writers commonly place Schema and Channel records in a prefix,
+    but a safe rewrite cannot assume metadata is never interleaved with messages.
     """
     for record in records:
         rtype = type(record)
@@ -138,8 +137,6 @@ def _chunk_records_match_writer_view(
             existing_channel = channels.get(channel.id)
             if existing_channel is None or existing_channel != channel:
                 return False
-        else:
-            return True
     return True
 
 

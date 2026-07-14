@@ -61,11 +61,13 @@ from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.nth_message import NthMessageProcessor
+from pymcap_cli.core.processors.qos_metadata import QosMetadataProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.time_offset import TimeOffsetProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.core.processors.topic_alias import TopicAliasProcessor
 from pymcap_cli.core.processors.topic_rewrite import TopicRewriteProcessor
+from pymcap_cli.core.qos import parse_qos_override_yaml, parse_qos_set_rule
 from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
 from pymcap_cli.types.size import parse_size_bytes
 from pymcap_cli.utils import (
@@ -87,6 +89,7 @@ TOPIC_TRANSFORM_GROUP = Group("Topic Transforms")
 TIME_TRANSFORM_GROUP = Group("Time / Decimation")
 RECHUNK_GROUP = Group("Rechunking")
 COMPRESS_GROUP = Group("Message Compression")
+ROS2_COMPATIBILITY_GROUP = Group("ROS 2 Compatibility")
 SPLIT_GROUP = Group("Splitting (multi-output)")
 SPLIT_EXPR_GROUP = Group("Splitting — Expression Options")
 
@@ -152,6 +155,43 @@ def process(
     # ----- Latching -----
     latch: LatchOption = None,
     latch_from_metadata: LatchFromMetadataOption = False,
+    # ----- ROS 2 compatibility -----
+    qos_format: Annotated[
+        Literal["preserve", "numeric"],
+        Parameter(
+            name=["--qos-format"],
+            group=ROS2_COMPATIBILITY_GROUP,
+            help=(
+                "QoS metadata representation. 'numeric' converts Jazzy string "
+                "policy names in offered_qos_profiles to the integer codes "
+                "required by Humble."
+            ),
+        ),
+    ] = "preserve",
+    qos_override: Annotated[
+        Path | None,
+        Parameter(
+            name=["--qos-override"],
+            group=ROS2_COMPATIBILITY_GROUP,
+            help=(
+                "ROS 2 QoS override YAML. Maps exact topic names to partial "
+                "QoS profiles; the values are embedded into every recorded "
+                "offered profile for that topic."
+            ),
+        ),
+    ] = None,
+    qos_set: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--qos-set"],
+            group=ROS2_COMPATIBILITY_GROUP,
+            help=(
+                "Set one QoS policy for topics matching a full regex. Format: "
+                "'TOPIC_REGEX:POLICY=VALUE'. Repeatable; later matching rules "
+                "override earlier rules and --qos-override values."
+            ),
+        ),
+    ] = None,
     # ----- Topic transforms -----
     rename_topic: Annotated[
         list[str] | None,
@@ -472,6 +512,13 @@ def process(
         Metadata handling: include or exclude metadata records.
     attachments_mode
         Attachments handling: include or exclude attachment records.
+    qos_format
+        Preserve QoS metadata as recorded, or convert policy names to the
+        numeric representation required by ROS 2 Humble.
+    qos_override
+        Standard ROS 2 topic-to-QoS-profile override YAML to embed.
+    qos_set
+        Repeatable TOPIC_REGEX:POLICY=VALUE overrides.
     chunk_size
         Chunk size of output file in bytes.
     compression
@@ -499,6 +546,13 @@ def process(
 
     # Merge multiple files with dedup
     pymcap-cli process a.mcap b.mcap -o merged.mcap --dedup-identical
+
+    # Make Jazzy QoS metadata readable by Humble
+    pymcap-cli process jazzy.mcap -o humble.mcap --qos-format numeric
+
+    # Correct camera reliability and embed it as Humble-compatible metadata
+    pymcap-cli process in.mcap -o fixed.mcap \
+        --qos-set '/camera/.*:reliability=best_effort' --qos-format numeric
 
     # Rename topics and decimate
     pymcap-cli process in.mcap -o out.mcap \\
@@ -587,22 +641,38 @@ def process(
         logger.error(str(e))  # noqa: TRY400
         return 1
 
-    # --- Build KV rule maps ----------------------------------------------------
+    # --- Build rule maps -------------------------------------------------------
     try:
         rename_rules = _parse_kv_rules(rename_topic or [], str)
         time_offset_rules = _parse_kv_rules(time_offset or [], parse_duration_ns)
         decimate_rules = _parse_kv_rules(decimate or [], int)
         alias_rules = _parse_alias_rules(alias_topic or [])
-    except ValueError as e:
+        qos_topic_overrides = (
+            parse_qos_override_yaml(qos_override.read_text()) if qos_override is not None else {}
+        )
+        qos_set_rules = [parse_qos_set_rule(token) for token in qos_set or []]
+        qos_processor = (
+            QosMetadataProcessor(
+                qos_format=qos_format,
+                topic_overrides=qos_topic_overrides,
+                set_rules=qos_set_rules,
+            )
+            if qos_format == "numeric" or qos_topic_overrides or qos_set_rules
+            else None
+        )
+    except (OSError, UnicodeError, TypeError, ValueError) as e:
         logger.error(str(e))  # noqa: TRY400
         return 1
 
     # --- Build the input processor chain --------------------------------------
     # Order follows core/processors/ARCHITECTURE.md §"Chain ordering":
-    # alias before id-mutators; rewrite LAST among id-mutators (it produces
-    # DECODE_VERIFY decisions); dedup needs every per-message run so it goes
-    # after id-mutators that fan out / merge.
+    # QoS metadata normalization precedes channel merge; alias comes before
+    # id-mutators; rewrite is LAST among id-mutators (it produces DECODE_VERIFY
+    # decisions); dedup needs every per-message run so it goes after id-mutators
+    # that fan out / merge.
     extras: list[InputProcessor] = []
+    if qos_processor is not None:
+        extras.append(qos_processor)
     if alias_rules:
         extras.append(TopicAliasProcessor(alias_rules))
     if merge_channels:

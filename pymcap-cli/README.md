@@ -305,6 +305,17 @@ pymcap-cli process data.mcap -o clean.mcap \
 pymcap-cli process zstd.mcap -o lz4.mcap --compression lz4 \
   -t '/important/.*'
 
+# Convert Jazzy QoS policy names to Humble-compatible integer codes
+pymcap-cli process jazzy.mcap -o humble.mcap --qos-format numeric
+
+# Embed standard ROS 2 per-topic QoS overrides
+pymcap-cli process data.mcap -o qos-fixed.mcap --qos-override qos.yaml
+
+# Apply repeatable regex overrides, then convert the result for Humble
+pymcap-cli process data.mcap -o qos-fixed.mcap \
+  --qos-set '/camera/.*:reliability=best_effort' \
+  --qos-set '/camera/front:depth=3' --qos-format numeric
+
 # Recovery mode with filtering (handles corrupt files)
 pymcap-cli process corrupt.mcap -o recovered.mcap \
   -t '/camera/.*' --recovery-mode

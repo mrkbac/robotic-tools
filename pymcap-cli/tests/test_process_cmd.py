@@ -14,6 +14,7 @@ from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.nth_message import NthMessageProcessor
+from pymcap_cli.core.processors.qos_metadata import QosMetadataProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.time_offset import TimeOffsetProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
@@ -139,6 +140,49 @@ class TestExtraProcessorWiring:
 
         assert any(isinstance(p, ChannelMergeProcessor) for p in self._extras(rec))
 
+    def test_numeric_qos_format_adds_processor(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        process_cmd.process(**_kwargs(), qos_format="numeric")
+
+        assert any(isinstance(p, QosMetadataProcessor) for p in self._extras(rec))
+
+    def test_preserve_qos_format_does_not_add_processor(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        process_cmd.process(**_kwargs())
+
+        assert not any(isinstance(p, QosMetadataProcessor) for p in self._extras(rec))
+
+    def test_qos_override_file_and_sets_add_processor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        override = tmp_path / "qos.yaml"
+        override.write_text("/camera/image:\n  reliability: reliable\n")
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        process_cmd.process(
+            **_kwargs(),
+            qos_override=override,
+            qos_set=[
+                "/camera/.*:reliability=best_effort",
+                "/camera/image:depth=3",
+            ],
+        )
+
+        processor = next(p for p in self._extras(rec) if isinstance(p, QosMetadataProcessor))
+        assert processor is not None
+
+    def test_invalid_qos_set_returns_error(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        assert process_cmd.process(**_kwargs(), qos_set=["/camera:unknown=value"]) == 1
+        assert rec.input_options is None
+
     def test_rename_topic_adds_rewrite_processor(self, monkeypatch: pytest.MonkeyPatch):
         rec = _Recorder()
         _patch_single(monkeypatch, rec)
@@ -215,6 +259,18 @@ class TestExtraProcessorWiring:
 
 
 class TestChainOrdering:
+    def test_qos_conversion_before_channel_merge(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        process_cmd.process(**_kwargs(), qos_format="numeric", merge_channels=True)
+
+        assert rec.input_options is not None
+        extras = list(rec.input_options.extra_processors)
+        qos_idx = next(i for i, p in enumerate(extras) if isinstance(p, QosMetadataProcessor))
+        merge_idx = next(i for i, p in enumerate(extras) if isinstance(p, ChannelMergeProcessor))
+        assert qos_idx < merge_idx
+
     def test_rewrite_after_alias_and_merge(self, monkeypatch: pytest.MonkeyPatch):
         """ARCHITECTURE.md §3: TopicRewrite is last among id-mutating processors."""
         rec = _Recorder()
