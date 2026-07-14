@@ -16,18 +16,22 @@ from pymcap_cli.cmd.bridge.diag import diag as _diag
 from pymcap_cli.cmd.bridge.fetch import fetch as _fetch
 from pymcap_cli.cmd.bridge.info import info as _info
 from pymcap_cli.cmd.bridge.params import params as _params
+from pymcap_cli.cmd.bridge.play import play as _play
 from pymcap_cli.cmd.bridge.proxy import proxy as _proxy
 from pymcap_cli.cmd.bridge.pub import pub as _pub
 from pymcap_cli.cmd.bridge.record import record as _record
+from pymcap_cli.cmd.bridge.serve import serve as _serve
 from pymcap_cli.cmd.bridge.tf import tf as _tf
 
 bridge_app = App(
     name="bridge",
-    help="Inspect, record, or stream from a live Foxglove WebSocket bridge.",
+    help="Inspect, record, play, or serve Foxglove WebSocket data.",
     help_format="rich",
 )
 bridge_app.command(_info, name="info")
 bridge_app.command(_record, name="record")
+bridge_app.command(_play, name="play")
+bridge_app.command(_serve, name="serve")
 bridge_app.command(_cat, name="cat")
 bridge_app.command(_delay, name="delay")
 bridge_app.command(_tf, name="tf")

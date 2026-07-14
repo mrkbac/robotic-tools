@@ -277,6 +277,15 @@ class WebSocketBridgeServer:
                 except ConnectionClosed:
                     Logger.debug("Skipping closed connection during publish")
 
+    async def publish_time(self, timestamp_ns: int) -> None:
+        """Broadcast the current server time to every connected client."""
+        frame = struct.pack("<BQ", int(BinaryOpCodes.TIME), timestamp_ns)
+        for state in list(self._connections.values()):
+            try:
+                await state.websocket.send(frame)
+            except ConnectionClosed:
+                Logger.debug("Skipping closed connection while publishing time")
+
     async def send_message_to_subscription(
         self,
         websocket: ServerConnection,

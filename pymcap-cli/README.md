@@ -739,6 +739,15 @@ pymcap-cli bridge cat localhost:8765 --topics /tf --limit 10
 
 # Record all advertised topics to MCAP
 pymcap-cli bridge record localhost:8765 --all -o live.mcap
+
+# Chronologically merge and play MCAP files into an existing bridge
+pymcap-cli bridge play first.mcap second.mcap --target localhost --speed 2
+
+# The bridge target can come from the environment
+PYMCAP_BRIDGE=localhost pymcap-cli bridge play recording.mcap -t '/camera/.*'
+
+# Host an MCAP directly for Foxglove clients
+pymcap-cli bridge serve recording.mcap --port 8765
 ```
 
 ### Shell Autocompletion
