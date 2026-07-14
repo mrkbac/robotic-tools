@@ -2,6 +2,7 @@ import pytest
 from pymcap_cli.cli import app
 from pymcap_cli.cmd import split_cmd
 from pymcap_cli.core.mcap_processor import OverwriteCollisionPolicy
+from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 
 from tests.helpers import empty_processor_result
@@ -111,6 +112,39 @@ def test_split_max_size_rejects_invalid_value(monkeypatch):
         lambda **_: empty_processor_result(segments={}),
     )
     exit_code = split_cmd.split(file="input.mcap", max_size="not-a-size", force=True)
+    assert exit_code == 1
+
+
+def test_split_passes_skip_values_to_expression_processor(monkeypatch):
+    seen: list[ExpressionSplitProcessor] = []
+
+    def fake_run_processor_multi(*, files: list[str], output_options, input_options=None):
+        _ = files, input_options
+        seen.extend(
+            router
+            for router in output_options.routers
+            if isinstance(router, ExpressionSplitProcessor)
+        )
+        return empty_processor_result(segments={})
+
+    monkeypatch.setattr(split_cmd, "run_processor_multi", fake_run_processor_multi)
+
+    exit_code = split_cmd.split(
+        file="input.mcap",
+        expression="/state.direction",
+        skip_value=["0", "-1"],
+        output_template="drive_{value:+d}_{index:03d}.mcap",
+        force=True,
+    )
+
+    assert exit_code == 0
+    assert len(seen) == 1
+    assert seen[0].skip_values == (0, -1)
+    assert seen[0].require_value is True
+
+
+def test_split_rejects_skip_value_without_expression() -> None:
+    exit_code = split_cmd.split(file="input.mcap", duration="1s", skip_value=["0"])
     assert exit_code == 1
 
 

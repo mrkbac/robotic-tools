@@ -35,7 +35,11 @@ from pymcap_cli.cmd._cli_options import (
     TopicOption,
 )
 from pymcap_cli.cmd._message_filter_options import create_message_filter
-from pymcap_cli.cmd._message_path_options import create_message_path_variables
+from pymcap_cli.cmd._message_path_options import (
+    create_message_path_variables,
+    output_template_uses_field,
+    parse_message_path_scalar,
+)
 from pymcap_cli.cmd._pointcloud_cleanup import (
     pointcloud_worker_count,
     resolve_pointcloud_cleanup,
@@ -343,7 +347,8 @@ def process(
             group=SPLIT_GROUP,
             help=(
                 "Split whenever a ros-parser message path changes value, "
-                "e.g. '/gps/fix.status.status'."
+                "e.g. '/gps/fix.status.status'. Extractors must resolve to a primitive; "
+                "predicates normalize to true/false."
             ),
         ),
     ] = None,
@@ -407,6 +412,17 @@ def process(
             ),
         ),
     ] = None,
+    split_skip_value: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--split-skip-value"],
+            group=SPLIT_EXPR_GROUP,
+            help=(
+                "Expression value to omit from split output (repeatable). Values use JSON "
+                "scalars when possible; negative values use --split-skip-value=-1."
+            ),
+        ),
+    ] = None,
     output_template: Annotated[
         str,
         Parameter(
@@ -414,8 +430,9 @@ def process(
             group=SPLIT_GROUP,
             help=(
                 "Output file naming template, used in split mode. "
-                "Variables: {index}, {index1}, {key}, {start_time}, "
-                "{start_time_iso}, {end_time}."
+                "Variables: {index}, {index1}, {key}, {value}, {start_time}, "
+                "{start_time_iso}, {end_time}. Standard Python format specs apply, "
+                "e.g. '{value:+d}' and '{index:03d}'."
             ),
         ),
     ] = "output_{index:03d}.mcap",
@@ -500,16 +517,25 @@ def process(
     # --- Validate output / split mode coupling ---------------------------------
     any_split = bool(split_duration or split_at or split_expression or split_max_size)
 
+    try:
+        template_uses_value = output_template_uses_field(output_template, "value")
+    except ValueError:
+        logger.exception(f"Invalid output template {output_template!r}")
+        return 1
+
     expr_only = (
         split_hysteresis is not None
         or split_hysteresis_count is not None
         or split_keep_trailing_context is not None
         or split_keep_trailing_count is not None
+        or bool(split_skip_value)
+        or template_uses_value
     )
     if expr_only and not split_expression:
         logger.error(
             "--split-hysteresis, --split-hysteresis-count, "
-            "--split-keep-trailing-context and --split-keep-trailing-count "
+            "--split-keep-trailing-context, --split-keep-trailing-count, "
+            "--split-skip-value and {value} "
             "require --split-expression."
         )
         return 1
@@ -722,6 +748,10 @@ def process(
     if split_expression:
         try:
             variables = create_message_path_variables(var)
+            skip_values = tuple(
+                parse_message_path_scalar(value, source="--split-skip-value")
+                for value in split_skip_value or ()
+            )
             routers.append(
                 ExpressionSplitProcessor(
                     split_expression,
@@ -730,6 +760,8 @@ def process(
                     trailing_context_ns=split_keep_trailing_context,
                     trailing_context_count=split_keep_trailing_count,
                     variables=variables,
+                    skip_values=skip_values,
+                    require_value=bool(skip_values) or template_uses_value,
                 )
             )
         except MessagePathError:

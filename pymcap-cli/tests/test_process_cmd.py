@@ -295,6 +295,24 @@ class TestSplitRouters:
         )
         assert router._variables == {"expected": 2}
 
+    def test_split_expression_passes_skip_values(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_multi(monkeypatch, rec)
+
+        process_cmd.process(
+            file=["input.mcap"],
+            split_expression="/state.direction",
+            split_skip_value=["0", "-1"],
+            output_template="drive_{value:+d}_{index:03d}.mcap",
+        )
+
+        assert rec.output_options is not None
+        router = next(
+            r for r in rec.output_options.routers if isinstance(r, ExpressionSplitProcessor)
+        )
+        assert router.skip_values == (0, -1)
+        assert router.require_value is True
+
     @pytest.mark.parametrize(
         "extra",
         [
@@ -302,6 +320,7 @@ class TestSplitRouters:
             {"split_hysteresis_count": 3},
             {"split_keep_trailing_context": 100},
             {"split_keep_trailing_count": 3},
+            {"split_skip_value": ["0"]},
         ],
     )
     def test_expression_only_flags_require_expression(self, extra: dict):

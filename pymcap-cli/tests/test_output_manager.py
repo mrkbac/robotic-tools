@@ -65,6 +65,53 @@ class TestOutputManagerLazyCreation:
         manager.get_or_create_segment(0)
         assert (tmp_path / "output_000.mcap").exists()
 
+    def test_formats_typed_template_fields(
+        self, output_options, schemas, channels, header, tmp_path
+    ):
+        output_options.output_template = str(tmp_path / "drive_{value:+d}_{index:03d}.mcap")
+        manager = OutputManager(
+            output_options,
+            schemas,
+            channels,
+            header,
+            template_fields=lambda key: {"value": key},
+        )
+
+        manager.get_or_create_segment(1)
+
+        assert (tmp_path / "drive_+1_000.mcap").exists()
+
+    def test_rejects_two_segments_resolving_to_same_path(
+        self, output_options, schemas, channels, header, tmp_path
+    ):
+        output_options.output_template = str(tmp_path / "drive_{value}.mcap")
+        manager = OutputManager(
+            output_options,
+            schemas,
+            channels,
+            header,
+            template_fields=lambda _key: {"value": 1},
+        )
+        manager.get_or_create_segment(0)
+
+        with pytest.raises(ValueError, match="same output path"):
+            manager.get_or_create_segment(1)
+
+    def test_rejects_unknown_or_nested_template_field(
+        self, output_options, schemas, channels, header, tmp_path
+    ):
+        output_options.output_template = str(tmp_path / "drive_{value.real}.mcap")
+        manager = OutputManager(
+            output_options,
+            schemas,
+            channels,
+            header,
+            template_fields=lambda _key: {"value": 1},
+        )
+
+        with pytest.raises(ValueError, match="Unknown output template field"):
+            manager.get_or_create_segment(0)
+
 
 class TestOutputManagerPendingRecords:
     def test_buffers_attachment_before_segments(self, manager):

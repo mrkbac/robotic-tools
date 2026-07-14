@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 OutputKey = int | str | tuple[int | str, ...]
 RouteKey = int | str
+TemplateValue = bool | int | float | str
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +308,7 @@ class OutputRouter:
 
     Routers decide which output segment(s) a surviving message or fast-copied
     chunk should be written to. Yielding multiple route keys duplicates the
-    record across those segments.
+    record across those segments; yielding no keys drops it.
     """
 
     def initialize(self, context: PipelineContext) -> None:
@@ -346,6 +347,10 @@ class OutputRouter:
     def output_segments(self) -> tuple[OutputSegmentInfo, ...] | None:
         """Return statically-known output segments, or None for dynamic routing."""
         return None
+
+    def template_fields(self, key: RouteKey) -> dict[str, TemplateValue]:
+        """Return output-template fields associated with one route key."""
+        return {}
 
 
 class OutputProcessor:

@@ -359,6 +359,72 @@ class TestExpressionSplit:
         path.write_bytes(buf.getvalue())
         return path.stat().st_size
 
+    def _write_direction_mcap(self, path: Path, *, samples: list[tuple[int, int]]) -> int:
+        import io  # noqa: PLC0415
+
+        from small_mcap import CompressionType, McapWriter  # noqa: PLC0415
+
+        buf = io.BytesIO()
+        writer = McapWriter(buf, compression=CompressionType.NONE)
+        writer.start()
+        writer.add_schema(schema_id=1, name="t", encoding="json", data=b"{}")
+        writer.add_channel(channel_id=1, topic="/state", message_encoding="json", schema_id=1)
+        for log_time_ns, value in samples:
+            writer.add_message(
+                channel_id=1,
+                log_time=log_time_ns,
+                publish_time=log_time_ns,
+                data=f'{{"direction":{value}}}'.encode(),
+            )
+        writer.finish()
+        path.write_bytes(buf.getvalue())
+        return path.stat().st_size
+
+    def test_skip_value_and_typed_value_filename(self, tmp_path: Path):
+        from small_mcap import read_message  # noqa: PLC0415
+
+        src = tmp_path / "in.mcap"
+        size = self._write_direction_mcap(
+            src,
+            samples=[(0, 0), (1, 1), (2, 1), (3, 0), (4, -1), (5, -1)],
+        )
+
+        with src.open("rb") as input_stream:
+            options = ProcessingOptions(
+                inputs=[
+                    InputFile(stream=input_stream, size=size, options=InputOptions.from_args())
+                ],
+                input_options=InputOptions.from_args(),
+                output_options=OutputOptions(
+                    routers=[
+                        ExpressionSplitProcessor(
+                            "/state.direction",
+                            skip_values=(0,),
+                            require_value=True,
+                        )
+                    ],
+                    output_template=str(tmp_path / "drive_{value:+d}_{index:03d}.mcap"),
+                    compression="zstd",
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                ),
+            )
+            processor = McapProcessor(options)
+            processor.process(output_stream=None)
+
+        paths = sorted(tmp_path.glob("drive_*.mcap"))
+        assert [path.name for path in paths] == ["drive_+1_000.mcap", "drive_-1_001.mcap"]
+
+        times_by_name: dict[str, list[int]] = {}
+        for path in paths:
+            with path.open("rb") as stream:
+                times_by_name[path.name] = [
+                    message.log_time for _schema, _channel, message in read_message(stream)
+                ]
+        assert times_by_name == {
+            "drive_+1_000.mcap": [1, 2],
+            "drive_-1_001.mcap": [4, 5],
+        }
+
     def test_hysteresis_count_suppresses_flapping(self, tmp_path: Path):
         """A flapping signal under the count threshold produces a single segment."""
         src = tmp_path / "in.mcap"

@@ -403,9 +403,20 @@ pymcap-cli split data.mcap -E "/gps/fix.status.status"
 # Predicate trigger — split on match/no-match transitions
 pymcap-cli split data.mcap -E "/detections.objects[:]{confidence>0.8}"
 
+# Omit neutral runs and name files with the typed expression value
+pymcap-cli split data.mcap \
+  -E '/sensor/aramine/drive_state.drive_direction' \
+  --skip-value 0 \
+  -t 'drive_{value:+d}_{index:03d}.mcap'
+
 # Split when each output reaches roughly 1 GB
 pymcap-cli split data.mcap --max-size 1G -t "shard_{index:03d}.mcap"
 ```
+
+Expression extractors must resolve to a primitive (`bool`, `int`, `float`, or
+`str`). Filter expressions normalize to a boolean match/no-match value. Output
+templates accept normal Python format specifications for typed fields such as
+`{value:+d}` and `{index:03d}`.
 
 ### `rechunk` — Topic-Based Rechunking
 

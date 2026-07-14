@@ -19,7 +19,11 @@ from pymcap_cli.cmd._cli_options import (
     NoClobberOption,
     SplitAtOption,
 )
-from pymcap_cli.cmd._message_path_options import create_message_path_variables
+from pymcap_cli.cmd._message_path_options import (
+    create_message_path_variables,
+    output_template_uses_field,
+    parse_message_path_scalar,
+)
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     processing_had_errors,
@@ -75,7 +79,8 @@ def split(
                 "Split whenever a ros-parser message path changes value, e.g. "
                 "'/gps/fix.status.status' (value-change trigger) or "
                 "'/detections.objects[:]{confidence>0.8}' (predicate trigger: "
-                "match/no-match transitions). Segments are numbered — use "
+                "match/no-match transitions). Extractors must resolve to a primitive; "
+                "predicates normalize to true/false. Segments are numbered — use "
                 "'{index:03d}' in --output-template. Messages on other topics "
                 "follow the current segment (sticky). Chunks with no "
                 "target-topic messages fast-copy without decoding."
@@ -100,7 +105,12 @@ def split(
         Parameter(
             name=["-t", "--output-template"],
             group=OUTPUT_GROUP,
-            help="Output file naming template (e.g. 'output_{index:03d}.mcap')",
+            help=(
+                "Python format template for output filenames. Variables: {index}, {index1}, "
+                "{key}, {value}, {start_time}, {start_time_iso}, {end_time}. Standard format "
+                "specs apply, e.g. '{value:+d}' and '{index:03d}'. {value} requires "
+                "--expression."
+            ),
         ),
     ] = "output_{index:03d}.mcap",
     hysteresis: Annotated[
@@ -157,6 +167,17 @@ def split(
             ),
         ),
     ] = None,
+    skip_value: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--skip-value"],
+            group=EXPRESSION_GROUP,
+            help=(
+                "Expression value to omit from the output (repeatable). Values use JSON "
+                "scalars when possible; negative values use --skip-value=-1."
+            ),
+        ),
+    ] = None,
     latch: LatchOption = None,
     latch_from_metadata: LatchFromMetadataOption = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
@@ -185,7 +206,7 @@ def split(
         Output file size is approximate — depends on output compression.
     output_template
         Python format string for output filenames. Available variables:
-        {index}, {index1}, {key}, {start_time}, {start_time_iso}, {end_time}.
+        {index}, {index1}, {key}, {value}, {start_time}, {start_time_iso}, {end_time}.
     chunk_size
         Chunk size of output file in bytes.
     compression
@@ -278,6 +299,12 @@ def split(
             f"Size split: every {bytes_to_human(max_size_bytes)} ({max_size_bytes:,} bytes)"
         )
 
+    try:
+        template_uses_value = output_template_uses_field(output_template, "value")
+    except ValueError:
+        logger.exception(f"Invalid output template {output_template!r}")
+        return 1
+
     if expression:
         # Hysteresis / trailing-context only apply to expression splits.
         try:
@@ -288,6 +315,10 @@ def split(
             return 1
         try:
             variables = create_message_path_variables(var)
+            skip_values = tuple(
+                parse_message_path_scalar(value, source="--skip-value")
+                for value in skip_value or ()
+            )
             processors.append(
                 ExpressionSplitProcessor(
                     expression,
@@ -296,6 +327,8 @@ def split(
                     trailing_context_ns=trailing_ns,
                     trailing_context_count=keep_trailing_count,
                     variables=variables,
+                    skip_values=skip_values,
+                    require_value=bool(skip_values) or template_uses_value,
                 )
             )
         except MessagePathError:
@@ -310,10 +343,12 @@ def split(
         or hysteresis_count is not None
         or keep_trailing_context
         or keep_trailing_count is not None
+        or skip_value
+        or template_uses_value
     ):
         logger.error(
             "--hysteresis, --hysteresis-count, --keep-trailing-context and "
-            "--keep-trailing-count require --expression."
+            "--keep-trailing-count, --skip-value and {value} require --expression."
         )
         return 1
 

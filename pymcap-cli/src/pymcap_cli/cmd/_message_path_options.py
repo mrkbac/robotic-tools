@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from string import Formatter
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -19,8 +20,12 @@ _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 def _validate_variable(name: str, value: object, *, source: str) -> MessagePathVariable:
     if _VARIABLE_NAME.fullmatch(name) is None:
         raise ValueError(f"Invalid MessagePath variable name {name!r} in {source}")
+    return _validate_scalar(value, source=f"MessagePath variable {name!r} in {source}")
+
+
+def _validate_scalar(value: object, *, source: str) -> MessagePathVariable:
     if type(value) not in (bool, int, float, str):
-        raise ValueError(f"MessagePath variable {name!r} in {source} must be a JSON scalar")
+        raise ValueError(f"{source} must be a JSON scalar")
     return cast("MessagePathVariable", value)
 
 
@@ -30,6 +35,20 @@ def _parse_value(raw: str, *, name: str, source: str) -> MessagePathVariable:
     except json.JSONDecodeError:
         return raw
     return _validate_variable(name, value, source=source)
+
+
+def parse_message_path_scalar(raw: str, *, source: str) -> MessagePathVariable:
+    """Parse one CLI value as JSON when possible, otherwise as a string."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw
+    return _validate_scalar(value, source=source)
+
+
+def output_template_uses_field(template: str, field: str) -> bool:
+    """Return whether a Python format template references an exact field name."""
+    return any(field_name == field for _, field_name, _, _ in Formatter().parse(template))
 
 
 def create_message_path_variables(

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from itertools import product
 from pathlib import Path
+from string import Formatter
 from typing import IO, BinaryIO, cast
 
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -77,6 +78,7 @@ from pymcap_cli.core.processors.base import (
     PipelineContext,
     RouteKey,
     SegmentContext,
+    TemplateValue,
 )
 from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.types_manual import (
@@ -96,6 +98,7 @@ logger = logging.getLogger(__name__)
 console = ERR
 OUTPUT_LIBRARY = "pymcap-cli"
 OutputStreamOpener = Callable[[OutputKey, int, int, int], tuple[str, BinaryIO]]
+TemplateFieldProvider = Callable[[OutputKey], dict[str, TemplateValue]]
 
 
 def _decode_chunk_records(chunk: Chunk) -> list[McapRecord]:
@@ -533,13 +536,16 @@ class OutputManager:
         channels: dict[int, Channel],
         header: Header,
         open_output: OutputStreamOpener | None = None,
+        template_fields: TemplateFieldProvider | None = None,
     ) -> None:
         self.output_options: OutputOptions = output_options
         self.schemas = schemas
         self.channels = channels
         self.header = header
         self._open_output = open_output or self._open_template_output
+        self._template_fields = template_fields or (lambda _key: {})
         self.segments: dict[OutputKey, OutputSegment] = {}
+        self._path_keys: dict[Path, OutputKey] = {}
         # Reverse lookup so rechunking can find a segment from its writer in O(1).
         self._segment_by_writer: dict[int, OutputSegment] = {}
         self._next_index: int = 0
@@ -565,14 +571,32 @@ class OutputManager:
         self, key: OutputKey, index: int, start_time: int, end_time: int
     ) -> tuple[str, BinaryIO]:
         """Open a template-derived output path for a segment."""
-        path = self.output_options.output_template.format(
-            index=index,
-            index1=index + 1,
-            key=key,
-            start_time=start_time,
-            start_time_iso=_ns_to_iso(start_time) if start_time else "",
-            end_time=end_time,
-        )
+        fields: dict[str, TemplateValue | OutputKey] = {
+            "index": index,
+            "index1": index + 1,
+            "key": key,
+            "start_time": start_time,
+            "start_time_iso": _ns_to_iso(start_time) if start_time else "",
+            "end_time": end_time,
+        }
+        extra_fields = self._template_fields(key)
+        duplicate_fields = fields.keys() & extra_fields.keys()
+        if duplicate_fields:
+            names = ", ".join(sorted(duplicate_fields))
+            raise ValueError(f"Output template fields conflict with built-ins: {names}")
+        fields.update(extra_fields)
+        for _, field_name, _, _ in Formatter().parse(self.output_options.output_template):
+            if field_name is not None and field_name not in fields:
+                raise ValueError(
+                    f"Unknown output template field {field_name!r}; available fields: "
+                    f"{', '.join(sorted(fields))}"
+                )
+        try:
+            path = self.output_options.output_template.format(**fields)
+        except (AttributeError, IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid output template {self.output_options.output_template!r}: {exc}"
+            ) from exc
 
         path_obj = Path(path)
         if any(output_overwrites_input(src, path_obj) for src in self.output_options.input_paths):
@@ -580,8 +604,17 @@ class OutputManager:
                 f"Output segment '{path}' is the same file as an input; "
                 "choose an output template that does not collide with the input."
             )
+        resolved_path = path_obj.resolve(strict=False)
+        previous_key = self._path_keys.get(resolved_path)
+        if previous_key is not None and previous_key != key:
+            raise ValueError(
+                f"Segments {previous_key!r} and {key!r} resolve to the same output path "
+                f"'{path}'; add '{{index}}' to the output template."
+            )
         self.handle_existing_output(path_obj)
-        return path, path_obj.open("wb")
+        stream = path_obj.open("wb")
+        self._path_keys[resolved_path] = key
+        return path, stream
 
     def _flush_pending_to_segment(self, segment: OutputSegment) -> None:
         """Write buffered attachments/metadata to a newly created segment."""
@@ -1752,6 +1785,7 @@ class McapProcessor:
             self.channels,
             header,
             open_output=open_output,
+            template_fields=self._template_fields_for_output_key,
         )
         # Pre-create statically-known segments. In single-output mode this creates segment 0.
         for key, start_time, end_time in known_segments:
@@ -1930,6 +1964,30 @@ class McapProcessor:
                 output_keys.append(key)
         return output_keys
 
+    def _template_fields_for_output_key(self, key: OutputKey) -> dict[str, TemplateValue]:
+        routers = self.options.output_options.routers
+        if not routers:
+            return {}
+        route_keys: tuple[int | str, ...]
+        if len(routers) == 1:
+            if not isinstance(key, (int, str)):
+                raise ValueError(f"Expected one route key, got {key!r}")
+            route_keys = (key,)
+        else:
+            if not isinstance(key, tuple) or len(key) != len(routers):
+                raise ValueError(f"Expected {len(routers)} route keys, got {key!r}")
+            route_keys = key
+
+        fields: dict[str, TemplateValue] = {}
+        for router, route_key in zip(routers, route_keys, strict=True):
+            router_fields = router.template_fields(route_key)
+            duplicate_fields = fields.keys() & router_fields.keys()
+            if duplicate_fields:
+                names = ", ".join(sorted(duplicate_fields))
+                raise ValueError(f"Multiple output routers provide template fields: {names}")
+            fields.update(router_fields)
+        return fields
+
     def _get_chunk_routes(
         self,
         stream_id: int,
@@ -1948,8 +2006,9 @@ class McapProcessor:
                 )
                 raise RuntimeError(msg)
             routes = list(cast("Iterable[RouteKey]", route_result))
-            if routes:
-                route_groups.append(routes)
+            if not routes:
+                return []
+            route_groups.append(routes)
         return self._compose_route_groups(route_groups)
 
     def _iter_known_output_segments(self) -> Iterator[tuple[OutputKey, int, int]]:
@@ -2017,8 +2076,9 @@ class McapProcessor:
         context = self._message_context(stream_id, input_channel_id)
         for proc in self.options.output_options.routers:
             routes = list(proc.route_message(context, message))
-            if routes:
-                route_groups.append(routes)
+            if not routes:
+                return []
+            route_groups.append(routes)
         return self._compose_route_groups(route_groups)
 
     def _run_chunk_pipeline(self, chunks: Iterator[PendingChunk]) -> None:

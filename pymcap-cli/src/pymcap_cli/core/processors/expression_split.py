@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
+    Filter,
     MessagePathError,
     ValidationError,
     parse_message_path,
@@ -27,7 +28,7 @@ from pymcap_cli.core.processors.base import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from ros_parser.message_path import MessagePathVariables
+    from ros_parser.message_path import MessagePathVariable, MessagePathVariables
     from small_mcap import Channel, Chunk, LazyChunk, Message, MessageIndex, Schema
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ _UNSET = _Unset()
 class _Candidate:
     """A pending value waiting for hysteresis thresholds before it commits."""
 
-    value: object
+    value: MessagePathVariable
     first_seen_ns: int
     count: int
 
@@ -81,6 +82,8 @@ class ExpressionSplitProcessor(OutputRouter):
         trailing_context_ns: int | None = None,
         trailing_context_count: int | None = None,
         variables: MessagePathVariables | None = None,
+        skip_values: tuple[MessagePathVariable, ...] = (),
+        require_value: bool = False,
     ) -> None:
         if hysteresis_ns is not None and hysteresis_ns <= 0:
             raise ValueError("hysteresis_ns must be positive")
@@ -93,12 +96,14 @@ class ExpressionSplitProcessor(OutputRouter):
 
         self.path_str = path
         self.parsed = parse_message_path(path)
+        self._is_predicate = any(isinstance(segment, Filter) for segment in self.parsed.segments)
         self._factories = (JSONDecoderFactory(), Ros2DecoderFactory())
         self.channels: dict[int, Channel] = {}
         self._decoders: dict[int, Callable[[bytes | memoryview], Any]] = {}
         self._validated_schema_ids: set[int] = set()
         self._segment_index: int = 0
-        self._prev_value: object = _UNSET
+        self._prev_value: MessagePathVariable | _Unset = _UNSET
+        self._segment_values: dict[int, MessagePathVariable] = {}
         self._hysteresis_ns = hysteresis_ns
         self._hysteresis_count = hysteresis_count
         self._candidate: _Candidate | None = None
@@ -106,6 +111,8 @@ class ExpressionSplitProcessor(OutputRouter):
         self._trailing_count = trailing_context_count
         self._tail_windows: list[_TailWindow] = []
         self._variables = dict(variables or {})
+        self.skip_values = skip_values
+        self.require_value = require_value
 
     @override
     def initialize(self, context: PipelineContext) -> None:
@@ -151,9 +158,15 @@ class ExpressionSplitProcessor(OutputRouter):
         if root is None:
             return
         try:
-            self.parsed.validate(root, all_defs)
+            result_type, _ = self.parsed.resolve_type(root, all_defs)
         except ValidationError as e:
             logger.warning("path %r invalid for %s: %s", self.path_str, schema.name, e)
+            return
+        if not self._is_predicate and (not result_type.is_primitive or result_type.is_array):
+            raise ValueError(
+                f"Expression {self.path_str!r} must resolve to a primitive; "
+                f"schema {schema.name!r} resolves it as {result_type}"
+            )
 
     def _chunk_has_target(self, indexes: Iterable[MessageIndex]) -> bool:
         if not self.channels:
@@ -181,9 +194,9 @@ class ExpressionSplitProcessor(OutputRouter):
         # Reached only for fast-copy chunks (on_chunk returned CONTINUE). Those
         # contain no target-topic messages, so route the whole chunk to the
         # current sticky segment.
-        return (self._segment_index,)
+        return self._current_routes()
 
-    def _commit_transition(self, new_value: object, log_time_ns: int) -> None:
+    def _commit_transition(self, new_value: MessagePathVariable, log_time_ns: int) -> None:
         """Commit a value transition: bump the segment index and arm the
         trailing-context window if configured."""
         # Skip the very first transition (from _UNSET → first value) so the
@@ -192,6 +205,7 @@ class ExpressionSplitProcessor(OutputRouter):
         if not prev_was_unset:
             self._segment_index += 1
         self._prev_value = new_value
+        self._segment_values[self._segment_index] = new_value
         self._candidate = None
 
         # Arm trailing context for the segment we just left (the previous
@@ -212,13 +226,15 @@ class ExpressionSplitProcessor(OutputRouter):
         dec = self._decoders.get(message.channel_id)
         ch = self.channels.get(message.channel_id)
         if dec is None or ch is None or ch.topic != self.parsed.topic:
-            return (self._segment_index,)
+            return self._current_routes()
         try:
-            value = self.parsed.apply(dec(message.data), self._variables)
+            raw_value: object = self.parsed.apply(dec(message.data), self._variables)
         except MessagePathError:
-            return (self._segment_index,)
+            return self._current_routes()
+        value = self._normalize_value(raw_value)
 
-        if value == self._prev_value:
+        prev_value = self._prev_value
+        if not isinstance(prev_value, _Unset) and self._values_equal(value, prev_value):
             # Same value as current segment — clear any pending candidate
             # (the transition flapped back).
             self._candidate = None
@@ -235,7 +251,7 @@ class ExpressionSplitProcessor(OutputRouter):
             self._commit_transition(value, message.log_time)
             return self._routes_for_target_message(message)
 
-        if self._candidate is None or self._candidate.value != value:
+        if self._candidate is None or not self._values_equal(self._candidate.value, value):
             self._candidate = _Candidate(value=value, first_seen_ns=message.log_time, count=1)
         else:
             self._candidate.count += 1
@@ -250,7 +266,42 @@ class ExpressionSplitProcessor(OutputRouter):
         return self._routes_for_target_message(message)
 
     def _routes_for_target_message(self, message: Message) -> tuple[int, ...]:
-        return (self._segment_index, *self._extra_routes_for_target_message(message))
+        routes = [*self._current_routes(), *self._extra_routes_for_target_message(message)]
+        return tuple(dict.fromkeys(routes))
+
+    def _normalize_value(self, value: object) -> MessagePathVariable:
+        if self._is_predicate:
+            return not (value is None or (isinstance(value, (list, tuple)) and not value))
+        if type(value) not in (bool, int, float, str):
+            raise ValueError(
+                f"Expression {self.path_str!r} must resolve to a primitive "
+                f"bool, int, float, or str; got {type(value).__name__}"
+            )
+        return cast("MessagePathVariable", value)
+
+    @staticmethod
+    def _values_equal(left: MessagePathVariable, right: MessagePathVariable) -> bool:
+        if type(left) is bool or type(right) is bool:
+            return type(left) is type(right) and left == right
+        return left == right
+
+    def _is_skipped(self, value: MessagePathVariable) -> bool:
+        return any(self._values_equal(value, skipped) for skipped in self.skip_values)
+
+    def _current_routes(self) -> tuple[int, ...]:
+        prev_value = self._prev_value
+        if isinstance(prev_value, _Unset):
+            return () if self.require_value else (self._segment_index,)
+        if self._is_skipped(prev_value):
+            return ()
+        return (self._segment_index,)
+
+    @override
+    def template_fields(self, key: int | str) -> dict[str, MessagePathVariable]:
+        if type(key) is not int:
+            return {}
+        value = self._segment_values.get(key)
+        return {} if value is None else {"value": value}
 
     def _extra_routes_for_target_message(self, message: Message) -> Iterable[int]:
         """Duplicate target-topic messages into the previous segment during
@@ -269,7 +320,8 @@ class ExpressionSplitProcessor(OutputRouter):
             if window.count_left == 0:
                 continue
 
-            if window.target not in targets:
+            value = self._segment_values.get(window.target)
+            if value is not None and not self._is_skipped(value) and window.target not in targets:
                 targets.append(window.target)
 
             if window.count_left > 0:

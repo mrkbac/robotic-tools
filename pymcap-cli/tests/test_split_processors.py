@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pymcap_cli.core.processors.base import SPLIT_REQUIRED, ChunkDecision
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.core.processors.utils import global_time_range
-from small_mcap import Channel, Message, MessageIndex, Summary
+from small_mcap import Channel, Message, MessageIndex, Schema, Summary
 from small_mcap import Statistics as SummaryStatistics
 
 from tests.helpers import chunk_context, lazy_chunk, message_context, pipeline_context
@@ -318,6 +320,76 @@ class TestExpressionSplitProcessor:
 
         assert _route_message(proc, _message(0, channel_id=1, data=b"alpha")) == 0
         assert _route_message(proc, _message(1, channel_id=1, data=b"beta")) == 1
+
+    def test_predicate_results_are_normalized_to_boolean(self) -> None:
+        proc = ExpressionSplitProcessor("/t.items[:]{score>0.8}")
+        proc.channels[1] = Channel(
+            id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
+        )
+        proc._decoders[1] = lambda data: json.loads(bytes(data))
+
+        first_match = b'{"items":[{"score":0.9,"name":"first"}]}'
+        different_match = b'{"items":[{"score":0.95,"name":"second"}]}'
+        no_match = b'{"items":[{"score":0.2,"name":"third"}]}'
+
+        assert _route_message(proc, _message(0, data=first_match)) == 0
+        assert _route_message(proc, _message(1, data=different_match)) == 0
+        assert _route_message(proc, _message(2, data=no_match)) == 1
+        assert proc.template_fields(0) == {"value": True}
+        assert proc.template_fields(1) == {"value": False}
+
+    def test_complex_non_predicate_result_is_rejected(self) -> None:
+        proc = ExpressionSplitProcessor("/t.items[:]")
+        proc.channels[1] = Channel(
+            id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
+        )
+        proc._decoders[1] = lambda data: json.loads(bytes(data))
+
+        with pytest.raises(ValueError, match="primitive"):
+            _routes(proc, _message(0, data=b'{"items":[1,2]}'))
+
+    def test_complex_non_predicate_schema_is_rejected_before_messages(self) -> None:
+        proc = ExpressionSplitProcessor("/t.items")
+        schema = Schema(
+            id=1,
+            name="example_msgs/msg/State",
+            encoding="ros2msg",
+            data=b"int8[] items\n",
+        )
+
+        with pytest.raises(ValueError, match="primitive"):
+            proc._validate_path(schema)
+
+    def test_skip_value_suppresses_matching_runs(self) -> None:
+        proc = ExpressionSplitProcessor("/t.field", skip_values=("neutral",))
+        proc.channels[1] = Channel(
+            id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
+        )
+        proc._decoders[1] = lambda data: type("M", (), {"field": bytes(data).decode()})()
+
+        assert _routes(proc, _message(0, data=b"neutral")) == []
+        assert _routes(proc, _message(1, data=b"forward")) == [1]
+        assert _routes(proc, _message(2, data=b"neutral")) == []
+        assert _routes(proc, _message(3, data=b"reverse")) == [3]
+        assert proc.template_fields(1) == {"value": "forward"}
+        assert proc.template_fields(3) == {"value": "reverse"}
+
+    def test_skip_numeric_zero_does_not_skip_boolean_false(self) -> None:
+        proc = ExpressionSplitProcessor("/t.field", skip_values=(0,))
+        proc.channels[1] = Channel(
+            id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
+        )
+        proc._decoders[1] = lambda _data: type("M", (), {"field": False})()
+
+        assert _routes(proc, _message(0)) == [0]
+
+    def test_value_required_drops_messages_before_first_expression_value(self) -> None:
+        proc = ExpressionSplitProcessor("/t.field", require_value=True)
+        proc.channels[2] = Channel(
+            id=2, schema_id=1, topic="/other", message_encoding="json", metadata={}
+        )
+
+        assert _routes(proc, _message(0, channel_id=2)) == []
 
     def test_decodes_chunks_with_target_topic(self):
         proc = _make_expression_proc()
