@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import socket
 import struct
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from pymcap_cli.cmd.bridge.delay import (
     _collect_delay_async,
     _delay_to_dict,
 )
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from robo_ws_bridge.server import Channel as ServerChannel
 from robo_ws_bridge.server import WebSocketBridgeServer
 from robo_ws_bridge.ws_types import BinaryOpCodes, ServerCapabilities
@@ -87,7 +87,7 @@ def test_collect_delay_async_without_topics_uses_time_updates_without_subscribin
         try:
             report = await _collect_delay_async(
                 f"ws://127.0.0.1:{port}",
-                topic_patterns=(),
+                message_filter=MessageFilterOptions(),
                 against=DelayReference.LOCAL,
                 duration=0.2,
                 connect_timeout=5.0,
@@ -125,7 +125,7 @@ def test_collect_delay_async_without_topics_requires_time_capability() -> None:
             with pytest.raises(BridgeFetchError, match="does not advertise"):
                 await _collect_delay_async(
                     f"ws://127.0.0.1:{port}",
-                    topic_patterns=(),
+                    message_filter=MessageFilterOptions(),
                     against=DelayReference.LOCAL,
                     duration=0.2,
                     connect_timeout=5.0,
@@ -162,7 +162,7 @@ def test_collect_delay_async_with_topics_measures_header_age_against_bridge_time
         try:
             return await _collect_delay_async(
                 f"ws://127.0.0.1:{port}",
-                topic_patterns=(re.compile("^/stamped$"),),
+                message_filter=MessageFilterOptions.from_args(topic=["/stamped"]),
                 against=DelayReference.BRIDGE,
                 duration=0.2,
                 connect_timeout=5.0,

@@ -1,7 +1,5 @@
 """Unified process command — every streaming MCAP→MCAP transform in one pass."""
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -11,18 +9,33 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
+    AlwaysDecodeChunkOption,
+    AttachmentsModeOption,
+    ChunkSizeOption,
+    CompressionLevelOption,
+    CompressionOption,
+    DedupIdenticalOption,
+    DeleteSourceOption,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    IncompressibleSchemaPatternOption,
+    LatchFromMetadataOption,
+    LatchOption,
+    MessagePathVariablesOption,
+    MetadataModeOption,
+    NoClobberOption,
+    OptionalOutputPathOption,
+    PointCloudDropInvalidOption,
+    PointCloudSortFieldOption,
+    SplitAtOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
-from pymcap_cli.cmd._message_path_options import (
-    MessagePathVariablesOption,
-    create_message_path_variables,
-)
+from pymcap_cli.cmd._message_filter_options import create_message_filter
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.cmd._pointcloud_cleanup import (
     pointcloud_worker_count,
     resolve_pointcloud_cleanup,
@@ -51,15 +64,6 @@ from pymcap_cli.core.processors.topic_alias import TopicAliasProcessor
 from pymcap_cli.core.processors.topic_rewrite import TopicRewriteProcessor
 from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
 from pymcap_cli.types.size import parse_size_bytes
-from pymcap_cli.types.types_manual import (
-    OUTPUT_OPTIONS_GROUP,
-    ChunkSizeOption,
-    CompressionLevelOption,
-    CompressionOption,
-    DeleteSourceOption,
-    ForceOverwriteOption,
-    NoClobberOption,
-)
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
@@ -75,12 +79,6 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups (declared once so --help groups every flag consistently)
-RECOVERY_GROUP = Group("Recovery Options")
-FILTERING_GROUP = Group("Topic Filtering")
-TIME_FILTERING_GROUP = Group("Time Filtering")
-CONTENT_FILTERING_GROUP = Group("Content Filtering")
-DEDUP_GROUP = Group("Deduplication")
-LATCHING_GROUP = Group("Latching")
 TOPIC_TRANSFORM_GROUP = Group("Topic Transforms")
 TIME_TRANSFORM_GROUP = Group("Time / Decimation")
 RECHUNK_GROUP = Group("Rechunking")
@@ -131,16 +129,10 @@ def _parse_alias_rules(tokens: list[str]) -> dict[str, str | list[str]]:
 
 def process(
     file: list[str],
-    output: Annotated[
-        Path | None,
-        Parameter(name=["-o", "--output"], group=OUTPUT_OPTIONS_GROUP),
-    ] = None,
+    output: OptionalOutputPathOption = None,
     *,
     # ----- Recovery -----
-    always_decode_chunk: Annotated[
-        bool,
-        Parameter(name=["-a", "--always-decode-chunk"], group=RECOVERY_GROUP),
-    ] = False,
+    always_decode_chunk: AlwaysDecodeChunkOption = False,
     # ----- Topic filtering -----
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
@@ -149,55 +141,13 @@ def process(
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
     # ----- Content filtering -----
-    metadata_mode: Annotated[
-        MetadataMode,
-        Parameter(name=["--metadata"], group=CONTENT_FILTERING_GROUP),
-    ] = MetadataMode.INCLUDE,
-    attachments_mode: Annotated[
-        AttachmentsMode,
-        Parameter(name=["--attachments"], group=CONTENT_FILTERING_GROUP),
-    ] = AttachmentsMode.INCLUDE,
+    metadata_mode: MetadataModeOption = MetadataMode.INCLUDE,
+    attachments_mode: AttachmentsModeOption = AttachmentsMode.INCLUDE,
     # ----- Deduplication -----
-    dedup_identical: Annotated[
-        bool,
-        Parameter(
-            name=["--dedup-identical"],
-            group=DEDUP_GROUP,
-            help=(
-                "Drop messages whose (channel, log_time, payload-hash) was "
-                "already written. Chunks whose time range doesn't overlap "
-                "any other input's chunk range still fast-copy; overlapping "
-                "chunks are decoded so the per-message hash check can run. "
-                "Combine with --always-decode-chunk to also catch intra-input "
-                "duplicates inside non-overlapping chunks."
-            ),
-        ),
-    ] = False,
+    dedup_identical: DedupIdenticalOption = False,
     # ----- Latching -----
-    latch: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--latch"],
-            group=LATCHING_GROUP,
-            help=(
-                "Topic regex (repeatable) whose latest message is replayed into "
-                "every output segment. Use for /tf_static and other "
-                "transient-local topics that consumers need at the start of "
-                "each segment."
-            ),
-        ),
-    ] = None,
-    latch_from_metadata: Annotated[
-        bool,
-        Parameter(
-            name=["--latch-from-metadata"],
-            group=LATCHING_GROUP,
-            help=(
-                "Auto-detect latched channels by reading the MCAP "
-                "'offered_qos_profiles' metadata for durability=transient_local."
-            ),
-        ),
-    ] = False,
+    latch: LatchOption = None,
+    latch_from_metadata: LatchFromMetadataOption = False,
     # ----- Topic transforms -----
     rename_topic: Annotated[
         list[str] | None,
@@ -321,23 +271,8 @@ def process(
             help="Cloudini lossy point-cloud resolution (m).",
         ),
     ] = 0.01,
-    pointcloud_drop_invalid: Annotated[
-        bool | None,
-        Parameter(
-            name=["--pointcloud-drop-invalid"],
-            negative="--no-pointcloud-drop-invalid",
-            group=COMPRESS_GROUP,
-            help="Drop PointCloud2 (0,0,0)/NaN points before writing or compressing.",
-        ),
-    ] = None,
-    pointcloud_sort_field: Annotated[
-        str | None,
-        Parameter(
-            name=["--pointcloud-sort-field"],
-            group=COMPRESS_GROUP,
-            help="Stable-sort cleaned PointCloud2 points by this field; use 'none' to disable.",
-        ),
-    ] = None,
+    pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
+    pointcloud_sort_field: PointCloudSortFieldOption = None,
     # ----- Rechunking -----
     rechunk_strategy: Annotated[
         RechunkStrategy,
@@ -390,20 +325,7 @@ def process(
             ),
         ),
     ] = None,
-    incompressible_schema_pattern: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--incompressible-schema-pattern"],
-            group=RECHUNK_GROUP,
-            help=(
-                "Regex matched against Schema.name (repeatable). Matching "
-                "channels (e.g. already-compressed video / point clouds) join "
-                "their own uncompressed chunk group — skip the wasted zstd pass "
-                "on data that won't shrink. Pairs naturally with "
-                "--compress-video / --compress-pointcloud."
-            ),
-        ),
-    ] = None,
+    incompressible_schema_pattern: IncompressibleSchemaPatternOption = None,
     # ----- Splitting (multi-output) -----
     split_duration: Annotated[
         str | None,
@@ -413,14 +335,7 @@ def process(
             help="Split every N time units (e.g. '60s', '1.5m', '1h').",
         ),
     ] = None,
-    split_at: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--split-at"],
-            group=SPLIT_GROUP,
-            help="Split at specific timestamps (ns or RFC3339, repeatable).",
-        ),
-    ] = None,
+    split_at: SplitAtOption = None,
     split_expression: Annotated[
         str | None,
         Parameter(

@@ -1,7 +1,5 @@
 """`pymcap-cli tf-export` — TF tree → URDF / SDF / JSON."""
 
-from __future__ import annotations
-
 import json
 import logging
 import sys
@@ -10,14 +8,15 @@ from typing import Annotated, Literal, TypedDict
 
 from cyclopts import Group, Parameter
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    OptionalOutputPathOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.core.tf_findings import detect_cycles, detect_multiple_parents
 from pymcap_cli.core.tf_tree import (
     TransformData,
@@ -114,14 +113,7 @@ def _resolve_multi_parent(
 def tf_export(
     file: str,
     *,
-    output: Annotated[
-        Path | None,
-        Parameter(
-            name=["--output", "-o"],
-            group=OUTPUT_GROUP,
-            help="Output file. Defaults to stdout.",
-        ),
-    ] = None,
+    output: OptionalOutputPathOption = None,
     format_: Annotated[
         Format,
         Parameter(

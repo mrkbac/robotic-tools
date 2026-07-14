@@ -6,38 +6,49 @@ import logging
 import re
 import sys
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any
 
-from cyclopts import Group as CycloptsGroup
-from cyclopts import Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.panel import Panel
 from rich.text import Text
 from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
 from ros_parser.message_path import (
-    MessagePath,
     MessagePathError,
     MessagePathVariables,
-    parse_message_path,
 )
 from small_mcap import JSONDecoderFactory, Schema
 
-from pymcap_cli.cmd._message_path_options import (
-    MessagePathVariablesOption,
-    create_message_path_variables,
-)
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
+from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
+    BytesModeOption,
+    ChangedOption,
+    ConnectTimeoutOption,
+    ExcludeTopicOption,
+    FlatOption,
+    GrepIgnoreCaseOption,
+    GrepOption,
+    LiveDurationOption,
+    MessageLimitOption,
+    MessagePathVariablesOption,
+    QueryOption,
+    TopicOption,
+)
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
+from pymcap_cli.cmd.bridge._shared import (
     ChannelSubscriptionManager,
     channel_to_schema,
     console,
     to_ws_url,
 )
-from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query, query_result_is_empty
+from pymcap_cli.core.message_filter import MessageFilterOptions
+from pymcap_cli.display.cat_helpers import (
+    SchemaCache,
+    parse_cat_queries,
+    plan_for_query,
+    query_result_is_empty,
+)
 from pymcap_cli.display.message_render import (
-    SMART_BYTES_INLINE_LIMIT,
     TTY_BYTES_TRUNCATE,
     BytesMode,
     changed_leaf_paths,
@@ -50,16 +61,13 @@ from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
 
-CAT_FILTER_GROUP = CycloptsGroup("Filtering")
-CAT_OUTPUT_GROUP = CycloptsGroup("Output")
-
 
 async def _cat_async(
     *,
     url: str,
-    topics: list[str],
-    exclude_topics: list[str],
-    query: str | None,
+    topic: list[str] | None,
+    exclude_topic: list[str] | None,
+    query: list[str] | None,
     grep: str | None,
     grep_ignore_case: bool,
     limit: int | None,
@@ -71,13 +79,11 @@ async def _cat_async(
     variables: MessagePathVariables | None = None,
 ) -> int:
     path_variables = dict(variables or {})
-    parsed_query: MessagePath | None = None
-    if query:
-        try:
-            parsed_query = parse_message_path(query)
-        except Exception:
-            logger.exception("Invalid --query syntax")
-            return 1
+    try:
+        parsed_queries = parse_cat_queries(query)
+    except Exception:
+        logger.exception("Invalid --query syntax")
+        return 1
 
     grep_pattern: re.Pattern[str] | None = None
     if grep:
@@ -88,10 +94,12 @@ async def _cat_async(
             return 1
 
     try:
-        topic_patterns = [re.compile(p) for p in topics]
-        exclude_topic_patterns = [re.compile(p) for p in exclude_topics]
-    except re.error:
-        logger.exception("Invalid topic regex")
+        message_filter = MessageFilterOptions.from_args(
+            topic=topic,
+            exclude_topic=exclude_topic,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
         return 1
 
     is_tty = sys.stdout.isatty()
@@ -108,13 +116,8 @@ async def _cat_async(
     done = asyncio.Event()
 
     def _topic_matches(topic: str) -> bool:
-        if parsed_query is not None:
-            return topic == parsed_query.topic and not any(
-                p.search(topic) for p in exclude_topic_patterns
-            )
-        if topic_patterns and not any(p.search(topic) for p in topic_patterns):
-            return False
-        return not any(p.search(topic) for p in exclude_topic_patterns)
+        query_matches = not parsed_queries or topic in parsed_queries
+        return query_matches and message_filter.matches_topic(topic)
 
     def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
         cid = channel["id"]
@@ -165,6 +168,8 @@ async def _cat_async(
         header.append("]", style="dim")
         schema = schemas_by_channel.get(channel["id"])
         root_plan = schema_cache.enum_plan(schema) if schema is not None else None
+        query_for_topic = parsed_queries.get(channel["topic"])
+        parsed_query = query_for_topic.path if query_for_topic is not None else None
         plan = plan_for_query(root_plan, parsed_query)
 
         changed_paths = None
@@ -217,11 +222,16 @@ async def _cat_async(
             return
 
         topic = channel["topic"]
-        if parsed_query is not None and topic not in validated_topics:
+        query_for_topic = parsed_queries.get(topic)
+        parsed_query = query_for_topic.path if query_for_topic is not None else None
+        if query_for_topic is not None and topic not in validated_topics:
             validated_topics.add(topic)
             schema = schemas_by_channel.get(channel["id"])
             if schema is not None and not schema_cache.validate_query(
-                parsed_query, schema, topic, query_repr=query or ""
+                query_for_topic.path,
+                schema,
+                topic,
+                query_repr=query_for_topic.source,
             ):
                 return_code = 1
                 done.set()
@@ -296,98 +306,18 @@ async def _cat_async(
 def cat(
     target: BridgeTarget,
     *,
-    topics: Annotated[
-        list[str],
-        Parameter(
-            name=["-t", "--topics"],
-            group=CAT_FILTER_GROUP,
-            help="Topic regex(es) to include. Repeat or pass space-delimited.",
-        ),
-    ] = [],  # noqa: B006
-    exclude_topics: Annotated[
-        list[str],
-        Parameter(
-            name=["-x", "--exclude-topics", "-n"],
-            group=CAT_FILTER_GROUP,
-            help="Topic regex(es) to exclude. Wins over --topics and --query.",
-        ),
-    ] = [],  # noqa: B006
-    query: Annotated[
-        str | None,
-        Parameter(
-            name=["-q", "--query"],
-            group=CAT_FILTER_GROUP,
-            help="MessagePath expression scoping output to one topic and/or subfield.",
-        ),
-    ] = None,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    query: QueryOption = None,
     var: MessagePathVariablesOption = None,
-    grep: Annotated[
-        str | None,
-        Parameter(
-            name=["-g", "--grep"],
-            group=CAT_FILTER_GROUP,
-            help=(
-                "Regex applied to every scalar value in the decoded message. "
-                "Messages with no match are skipped. Bytes-like fields are not "
-                "searched."
-            ),
-        ),
-    ] = None,
-    grep_ignore_case: Annotated[
-        bool,
-        Parameter(name=["-i", "--grep-ignore-case"], group=CAT_FILTER_GROUP),
-    ] = False,
-    limit: Annotated[
-        int | None,
-        Parameter(name=["-l", "--limit"], group=CAT_OUTPUT_GROUP, help="Stop after N messages."),
-    ] = None,
-    duration: Annotated[
-        float | None,
-        Parameter(
-            name=["-d", "--duration"],
-            group=CAT_OUTPUT_GROUP,
-            help="Stop after this many seconds.",
-        ),
-    ] = None,
-    bytes_mode: Annotated[
-        BytesMode,
-        Parameter(
-            name=["--bytes"],
-            group=CAT_OUTPUT_GROUP,
-            help=(
-                "How to render `bytes` fields. `smart` (default) inlines payloads "
-                f"≤{SMART_BYTES_INLINE_LIMIT} bytes as int lists and collapses "
-                "larger ones to `<N bytes>`. `ints` for the full list, `base64` "
-                "for a string, or `skip` to drop the payload."
-            ),
-        ),
-    ] = BytesMode.SMART,
-    flat: Annotated[
-        bool,
-        Parameter(
-            name=["--flat"],
-            group=CAT_OUTPUT_GROUP,
-            help=(
-                "In a terminal, print one `dotted.path: value` line per leaf "
-                "instead of a tree. Greppable, and handy with --query."
-            ),
-        ),
-    ] = False,
-    changed: Annotated[
-        bool,
-        Parameter(
-            name=["--changed"],
-            group=CAT_OUTPUT_GROUP,
-            help=(
-                "In a terminal, highlight values that changed since the previous "
-                "message on the same topic. The full message is still shown."
-            ),
-        ),
-    ] = False,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
+    grep: GrepOption = None,
+    grep_ignore_case: GrepIgnoreCaseOption = False,
+    limit: MessageLimitOption = None,
+    duration: LiveDurationOption = None,
+    bytes_mode: BytesModeOption = BytesMode.SMART,
+    flat: FlatOption = False,
+    changed: ChangedOption = False,
+    connect_timeout: ConnectTimeoutOption = 5.0,
 ) -> int:
     """Stream live decoded messages from a Foxglove WebSocket bridge to stdout.
 
@@ -400,10 +330,10 @@ def cat(
     target
         Bridge address. Same forms accepted by ``bridge`` (URL, host, ``host:port``);
         defaults to port 8765.
-    topics
-        Topic regex(es) to include (case-sensitive ``re.search``). Empty means all.
-    exclude_topics
-        Topic regex(es) to skip. Wins over includes and over ``--query``.
+    topic
+        Topic regexes to include using canonical full-match semantics.
+    exclude_topic
+        Topic regexes to skip. Wins over includes and over ``--query``.
     query
         MessagePath expression (e.g. ``/odom.pose.position.x``); restricts output
         to its topic and projects the addressed subfield.
@@ -423,10 +353,10 @@ def cat(
     Examples
     --------
     ```
-    pymcap-cli bridge cat ws://localhost:8765 -t '^/chatter' -l 3
+    pymcap-cli bridge cat ws://localhost:8765 -t '/chatter' -l 3
     pymcap-cli bridge cat localhost:8765 -t '.*' -l 1 | jq
     pymcap-cli bridge cat localhost:8765 -q '/odom.pose.position.x' -l 5
-    pymcap-cli bridge cat localhost:8765 -t '.*' -g 'error' -i -d 10
+    pymcap-cli bridge cat localhost:8765 -q '/odom.pose' -q '/imu.data' -l 5
     ```
     """
     if duration is not None and duration <= 0:
@@ -448,8 +378,8 @@ def cat(
         return asyncio.run(
             _cat_async(
                 url=url,
-                topics=topics,
-                exclude_topics=exclude_topics,
+                topic=topic,
+                exclude_topic=exclude_topic,
                 query=query,
                 grep=grep,
                 grep_ignore_case=grep_ignore_case,

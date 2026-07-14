@@ -2,38 +2,19 @@
 
 import logging
 import sys
-from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Group, Parameter
-
+from pymcap_cli.cmd._cli_options import ExtraMessagePathOption, MessageDistroOption
 from pymcap_cli.core.msg_resolver import ROS2Distro, list_package_messages
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
 
-MSG_LIST_OPTIONS_GROUP = Group("Message Listing Options")
-
 
 def msg_list(
     package_name: str,
     *,
-    distro: Annotated[
-        ROS2Distro,
-        Parameter(
-            name=["--distro", "-d"],
-            group=MSG_LIST_OPTIONS_GROUP,
-            help="ROS2 distribution to use for rosdistro-based message listings.",
-        ),
-    ] = ROS2Distro.HUMBLE,
-    extra_path: Annotated[
-        list[Path],
-        Parameter(
-            name=["--extra-path", "-I"],
-            group=MSG_LIST_OPTIONS_GROUP,
-            help="Additional root paths to search for custom message definitions.",
-        ),
-    ] = [],  # noqa: B006
+    distro: MessageDistroOption = ROS2Distro.HUMBLE,
+    extra_path: ExtraMessagePathOption = [],  # noqa: B006
 ) -> int:
     """List ROS2 ``.msg`` types defined by a package.
 

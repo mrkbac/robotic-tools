@@ -6,20 +6,22 @@ from typing import Annotated, Literal
 from cyclopts import Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    NumWorkersOption,
+    OutputPathOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.geojson_exporter import GeoJsonExporter
 from pymcap_cli.exporters.gpx_exporter import GpxExporter
 from pymcap_cli.exporters.kml_exporter import KmlExporter
 from pymcap_cli.types.duration import parse_duration_ns
-from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -42,7 +44,7 @@ def export_geo(
     stride_n: Annotated[int, Parameter(name=["--stride"])] = 1,
     include_no_fix: Annotated[bool, Parameter(name=["--include-no-fix"])] = False,
     force: ForceOverwriteOption = False,
-    num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
+    num_workers: NumWorkersOption = 8,
 ) -> int:
     """Export geographic topics (``NavSatFix``, ``geographic_msgs/*``) to a map format.
 

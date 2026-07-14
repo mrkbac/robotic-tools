@@ -89,6 +89,16 @@ class MessageFilterOptions:
         """Return equivalent exclusion regexes for ``TopicFilterProcessor``."""
         return [rf"\A(?:{selector})\Z" for selector in self.exclude_topics]
 
+    def matches_topic(self, topic: str) -> bool:
+        """Return whether a topic passes the canonical include/exclude selectors."""
+        include_regex = self._compile_selectors(self.topics)
+        exclude_regex = self._compile_selectors(self.exclude_topics)
+        positive = not self.has_positive_topics or any(
+            pattern.fullmatch(topic) for pattern in include_regex
+        )
+        excluded = any(pattern.fullmatch(topic) for pattern in exclude_regex)
+        return positive and not excluded
+
     def _validate_unresolved(self) -> None:
         if self.early_bail and self.end_time is None:
             raise ValueError("--early-bail requires --end")

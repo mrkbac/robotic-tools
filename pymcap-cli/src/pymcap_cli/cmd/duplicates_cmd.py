@@ -24,6 +24,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.tree import Tree
 
+from pymcap_cli.cmd._cli_options import ComparePayloadsOption
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.mcap_compare import (
     IdentityReadResult,
@@ -711,16 +712,7 @@ def duplicates(
             ),
         ),
     ] = True,
-    compare_payloads: Annotated[
-        bool,
-        Parameter(
-            name=["--compare-payloads"],
-            help=(
-                "After indexes match, compare raw message payload bytes before "
-                "declaring duplicates."
-            ),
-        ),
-    ] = False,
+    compare_payloads: ComparePayloadsOption = False,
 ) -> int:
     """Find likely duplicate MCAP recordings using summary and message indexes."""
     if not paths:

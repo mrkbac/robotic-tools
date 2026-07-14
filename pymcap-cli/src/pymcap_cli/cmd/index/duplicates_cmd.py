@@ -1,14 +1,18 @@
 """``pymcap-cli index duplicates`` — find duplicated content rows."""
 
 import json as _json
-from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import (
+    IndexDbOption,
+    IndexFolderOption,
+    IndexLimitOption,
+    IndexTableJsonPathsFormatOption,
+)
 from pymcap_cli.cmd.index._helpers import (
-    OutputFormat,
     _path_prefix_predicate,
     _print_db_needs_migration,
     _resolve_db,
@@ -21,10 +25,7 @@ from pymcap_cli.utils import bytes_to_human
 
 
 def duplicates_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to restrict the search."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
     min_copies: Annotated[
         int,
@@ -41,15 +42,9 @@ def duplicates_cmd(
         Literal["savings", "copies", "size"],
         Parameter(name=["--sort"], help="Order rows by reclaimable bytes, copy count, or size."),
     ] = "savings",
-    limit: Annotated[int, Parameter(name=["--limit"], help="Max groups to print.")] = 50,
-    format: Annotated[
-        OutputFormat,
-        Parameter(name=["--format"], help="Output as Rich table, JSON, or paths-only."),
-    ] = "table",
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    limit: IndexLimitOption = 50,
+    format: IndexTableJsonPathsFormatOption = "table",
+    db: IndexDbOption = None,
 ) -> int:
     """Group files by cheap byte probe and report likely reclaimable disk space."""
     db_path = _resolve_db(db)

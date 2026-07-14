@@ -7,6 +7,15 @@ from typing import TYPE_CHECKING, Annotated
 from cyclopts import Group, Parameter
 from rich.console import Console
 
+from pymcap_cli.cmd._cli_options import (
+    ChunkSizeOption,
+    CompressionOption,
+    DeleteSourceOption,
+    ForceOverwriteOption,
+    IncompressibleSchemaPatternOption,
+    NoClobberOption,
+    OutputPathOption,
+)
 from pymcap_cli.cmd._rechunk_strategy import RechunkStrategy, build_output_processors
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
@@ -19,14 +28,6 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
 )
 from pymcap_cli.types.size import parse_size_bytes
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionOption,
-    DeleteSourceOption,
-    ForceOverwriteOption,
-    NoClobberOption,
-    OutputPathOption,
-)
 from pymcap_cli.utils import compile_topic_patterns
 
 if TYPE_CHECKING:
@@ -96,22 +97,7 @@ def rechunk(
             ),
         ),
     ] = None,
-    incompressible_schema_pattern: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--incompressible-schema-pattern"],
-            group=STRATEGY_GROUP,
-            help=(
-                "Regex matched against Schema.name (repeatable). Matching "
-                "channels join their own uncompressed chunk group — for "
-                "payloads already compressed (H.264/H.265 video, "
-                "Cloudini/Draco point clouds), zstd saves under 1% of size "
-                "for real CPU cost on both write and every future read. "
-                "Independent of --strategy: applies on top of it, or alone "
-                "with --strategy=none."
-            ),
-        ),
-    ] = None,
+    incompressible_schema_pattern: IncompressibleSchemaPatternOption = None,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,

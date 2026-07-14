@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from ros_parser import parse_schema_to_definitions
-from ros_parser.message_path import ArrayIndex, ArraySlice, FieldAccess, ValidationError
+from ros_parser.message_path import (
+    ArrayIndex,
+    ArraySlice,
+    FieldAccess,
+    MessagePath,
+    ValidationError,
+    parse_message_path,
+)
 
 from pymcap_cli.display.message_render import EnumPlan, build_enum_plan, resolve_msgdef_by_name
 
@@ -16,6 +23,28 @@ if TYPE_CHECKING:
     from ros_parser.models import MessageDefinition
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class CatQuery:
+    """One parsed cat query together with its user-facing representation."""
+
+    source: str
+    path: MessagePath
+
+
+def parse_cat_queries(queries: list[str] | None) -> dict[str, CatQuery]:
+    """Parse repeatable cat queries and index them by selected topic."""
+    parsed: dict[str, CatQuery] = {}
+    for source in queries or ():
+        path = parse_message_path(source)
+        if path.topic in parsed:
+            raise ValueError(
+                f"Only one --query per topic is supported; "
+                f"topic '{path.topic}' was specified more than once"
+            )
+        parsed[path.topic] = CatQuery(source=source, path=path)
+    return parsed
 
 
 def query_result_is_empty(result: object) -> bool:

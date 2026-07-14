@@ -6,6 +6,17 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 
+from pymcap_cli.cmd._cli_options import (
+    ChunkSizeOption,
+    CompressionLevelOption,
+    CompressionOption,
+    DeleteSourceOption,
+    FastCompressionOption,
+    ForceOverwriteOption,
+    InPlaceOption,
+    NoClobberOption,
+    OutputPathOption,
+)
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     finalize_replace_source,
@@ -19,17 +30,6 @@ from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
     OverwriteCollisionPolicy,
-)
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionLevelOption,
-    CompressionOption,
-    DeleteSourceOption,
-    FastCompressionOption,
-    ForceOverwriteOption,
-    InPlaceOption,
-    NoClobberOption,
-    OutputPathOption,
 )
 from pymcap_cli.utils import output_overwrites_input
 

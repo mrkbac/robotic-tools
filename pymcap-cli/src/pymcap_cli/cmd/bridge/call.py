@@ -3,12 +3,16 @@
 import asyncio
 import dataclasses
 import logging
-from typing import Annotated
 
-from cyclopts import Parameter
 from robo_ws_bridge import ServiceCallError, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ServerCapabilities, ServiceInfo
 
+from pymcap_cli.cmd._cli_options import (
+    BridgeTarget,
+    CallTimeoutOption,
+    ConnectTimeoutOption,
+    DiscoverSecondsOption,
+)
 from pymcap_cli.cmd.bridge._codec import (
     CodecError,
     FieldSyntaxError,
@@ -18,9 +22,7 @@ from pymcap_cli.cmd.bridge._codec import (
     parse_field_args,
 )
 from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
     BridgeFetchError,
-    BridgeTarget,
     console,
     to_ws_url,
 )
@@ -155,18 +157,9 @@ def call(
     service: str,
     fields: list[str] = [],  # noqa: B006
     *,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    discover_seconds: Annotated[
-        float,
-        Parameter(name=["--discover-seconds"], group=CONNECTION_GROUP),
-    ] = 2.0,
-    call_timeout: Annotated[
-        float,
-        Parameter(name=["--call-timeout"], group=CONNECTION_GROUP),
-    ] = 10.0,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    discover_seconds: DiscoverSecondsOption = 2.0,
+    call_timeout: CallTimeoutOption = 10.0,
 ) -> int:
     """Call a service advertised by a live Foxglove WebSocket bridge.
 

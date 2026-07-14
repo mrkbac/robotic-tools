@@ -4,22 +4,28 @@ import json
 import logging
 import re
 import sys
-from typing import Annotated
 
-from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from small_mcap import get_summary, include_topics, read_message_decoded
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
+    DiagnosticLevelOption,
+    DiagnosticNameOption,
+    DiagnosticTreeOption,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    HardwareIdOption,
+    InspectAllDiagnosticsOption,
+    InspectDiagnosticOption,
+    JsonOutputOption,
+    ShowAllDiagnosticsOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.core.diagnostics import (
     DEFAULT_TOPICS,
     DiagEntry,
@@ -39,9 +45,6 @@ from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-FILTERING_GROUP = Group("Filtering")
-DISPLAY_GROUP = Group("Display")
 
 
 def _collect_diagnostics(file: str, message_filter: MessageFilterOptions) -> dict[str, DiagEntry]:
@@ -108,67 +111,19 @@ def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str]:
 def diag(
     file: str,
     *,
-    level: Annotated[
-        int | None,
-        Parameter(
-            name=["-l", "--level"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
-    show_all: Annotated[
-        bool,
-        Parameter(
-            name=["-a", "--all"],
-            group=FILTERING_GROUP,
-        ),
-    ] = False,
-    name: Annotated[
-        str | None,
-        Parameter(
-            name=["-n", "--name"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
-    hardware_id: Annotated[
-        str | None,
-        Parameter(
-            name=["--hardware-id", "--hw"],
-            group=FILTERING_GROUP,
-        ),
-    ] = None,
-    inspect: Annotated[
-        str | None,
-        Parameter(
-            name=["-i", "--inspect"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = None,
-    inspect_all: Annotated[
-        bool,
-        Parameter(
-            name=["-I", "--inspect-all"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
-    tree: Annotated[
-        bool,
-        Parameter(
-            name=["--tree"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
+    level: DiagnosticLevelOption = None,
+    show_all: ShowAllDiagnosticsOption = False,
+    name: DiagnosticNameOption = None,
+    hardware_id: HardwareIdOption = None,
+    inspect: InspectDiagnosticOption = None,
+    inspect_all: InspectAllDiagnosticsOption = False,
+    tree: DiagnosticTreeOption = False,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    json_output: Annotated[
-        bool,
-        Parameter(
-            name=["--json"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
+    json_output: JsonOutputOption = False,
 ) -> int:
     """Inspect ROS2 diagnostics from an MCAP file.
 

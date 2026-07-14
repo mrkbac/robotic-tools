@@ -1,16 +1,23 @@
 """``pymcap-cli index query`` — look up indexed files."""
 
-from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import (
+    AtTimeOption,
+    IndexDbOption,
+    IndexFolderOption,
+    IndexLimitOption,
+    IndexSinceOption,
+    IndexTableJsonPathsFormatOption,
+    IndexUntilOption,
+)
 from pymcap_cli.cmd.index._helpers import (
     _EFF_END_SQL,
     _EFF_START_SQL,
     _MAX_PLAUSIBLE_DURATION_NS,
-    OutputFormat,
     _emit_non_table,
     _format_duration_ns,
     _format_ts_ns,
@@ -29,10 +36,7 @@ from pymcap_cli.index.db import IndexDbNeedsMigrationError, open_db
 
 
 def query_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to restrict results to."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
     sort_by: Annotated[
         Literal[
@@ -63,36 +67,12 @@ def query_cmd(
         str | None,
         Parameter(name=["--fingerprint"], help="Match by summary fingerprint (e.g. 's1:…')."),
     ] = None,
-    at: Annotated[
-        str | None,
-        Parameter(
-            name=["--at"],
-            help="Match files whose time range contains this instant (ns or RFC3339).",
-        ),
-    ] = None,
-    since: Annotated[
-        str | None,
-        Parameter(
-            name=["--since"],
-            help="Match files overlapping the window starting at this instant.",
-        ),
-    ] = None,
-    until: Annotated[
-        str | None,
-        Parameter(
-            name=["--until"],
-            help="Match files overlapping the window ending at this instant.",
-        ),
-    ] = None,
-    limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
-    format: Annotated[
-        OutputFormat,
-        Parameter(name=["--format"], help="Output as Rich table, JSON, or paths-only."),
-    ] = "table",
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    at: AtTimeOption = None,
+    since: IndexSinceOption = None,
+    until: IndexUntilOption = None,
+    limit: IndexLimitOption = 50,
+    format: IndexTableJsonPathsFormatOption = "table",
+    db: IndexDbOption = None,
 ) -> int:
     """Look up files in the sidecar DB."""
     db_path = _resolve_db(db)

@@ -3,17 +3,29 @@
 import logging
 from typing import Annotated
 
-from cyclopts import Group, Parameter
+from cyclopts import Parameter
 from rich.console import Console
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
+    TIME_FILTERING_GROUP,
+    TOPIC_FILTERING_GROUP,
+    AttachmentsModeOption,
+    ChunkSizeOption,
+    CompressionOption,
+    DeleteSourceOption,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    LatchFromMetadataOption,
+    LatchOption,
+    MetadataModeOption,
+    NoClobberOption,
+    OutputPathOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     resolve_overwrite_policy,
@@ -24,14 +36,6 @@ from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
 )
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionOption,
-    DeleteSourceOption,
-    ForceOverwriteOption,
-    NoClobberOption,
-    OutputPathOption,
-)
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
@@ -39,12 +43,6 @@ from pymcap_cli.utils import (
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-# Parameter groups
-TOPIC_FILTERING_GROUP = Group("Topic Filtering")
-TIME_FILTERING_GROUP = Group("Time Filtering")
-CONTENT_FILTERING_GROUP = Group("Content Filtering")
-LATCHING_GROUP = Group("Latching")
 
 
 def filter_cmd(
@@ -72,43 +70,10 @@ def filter_cmd(
         ),
     ] = False,
     early_bail: EarlyBailOption = False,
-    latch: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--latch"],
-            group=LATCHING_GROUP,
-            help=(
-                "Topic regex (repeatable) whose latest message should be replayed "
-                "into the output even if --topic or --start would otherwise drop "
-                "it. Useful for /tf_static and other transient-local topics."
-            ),
-        ),
-    ] = None,
-    latch_from_metadata: Annotated[
-        bool,
-        Parameter(
-            name=["--latch-from-metadata"],
-            group=LATCHING_GROUP,
-            help=(
-                "Also auto-detect latched channels by reading the MCAP "
-                "'offered_qos_profiles' metadata for durability=transient_local."
-            ),
-        ),
-    ] = False,
-    metadata_mode: Annotated[
-        MetadataMode,
-        Parameter(
-            name=["--metadata"],
-            group=CONTENT_FILTERING_GROUP,
-        ),
-    ] = MetadataMode.EXCLUDE,
-    attachments_mode: Annotated[
-        AttachmentsMode,
-        Parameter(
-            name=["--attachments"],
-            group=CONTENT_FILTERING_GROUP,
-        ),
-    ] = AttachmentsMode.EXCLUDE,
+    latch: LatchOption = None,
+    latch_from_metadata: LatchFromMetadataOption = False,
+    metadata_mode: MetadataModeOption = MetadataMode.EXCLUDE,
+    attachments_mode: AttachmentsModeOption = AttachmentsMode.EXCLUDE,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,

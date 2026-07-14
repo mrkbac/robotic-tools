@@ -1,11 +1,9 @@
 """DU command - report space usage within an MCAP file."""
 
-from typing import Annotated
-
-from cyclopts import Parameter
 from rich.console import Console
 from small_mcap import read_info_approximate
 
+from pymcap_cli.cmd._cli_options import ExactSizesOption
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.display_utils import ChannelTableColumn, display_channels_table
 from pymcap_cli.types.info_data import info_to_dict
@@ -17,12 +15,7 @@ console = Console()
 def du(
     file: str,
     *,
-    exact_sizes: Annotated[
-        bool,
-        Parameter(
-            name=["-e", "--exact-sizes"],
-        ),
-    ] = False,
+    exact_sizes: ExactSizesOption = False,
 ) -> int:
     """Report space usage within an MCAP file.
 

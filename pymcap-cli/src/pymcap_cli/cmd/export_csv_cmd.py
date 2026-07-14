@@ -1,26 +1,24 @@
 """Export an MCAP file to a directory of CSV files (one per topic)."""
 
 import logging
-from typing import Annotated
 
-from cyclopts import Parameter
-
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    IncludeBlobsOption,
+    MessagePathVariablesOption,
+    NumWorkersOption,
+    OutputPathOption,
+    SelectColumnsOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
-from pymcap_cli.cmd._message_path_options import (
-    MessagePathVariablesOption,
-    create_message_path_variables,
-)
-from pymcap_cli.cmd._structured_export_options import SelectColumnsOption
+from pymcap_cli.cmd._message_filter_options import create_message_filter
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.csv_exporter import CsvExporter
-from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +33,8 @@ def export_csv(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    include_blobs: Annotated[bool, Parameter(name=["--include-blobs"])] = False,
-    num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
+    include_blobs: IncludeBlobsOption = False,
+    num_workers: NumWorkersOption = 8,
     select: SelectColumnsOption = None,
     var: MessagePathVariablesOption = None,
 ) -> int:

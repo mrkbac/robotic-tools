@@ -1,13 +1,19 @@
 """``pymcap-cli index sessions`` — list scan_session rows."""
 
-from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import (
+    IndexDbOption,
+    IndexFolderOption,
+    IndexLimitOption,
+    IndexSinceOption,
+    IndexTableJsonPathsFormatOption,
+    IndexUntilOption,
+)
 from pymcap_cli.cmd.index._helpers import (
-    OutputFormat,
     _emit_non_table,
     _format_duration_ns,
     _format_ts_ns,
@@ -23,25 +29,10 @@ from pymcap_cli.index.db import IndexDbNeedsMigrationError, open_db
 
 
 def sessions_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to filter sessions by their ``root_path``."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
-    since: Annotated[
-        str | None,
-        Parameter(
-            name=["--since"],
-            help="Only sessions started after this instant (ns or RFC3339).",
-        ),
-    ] = None,
-    until: Annotated[
-        str | None,
-        Parameter(
-            name=["--until"],
-            help="Only sessions started before this instant (ns or RFC3339).",
-        ),
-    ] = None,
+    since: IndexSinceOption = None,
+    until: IndexUntilOption = None,
     running: Annotated[
         bool,
         Parameter(
@@ -49,18 +40,9 @@ def sessions_cmd(
             help="Only sessions that have not finished (``finished_at IS NULL``).",
         ),
     ] = False,
-    limit: Annotated[int, Parameter(name=["--limit"], help="Max sessions to print.")] = 25,
-    format: Annotated[
-        OutputFormat,
-        Parameter(
-            name=["--format"],
-            help="Output as Rich table, JSON, or paths-only (root_path).",
-        ),
-    ] = "table",
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    limit: IndexLimitOption = 25,
+    format: IndexTableJsonPathsFormatOption = "table",
+    db: IndexDbOption = None,
 ) -> int:
     """List ``scan_session`` rows — when, where, and how each scan went."""
     db_path = _resolve_db(db)

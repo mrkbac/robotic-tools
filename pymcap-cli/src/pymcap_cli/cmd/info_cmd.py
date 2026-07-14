@@ -21,6 +21,16 @@ from rich.text import Text
 from small_mcap import McapError, RebuildInfo, rebuild_summary
 from small_mcap.records import Summary
 
+from pymcap_cli.cmd._cli_options import (
+    CompressJsonOption,
+    DebugOption,
+    ExactSizesOption,
+    JsonOutputOption,
+    RebuildSummaryOption,
+    ReverseOption,
+    WatchIntervalOption,
+    WatchOption,
+)
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.qos import parse_qos_profiles
@@ -40,7 +50,6 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 # Parameter groups
-PROCESSING_GROUP = CycloptsGroup("Processing Options")
 DISPLAY_GROUP = CycloptsGroup("Display Options")
 
 
@@ -421,41 +430,11 @@ def _output_json(
 def info(
     files: list[str],
     *,
-    rebuild: Annotated[
-        bool,
-        Parameter(
-            name=["-r", "--rebuild"],
-            group=PROCESSING_GROUP,
-        ),
-    ] = False,
-    exact_sizes: Annotated[
-        bool,
-        Parameter(
-            name=["-e", "--exact-sizes"],
-            group=PROCESSING_GROUP,
-        ),
-    ] = False,
-    debug: Annotated[
-        bool,
-        Parameter(
-            name=["--debug"],
-            group=PROCESSING_GROUP,
-        ),
-    ] = False,
-    json_output: Annotated[
-        bool,
-        Parameter(
-            name=["--json"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
-    compress: Annotated[
-        bool,
-        Parameter(
-            name=["--compress"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
+    rebuild: RebuildSummaryOption = False,
+    exact_sizes: ExactSizesOption = False,
+    debug: DebugOption = False,
+    json_output: JsonOutputOption = False,
+    compress: CompressJsonOption = False,
     sort: Annotated[
         SortChoice,
         Parameter(
@@ -463,13 +442,7 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = SortChoice.TOPIC,
-    reverse: Annotated[
-        bool,
-        Parameter(
-            name=["--reverse"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
+    reverse: ReverseOption = False,
     index_duration: Annotated[
         bool,
         Parameter(
@@ -499,20 +472,8 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = False,
-    watch: Annotated[
-        bool,
-        Parameter(
-            name=["-w", "--watch"],
-            group=PROCESSING_GROUP,
-        ),
-    ] = False,
-    watch_interval: Annotated[
-        float,
-        Parameter(
-            name=["--watch-interval"],
-            group=PROCESSING_GROUP,
-        ),
-    ] = 0.5,
+    watch: WatchOption = False,
+    watch_interval: WatchIntervalOption = 0.5,
     link: Annotated[
         bool,
         Parameter(

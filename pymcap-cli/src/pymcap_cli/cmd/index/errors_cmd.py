@@ -1,13 +1,19 @@
 """``pymcap-cli index errors`` — browse scan_error rows."""
 
-from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import (
+    IndexDbOption,
+    IndexFolderOption,
+    IndexLimitOption,
+    IndexSinceOption,
+    IndexTableJsonPathsFormatOption,
+    IndexUntilOption,
+)
 from pymcap_cli.cmd.index._helpers import (
-    OutputFormat,
     _describe_error_kind,
     _emit_non_table,
     _format_ts_ns,
@@ -24,10 +30,7 @@ from pymcap_cli.utils import bytes_to_human
 
 
 def errors_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to restrict errors to."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
     kind: Annotated[
         str | None,
@@ -40,14 +43,8 @@ def errors_cmd(
         int | None,
         Parameter(name=["--session"], help="Filter by ``scan_session.id``."),
     ] = None,
-    since: Annotated[
-        str | None,
-        Parameter(name=["--since"], help="Only errors observed after this instant."),
-    ] = None,
-    until: Annotated[
-        str | None,
-        Parameter(name=["--until"], help="Only errors observed before this instant."),
-    ] = None,
+    since: IndexSinceOption = None,
+    until: IndexUntilOption = None,
     current: Annotated[
         bool,
         Parameter(
@@ -56,18 +53,9 @@ def errors_cmd(
             "file_observation — i.e. the file is still broken in the same way.",
         ),
     ] = False,
-    limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
-    format: Annotated[
-        OutputFormat,
-        Parameter(
-            name=["--format"],
-            help="Output as Rich table, JSON, or paths-only.",
-        ),
-    ] = "table",
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    limit: IndexLimitOption = 50,
+    format: IndexTableJsonPathsFormatOption = "table",
+    db: IndexDbOption = None,
 ) -> int:
     """Browse ``scan_error`` rows: which files failed, when, and why."""
     db_path = _resolve_db(db)

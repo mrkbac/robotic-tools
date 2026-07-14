@@ -35,9 +35,9 @@ from pymcap_cli.cmd.bridge.record import (
     _build_record_status,
     _record_async,
 )
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.core.tf_tree import TfGraph
 from pymcap_cli.display.message_render import BytesMode
-from pymcap_cli.utils import compile_topic_patterns
 from rich.console import Console, RenderableType
 from robo_ws_bridge import ConnectionGraph
 from robo_ws_bridge.server import Channel as ServerChannel
@@ -350,26 +350,26 @@ def _make_recorder(
     writer.start(profile="", library="test")
     recorder = BridgeRecorder(
         writer=writer,
-        selector=selector if selector is not None else TopicSelector(all_topics=True),
+        selector=selector if selector is not None else TopicSelector(),
         message_limit=message_limit,
     )
     return recorder, writer, buf
 
 
 def test_topic_selector_all_topics_overrides_other_includes() -> None:
-    selector = TopicSelector(all_topics=True)
+    selector = TopicSelector()
     assert selector.matches("/anything") is True
 
 
 def test_topic_selector_exact_topics_match_strictly() -> None:
-    selector = TopicSelector(exact_topics=frozenset({"/chatter"}))
+    selector = TopicSelector(MessageFilterOptions.from_args(topic=["/chatter"]))
     assert selector.matches("/chatter") is True
     assert selector.matches("/chatter/sub") is False
 
 
-def test_topic_selector_include_patterns_use_regex_search() -> None:
+def test_topic_selector_include_patterns_use_fullmatch() -> None:
     selector = TopicSelector(
-        include_patterns=tuple(compile_topic_patterns(["^/camera/", r"\bimu\b"])),
+        MessageFilterOptions.from_args(topic=["/camera/.*", ".*imu.*"]),
     )
     assert selector.matches("/camera/front") is True
     assert selector.matches("/sensor/imu/data") is True
@@ -378,22 +378,20 @@ def test_topic_selector_include_patterns_use_regex_search() -> None:
 
 def test_topic_selector_exclude_wins_over_include() -> None:
     selector = TopicSelector(
-        all_topics=True,
-        exclude_patterns=tuple(compile_topic_patterns(["^/debug/"])),
+        MessageFilterOptions.from_args(exclude_topic=["/debug/.*"]),
     )
     assert selector.matches("/debug/log") is False
     assert selector.matches("/sensor/data") is True
 
 
 def test_topic_selector_without_any_match_rule_rejects_everything() -> None:
-    selector = TopicSelector()
+    selector = TopicSelector(MessageFilterOptions.from_args(topic=["a^"]))
     assert selector.matches("/anything") is False
 
 
 def test_topic_selector_exclude_topics_strict_match() -> None:
     selector = TopicSelector(
-        all_topics=True,
-        exclude_topics=frozenset({"/debug"}),
+        MessageFilterOptions.from_args(exclude_topic=["/debug"]),
     )
     assert selector.matches("/debug") is False
     assert selector.matches("/debug/sub") is True
@@ -401,9 +399,10 @@ def test_topic_selector_exclude_topics_strict_match() -> None:
 
 def test_topic_selector_combines_includes_and_excludes() -> None:
     selector = TopicSelector(
-        exact_topics=frozenset({"/chatter"}),
-        include_patterns=tuple(compile_topic_patterns(["^/cam/"])),
-        exclude_patterns=tuple(compile_topic_patterns(["debug"])),
+        MessageFilterOptions.from_args(
+            topic=["/chatter", "/cam/.*"],
+            exclude_topic=[".*debug.*"],
+        ),
     )
     assert selector.matches("/chatter") is True
     assert selector.matches("/cam/front") is True
@@ -428,19 +427,11 @@ def test_record_all_topics_skips_invalid_include_regex(
         target="localhost",
         output=tmp_path / "capture.mcap",
         all_topics=True,
-        regex="[",
+        topic=["["],
     )
 
     assert rc == 0
-    assert seen_selectors == [
-        TopicSelector(
-            all_topics=True,
-            exact_topics=frozenset(),
-            include_patterns=(),
-            exclude_topics=frozenset(),
-            exclude_patterns=(),
-        )
-    ]
+    assert seen_selectors == [TopicSelector()]
 
 
 def test_record_all_topics_still_validates_exclude_regex(
@@ -455,7 +446,7 @@ def test_record_all_topics_still_validates_exclude_regex(
         target="localhost",
         output=tmp_path / "capture.mcap",
         all_topics=True,
-        exclude_regex="[",
+        exclude_topic=["["],
     )
 
     assert rc == 1
@@ -535,7 +526,7 @@ def test_recorder_on_message_writes_records_and_respects_limit(tmp_path: Path) -
 def test_recorder_skips_messages_for_topics_not_matching_filter() -> None:
     recorder, writer, _ = _make_recorder(
         selector=TopicSelector(
-            include_patterns=tuple(compile_topic_patterns(["^/keep"])),
+            MessageFilterOptions.from_args(topic=["/keep.*"]),
         )
     )
     channel: ChannelInfo = {
@@ -615,7 +606,7 @@ def test_record_async_captures_messages_into_mcap(tmp_path: Path) -> None:
             return await _record_async(
                 url=f"ws://127.0.0.1:{port}",
                 output=output,
-                selector=TopicSelector(include_patterns=tuple(compile_topic_patterns(["chatter"]))),
+                selector=TopicSelector(MessageFilterOptions.from_args(topic=["/chatter"])),
                 duration=None,
                 message_limit=3,
                 chunk_size=1024,
@@ -675,9 +666,7 @@ def test_record_async_captures_duplicate_topic_channels(tmp_path: Path) -> None:
             return await _record_async(
                 url=f"ws://127.0.0.1:{port}",
                 output=output,
-                selector=TopicSelector(
-                    include_patterns=tuple(compile_topic_patterns(["^/duplicated$"]))
-                ),
+                selector=TopicSelector(MessageFilterOptions.from_args(topic=["/duplicated"])),
                 duration=0.5,
                 message_limit=2,
                 chunk_size=1024,
@@ -768,8 +757,8 @@ def _run_cat_against_server(
 
 def _default_cat_kwargs(**overrides: object) -> dict:
     base: dict = {
-        "topics": [],
-        "exclude_topics": [],
+        "topic": None,
+        "exclude_topic": None,
         "query": None,
         "grep": None,
         "grep_ignore_case": False,
@@ -792,7 +781,7 @@ def test_cat_async_streams_decoded_jsonl_when_piped(
             (1, b'{"data":"hello-1"}', 1_000_000_001),
             (1, b'{"data":"hello-2"}', 1_000_000_002),
         ],
-        cat_kwargs=_default_cat_kwargs(topics=[".*"], limit=3),
+        cat_kwargs=_default_cat_kwargs(topic=[".*"], limit=3),
     )
     assert rc == 0
 
@@ -818,7 +807,7 @@ def test_cat_async_filters_topics_by_regex(capsys: pytest.CaptureFixture[str]) -
             (2, b'{"data":"out-0"}', 2),
             (1, b'{"data":"in-1"}', 3),
         ],
-        cat_kwargs=_default_cat_kwargs(topics=["^/included"], limit=2),
+        cat_kwargs=_default_cat_kwargs(topic=["/included/.*"], limit=2),
     )
     assert rc == 0
 
@@ -838,7 +827,7 @@ def test_cat_async_grep_drops_non_matching_messages(
             (1, b'{"data":"info: finished"}', 3),
         ],
         cat_kwargs=_default_cat_kwargs(
-            topics=[".*"],
+            topic=[".*"],
             grep="error",
             grep_ignore_case=True,
             limit=1,
@@ -858,7 +847,7 @@ def test_cat_async_passes_variables_to_query(capsys: pytest.CaptureFixture[str])
             (1, b'{"data":"keep"}', 2),
         ],
         cat_kwargs=_default_cat_kwargs(
-            query="/chatter.data{==$wanted}",
+            query=["/chatter.data{==$wanted}"],
             variables={"wanted": "keep"},
             limit=1,
         ),
@@ -867,6 +856,32 @@ def test_cat_async_passes_variables_to_query(capsys: pytest.CaptureFixture[str])
     assert rc == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
     assert [entry["message"] for entry in lines] == ["keep"]
+
+
+def test_cat_async_applies_repeatable_queries_by_topic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _run_cat_against_server(
+        register=[
+            _json_string_channel(1, "/front"),
+            _json_string_channel(2, "/rear"),
+        ],
+        publish=[
+            (1, b'{"data":"front-value"}', 1),
+            (2, b'{"data":"rear-value"}', 2),
+        ],
+        cat_kwargs=_default_cat_kwargs(
+            query=["/front.data", "/rear.data"],
+            limit=2,
+        ),
+    )
+
+    assert rc == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert [(entry["topic"], entry["message"]) for entry in lines] == [
+        ("/front", "front-value"),
+        ("/rear", "rear-value"),
+    ]
 
 
 def test_cat_async_skips_channel_with_unknown_encoding(
@@ -888,7 +903,7 @@ def test_cat_async_skips_channel_with_unknown_encoding(
         publish=[
             (2, b'{"data":"first"}', 1),
         ],
-        cat_kwargs=_default_cat_kwargs(topics=[".*"], limit=1),
+        cat_kwargs=_default_cat_kwargs(topic=[".*"], limit=1),
     )
     assert rc == 0
 
@@ -916,7 +931,7 @@ def test_cat_async_swallows_malformed_schema_for_one_channel(
         publish=[
             (2, b'{"data":"survives"}', 1),
         ],
-        cat_kwargs=_default_cat_kwargs(topics=[".*"], limit=1),
+        cat_kwargs=_default_cat_kwargs(topic=[".*"], limit=1),
     )
     assert rc == 0
 
@@ -937,7 +952,7 @@ def test_cat_async_subscribes_each_channel_for_duplicate_topics(
             (1, b'{"data":"first-channel"}', 1),
             (2, b'{"data":"second-channel"}', 2),
         ],
-        cat_kwargs=_default_cat_kwargs(topics=["^/duplicated$"], limit=2, duration=1.0),
+        cat_kwargs=_default_cat_kwargs(topic=["/duplicated"], limit=2, duration=1.0),
         wait_for_channels={1, 2},
     )
     assert rc == 0
@@ -953,7 +968,7 @@ def test_cat_command_unreachable_port_returns_one() -> None:
     port = _free_port()
     rc = cat(
         target=f"ws://127.0.0.1:{port}",
-        topics=[".*"],
+        topic=[".*"],
         connect_timeout=0.3,
         limit=1,
     )
@@ -961,12 +976,12 @@ def test_cat_command_unreachable_port_returns_one() -> None:
 
 
 def test_cat_command_rejects_non_positive_limit() -> None:
-    rc = cat(target="ws://127.0.0.1:1", topics=[".*"], limit=0)
+    rc = cat(target="ws://127.0.0.1:1", topic=[".*"], limit=0)
     assert rc == 1
 
 
 def test_cat_command_rejects_non_positive_duration() -> None:
-    rc = cat(target="ws://127.0.0.1:1", topics=[".*"], duration=0.0)
+    rc = cat(target="ws://127.0.0.1:1", topic=[".*"], duration=0.0)
     assert rc == 1
 
 

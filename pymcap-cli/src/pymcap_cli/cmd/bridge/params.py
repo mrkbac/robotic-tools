@@ -9,11 +9,14 @@ from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import Parameter as BridgeParameter
 from robo_ws_bridge.ws_types import ServerCapabilities
 
+from pymcap_cli.cmd._cli_options import (
+    BridgeTarget,
+    CallTimeoutOption,
+    ConnectTimeoutOption,
+)
 from pymcap_cli.cmd.bridge._codec import FieldSyntaxError, parse_field_args
 from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
     BridgeFetchError,
-    BridgeTarget,
     console,
     to_ws_url,
 )
@@ -64,14 +67,8 @@ def params(
     names: list[str] = [],  # noqa: B006
     *,
     set_values: Annotated[list[str], Parameter(name=["-s", "--set"])] = [],  # noqa: B006
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    call_timeout: Annotated[
-        float,
-        Parameter(name=["--call-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    call_timeout: CallTimeoutOption = 5.0,
 ) -> int:
     """List, get, or set parameters on a live Foxglove WebSocket bridge.
 

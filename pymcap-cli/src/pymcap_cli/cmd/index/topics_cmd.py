@@ -1,13 +1,18 @@
 """``pymcap-cli index topics`` — topic-level rollup."""
 
-from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import (
+    IndexDbOption,
+    IndexLimitOption,
+    IndexMinFilesOption,
+    IndexTableJsonFormatOption,
+    IndexTopicSortOption,
+)
 from pymcap_cli.cmd.index._helpers import (
-    OutputFormat,
     _emit_non_table,
     _format_count,
     _like_prefix_param,
@@ -26,26 +31,11 @@ def topics_cmd(
         Parameter(help="Optional topic prefix filter (e.g. '/tf' or '/sensor')."),
     ] = None,
     *,
-    sort_by: Annotated[
-        Literal["files", "messages", "schemas", "name"],
-        Parameter(
-            name=["--sort-by"],
-            help="Sort results (descending except for ``name``).",
-        ),
-    ] = "files",
-    limit: Annotated[int, Parameter(name=["--limit"], help="Max rows to print.")] = 50,
-    min_files: Annotated[
-        int,
-        Parameter(name=["--min-files"], help="Hide topics seen in fewer files than this."),
-    ] = 1,
-    format: Annotated[
-        OutputFormat,
-        Parameter(name=["--format"], help="Output as Rich table or JSON (paths-only is N/A)."),
-    ] = "table",
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    sort_by: IndexTopicSortOption = "files",
+    limit: IndexLimitOption = 50,
+    min_files: IndexMinFilesOption = 1,
+    format: IndexTableJsonFormatOption = "table",
+    db: IndexDbOption = None,
 ) -> int:
     """List topics in the index with file and message counts."""
     db_path = _resolve_db(db)

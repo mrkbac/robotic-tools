@@ -7,6 +7,7 @@ from cyclopts import Parameter
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import IndexDbOption
 from pymcap_cli.cmd.index._helpers import (
     _describe_error_kind,
     _pymcap_cli_version,
@@ -20,10 +21,7 @@ from pymcap_cli.index.scanner import ScanStats, scan
 def scan_cmd(
     folder: Path,
     *,
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    db: IndexDbOption = None,
     jobs: Annotated[
         int,
         Parameter(name=["-j", "--jobs"], help="Parallel I/O workers."),

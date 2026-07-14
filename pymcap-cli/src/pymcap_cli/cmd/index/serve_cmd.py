@@ -14,10 +14,15 @@ import sys
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Group, Parameter
+from cyclopts import Group
 
+from pymcap_cli.cmd._cli_options import (
+    IndexDbOption,
+    NoBrowserOption,
+    ServerHostOption,
+    ServerPortOption,
+)
 from pymcap_cli.cmd.index._helpers import _print_db_needs_migration, _resolve_db
 from pymcap_cli.index.db import IndexDbNeedsMigrationError, connect
 from pymcap_cli.log_setup import ERR
@@ -105,39 +110,10 @@ def _validate_db_readable(db_path: Path) -> bool:
 
 def index_serve(
     *,
-    db: Annotated[
-        Path | None,
-        Parameter(
-            name=["--db"],
-            group=INDEX_SERVE_OPTIONS_GROUP,
-            help="Override the sidecar DB path.",
-        ),
-    ] = None,
-    host: Annotated[
-        str,
-        Parameter(
-            name=["--host"],
-            group=INDEX_SERVE_OPTIONS_GROUP,
-            help="Interface to bind the server to.",
-        ),
-    ] = "127.0.0.1",
-    port: Annotated[
-        int,
-        Parameter(
-            name=["--port", "-p"],
-            group=INDEX_SERVE_OPTIONS_GROUP,
-            help="TCP port to listen on.",
-        ),
-    ] = 8001,
-    no_browser: Annotated[
-        bool,
-        Parameter(
-            name=["--no-browser"],
-            group=INDEX_SERVE_OPTIONS_GROUP,
-            help="Don't auto-open a browser tab on start.",
-            negative="",
-        ),
-    ] = False,
+    db: IndexDbOption = None,
+    host: ServerHostOption = "127.0.0.1",
+    port: ServerPortOption = 8001,
+    no_browser: NoBrowserOption = False,
 ) -> int:
     """Browse the index catalog in a local Datasette web UI.
 

@@ -3,12 +3,12 @@
 import json
 import logging
 import sys
-from pathlib import Path
 from typing import Annotated
 
 from cyclopts import App, Parameter
 from small_mcap import get_summary, read_attachment, read_metadata
 
+from pymcap_cli.cmd._cli_options import OptionalOutputPathOption, RecordNameOption
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.log_setup import ERR
 
@@ -20,10 +20,7 @@ get_app = App(help="Get an attachment or metadata record from an MCAP file")
 def attachment(
     file: str,
     *,
-    name: Annotated[
-        str,
-        Parameter(name=["--name", "-n"], help="Name of the attachment to extract."),
-    ],
+    name: RecordNameOption,
     offset: Annotated[
         int | None,
         Parameter(
@@ -31,13 +28,7 @@ def attachment(
             help="Byte offset to disambiguate when multiple attachments share a name.",
         ),
     ] = None,
-    output: Annotated[
-        Path | None,
-        Parameter(
-            name=["--output", "-o"],
-            help="Output file path. Defaults to stdout (refuses to write to a TTY).",
-        ),
-    ] = None,
+    output: OptionalOutputPathOption = None,
 ) -> int:
     """Extract a single attachment by name and write its bytes.
 
@@ -100,10 +91,7 @@ def attachment(
 def metadata(
     file: str,
     *,
-    name: Annotated[
-        str,
-        Parameter(name=["--name", "-n"], help="Name of the metadata record to extract."),
-    ],
+    name: RecordNameOption,
 ) -> int:
     """Extract a metadata record by name and print as JSON.
 

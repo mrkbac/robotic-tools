@@ -8,6 +8,11 @@ from cyclopts import Parameter
 from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities
 
+from pymcap_cli.cmd._cli_options import (
+    BridgeTarget,
+    ConnectTimeoutOption,
+    DiscoverSecondsOption,
+)
 from pymcap_cli.cmd.bridge._codec import (
     CodecError,
     FieldSyntaxError,
@@ -16,9 +21,7 @@ from pymcap_cli.cmd.bridge._codec import (
     parse_field_args,
 )
 from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
     BridgeFetchError,
-    BridgeTarget,
     console,
     to_ws_url,
 )
@@ -115,14 +118,8 @@ def pub(
     *,
     count: Annotated[int, Parameter(name=["-c", "--count"])] = 1,
     rate: Annotated[float, Parameter(name=["-r", "--rate"])] = 0.0,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    discover_seconds: Annotated[
-        float,
-        Parameter(name=["--discover-seconds"], group=CONNECTION_GROUP),
-    ] = 2.0,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    discover_seconds: DiscoverSecondsOption = 2.0,
 ) -> int:
     """Publish a message to a topic on a live Foxglove WebSocket bridge.
 

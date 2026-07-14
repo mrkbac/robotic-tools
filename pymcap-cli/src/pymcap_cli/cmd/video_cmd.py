@@ -6,7 +6,6 @@ Wraps :class:`pymcap_cli.exporters.video_exporter.VideoExporter`.
 
 import logging
 from enum import Enum
-from pathlib import Path
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -18,14 +17,17 @@ from mcap_codec_support.video import (
 )
 from rich.console import Console
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    OutputPathOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
+    VideoCodecOption,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.video_exporter import VideoExporter
 
@@ -59,14 +61,8 @@ def video(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    output: Annotated[
-        Path,
-        Parameter(name=["-o", "--output"], group=OUTPUT_GROUP),
-    ],
-    codec: Annotated[
-        VideoCodec,
-        Parameter(name=["--codec"], group=ENCODING_GROUP),
-    ] = VideoCodec.H264,
+    output: OutputPathOption,
+    codec: VideoCodecOption = VideoCodec.H264,
     quality: Annotated[
         QualityPreset,
         Parameter(name=["--quality"], group=ENCODING_GROUP),
@@ -83,10 +79,7 @@ def video(
         EncoderMode,
         Parameter(name=["--mode"], group=ENCODING_GROUP),
     ] = EncoderMode.AUTO,
-    force: Annotated[
-        bool,
-        Parameter(name=["-f", "--force"], group=OUTPUT_GROUP),
-    ] = False,
+    force: ForceOverwriteOption = False,
 ) -> int:
     """Encode video from image topics in an MCAP file.
 

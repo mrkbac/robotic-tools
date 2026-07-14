@@ -16,14 +16,14 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
-from pymcap_cli.display.osc_utils import OSCProgressColumn
-from pymcap_cli.types.types_manual import (
+from pymcap_cli.cmd._cli_options import (
     ChunkSizeOption,
     CompressionOption,
     ForceOverwriteOption,
     OutputPathOption,
 )
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
+from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.utils import WriterCompression, confirm_output_overwrite, create_mcap_writer
 
 logger = logging.getLogger(__name__)

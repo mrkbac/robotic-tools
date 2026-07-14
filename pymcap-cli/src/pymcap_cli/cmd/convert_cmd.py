@@ -6,9 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, BinaryIO
+from typing import BinaryIO
 
-from cyclopts import Group, Parameter
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -19,15 +18,17 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from pymcap_cli.cmd._cli_options import (
+    ChunkSizeOption,
+    CompressionOption,
+    ExtraMessagePathOption,
+    ForceOverwriteOption,
+    MessageDistroOption,
+    OutputPathOption,
+)
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.msg_resolver import ROS2Distro, get_message_definition
 from pymcap_cli.display.osc_utils import OSCProgressColumn
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionOption,
-    ForceOverwriteOption,
-    OutputPathOption,
-)
 from pymcap_cli.utils import WriterCompression, confirm_output_overwrite, create_mcap_writer
 
 logger = logging.getLogger(__name__)
@@ -380,30 +381,13 @@ def convert_db3_to_mcap(
 
 console = Console()
 
-# Parameter groups
-CONVERT_OPTIONS_GROUP = Group("Convert Options")
-
 
 def convert(
     file: str,
     output: OutputPathOption,
     *,
-    distro: Annotated[
-        ROS2Distro,
-        Parameter(
-            name=["--distro"],
-            group=CONVERT_OPTIONS_GROUP,
-            help="ROS2 distribution for message definitions",
-        ),
-    ] = ROS2Distro.HUMBLE,
-    extra_path: Annotated[
-        list[Path],
-        Parameter(
-            name=["--extra-path"],
-            group=CONVERT_OPTIONS_GROUP,
-            help="Additional paths to search for custom message definitions",
-        ),
-    ] = [],  # noqa: B006
+    distro: MessageDistroOption = ROS2Distro.HUMBLE,
+    extra_path: ExtraMessagePathOption = [],  # noqa: B006
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,

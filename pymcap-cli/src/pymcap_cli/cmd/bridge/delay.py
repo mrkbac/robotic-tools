@@ -1,16 +1,14 @@
 """`pymcap-cli bridge delay` — measure bridge clock offset and ROS header age."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
 import math
-import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from cyclopts import Group as CycloptsGroup
 from cyclopts import Parameter
@@ -19,28 +17,28 @@ from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
 from robo_ws_bridge import WebSocketBridgeClient
-from robo_ws_bridge.ws_types import ServerCapabilities
+from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities
 from small_mcap import JSONDecoderFactory
 
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
-    DISPLAY_GROUP,
-    BridgeFetchError,
+from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
+    ConnectTimeoutOption,
+    JsonOutputOption,
+    SampleDurationOption,
+    TopicOption,
+)
+from pymcap_cli.cmd.bridge._shared import (
+    BridgeFetchError,
     ChannelSubscriptionManager,
     channel_to_schema,
     console,
     to_ws_url,
 )
 from pymcap_cli.constants import NS_TO_SEC
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.display.display_utils import _format_parts_with_colors
 from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.to_plain import to_plain
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from robo_ws_bridge.ws_types import ChannelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -111,10 +109,6 @@ class DelayReport:
         return sum(stats.clock_offset.count for stats in self.channels)
 
 
-def _compile_topic_patterns(patterns: list[str]) -> tuple[re.Pattern[str], ...]:
-    return tuple(re.compile(pattern) for pattern in patterns)
-
-
 def _header_stamp_ns(decoded_message: object) -> int | None:
     plain = to_plain(decoded_message)
     if not isinstance(plain, dict):
@@ -141,13 +135,13 @@ def _header_stamp_ns(decoded_message: object) -> int | None:
 async def _collect_delay_async(
     url: str,
     *,
-    topic_patterns: tuple[re.Pattern[str], ...],
+    message_filter: MessageFilterOptions,
     against: DelayReference,
     duration: float,
     connect_timeout: float,
     now_ns: Callable[[], int] = time.time_ns,
 ) -> DelayReport:
-    wants_header_age = bool(topic_patterns)
+    wants_header_age = message_filter.has_positive_topics
     client = WebSocketBridgeClient(url, min_retry_delay=0.2, max_retry_delay=2.0)
     server_info_event = asyncio.Event()
     client.on_server_info(lambda *_: server_info_event.set())
@@ -158,7 +152,7 @@ async def _collect_delay_async(
     stats_by_channel: dict[int, ChannelDelayStats] = {}
 
     def _topic_matches(topic: str) -> bool:
-        return not topic_patterns or any(pattern.search(topic) for pattern in topic_patterns)
+        return message_filter.matches_topic(topic)
 
     def _stats_for(channel: ChannelInfo) -> ChannelDelayStats:
         channel_id = channel["id"]
@@ -468,25 +462,8 @@ def _build_display(report: DelayReport) -> RenderableType:
 
 def delay(
     target: BridgeTarget,
-    topics: Annotated[
-        list[str],
-        Parameter(
-            group=FILTER_GROUP,
-            help=(
-                "Topic regex(es) to decode for header.stamp age. "
-                "With no topics, requires bridge time capability and sends no topic subscriptions."
-            ),
-        ),
-    ] = [],  # noqa: B006
     *,
-    topic_options: Annotated[
-        list[str],
-        Parameter(
-            name=["-t", "--topics"],
-            group=FILTER_GROUP,
-            help="Additional topic regex(es) to decode for header.stamp age.",
-        ),
-    ] = [],  # noqa: B006
+    topic: TopicOption = None,
     against: Annotated[
         DelayReference,
         Parameter(
@@ -495,22 +472,9 @@ def delay(
             help="Reference time for header.stamp age when topics are supplied.",
         ),
     ] = DelayReference.LOCAL,
-    duration: Annotated[
-        float,
-        Parameter(
-            name=["-d", "--duration"],
-            group=DISPLAY_GROUP,
-            help="Seconds to sample before printing the report.",
-        ),
-    ] = 5.0,
-    json_output: Annotated[
-        bool,
-        Parameter(name=["--json"], group=DISPLAY_GROUP, help="Print JSON instead of a table."),
-    ] = False,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
+    duration: SampleDurationOption = 5.0,
+    json_output: JsonOutputOption = False,
+    connect_timeout: ConnectTimeoutOption = 5.0,
 ) -> int:
     """Measure live bridge clock offset and optional ROS `header.stamp` message age.
 
@@ -523,8 +487,8 @@ def delay(
     --------
     ```
     pymcap-cli bridge delay robot:8765
-    pymcap-cli bridge delay robot:8765 /camera/image_raw
-    pymcap-cli bridge delay robot:8765 -t '^/imu' --against bridge
+    pymcap-cli bridge delay robot:8765 -t /camera/image_raw
+    pymcap-cli bridge delay robot:8765 -t '/imu/.*' --against bridge
     pymcap-cli bridge delay robot:8765 --duration 10 --json
     ```
     """
@@ -532,11 +496,10 @@ def delay(
         ERR.print("[red]Error:[/] --duration must be positive")
         return 1
 
-    topic_filters = [*topics, *topic_options]
     try:
-        topic_patterns = _compile_topic_patterns(topic_filters)
-    except re.error:
-        logger.exception("Invalid topic regex")
+        message_filter = MessageFilterOptions.from_args(topic=topic)
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
         return 1
 
     url = to_ws_url(target)
@@ -544,7 +507,7 @@ def delay(
         report = asyncio.run(
             _collect_delay_async(
                 url,
-                topic_patterns=topic_patterns,
+                message_filter=message_filter,
                 against=against,
                 duration=duration,
                 connect_timeout=connect_timeout,

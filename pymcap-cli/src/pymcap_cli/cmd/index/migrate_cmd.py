@@ -2,11 +2,10 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import IndexDbOption
 from pymcap_cli.cmd.index._helpers import _resolve_db, console
 from pymcap_cli.index.db import CURRENT_SCHEMA_VERSION, connect
 
@@ -22,10 +21,7 @@ def _read_user_version(db_path: Path) -> int:
 
 def migrate_cmd(
     *,
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    db: IndexDbOption = None,
 ) -> int:
     """Apply any pending schema migrations to the index DB."""
     db_path = _resolve_db(db)

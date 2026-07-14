@@ -2,11 +2,11 @@
 
 import json as _json
 import zlib
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING
 
-from cyclopts import Parameter
 from rich.table import Table
+
+from pymcap_cli.cmd._cli_options import IndexDbOption, IndexTableJsonFormatOption
 
 if TYPE_CHECKING:
     from pymcap_cli.types.qos import QosProfile
@@ -37,14 +37,8 @@ from pymcap_cli.utils import bytes_to_human
 def info_cmd(
     target: str,
     *,
-    format: Annotated[
-        Literal["table", "json"],
-        Parameter(name=["--format"], help="Output as Rich tables or JSON."),
-    ] = "table",
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    format: IndexTableJsonFormatOption = "table",
+    db: IndexDbOption = None,
 ) -> int:
     """Show everything the index knows about TARGET (path, fingerprint, or short id)."""
     db_path = _resolve_db(db)

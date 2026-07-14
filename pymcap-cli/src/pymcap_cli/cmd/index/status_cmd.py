@@ -1,12 +1,10 @@
 """``pymcap-cli index status`` — coverage stats for the sidecar DB."""
 
 import sqlite3
-from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import IndexDbOption, IndexFolderOption
 from pymcap_cli.cmd.index._helpers import (
     _connect_status_db,
     _describe_error_kind,
@@ -27,15 +25,9 @@ from pymcap_cli.utils import bytes_to_human
 
 
 def status_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to filter observations by."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    db: IndexDbOption = None,
 ) -> int:
     """Show coverage stats from the sidecar DB."""
     db_path = _resolve_db(db)

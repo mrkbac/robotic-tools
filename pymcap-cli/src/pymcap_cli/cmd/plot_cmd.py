@@ -10,18 +10,18 @@ from typing import Annotated
 from cyclopts import Group, Parameter
 from ros_parser.message_path import ValidationError
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    MessagePathVariablesOption,
+    OptionalOutputPathOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
-from pymcap_cli.cmd._message_path_options import (
-    MessagePathVariablesOption,
-    create_message_path_variables,
-)
+from pymcap_cli.cmd._message_filter_options import create_message_filter
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.plot_exporter import PlotExporter
 
@@ -40,10 +40,7 @@ def plot(
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
     var: MessagePathVariablesOption = None,
-    output: Annotated[
-        str | None,
-        Parameter(name=["-o", "--output"], group=OUTPUT_GROUP),
-    ] = None,
+    output: OptionalOutputPathOption = None,
     title: Annotated[
         str | None,
         Parameter(name=["--title"], group=OUTPUT_GROUP),
@@ -56,10 +53,7 @@ def plot(
         bool,
         Parameter(name=["--xy"], group=OUTPUT_GROUP),
     ] = False,
-    force: Annotated[
-        bool,
-        Parameter(name=["-f", "--force"], group=OUTPUT_GROUP),
-    ] = False,
+    force: ForceOverwriteOption = False,
 ) -> int:
     """Plot time-series data from an MCAP file using message paths.
 

@@ -4,13 +4,13 @@ import os
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import Parameter
 from rich.text import Text
 from rich.tree import Tree
 
+from pymcap_cli.cmd._cli_options import IndexDbOption, IndexFolderOption, IndexMinFilesOption
 from pymcap_cli.cmd.index._helpers import (
     _format_count,
     _path_prefix_predicate,
@@ -330,15 +330,9 @@ def _render_path_tree(
 
 
 def tree_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to restrict the tree to."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    db: IndexDbOption = None,
     max_depth: Annotated[
         int,
         Parameter(
@@ -348,10 +342,7 @@ def tree_cmd(
             ),
         ),
     ] = 4,
-    min_files: Annotated[
-        int,
-        Parameter(help="Hide directories containing fewer than this many .mcap files."),
-    ] = 1,
+    min_files: IndexMinFilesOption = 1,
     max_children: Annotated[
         int,
         Parameter(

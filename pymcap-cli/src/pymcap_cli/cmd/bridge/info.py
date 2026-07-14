@@ -18,15 +18,23 @@ from rich.tree import Tree
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities, ServiceInfo
 
+from pymcap_cli.cmd._cli_options import (
+    DISPLAY_GROUP,
+    BridgeTarget,
+    CompressJsonOption,
+    ConnectTimeoutOption,
+    DiscoverSecondsOption,
+    JsonOutputOption,
+    ReverseOption,
+    WatchIntervalOption,
+    WatchOption,
+)
 from pymcap_cli.cmd.bridge._shared import (
     _STATUS_LEVEL_LABELS,
     _STATUS_LEVEL_STYLES,
-    CONNECTION_GROUP,
-    DISPLAY_GROUP,
     BridgeFetchError,
     BridgeInfo,
     BridgeStatus,
-    BridgeTarget,
     SortChoice,
     _append_status,
     _remove_statuses,
@@ -316,42 +324,21 @@ def _watch(
 def info(
     target: BridgeTarget,
     *,
-    json_output: Annotated[
-        bool,
-        Parameter(name=["--json"], group=DISPLAY_GROUP),
-    ] = False,
-    compress: Annotated[
-        bool,
-        Parameter(name=["--compress"], group=DISPLAY_GROUP),
-    ] = False,
+    json_output: JsonOutputOption = False,
+    compress: CompressJsonOption = False,
     sort: Annotated[
         SortChoice,
         Parameter(name=["-s", "--sort"], group=DISPLAY_GROUP),
     ] = SortChoice.TOPIC,
-    reverse: Annotated[
-        bool,
-        Parameter(name=["--reverse"], group=DISPLAY_GROUP),
-    ] = False,
+    reverse: ReverseOption = False,
     graph: Annotated[
         bool,
         Parameter(name=["-g", "--graph"], group=DISPLAY_GROUP),
     ] = False,
-    watch: Annotated[
-        bool,
-        Parameter(name=["-w", "--watch"], group=CONNECTION_GROUP),
-    ] = False,
-    watch_interval: Annotated[
-        float,
-        Parameter(name=["--watch-interval"], group=CONNECTION_GROUP),
-    ] = 0.5,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    discover_seconds: Annotated[
-        float,
-        Parameter(name=["--discover-seconds"], group=CONNECTION_GROUP),
-    ] = 1.5,
+    watch: WatchOption = False,
+    watch_interval: WatchIntervalOption = 0.5,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    discover_seconds: DiscoverSecondsOption = 1.5,
 ) -> int:
     """Summarize a live Foxglove WebSocket bridge.
 

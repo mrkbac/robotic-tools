@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.tree import Tree
 from small_mcap import RebuildInfo, Schema, Statistics, Summary
 
+from pymcap_cli.cmd._cli_options import ComparePayloadsOption
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.core.mcap_compare import (
     IndexedCompareKind,
@@ -699,16 +700,7 @@ def diff_cmd(
             help="Maximum number of timestamp ranges to show per channel",
         ),
     ] = 3,
-    compare_payloads: Annotated[
-        bool,
-        Parameter(
-            name=["--compare-payloads"],
-            help=(
-                "After indexes match, compare raw message payload bytes and fail "
-                "fast on the first payload/header mismatch."
-            ),
-        ),
-    ] = False,
+    compare_payloads: ComparePayloadsOption = False,
 ) -> int:
     """Compare MCAP files using summary and message index timestamps.
 

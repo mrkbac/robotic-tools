@@ -1,13 +1,11 @@
-"""Shared MessagePath variable options for CLI consumers."""
+"""Parse MessagePath variables from CLI values and the environment."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
-from typing import TYPE_CHECKING, Annotated, cast
-
-from cyclopts import Group, Parameter
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -15,19 +13,6 @@ if TYPE_CHECKING:
     from ros_parser.message_path import MessagePathVariable, MessagePathVariables
 
 MESSAGE_PATH_VARIABLE_ENV_PREFIX = "PYMCAP_VAR_"
-MESSAGE_PATH_GROUP = Group("MessagePath")
-MessagePathVariablesOption = Annotated[
-    list[str] | None,
-    Parameter(
-        name=["--var"],
-        group=MESSAGE_PATH_GROUP,
-        help=(
-            "Set a MessagePath variable as NAME=VALUE; repeat for more. Values use JSON "
-            "scalars when possible and override matching $PYMCAP_VAR_NAME values."
-        ),
-    ),
-]
-
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 

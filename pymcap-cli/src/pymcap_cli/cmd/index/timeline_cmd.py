@@ -1,11 +1,17 @@
 """``pymcap-cli index timeline`` — bucketed activity histogram."""
 
-from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._cli_options import (
+    IndexDbOption,
+    IndexFolderOption,
+    IndexLimitOption,
+    IndexSinceOption,
+    IndexUntilOption,
+)
 from pymcap_cli.cmd.index._helpers import (
     _format_count,
     _parse_time_or_exit,
@@ -29,28 +35,16 @@ _TIMELINE_BUCKET_FORMAT: dict[str, str] = {
 
 
 def timeline_cmd(
-    folder: Annotated[
-        Path | None,
-        Parameter(help="Optional path prefix to restrict the timeline to."),
-    ] = None,
+    folder: IndexFolderOption = None,
     *,
     bucket: Annotated[
         Literal["day", "week", "month", "year"],
         Parameter(name=["--bucket"], help="Time bucket size."),
     ] = "day",
-    since: Annotated[
-        str | None,
-        Parameter(name=["--since"], help="Only files whose recording started after this instant."),
-    ] = None,
-    until: Annotated[
-        str | None,
-        Parameter(name=["--until"], help="Only files whose recording started before this instant."),
-    ] = None,
-    limit: Annotated[int, Parameter(name=["--limit"], help="Max buckets to print.")] = 100,
-    db: Annotated[
-        Path | None,
-        Parameter(name=["--db"], help="Override the sidecar DB path."),
-    ] = None,
+    since: IndexSinceOption = None,
+    until: IndexUntilOption = None,
+    limit: IndexLimitOption = 100,
+    db: IndexDbOption = None,
 ) -> int:
     """Bucketed histogram of recording activity (files, messages, bytes)."""
     db_path = _resolve_db(db)

@@ -1,11 +1,20 @@
 """Merge command for pymcap-cli."""
 
 import logging
-from typing import Annotated
 
-from cyclopts import Group, Parameter
 from rich.console import Console
 
+from pymcap_cli.cmd._cli_options import (
+    AttachmentsModeOption,
+    ChunkSizeOption,
+    CompressionOption,
+    DedupIdenticalOption,
+    DeleteSourceOption,
+    ForceOverwriteOption,
+    MetadataModeOption,
+    NoClobberOption,
+    OutputPathOption,
+)
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     processing_had_errors,
@@ -20,14 +29,6 @@ from pymcap_cli.core.mcap_processor import (
 from pymcap_cli.core.processors.base import InputProcessor  # noqa: TC001 - runtime annotation below
 from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.core.rosbag2_layout import expand_bag_paths
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionOption,
-    DeleteSourceOption,
-    ForceOverwriteOption,
-    NoClobberOption,
-    OutputPathOption,
-)
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
@@ -37,41 +38,14 @@ from pymcap_cli.utils import (
 logger = logging.getLogger(__name__)
 console = Console()
 
-# Parameter groups
-CONTENT_FILTERING_GROUP = Group("Content Filtering")
-
 
 def merge(
     files: list[str],
     output: OutputPathOption,
     *,
-    metadata_mode: Annotated[
-        MetadataMode,
-        Parameter(
-            name=["--metadata"],
-            group=CONTENT_FILTERING_GROUP,
-        ),
-    ] = MetadataMode.INCLUDE,
-    attachments_mode: Annotated[
-        AttachmentsMode,
-        Parameter(
-            name=["--attachments"],
-            group=CONTENT_FILTERING_GROUP,
-        ),
-    ] = AttachmentsMode.INCLUDE,
-    dedup_identical: Annotated[
-        bool,
-        Parameter(
-            name=["--dedup-identical"],
-            group=CONTENT_FILTERING_GROUP,
-            help=(
-                "Drop messages whose (channel, log_time, payload-hash) was "
-                "already written. Chunks whose time range doesn't overlap "
-                "any other input's chunk range still fast-copy; overlapping "
-                "chunks are decoded so the per-message hash check can run."
-            ),
-        ),
-    ] = False,
+    metadata_mode: MetadataModeOption = MetadataMode.INCLUDE,
+    attachments_mode: AttachmentsModeOption = AttachmentsMode.INCLUDE,
+    dedup_identical: DedupIdenticalOption = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,

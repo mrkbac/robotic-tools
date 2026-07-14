@@ -1,21 +1,20 @@
 """Export ``sensor_msgs/PointCloud2`` topics from an MCAP file to PCD files."""
 
 import logging
-from typing import Annotated
 
-from cyclopts import Parameter
-
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    NumWorkersOption,
+    OutputPathOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.pcd_exporter import PcdExporter
-from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ def export_pcd(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
+    num_workers: NumWorkersOption = 8,
 ) -> int:
     """Export ``sensor_msgs/PointCloud2`` topics to ASCII PCD files.
 

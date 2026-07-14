@@ -5,10 +5,11 @@ import contextlib
 import logging
 import socket
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
 from cyclopts import Group as CycloptsGroup
 from cyclopts import Parameter
+from mcap_codec_support.video import EncoderMode
 from mcap_ros2_support_fast.decoder import DecoderFactory, McapROS2DecodeError
 from robo_ws_bridge import (
     ConnectionState,
@@ -19,6 +20,28 @@ from robo_ws_bridge import (
 from robo_ws_bridge.server import Channel
 from robo_ws_bridge.ws_types import ChannelInfo
 
+from pymcap_cli.cmd._cli_options import (
+    CONNECTION_GROUP,
+    BackendOption,
+    BridgeTarget,
+    CodecOption,
+    DracoCompressionLevelOption,
+    EncoderOption,
+    ImageFormatOption,
+    JpegQualityOption,
+    PointCloudCompressionOption,
+    PointCloudDropInvalidOption,
+    PointCloudEncodingOption,
+    PointCloudFormatOption,
+    PointCloudOption,
+    PointCloudSchemaOption,
+    PointCloudSortFieldOption,
+    QualityOption,
+    ResolutionOption,
+    ScaleOption,
+    ServerHostOption,
+    ServerPortOption,
+)
 from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     MESSAGE_ENCODING,
@@ -38,12 +61,7 @@ from pymcap_cli.cmd.bridge._proxy_transforms import (
     create_transformer,
     is_video_keyframe,
 )
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
-    BridgeTarget,
-    console,
-    to_ws_url,
-)
+from pymcap_cli.cmd.bridge._shared import console, to_ws_url
 from pymcap_cli.log_setup import ERR
 
 if TYPE_CHECKING:
@@ -53,8 +71,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-IMAGE_GROUP = CycloptsGroup("Image Compression")
-POINTCLOUD_GROUP = CycloptsGroup("Point Cloud Compression")
 LATENCY_GROUP = CycloptsGroup("Low Latency")
 
 
@@ -410,76 +426,24 @@ class BridgeProxy:
 def proxy(
     target: BridgeTarget,
     *,
-    port: Annotated[int, Parameter(name=["--port"], group=CONNECTION_GROUP)] = 8766,
-    host: Annotated[str, Parameter(name=["--host"], group=CONNECTION_GROUP)] = "0.0.0.0",  # noqa: S104
-    image_format: Annotated[
-        Literal["video", "jpeg", "png", "none"],
-        Parameter(name=["--image-format"], group=IMAGE_GROUP),
-    ] = "video",
-    image_codec: Annotated[
-        Literal["h264", "h265", "vp9", "av1"],
-        Parameter(name=["--image-codec"], group=IMAGE_GROUP),
-    ] = "h264",
-    image_quality: Annotated[
-        int,
-        Parameter(name=["--image-quality"], group=IMAGE_GROUP),
-    ] = 28,
-    image_encoder: Annotated[
-        str | None,
-        Parameter(name=["--image-encoder"], group=IMAGE_GROUP),
-    ] = None,
-    image_backend: Annotated[
-        Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"],
-        Parameter(name=["--image-backend"], group=IMAGE_GROUP),
-    ] = "auto",
-    image_scale: Annotated[
-        int | None,
-        Parameter(name=["--image-scale"], group=IMAGE_GROUP),
-    ] = None,
-    jpeg_quality: Annotated[
-        int,
-        Parameter(name=["--jpeg-quality"], group=IMAGE_GROUP),
-    ] = 90,
-    pointcloud: Annotated[
-        bool,
-        Parameter(name=["--pointcloud"], negative="--no-pointcloud", group=POINTCLOUD_GROUP),
-    ] = True,
-    pc_format: Annotated[
-        Literal["cloudini", "draco"],
-        Parameter(name=["--pc-format"], group=POINTCLOUD_GROUP),
-    ] = "cloudini",
-    pc_schema: Annotated[
-        Literal["auto", "pointcloud2", "foxglove"],
-        Parameter(name=["--pc-schema"], group=POINTCLOUD_GROUP),
-    ] = "auto",
-    pc_encoding: Annotated[
-        Literal["lossy", "lossless", "none"],
-        Parameter(name=["--pc-encoding"], group=POINTCLOUD_GROUP),
-    ] = "lossy",
-    pc_compression: Annotated[
-        Literal["zstd", "lz4", "none"],
-        Parameter(name=["--pc-compression"], group=POINTCLOUD_GROUP),
-    ] = "zstd",
-    resolution: Annotated[
-        float,
-        Parameter(name=["--resolution"], group=POINTCLOUD_GROUP),
-    ] = 0.01,
-    draco_compression_level: Annotated[
-        int,
-        Parameter(name=["--draco-compression-level"], group=POINTCLOUD_GROUP),
-    ] = 7,
-    pointcloud_drop_invalid: Annotated[
-        bool | None,
-        Parameter(
-            name=["--pointcloud-drop-invalid"],
-            negative="--no-pointcloud-drop-invalid",
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = None,
-    pointcloud_sort_field: Annotated[
-        str | None,
-        Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
-    ] = None,
+    port: ServerPortOption = 8766,
+    host: ServerHostOption = "0.0.0.0",  # noqa: S104
+    image_format: ImageFormatOption = "video",
+    codec: CodecOption = "h264",
+    quality: QualityOption = 28,
+    encoder: EncoderOption = None,
+    backend: BackendOption = EncoderMode.AUTO,
+    scale: ScaleOption = None,
+    jpeg_quality: JpegQualityOption = 90,
+    pointcloud: PointCloudOption = True,
+    pc_format: PointCloudFormatOption = "cloudini",
+    pc_schema: PointCloudSchemaOption = "auto",
+    pc_encoding: PointCloudEncodingOption = "lossy",
+    pc_compression: PointCloudCompressionOption = "zstd",
+    resolution: ResolutionOption = 0.01,
+    draco_compression_level: DracoCompressionLevelOption = 7,
+    pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
+    pointcloud_sort_field: PointCloudSortFieldOption = None,
     send_queue_size: Annotated[
         int,
         Parameter(name=["--send-queue-size"], group=LATENCY_GROUP),
@@ -529,11 +493,11 @@ def proxy(
     config = ProxyConfig(
         image=ImageConfig(
             image_format=image_format,
-            codec=image_codec,
-            quality=image_quality,
-            encoder=image_encoder,
-            backend=image_backend,
-            scale=image_scale,
+            codec=codec,
+            quality=quality,
+            encoder=encoder,
+            backend=backend.value,
+            scale=scale,
             jpeg_quality=jpeg_quality,
         ),
         pointcloud=PointCloudConfig(

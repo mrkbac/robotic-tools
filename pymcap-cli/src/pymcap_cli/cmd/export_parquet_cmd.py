@@ -24,22 +24,23 @@ from typing import Annotated
 
 from cyclopts import Parameter
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    IncludeBlobsOption,
+    MessagePathVariablesOption,
+    NumWorkersOption,
+    OutputPathOption,
+    SelectColumnsOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
-from pymcap_cli.cmd._message_path_options import (
-    MessagePathVariablesOption,
-    create_message_path_variables,
-)
-from pymcap_cli.cmd._structured_export_options import SelectColumnsOption
+from pymcap_cli.cmd._message_filter_options import create_message_filter
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.parquet_exporter import ParquetExporter
-from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def export_parquet(
     *,
     force: ForceOverwriteOption = False,
     batch_size: Annotated[int, Parameter(name=["--batch-size"])] = 20000,
-    num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
+    num_workers: NumWorkersOption = 8,
     writer_threads: Annotated[int, Parameter(name=["--writer-threads"])] = 4,
     compression: Annotated[str, Parameter(name=["--compression"])] = "zstd",
     topic: TopicOption = None,
@@ -58,7 +59,7 @@ def export_parquet(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    include_blobs: Annotated[bool, Parameter(name=["--include-blobs"])] = False,
+    include_blobs: IncludeBlobsOption = False,
     skip_schema: Annotated[list[str] | None, Parameter(name=["--skip-schema"])] = None,
     select: SelectColumnsOption = None,
     var: MessagePathVariablesOption = None,

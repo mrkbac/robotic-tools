@@ -1,23 +1,21 @@
 """`pymcap-cli tf-get` - lookup a transform between two TF frames."""
 
-from __future__ import annotations
-
 import logging
 import math
-from typing import Annotated
 
-from cyclopts import Group, Parameter
+from cyclopts import Group
 from rich.console import Console
 from rich.table import Table
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
+    AtTimeOption,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.core.tf_findings import (
     TfFinding,
     TfSeverity,
@@ -45,17 +43,7 @@ def tf_get(
     target: str,
     source: str,
     *,
-    at: Annotated[
-        str | None,
-        Parameter(
-            name=["--at"],
-            group=SELECTION_GROUP,
-            help=(
-                "Resolve dynamic /tf samples at this time (RFC3339 or nanoseconds). "
-                "Defaults to per-edge latest, like ROS 2 lookup_transform with Time(0)."
-            ),
-        ),
-    ] = None,
+    at: AtTimeOption = None,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
     start: StartTimeOption = "",

@@ -5,41 +5,45 @@ import logging
 import re
 import sys
 from contextlib import ExitStack
-from pathlib import Path
-from typing import IO, TYPE_CHECKING, Annotated, Any
+from typing import IO, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from small_mcap import DecodedMessage
 
-from cyclopts import Group, Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from ros_parser.message_path import (
-    MessagePath,
-    MessagePathError,
-    parse_message_path,
-)
+from ros_parser.message_path import MessagePathError
 from small_mcap import Channel, JSONDecoderFactory, get_summary, read_message_decoded
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
+    BytesModeOption,
+    ChangedOption,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    FlatOption,
+    GrepIgnoreCaseOption,
+    GrepOption,
+    MessageLimitOption,
+    MessagePathVariablesOption,
+    OptionalOutputPathOption,
+    QueryOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
-from pymcap_cli.cmd._message_path_options import (
-    MessagePathVariablesOption,
-    create_message_path_variables,
-)
+from pymcap_cli.cmd._message_filter_options import create_message_filter
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query, query_result_is_empty
+from pymcap_cli.display.cat_helpers import (
+    SchemaCache,
+    parse_cat_queries,
+    plan_for_query,
+    query_result_is_empty,
+)
 from pymcap_cli.display.message_render import (
-    SMART_BYTES_INLINE_LIMIT,
     TTY_BYTES_TRUNCATE,
     BytesMode,
     changed_leaf_paths,
@@ -53,101 +57,24 @@ from pymcap_cli.utils import ProgressTrackingIO, file_progress
 logger = logging.getLogger(__name__)
 console_out = Console()
 
-FILTERING_GROUP = Group("Filtering")
-OUTPUT_GROUP = Group("Output")
-
 
 def cat(
     file: str,
     *,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
-    query: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["-q", "--query"],
-            group=FILTERING_GROUP,
-            help=(
-                "MessagePath expression scoping output to one topic and/or subfield. "
-                "Repeat for additional topics."
-            ),
-        ),
-    ] = None,
+    query: QueryOption = None,
     var: MessagePathVariablesOption = None,
-    grep: Annotated[
-        str | None,
-        Parameter(
-            name=["-g", "--grep"],
-            group=FILTERING_GROUP,
-            help=(
-                "Regex applied to every scalar value in the decoded message. "
-                "Messages with no match are skipped. Bytes-like fields are not "
-                "searched. Composes with --query: the regex runs on the post-"
-                "query result so '--query <path> --grep <re>' scopes the search."
-            ),
-        ),
-    ] = None,
-    grep_ignore_case: Annotated[
-        bool,
-        Parameter(
-            name=["-i", "--grep-ignore-case"],
-            group=FILTERING_GROUP,
-        ),
-    ] = False,
+    grep: GrepOption = None,
+    grep_ignore_case: GrepIgnoreCaseOption = False,
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    limit: Annotated[
-        int | None,
-        Parameter(
-            name=["-l", "--limit"],
-            group=OUTPUT_GROUP,
-        ),
-    ] = None,
-    output: Annotated[
-        Path | None,
-        Parameter(
-            name=["-o", "--output"],
-            group=OUTPUT_GROUP,
-        ),
-    ] = None,
-    bytes_mode: Annotated[
-        BytesMode,
-        Parameter(
-            name=["--bytes"],
-            group=OUTPUT_GROUP,
-            help=(
-                "How to render `bytes` fields in JSON output. `smart` (default) "
-                f"inlines payloads ≤{SMART_BYTES_INLINE_LIMIT} bytes as int lists "
-                "and collapses larger ones to `<N bytes>` so `cat` stays readable "
-                "on messages with Image/PointCloud2 payloads. Use `ints` for the "
-                "full int list, `base64` for a compact serialisable string, or "
-                "`skip` to always drop the payload."
-            ),
-        ),
-    ] = BytesMode.SMART,
-    flat: Annotated[
-        bool,
-        Parameter(
-            name=["--flat"],
-            group=OUTPUT_GROUP,
-            help=(
-                "In a terminal, print one `dotted.path: value` line per leaf "
-                "instead of a tree. Greppable, and handy with --query."
-            ),
-        ),
-    ] = False,
-    changed: Annotated[
-        bool,
-        Parameter(
-            name=["--changed"],
-            group=OUTPUT_GROUP,
-            help=(
-                "In a terminal, highlight values that changed since the previous "
-                "message on the same topic. The full message is still shown."
-            ),
-        ),
-    ] = False,
+    limit: MessageLimitOption = None,
+    output: OptionalOutputPathOption = None,
+    bytes_mode: BytesModeOption = BytesMode.SMART,
+    flat: FlatOption = False,
+    changed: ChangedOption = False,
 ) -> int:
     """Stream MCAP messages to stdout.
 
@@ -202,22 +129,11 @@ def cat(
         logger.error(str(exc))  # noqa: TRY400
         return 1
 
-    parsed_queries: dict[str, MessagePath] = {}
-    query_reprs: dict[str, str] = {}
-    for query_repr in query or []:
-        try:
-            parsed_query = parse_message_path(query_repr)
-        except Exception:
-            logger.exception("Invalid query syntax")
-            return 1
-        if parsed_query.topic in parsed_queries:
-            logger.error(
-                f"Only one --query per topic is supported; "
-                f"topic '{parsed_query.topic}' was specified more than once"
-            )
-            return 1
-        parsed_queries[parsed_query.topic] = parsed_query
-        query_reprs[parsed_query.topic] = query_repr
+    try:
+        parsed_queries = parse_cat_queries(query)
+    except Exception:
+        logger.exception("Invalid query syntax")
+        return 1
 
     grep_pattern: re.Pattern[str] | None = None
     if grep:
@@ -294,10 +210,11 @@ def cat(
                 if limit is not None and message_count >= limit:
                     break
 
-                parsed_query = parsed_queries.get(msg.channel.topic)
+                query_for_topic = parsed_queries.get(msg.channel.topic)
+                parsed_query = query_for_topic.path if query_for_topic is not None else None
 
                 # Validate query against schema on first message of each topic
-                if parsed_query is not None and msg.channel.topic not in validated_topics:
+                if query_for_topic is not None and msg.channel.topic not in validated_topics:
                     validated_topics.add(msg.channel.topic)
 
                     if msg.schema is None:
@@ -306,10 +223,10 @@ def cat(
                             "(no schema available)"
                         )
                     elif not schema_cache.validate_query(
-                        parsed_query,
+                        query_for_topic.path,
                         msg.schema,
                         msg.channel.topic,
-                        query_repr=query_reprs[msg.channel.topic],
+                        query_repr=query_for_topic.source,
                     ):
                         return 1
 

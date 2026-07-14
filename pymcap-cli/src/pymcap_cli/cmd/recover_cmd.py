@@ -1,10 +1,17 @@
 import logging
-from typing import Annotated
 
-from cyclopts import Group, Parameter
 from rich.console import Console
 from small_mcap import WriterNotStartedError
 
+from pymcap_cli.cmd._cli_options import (
+    AlwaysDecodeChunkOption,
+    ChunkSizeOption,
+    CompressionOption,
+    DeleteSourceOption,
+    ForceOverwriteOption,
+    NoClobberOption,
+    OutputPathOption,
+)
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     resolve_overwrite_policy,
@@ -15,20 +22,9 @@ from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
 )
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionOption,
-    DeleteSourceOption,
-    ForceOverwriteOption,
-    NoClobberOption,
-    OutputPathOption,
-)
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-# Parameter groups
-RECOVERY_OPTIONS_GROUP = Group("Recovery Options")
 
 
 def recover(
@@ -37,13 +33,7 @@ def recover(
     *,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
-    always_decode_chunk: Annotated[
-        bool,
-        Parameter(
-            name=["-a", "--always-decode-chunk"],
-            group=RECOVERY_OPTIONS_GROUP,
-        ),
-    ] = False,
+    always_decode_chunk: AlwaysDecodeChunkOption = False,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,

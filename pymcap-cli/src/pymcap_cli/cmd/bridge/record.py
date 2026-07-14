@@ -5,11 +5,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from re import Pattern
-from typing import Annotated
 
-from cyclopts import Group as CycloptsGroup
-from cyclopts import Parameter
 from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.table import Table
@@ -18,35 +14,38 @@ from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import McapWriter
 
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
-    DISPLAY_GROUP,
+from pymcap_cli.cmd._cli_options import (
+    AllTopicsOption,
     BridgeTarget,
+    ChunkSizeOption,
+    CompressionName,
+    CompressionOption,
+    ConnectTimeoutOption,
+    ExcludeTopicOption,
+    ForceOverwriteOption,
+    LiveDurationOption,
+    MessageLimitOption,
+    OutputPathOption,
+    ProgressOption,
+    TopicOption,
+)
+from pymcap_cli.cmd.bridge._shared import (
     ChannelSubscriptionManager,
     console,
     to_ws_url,
 )
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.display.display_utils import _format_parts_with_colors
 from pymcap_cli.log_setup import ERR
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionName,
-    CompressionOption,
-    ForceOverwriteOption,
-    OutputPathOption,
-)
 from pymcap_cli.utils import (
     McapWriterOptions,
     bytes_to_human,
-    compile_topic_patterns,
     confirm_output_overwrite,
     create_mcap_writer,
 )
 
 logger = logging.getLogger(__name__)
-
-RECORD_GROUP = CycloptsGroup("Record Options")
 
 
 @dataclass(frozen=True)
@@ -60,24 +59,12 @@ class _RecorderChannelKey:
 
 @dataclass(frozen=True)
 class TopicSelector:
-    """Decide which topics to record, mirroring `ros2 bag record` semantics."""
+    """Apply the canonical topic selectors to live bridge advertisements."""
 
-    all_topics: bool = False
-    exact_topics: frozenset[str] = field(default_factory=frozenset)
-    include_patterns: tuple[Pattern[str], ...] = ()
-    exclude_topics: frozenset[str] = field(default_factory=frozenset)
-    exclude_patterns: tuple[Pattern[str], ...] = ()
+    message_filter: MessageFilterOptions = field(default_factory=MessageFilterOptions)
 
     def matches(self, topic: str) -> bool:
-        if topic in self.exclude_topics:
-            return False
-        if any(pattern.search(topic) for pattern in self.exclude_patterns):
-            return False
-        if self.all_topics:
-            return True
-        if topic in self.exact_topics:
-            return True
-        return any(pattern.search(topic) for pattern in self.include_patterns)
+        return self.message_filter.matches_topic(topic)
 
 
 @dataclass
@@ -307,91 +294,22 @@ def record(
     target: BridgeTarget,
     *,
     output: OutputPathOption,
-    topics: Annotated[
-        list[str],
-        Parameter(
-            name=["--topics"],
-            group=RECORD_GROUP,
-            help="Space-delimited list of topics to record (exact names).",
-        ),
-    ] = [],  # noqa: B006
-    all_topics: Annotated[
-        bool,
-        Parameter(
-            name=["--all", "-a"],
-            group=RECORD_GROUP,
-            negative="--no-all",
-            help="Record every advertised topic.",
-        ),
-    ] = False,
-    regex: Annotated[
-        str | None,
-        Parameter(
-            name=["--regex", "-e"],
-            group=RECORD_GROUP,
-            help=(
-                "Record topics matching this regex (case-insensitive, ``re.search``)."
-                " Note: --all overrides --regex."
-            ),
-        ),
-    ] = None,
-    exclude_topics: Annotated[
-        list[str],
-        Parameter(
-            name=["--exclude-topics"],
-            group=RECORD_GROUP,
-            help="Space-delimited list of topics to skip (exact names).",
-        ),
-    ] = [],  # noqa: B006
-    exclude_regex: Annotated[
-        str | None,
-        Parameter(
-            name=["--exclude-regex"],
-            group=RECORD_GROUP,
-            help="Skip topics matching this regex (case-insensitive). Wins over includes.",
-        ),
-    ] = None,
-    duration: Annotated[
-        float | None,
-        Parameter(
-            name=["--duration", "-d"],
-            group=RECORD_GROUP,
-            help=(
-                "Stop after this many seconds. (Differs from ros2 bag's -d, which splits the bag.)"
-            ),
-        ),
-    ] = None,
-    message_limit: Annotated[
-        int | None,
-        Parameter(
-            name=["--message-limit"],
-            group=RECORD_GROUP,
-            help="Stop after writing this many messages.",
-        ),
-    ] = None,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
+    topic: TopicOption = None,
+    all_topics: AllTopicsOption = False,
+    exclude_topic: ExcludeTopicOption = None,
+    duration: LiveDurationOption = None,
+    limit: MessageLimitOption = None,
+    connect_timeout: ConnectTimeoutOption = 5.0,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,
-    progress: Annotated[
-        bool,
-        Parameter(
-            name=["--progress"],
-            group=DISPLAY_GROUP,
-            negative="--no-progress",
-            help="Show a live status panel while recording.",
-        ),
-    ] = True,
+    progress: ProgressOption = True,
 ) -> int:
     """Record messages from a live Foxglove WebSocket bridge into an MCAP file.
 
-    Mirrors the ``ros2 bag record`` topic-selection surface: ``--topics`` for
-    a list of exact names, ``-e/--regex`` for a regex include, ``-a/--all`` for
-    everything, with ``--exclude-topics`` and ``--exclude-regex`` filtering on
-    top. Stops on ``--duration`` / ``--message-limit`` or Ctrl+C.
+    Uses the canonical repeatable ``--topic`` / ``--exclude-topic`` regex
+    selectors shared by file-reading commands. Stops on ``--duration`` /
+    ``--limit`` or Ctrl+C.
 
     Parameters
     ----------
@@ -400,19 +318,15 @@ def record(
         ``host:port``); defaults to port 8765 when none is given.
     output
         MCAP file to write.
-    topics
-        Space-delimited list of topics to record (exact names).
+    topic
+        Topic regexes to record using full-match semantics.
     all_topics
         Record every advertised topic.
-    regex
-        Record topics matching this regex. ``--all`` overrides this.
-    exclude_topics
-        Topics to skip (exact names).
-    exclude_regex
-        Skip topics matching this regex. Wins over includes.
+    exclude_topic
+        Topic regexes to skip. Wins over includes.
     duration
         Stop after this many seconds.
-    message_limit
+    limit
         Stop after writing this many messages.
     connect_timeout
         Seconds to wait for the bridge's ``serverInfo`` (default: 5.0).
@@ -429,42 +343,34 @@ def record(
     --------
     ```
     pymcap-cli bridge record ws://localhost:8765 -a -o capture.mcap
-    pymcap-cli bridge record localhost --topics /chatter /imu/data -o capture.mcap
-    pymcap-cli bridge record localhost -e '^/camera/' -o capture.mcap -d 30
-    pymcap-cli bridge record localhost -a --exclude-regex '^/debug/' -o capture.mcap
+    pymcap-cli bridge record localhost -t /chatter -t /imu/data -o capture.mcap
+    pymcap-cli bridge record localhost -t '/camera/.*' -o capture.mcap -d 30
+    pymcap-cli bridge record localhost -a -x '/debug/.*' -o capture.mcap
     ```
     """
     if duration is not None and duration <= 0:
         ERR.print("[red]Error:[/] --duration must be positive")
         return 1
-    if message_limit is not None and message_limit <= 0:
-        ERR.print("[red]Error:[/] --message-limit must be positive")
+    if limit is not None and limit <= 0:
+        ERR.print("[red]Error:[/] --limit must be positive")
         return 1
-    if not all_topics and not topics and regex is None:
-        ERR.print("[red]Error:[/] specify --topics, --all, or --regex.")
+    if not all_topics and not topic:
+        ERR.print("[red]Error:[/] specify --topic or --all.")
         return 1
 
     output_path = Path(output)
     confirm_output_overwrite(output_path, force)
 
     try:
-        include_patterns = (
-            tuple(compile_topic_patterns([regex])) if regex is not None and not all_topics else ()
-        )
-        exclude_patterns = (
-            tuple(compile_topic_patterns([exclude_regex])) if exclude_regex is not None else ()
+        message_filter = MessageFilterOptions.from_args(
+            topic=None if all_topics else topic,
+            exclude_topic=exclude_topic,
         )
     except ValueError as exc:
         ERR.print(f"[red]Error:[/] {exc}")
         return 1
 
-    selector = TopicSelector(
-        all_topics=all_topics,
-        exact_topics=frozenset(topics),
-        include_patterns=include_patterns,
-        exclude_topics=frozenset(exclude_topics),
-        exclude_patterns=exclude_patterns,
-    )
+    selector = TopicSelector(message_filter=message_filter)
 
     url = to_ws_url(target)
     refresh_interval = 0.25
@@ -476,7 +382,7 @@ def record(
                 output=output_path,
                 selector=selector,
                 duration=duration,
-                message_limit=message_limit,
+                message_limit=limit,
                 chunk_size=chunk_size,
                 compression_choice=compression,
                 connect_timeout=connect_timeout,

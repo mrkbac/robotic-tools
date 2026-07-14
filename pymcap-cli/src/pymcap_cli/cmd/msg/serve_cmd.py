@@ -6,10 +6,14 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Group, Parameter
-
+from pymcap_cli.cmd._cli_options import (
+    ExtraMessagePathOption,
+    MessageDistroOption,
+    NoBrowserOption,
+    ServerHostOption,
+    ServerPortOption,
+)
 from pymcap_cli.core.msg_resolver import (
     PackageInfo,
     ROS2Distro,
@@ -22,9 +26,6 @@ from pymcap_cli.display.schema_html import render_msg_definition_html
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
-
-MSG_SERVE_OPTIONS_GROUP = Group("Message Serve Options")
-
 
 _STYLE_CSS = """\
 :root {
@@ -433,47 +434,11 @@ def _make_handler(
 
 def msg_serve(
     *,
-    host: Annotated[
-        str,
-        Parameter(
-            name=["--host"],
-            group=MSG_SERVE_OPTIONS_GROUP,
-            help="Interface to bind the server to.",
-        ),
-    ] = "127.0.0.1",
-    port: Annotated[
-        int,
-        Parameter(
-            name=["--port", "-p"],
-            group=MSG_SERVE_OPTIONS_GROUP,
-            help="TCP port to listen on.",
-        ),
-    ] = 8765,
-    distro: Annotated[
-        ROS2Distro,
-        Parameter(
-            name=["--distro", "-d"],
-            group=MSG_SERVE_OPTIONS_GROUP,
-            help="ROS2 distribution to serve.",
-        ),
-    ] = ROS2Distro.HUMBLE,
-    extra_path: Annotated[
-        list[Path],
-        Parameter(
-            name=["--extra-path", "-I"],
-            group=MSG_SERVE_OPTIONS_GROUP,
-            help="Additional root paths to search for custom message definitions.",
-        ),
-    ] = [],  # noqa: B006
-    no_browser: Annotated[
-        bool,
-        Parameter(
-            name=["--no-browser"],
-            group=MSG_SERVE_OPTIONS_GROUP,
-            help="Don't auto-open a browser tab on start.",
-            negative="",
-        ),
-    ] = False,
+    host: ServerHostOption = "127.0.0.1",
+    port: ServerPortOption = 8765,
+    distro: MessageDistroOption = ROS2Distro.HUMBLE,
+    extra_path: ExtraMessagePathOption = [],  # noqa: B006
+    no_browser: NoBrowserOption = False,
 ) -> int:
     """Browse ROS2 packages and message definitions in a local web UI.
 

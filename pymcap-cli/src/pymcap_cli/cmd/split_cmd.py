@@ -8,10 +8,18 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
-from pymcap_cli.cmd._message_path_options import (
+from pymcap_cli.cmd._cli_options import (
+    ChunkSizeOption,
+    CompressionOption,
+    DeleteSourceOption,
+    ForceOverwriteOption,
+    LatchFromMetadataOption,
+    LatchOption,
     MessagePathVariablesOption,
-    create_message_path_variables,
+    NoClobberOption,
+    SplitAtOption,
 )
+from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     processing_had_errors,
@@ -26,13 +34,6 @@ from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
 from pymcap_cli.types.size import parse_size_bytes
-from pymcap_cli.types.types_manual import (
-    ChunkSizeOption,
-    CompressionOption,
-    DeleteSourceOption,
-    ForceOverwriteOption,
-    NoClobberOption,
-)
 from pymcap_cli.utils import bytes_to_human, parse_time_arg
 
 if TYPE_CHECKING:
@@ -44,7 +45,6 @@ console = Console()
 # Parameter groups
 SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
-LATCHING_GROUP = Group("Latching")
 EXPRESSION_GROUP = Group("Expression Options")
 
 
@@ -65,14 +65,7 @@ def split(
             help="Split every N time units (e.g. 60s, 1.5m, 1h); bare numbers are seconds",
         ),
     ] = None,
-    split_at: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--split-at"],
-            group=SPLIT_GROUP,
-            help="Split at specific timestamps (ns or RFC3339, repeatable)",
-        ),
-    ] = None,
+    split_at: SplitAtOption = None,
     expression: Annotated[
         str | None,
         Parameter(
@@ -164,29 +157,8 @@ def split(
             ),
         ),
     ] = None,
-    latch: Annotated[
-        list[str] | None,
-        Parameter(
-            name=["--latch"],
-            group=LATCHING_GROUP,
-            help=(
-                "Topic regex (repeatable) whose latest message is replayed into "
-                "every output segment. Use for /tf_static and other transient-local "
-                "topics that consumers need at the start of each segment."
-            ),
-        ),
-    ] = None,
-    latch_from_metadata: Annotated[
-        bool,
-        Parameter(
-            name=["--latch-from-metadata"],
-            group=LATCHING_GROUP,
-            help=(
-                "Also auto-detect latched channels by reading the MCAP "
-                "'offered_qos_profiles' metadata for durability=transient_local."
-            ),
-        ),
-    ] = False,
+    latch: LatchOption = None,
+    latch_from_metadata: LatchFromMetadataOption = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
     force: ForceOverwriteOption = False,

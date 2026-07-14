@@ -11,19 +11,36 @@ and composes with everything else. The heavy lifting lives in the processors
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING
 
-from cyclopts import Group, Parameter
 from mcap_codec_support.video import EncoderMode, VideoEncoderError
 from rich.console import Console
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
+    BackendOption,
+    CodecOption,
+    DracoCompressionLevelOption,
+    EncoderOption,
     EndTimeOption,
     ExcludeTopicOption,
+    ForceOverwriteOption,
+    ImageFormatOption,
+    JpegQualityOption,
+    OutputPathOption,
+    PointCloudCompressionOption,
+    PointCloudDropInvalidOption,
+    PointCloudEncodingOption,
+    PointCloudFormatOption,
+    PointCloudOption,
+    PointCloudSchemaOption,
+    PointCloudSortFieldOption,
+    QualityOption,
+    ResolutionOption,
+    ScaleOption,
     StartTimeOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._pointcloud_cleanup import (
     pointcloud_worker_count,
     resolve_pointcloud_cleanup,
@@ -33,7 +50,6 @@ from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
-from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
 from pymcap_cli.utils import output_overwrites_input
 
 if TYPE_CHECKING:
@@ -53,129 +69,28 @@ _COMPRESSED_OUTPUT_PATTERN = re.compile(r"Compressed(Image|Video|PointCloud)")
 _INPUT_BUFFER_BYTES = 8 * 1024 * 1024
 _ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
 
-# Parameter groups
-ENCODING_GROUP = Group("Encoding")
-POINTCLOUD_GROUP = Group("Point Cloud")
-
 
 def roscompress(
     file: str,
     output: OutputPathOption,
     *,
     force: ForceOverwriteOption = False,
-    quality: Annotated[
-        int,
-        Parameter(
-            name=["--quality", "-q"],
-            group=ENCODING_GROUP,
-        ),
-    ] = 28,
-    codec: Annotated[
-        Literal["h264", "h265", "vp9", "av1"],
-        Parameter(
-            name=["--codec"],
-            group=ENCODING_GROUP,
-        ),
-    ] = "h264",
-    encoder: Annotated[
-        str | None,
-        Parameter(
-            name=["--encoder"],
-            group=ENCODING_GROUP,
-        ),
-    ] = None,
-    resolution: Annotated[
-        float,
-        Parameter(
-            name=["--resolution"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = 0.01,
-    pc_format: Annotated[
-        Literal["cloudini", "draco"],
-        Parameter(
-            name=["--pc-format"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = "cloudini",
-    pc_schema: Annotated[
-        Literal["auto", "pointcloud2", "foxglove"],
-        Parameter(
-            name=["--pc-schema"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = "auto",
-    pc_encoding: Annotated[
-        Literal["lossy", "lossless", "none"],
-        Parameter(
-            name=["--pc-encoding"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = "lossy",
-    pc_compression: Annotated[
-        Literal["zstd", "lz4", "none"],
-        Parameter(
-            name=["--pc-compression"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = "zstd",
-    draco_compression_level: Annotated[
-        int,
-        Parameter(
-            name=["--draco-compression-level"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = 7,
-    scale: Annotated[
-        int | None,
-        Parameter(
-            name=["--scale", "-s"],
-            group=ENCODING_GROUP,
-        ),
-    ] = None,
-    image_format: Annotated[
-        Literal["video", "jpeg", "png", "none"],
-        Parameter(
-            name=["--image-format"],
-            group=ENCODING_GROUP,
-        ),
-    ] = "video",
-    jpeg_quality: Annotated[
-        int,
-        Parameter(
-            name=["--jpeg-quality"],
-            group=ENCODING_GROUP,
-        ),
-    ] = 90,
-    backend: Annotated[
-        EncoderMode,
-        Parameter(
-            name=["--backend"],
-            group=ENCODING_GROUP,
-        ),
-    ] = EncoderMode.AUTO,
-    pointcloud: Annotated[
-        bool,
-        Parameter(
-            name=["--pointcloud"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = True,
-    pointcloud_drop_invalid: Annotated[
-        bool | None,
-        Parameter(
-            name=["--pointcloud-drop-invalid"],
-            negative="--no-pointcloud-drop-invalid",
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = None,
-    pointcloud_sort_field: Annotated[
-        str | None,
-        Parameter(
-            name=["--pointcloud-sort-field"],
-            group=POINTCLOUD_GROUP,
-        ),
-    ] = None,
+    quality: QualityOption = 28,
+    codec: CodecOption = "h264",
+    encoder: EncoderOption = None,
+    resolution: ResolutionOption = 0.01,
+    pc_format: PointCloudFormatOption = "cloudini",
+    pc_schema: PointCloudSchemaOption = "auto",
+    pc_encoding: PointCloudEncodingOption = "lossy",
+    pc_compression: PointCloudCompressionOption = "zstd",
+    draco_compression_level: DracoCompressionLevelOption = 7,
+    scale: ScaleOption = None,
+    image_format: ImageFormatOption = "video",
+    jpeg_quality: JpegQualityOption = 90,
+    backend: BackendOption = EncoderMode.AUTO,
+    pointcloud: PointCloudOption = True,
+    pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
+    pointcloud_sort_field: PointCloudSortFieldOption = None,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
     start: StartTimeOption = "",

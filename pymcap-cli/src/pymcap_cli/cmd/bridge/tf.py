@@ -3,18 +3,20 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any
 
-from cyclopts import Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
 
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
-    DISPLAY_GROUP,
-    BridgeFetchError,
+from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
+    ConnectTimeoutOption,
+    DiscoverSecondsOption,
+    StaticOnlyOption,
+)
+from pymcap_cli.cmd.bridge._shared import (
+    BridgeFetchError,
     ChannelSubscriptionManager,
     channel_to_schema,
     console,
@@ -95,18 +97,9 @@ async def _collect_tf_graph_async(
 def tf(
     target: BridgeTarget,
     *,
-    static_only: Annotated[
-        bool,
-        Parameter(name=["--static-only"], group=DISPLAY_GROUP),
-    ] = False,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    discover_seconds: Annotated[
-        float,
-        Parameter(name=["--discover-seconds"], group=CONNECTION_GROUP),
-    ] = 2.0,
+    static_only: StaticOnlyOption = False,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    discover_seconds: DiscoverSecondsOption = 2.0,
 ) -> int:
     """Reconstruct the TF frame tree from a live Foxglove WebSocket bridge.
 

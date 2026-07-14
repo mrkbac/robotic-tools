@@ -11,11 +11,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from ipaddress import ip_address
-from typing import Annotated
 from urllib.parse import urlsplit
 
-from cyclopts import Group as CycloptsGroup
-from cyclopts import Parameter
 from rich.console import Console
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities, ServerInfoMessage, ServiceInfo
@@ -23,25 +20,6 @@ from small_mcap import Schema
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-# Parameter groups shared by info / record / cat.
-CONNECTION_GROUP = CycloptsGroup("Connection Options")
-DISPLAY_GROUP = CycloptsGroup("Display Options")
-
-# Env var fallback for the bridge address, so it need not be repeated on every
-# invocation of info / record / cat.
-BRIDGE_TARGET_ENV = "PYMCAP_BRIDGE"
-
-BridgeTarget = Annotated[
-    str,
-    Parameter(
-        env_var=BRIDGE_TARGET_ENV,
-        help=(
-            "Bridge address: ws://host:port, wss://host:port, a hostname, an IP, "
-            "or host:port (default port 8765). Falls back to $PYMCAP_BRIDGE."
-        ),
-    ),
-]
 
 _DEFAULT_PORT = 8765
 

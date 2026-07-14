@@ -10,14 +10,15 @@ from rich.console import Console
 from rich.live import Live
 from small_mcap import get_summary, include_topics, read_message_decoded
 
-from pymcap_cli.cmd._message_filter_options import (
+from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
     StartTimeOption,
+    StaticOnlyOption,
     TopicOption,
-    create_message_filter,
 )
+from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.tf_findings import collect_tf_findings, has_error_findings
 from pymcap_cli.core.tf_tree import TF_STATIC_TOPIC, TF_TOPIC, TfGraph, add_tf_message
@@ -32,13 +33,7 @@ DISPLAY_GROUP = Group("Display")
 def tftree(
     file: str,
     *,
-    static_only: Annotated[
-        bool,
-        Parameter(
-            name=["--static-only"],
-            group=DISPLAY_GROUP,
-        ),
-    ] = False,
+    static_only: StaticOnlyOption = False,
     change_only: Annotated[
         bool,
         Parameter(

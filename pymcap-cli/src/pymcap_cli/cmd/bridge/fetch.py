@@ -3,17 +3,18 @@
 import asyncio
 import logging
 import sys
-from pathlib import Path
-from typing import Annotated
 
-from cyclopts import Parameter
 from robo_ws_bridge import FetchAssetError, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ServerCapabilities
 
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
-    BridgeFetchError,
+from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
+    CallTimeoutOption,
+    ConnectTimeoutOption,
+    OptionalOutputPathOption,
+)
+from pymcap_cli.cmd.bridge._shared import (
+    BridgeFetchError,
     console,
     to_ws_url,
 )
@@ -57,15 +58,9 @@ def fetch(
     target: BridgeTarget,
     uri: str,
     *,
-    output: Annotated[Path | None, Parameter(name=["-o", "--output"])] = None,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    call_timeout: Annotated[
-        float,
-        Parameter(name=["--call-timeout"], group=CONNECTION_GROUP),
-    ] = 10.0,
+    output: OptionalOutputPathOption = None,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    call_timeout: CallTimeoutOption = 10.0,
 ) -> int:
     """Download an asset (e.g. a URDF or mesh) from a live Foxglove WebSocket bridge.
 

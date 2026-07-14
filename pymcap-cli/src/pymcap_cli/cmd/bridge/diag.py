@@ -5,19 +5,29 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any
 
-from cyclopts import Group as CycloptsGroup
-from cyclopts import Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
 
-from pymcap_cli.cmd.bridge._shared import (
-    CONNECTION_GROUP,
-    DISPLAY_GROUP,
-    BridgeFetchError,
+from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
+    ConnectTimeoutOption,
+    DiagnosticLevelOption,
+    DiagnosticNameOption,
+    DiagnosticTreeOption,
+    DiscoverSecondsOption,
+    ExcludeTopicOption,
+    HardwareIdOption,
+    InspectAllDiagnosticsOption,
+    InspectDiagnosticOption,
+    JsonOutputOption,
+    ShowAllDiagnosticsOption,
+    TopicOption,
+)
+from pymcap_cli.cmd.bridge._shared import (
+    BridgeFetchError,
     ChannelSubscriptionManager,
     channel_to_schema,
     console,
@@ -30,6 +40,7 @@ from pymcap_cli.core.diagnostics import (
     filter_entries,
     level_totals,
 )
+from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.display.diag_render import (
     build_inspect_view,
     build_json_output,
@@ -39,8 +50,6 @@ from pymcap_cli.display.diag_render import (
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
-
-FILTER_GROUP = CycloptsGroup("Filtering")
 
 
 def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str] | None:
@@ -54,13 +63,11 @@ def _compile_pattern(pattern: str, flag_name: str) -> re.Pattern[str] | None:
 async def _collect_diagnostics_async(
     url: str,
     *,
-    topics: list[str],
+    message_filter: MessageFilterOptions,
     connect_timeout: float,
     collect_seconds: float,
 ) -> dict[str, DiagEntry]:
     entries: dict[str, DiagEntry] = {}
-    wanted = set(topics)
-
     client = WebSocketBridgeClient(url, min_retry_delay=0.2, max_retry_delay=2.0)
     server_info_event = asyncio.Event()
     client.on_server_info(lambda *_: server_info_event.set())
@@ -93,7 +100,9 @@ async def _collect_diagnostics_async(
 
     subscriber = ChannelSubscriptionManager(
         client,
-        lambda channel: channel["topic"] in wanted and _decoder_for(channel) is not None,
+        lambda channel: (
+            message_filter.matches_topic(channel["topic"]) and _decoder_for(channel) is not None
+        ),
     )
     subscriber.install()
     client.on_message(_on_message)
@@ -118,50 +127,18 @@ async def _collect_diagnostics_async(
 def diag(
     target: BridgeTarget,
     *,
-    level: Annotated[
-        int | None,
-        Parameter(name=["-l", "--level"], group=FILTER_GROUP),
-    ] = None,
-    show_all: Annotated[
-        bool,
-        Parameter(name=["-a", "--all"], group=FILTER_GROUP),
-    ] = False,
-    name: Annotated[
-        str | None,
-        Parameter(name=["-n", "--name"], group=FILTER_GROUP),
-    ] = None,
-    hardware_id: Annotated[
-        str | None,
-        Parameter(name=["--hardware-id", "--hw"], group=FILTER_GROUP),
-    ] = None,
-    inspect: Annotated[
-        str | None,
-        Parameter(name=["-i", "--inspect"], group=DISPLAY_GROUP),
-    ] = None,
-    inspect_all: Annotated[
-        bool,
-        Parameter(name=["-I", "--inspect-all"], group=DISPLAY_GROUP),
-    ] = False,
-    tree: Annotated[
-        bool,
-        Parameter(name=["--tree"], group=DISPLAY_GROUP),
-    ] = False,
-    json_output: Annotated[
-        bool,
-        Parameter(name=["--json"], group=DISPLAY_GROUP),
-    ] = False,
-    topics: Annotated[
-        list[str] | None,
-        Parameter(name=["-t", "--topics"], group=FILTER_GROUP),
-    ] = None,
-    connect_timeout: Annotated[
-        float,
-        Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
-    ] = 5.0,
-    discover_seconds: Annotated[
-        float,
-        Parameter(name=["--discover-seconds"], group=CONNECTION_GROUP),
-    ] = 3.0,
+    level: DiagnosticLevelOption = None,
+    show_all: ShowAllDiagnosticsOption = False,
+    name: DiagnosticNameOption = None,
+    hardware_id: HardwareIdOption = None,
+    inspect: InspectDiagnosticOption = None,
+    inspect_all: InspectAllDiagnosticsOption = False,
+    tree: DiagnosticTreeOption = False,
+    json_output: JsonOutputOption = False,
+    topic: TopicOption = None,
+    exclude_topic: ExcludeTopicOption = None,
+    connect_timeout: ConnectTimeoutOption = 5.0,
+    discover_seconds: DiscoverSecondsOption = 3.0,
 ) -> int:
     """Live ROS2 diagnostics overview from a Foxglove WebSocket bridge.
 
@@ -189,8 +166,10 @@ def diag(
         Display as a hierarchical tree grouped by hardware ID.
     json_output
         Output as JSON for scripting.
-    topics
-        Diagnostics topic names. Defaults to /diagnostics and /diagnostics_agg.
+    topic
+        Diagnostics topic regexes. Defaults to /diagnostics and /diagnostics_agg.
+    exclude_topic
+        Diagnostics topic regexes to exclude.
     connect_timeout
         Seconds to wait for the bridge's serverInfo before giving up (default: 5.0).
     discover_seconds
@@ -204,7 +183,15 @@ def diag(
     pymcap-cli bridge diag 192.168.1.10 --inspect encoder --discover-seconds 5
     ```
     """
-    resolved_topics = topics if topics is not None else DEFAULT_TOPICS
+    resolved_topics = topic if topic is not None else DEFAULT_TOPICS
+    try:
+        message_filter = MessageFilterOptions.from_args(
+            topic=resolved_topics,
+            exclude_topic=exclude_topic,
+        )
+    except ValueError as exc:
+        ERR.print(f"[red]Error:[/] {exc}")
+        return 1
 
     name_re = _compile_pattern(name, "--name") if name else None
     if name and name_re is None:
@@ -224,7 +211,7 @@ def diag(
         entries = asyncio.run(
             _collect_diagnostics_async(
                 url,
-                topics=resolved_topics,
+                message_filter=message_filter,
                 connect_timeout=connect_timeout,
                 collect_seconds=discover_seconds,
             )
