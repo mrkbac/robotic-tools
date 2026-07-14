@@ -12,6 +12,7 @@ from .models import (
     CompoundFilter,
     CurrentFilterValue,
     CurrentValueComparison,
+    CurrentValueInExpression,
     FieldAccess,
     Filter,
     FilterExpression,
@@ -107,6 +108,10 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         operator = ComparisonOperator(str(items[0]))
         value: CurrentFilterValue = items[1]
         return CurrentValueComparison(operator=operator, value=value)
+
+    def current_value_in_expr(self, items: list[CurrentFilterValue]) -> CurrentValueInExpression:
+        """Build a membership test against the current scalar value."""
+        return CurrentValueInExpression(values=items)
 
     def in_expr(self, items: list[Any]) -> InExpression:
         """Build InExpression from field path and list of values."""

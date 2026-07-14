@@ -69,13 +69,15 @@ selecting a primitive field or calculating a derived value with a modifier:
 /wheel_speed{!=0}
 /imu.linear_acceleration.@norm{<=30}
 /samples[:]{<=30}
+/status{in [1, 3, $selected_status]}
 ```
 
 For a scalar, a matching filter returns the original value and a non-matching
 filter returns no value. For a primitive array, the comparison is applied to
 each element. The right side of a current-value comparison may be a literal or
 `$variable`, but not a field reference; use a named-field filter when comparing
-fields on an object.
+fields on an object. Current-value membership uses the same literal and variable
+values with `{in [...]}`.
 
 #### Comparison Operators
 
@@ -113,6 +115,19 @@ Compare one field against another field on the same object:
 /odom{position.x > target.x}
 /readings[:]{measured > expected}
 ```
+
+#### Enum Names
+
+For ROS fields with constants, an unquoted constant name resolves to its schema
+value after validation:
+
+```
+/vehicle_state{status == MOVING}
+/vehicle_state{status in [STOPPED, MOVING]}
+```
+
+Enum names are case-sensitive. A bare name that resolves to another field keeps
+the cross-field behavior described above.
 
 #### `in` Membership Operator
 
@@ -202,10 +217,11 @@ These operate on objects with specific field structures (e.g., geometry messages
 
 | Modifier | Input fields | Description | Output |
 | --- | --- | --- | --- |
-| `.@norm` | `x, y, z` | Euclidean norm (L2) of a 3D vector | `float` |
+| `.@length` | sequence | Number of elements in an array or typed array | `int` |
+| `.@norm` | sequence or `x, y, z?` | Euclidean norm of a numeric array or vector | `float` |
 | `.@magnitude` | sequence | L2 norm of a list/array of numbers | `float` |
 | `.@rpy` | `x, y, z, w` | Quaternion to Euler angles | `EulerAngles(.roll, .pitch, .yaw)` |
-| `.@quat` | `x, y, z` | Euler angles (roll=x, pitch=y, yaw=z) to quaternion | `Quaternion(.x, .y, .z, .w)` |
+| `.@quat` | `roll, pitch, yaw` | Euler angles to quaternion | `Quaternion(.x, .y, .z, .w)` |
 
 The results of `.@rpy` and `.@quat` are objects with named fields, so you can chain field access:
 
@@ -214,7 +230,8 @@ The results of `.@rpy` and `.@quat` are objects with named fields, so you can ch
 /odom.pose.orientation.@rpy.roll   # Extract just the roll angle
 /topic.euler.@quat.w              # Extract the w component of the quaternion
 /odom.pose.position.@norm          # Distance from origin
-/imu.linear_acceleration.@magnitude
+/joint_states.velocity.@norm       # Norm of a numeric array
+/joint_states.position.@length     # Number of array elements
 ```
 
 #### Time-Series Functions
@@ -385,11 +402,14 @@ and_expr        : not_expr ("&&" not_expr)*
 not_expr        : "!" not_expr | filter_atom
 filter_atom     : comparison
                 | current_value_comparison
+                | current_value_in_expr
                 | in_expr
                 | "(" filter_expr ")"
 comparison      : field_path operator filter_value
 current_value_comparison
                 : operator current_filter_value
+current_value_in_expr
+                : "in" "[" current_filter_value ("," current_filter_value)* "]"
 in_expr         : field_path "in" "[" filter_value ("," filter_value)* "]"
 
 filter_value    : number | string | boolean | variable | field_path

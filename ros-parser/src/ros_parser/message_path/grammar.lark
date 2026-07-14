@@ -62,6 +62,7 @@ filter: "{" filter_expr "}"
          | filter_atom
 ?filter_atom: comparison
             | current_value_comparison
+            | current_value_in_expr
             | in_expr
             | "(" filter_expr ")"
 
@@ -72,6 +73,9 @@ comparison: field_path COMPARISON_OP filter_value
 // The right side deliberately excludes field paths because a derived scalar
 // has no containing object from which to resolve them.
 current_value_comparison: COMPARISON_OP current_filter_value
+
+// Membership test against the current scalar or primitive array element.
+current_value_in_expr: "in" "[" current_filter_value ("," current_filter_value)* "]"
 
 // In expression: field in [val1, val2, ...]
 in_expr: field_path "in" "[" filter_value ("," filter_value)* "]"

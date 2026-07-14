@@ -1,7 +1,7 @@
 """Tests for message path validator."""
 
 import pytest
-from ros_parser import Field, MessageDefinition, Type
+from ros_parser import Constant, Field, MessageDefinition, Type
 from ros_parser.message_path import ValidationError, parse_message_path
 
 
@@ -305,6 +305,88 @@ class TestFilterValidation:
 
         with pytest.raises(ValidationError, match=r"current-value filter.*primitive"):
             parse_message_path("/topic.point{<=30}").validate(msgdef, definitions)
+
+    def test_current_value_in_filter_valid_on_primitive(self) -> None:
+        msgdef = MessageDefinition(
+            name="test_msgs/Message",
+            fields_all=[Field(Type(type_name="int32"), "value")],
+        )
+
+        parse_message_path("/topic.value{in [1, 3]}").validate(
+            msgdef, {"test_msgs/Message": msgdef}
+        )
+
+    def test_enum_name_filter_resolves_schema_constant(self) -> None:
+        uint8 = Type(type_name="uint8")
+        msgdef = MessageDefinition(
+            name="test_msgs/State",
+            fields_all=[
+                Constant(uint8, "MOVING", 2),
+                Field(uint8, "status"),
+            ],
+        )
+        path = parse_message_path("/topic{status==MOVING}")
+
+        path.validate(msgdef, {"test_msgs/State": msgdef})
+
+        assert path.apply({"status": 2}) == {"status": 2}
+        assert path.apply({"status": 1}) is None
+
+    def test_enum_name_filter_is_case_sensitive(self) -> None:
+        uint8 = Type(type_name="uint8")
+        msgdef = MessageDefinition(
+            name="test_msgs/State",
+            fields_all=[
+                Constant(uint8, "MOVING", 2),
+                Field(uint8, "status"),
+            ],
+        )
+
+        with pytest.raises(ValidationError, match="moving"):
+            parse_message_path("/topic{status==moving}").validate(
+                msgdef, {"test_msgs/State": msgdef}
+            )
+
+    def test_nested_enum_name_uses_field_owner_constants(self) -> None:
+        uint8 = Type(type_name="uint8")
+        state_def = MessageDefinition(
+            name="test_msgs/State",
+            fields_all=[
+                Constant(uint8, "MOVING", 2),
+                Field(uint8, "status"),
+            ],
+        )
+        root_def = MessageDefinition(
+            name="test_msgs/Message",
+            fields_all=[Field(Type(type_name="State", package_name="test_msgs"), "state")],
+        )
+        definitions = {
+            "test_msgs/Message": root_def,
+            "test_msgs/State": state_def,
+        }
+        path = parse_message_path("/topic{state.status==MOVING}")
+
+        path.validate(root_def, definitions)
+
+        assert path.apply({"state": {"status": 2}}) == {"state": {"status": 2}}
+
+    def test_enum_names_work_in_membership_filter(self) -> None:
+        uint8 = Type(type_name="uint8")
+        msgdef = MessageDefinition(
+            name="test_msgs/State",
+            fields_all=[
+                Constant(uint8, "STOPPED", 1),
+                Constant(uint8, "MOVING", 2),
+                Field(uint8, "status"),
+            ],
+        )
+        path = parse_message_path("/topic{status in [STOPPED, MOVING]}")
+
+        path.validate(msgdef, {"test_msgs/State": msgdef})
+
+        assert path.apply({"status": 1}) == {"status": 1}
+        assert path.apply({"status": 2}) == {"status": 2}
+        assert path.apply({"status": 3}) is None
 
     def test_filter_with_field_path_valid(self):
         """Test filter with field path."""

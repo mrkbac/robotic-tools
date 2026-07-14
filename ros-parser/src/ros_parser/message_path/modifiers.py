@@ -15,6 +15,7 @@ from operator import neg
 from typing import Any
 
 from ros_parser.message_path.models import (
+    _ARRAY_TYPES,
     _FLOAT64_TYPE,
     _MISSING,
     MessagePathError,
@@ -175,15 +176,34 @@ def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
     )
 
 
-@modifier("norm", kind="object", requires_fields=("x", "y", "z"), return_type=_FLOAT64_TYPE)
+@modifier("length", kind="object", requires_array=True, return_type=_INT64_TYPE)
+def _length(obj: Any) -> int:
+    """Return the number of elements in an array or typed array."""
+    return len(obj)
+
+
+@modifier(
+    "norm",
+    kind="object",
+    requires_fields=("x", "y"),
+    accepts_array=True,
+    return_type=_FLOAT64_TYPE,
+)
 def _norm(obj: Any) -> float:
-    """Euclidean norm of object with x/y/z fields."""
+    """Euclidean norm of a numeric array or object with x/y and optional z fields."""
+    if isinstance(obj, _ARRAY_TYPES):
+        return math.sqrt(sum(value * value for value in obj))
+
     try:
         x = _get_field(obj, "x")
         y = _get_field(obj, "y")
-        z = _get_field(obj, "z")
     except MessagePathError:
-        raise MessagePathError("norm requires an object with x, y, z fields") from None
+        raise MessagePathError(
+            "norm requires a numeric array or object with x, y and optional z fields"
+        ) from None
+    z = _lookup_field(obj, "z")
+    if z is _MISSING:
+        z = 0
     return math.sqrt(x * x + y * y + z * z)
 
 
@@ -212,17 +232,20 @@ def _quaternion_to_euler(obj: Any) -> EulerAngles:
     return EulerAngles(roll=roll, pitch=pitch, yaw=yaw)
 
 
-@modifier("quat", kind="object", requires_fields=("x", "y", "z"), return_def=_QUAT_RETURN_DEF)
+@modifier(
+    "quat",
+    kind="object",
+    requires_fields=("roll", "pitch", "yaw"),
+    return_def=_QUAT_RETURN_DEF,
+)
 def _euler_to_quaternion(obj: Any) -> Quaternion:
-    """Convert (roll, pitch, yaw) stored as (x, y, z) to Quaternion(x, y, z, w)."""
+    """Convert roll/pitch/yaw fields to Quaternion(x, y, z, w)."""
     try:
-        roll = _get_field(obj, "x")
-        pitch = _get_field(obj, "y")
-        yaw = _get_field(obj, "z")
+        roll = _get_field(obj, "roll")
+        pitch = _get_field(obj, "pitch")
+        yaw = _get_field(obj, "yaw")
     except MessagePathError:
-        raise MessagePathError(
-            "quat requires an object with x, y, z fields (roll, pitch, yaw)"
-        ) from None
+        raise MessagePathError("quat requires an object with roll, pitch, yaw fields") from None
 
     cr, sr = math.cos(roll / 2), math.sin(roll / 2)
     cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)

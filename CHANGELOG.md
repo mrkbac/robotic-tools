@@ -6,6 +6,16 @@ User-facing notes for releases.
 
 ## Unreleased
 
+### ros-parser
+
+- MessagePath filters now short-circuit rejected values, resolve ROS enum names
+  from message constants, and support current-value membership expressions such
+  as `{in [1, 3, $selected]}`.
+- MessagePath functions add `.@length`; `.@norm` now accepts numeric arrays and
+  vector objects with `x`, `y`, and optional `z` fields.
+- Breaking: `.@quat` now requires Foxglove-compatible `roll`, `pitch`, and `yaw`
+  input fields instead of treating `x`, `y`, and `z` as Euler angles.
+
 ### pymcap-cli
 
 - Breaking: file-reading commands now use one message-filter convention. Use

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, cast
 
-from ros_parser.models import MessageDefinition, Type
+from ros_parser.models import MessageDefinition, PrimitiveValue, Type
 
 
 class MessagePathError(Exception):
@@ -295,13 +295,29 @@ class FilterFieldRef:
 
     field_path: str
     _parts: tuple[str, ...] = field(init=False, repr=False, compare=False)
+    _constant_value: PrimitiveValue | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _is_constant: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._parts = tuple(self.field_path.split("."))
 
     def resolve(self, obj: Any) -> Any:
         """Resolve the field path against an object."""
+        if self._is_constant:
+            return self._constant_value
         return _resolve_parts(obj, self._parts)
+
+    def bind_constant(self, value: PrimitiveValue) -> None:
+        """Resolve this ambiguous bare identifier as a schema enum constant."""
+        self._constant_value = value
+        self._is_constant = True
+
+    def bind_field(self) -> None:
+        """Resolve this identifier as a cross-field reference."""
+        self._constant_value = None
+        self._is_constant = False
 
 
 FilterValue = int | float | str | bool | Variable | FilterFieldRef
@@ -392,6 +408,17 @@ class CurrentValueComparison(FilterExpression):
     def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
         compare_value = _resolve_filter_value(self.value, obj, variables)
         return _compare(obj, self.operator, compare_value)
+
+
+@dataclass
+class CurrentValueInExpression(FilterExpression):
+    """A membership test against the current scalar or primitive sequence element."""
+
+    values: list[CurrentFilterValue]
+
+    def evaluate(self, obj: Any, variables: _VariableStore) -> bool:
+        resolved = [_resolve_filter_value(value, obj, variables) for value in self.values]
+        return obj in resolved
 
 
 @dataclass
@@ -495,27 +522,69 @@ class Filter(Action):
     ) -> None:
         """Recursively validate all field paths in a filter expression."""
         if isinstance(expr, Comparison):
-            _validate_field_path(expr.field_path, validate_type, validate_msgdef, all_definitions)
+            field_type, field_owner = _validate_field_path(
+                expr.field_path, validate_type, validate_msgdef, all_definitions
+            )
             if isinstance(expr.value, FilterFieldRef):
-                _validate_field_path(
-                    expr.value.field_path, validate_type, validate_msgdef, all_definitions
+                self._validate_filter_field_ref(
+                    expr.value,
+                    field_type,
+                    field_owner,
+                    validate_type,
+                    validate_msgdef,
+                    all_definitions,
                 )
-        elif isinstance(expr, CurrentValueComparison):
+        elif isinstance(expr, (CurrentValueComparison, CurrentValueInExpression)):
             if not validate_type.is_primitive:
                 raise ValidationError(
                     "current-value filter can only be applied to a primitive scalar "
                     f"or array of primitives, got '{validate_type}'"
                 )
         elif isinstance(expr, InExpression):
-            _validate_field_path(expr.field_path, validate_type, validate_msgdef, all_definitions)
+            field_type, field_owner = _validate_field_path(
+                expr.field_path, validate_type, validate_msgdef, all_definitions
+            )
             for val in expr.values:
                 if isinstance(val, FilterFieldRef):
-                    _validate_field_path(
-                        val.field_path, validate_type, validate_msgdef, all_definitions
+                    self._validate_filter_field_ref(
+                        val,
+                        field_type,
+                        field_owner,
+                        validate_type,
+                        validate_msgdef,
+                        all_definitions,
                     )
         elif isinstance(expr, CompoundFilter):
             for child in expr.children:
                 self._validate_expression(child, validate_type, validate_msgdef, all_definitions)
+
+    def _validate_filter_field_ref(
+        self,
+        ref: FilterFieldRef,
+        compared_type: "Type",
+        compared_owner: "MessageDefinition",
+        validate_type: "Type",
+        validate_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> None:
+        """Resolve a bare identifier as a field reference or schema enum constant."""
+        try:
+            _validate_field_path(ref.field_path, validate_type, validate_msgdef, all_definitions)
+        except ValidationError:
+            constant = next(
+                (
+                    item
+                    for item in compared_owner.constants
+                    if item.name == ref.field_path
+                    and item.type.type_name == compared_type.type_name
+                ),
+                None,
+            )
+            if "." in ref.field_path or constant is None:
+                raise
+            ref.bind_constant(constant.value)
+        else:
+            ref.bind_field()
 
 
 # --- Math modifier framework -------------------------------------------------
@@ -524,6 +593,18 @@ class Filter(Action):
 # with the consumer instead of in separate parallel tables.
 
 _FLOAT64_TYPE = Type(type_name="float64", package_name=None)
+_NUMERIC_TYPE_NAMES = {
+    "int8",
+    "uint8",
+    "int16",
+    "uint16",
+    "int32",
+    "uint32",
+    "int64",
+    "uint64",
+    "float32",
+    "float64",
+}
 
 
 # How a modifier is dispatched/validated:
@@ -541,6 +622,7 @@ class _Modifier:
     kind: ModifierKind = "scalar"
     requires_fields: tuple[str, ...] = ()
     requires_array: bool = False
+    accepts_array: bool = False
     return_type: "Type | None" = None
     return_def: "MessageDefinition | None" = None
 
@@ -554,6 +636,7 @@ def modifier(
     kind: ModifierKind = "scalar",
     requires_fields: tuple[str, ...] = (),
     requires_array: bool = False,
+    accepts_array: bool = False,
     return_type: "Type | None" = None,
     return_def: "MessageDefinition | None" = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -561,7 +644,13 @@ def modifier(
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         _MODIFIERS[name] = _Modifier(
-            func, kind, requires_fields, requires_array, return_type, return_def
+            func=func,
+            kind=kind,
+            requires_fields=requires_fields,
+            requires_array=requires_array,
+            accepts_array=accepts_array,
+            return_type=return_type,
+            return_def=return_def,
         )
         return func
 
@@ -647,12 +736,21 @@ class MathModifier(Action):
                     f"Math modifier '{op}' requires an array, got '{current_type}'"
                 )
             return
-        # norm/rpy/quat/to_sec/to_nsec need a single message value with given fields
-        required = spec.requires_fields
         if current_type.is_array:
+            if spec.accepts_array:
+                if (
+                    not current_type.is_primitive
+                    or current_type.type_name not in _NUMERIC_TYPE_NAMES
+                ):
+                    raise ValidationError(
+                        f"Math modifier '{op}' requires a numeric array, got '{current_type}'"
+                    )
+                return
             raise ValidationError(
                 f"Math modifier '{op}' cannot be applied to array type '{current_type}'"
             )
+        # rpy/quat/to_sec/to_nsec and object-form norm need a message with known fields
+        required = spec.requires_fields
         if current_type.is_primitive:
             raise ValidationError(
                 f"Math modifier '{op}' requires a message with fields {', '.join(required)}, "
@@ -714,19 +812,7 @@ class MathModifier(Action):
             )
 
         # Check if it's a numeric primitive (int, float, double, etc.)
-        numeric_types = {
-            "int8",
-            "uint8",
-            "int16",
-            "uint16",
-            "int32",
-            "uint32",
-            "int64",
-            "uint64",
-            "float32",
-            "float64",
-        }
-        if working_type.type_name not in numeric_types:
+        if working_type.type_name not in _NUMERIC_TYPE_NAMES:
             raise ValidationError(
                 f"Math modifier '{self.operation}' can only be applied to numeric types, "
                 f"got '{working_type.type_name}'"
@@ -760,6 +846,8 @@ class MessagePath:
 
         result = obj
         for segment in self.segments:
+            if result is None:
+                return None
             result = segment.apply(result, variables)
         return result
 
@@ -777,6 +865,14 @@ class MessagePath:
         Raises:
             ValidationError: If the path is invalid with detailed error message
         """
+        self.resolve_type(message_def, all_definitions)
+
+    def resolve_type(
+        self,
+        message_def: "MessageDefinition",
+        all_definitions: dict[str, "MessageDefinition"],
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        """Validate this path and return its resulting type and message definition."""
 
         # Start with a pseudo-type representing the root message
         current_type = Type(
@@ -826,17 +922,20 @@ class MessagePath:
             elif isinstance(segment, ArrayIndex):
                 in_array_context = False
 
+        return current_type, current_msgdef
+
 
 def _validate_field_path(
     field_path: str,
     validate_type: "Type",
     validate_msgdef: "MessageDefinition | None",
     all_definitions: dict[str, "MessageDefinition"],
-) -> None:
+) -> tuple["Type", "MessageDefinition"]:
     """Validate a field path against a type schema."""
     field_parts = field_path.split(".")
     working_type = validate_type
     working_msgdef = validate_msgdef
+    owner_msgdef: MessageDefinition | None = None
 
     for part in field_parts:
         if working_type.is_primitive:
@@ -855,6 +954,8 @@ def _validate_field_path(
         if working_msgdef is None:
             working_msgdef = _get_message_definition(working_type, all_definitions)
 
+        owner_msgdef = working_msgdef
+
         field = next((f for f in working_msgdef.fields if f.name == part), None)
         if not field:
             available = [f.name for f in working_msgdef.fields]
@@ -869,6 +970,10 @@ def _validate_field_path(
         if not working_type.is_primitive and not working_type.is_array:
             with contextlib.suppress(ValidationError):
                 working_msgdef = _get_message_definition(working_type, all_definitions)
+
+    if owner_msgdef is None:
+        raise ValidationError(f"Filter field path '{field_path}' does not resolve to a field")
+    return working_type, owner_msgdef
 
 
 def _get_message_definition(

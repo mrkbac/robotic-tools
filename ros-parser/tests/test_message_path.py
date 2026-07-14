@@ -14,6 +14,7 @@ from ros_parser.message_path import (
     ComparisonOperator,
     CompoundFilter,
     CurrentValueComparison,
+    CurrentValueInExpression,
     FieldAccess,
     Filter,
     FilterFieldRef,
@@ -366,6 +367,35 @@ class TestExtendedFilters:
 
         assert path.apply({"linear_acceleration": {"x": 10.0, "y": 20.0, "z": 20.0}}) == 30
         assert path.apply({"linear_acceleration": {"x": 20.0, "y": 20.0, "z": 20.0}}) is None
+
+    def test_current_value_in_expression(self) -> None:
+        path = parse_message_path("/topic.value{in [1, 3, $selected]}")
+
+        expression = path.segments[-1].expression
+        assert isinstance(expression, CurrentValueInExpression)
+        assert path.apply({"value": 1}, {"selected": 5}) == 1
+        assert path.apply({"value": 5}, {"selected": 5}) == 5
+        assert path.apply({"value": 2}, {"selected": 5}) is None
+
+    def test_current_value_in_expression_filters_primitive_array(self) -> None:
+        path = parse_message_path("/topic.values[:]{in [1, 3]}")
+
+        assert path.apply({"values": [1, 2, 3, 4]}) == [1, 3]
+
+    def test_rejected_filter_short_circuits_field_access(self) -> None:
+        path = parse_message_path("/topic{ok==true}.value")
+
+        assert path.apply({"ok": False, "value": 10}) is None
+
+    def test_rejected_current_value_filter_short_circuits_modifier(self) -> None:
+        path = parse_message_path("/topic.value{>0}.@mul(2)")
+
+        assert path.apply({"value": -1}) is None
+
+    def test_rejected_current_value_filter_short_circuits_chained_filter(self) -> None:
+        path = parse_message_path("/topic.value{>=-40}{<=125}")
+
+        assert path.apply({"value": -41}) is None
 
     def test_or_expression(self):
         """Test OR boolean logic in filters."""
@@ -1921,6 +1951,16 @@ class TestObjectFunctions:
         result = modifier.apply({"x": 1.0, "y": 2.0, "z": 2.0}, {})
         assert abs(result - 3.0) < 1e-10
 
+    def test_norm_with_xy_dict(self):
+        modifier = MathModifier(operation="norm", arguments=[])
+        result = modifier.apply({"x": 3.0, "y": 4.0}, {})
+        assert abs(result - 5.0) < 1e-10
+
+    def test_norm_with_numeric_array(self):
+        modifier = MathModifier(operation="norm", arguments=[])
+        result = modifier.apply([2.0, 3.0, 6.0], {})
+        assert abs(result - 7.0) < 1e-10
+
     def test_norm_unit_vector(self):
         modifier = MathModifier(operation="norm", arguments=[])
         result = modifier.apply({"x": 0.0, "y": 0.0, "z": 1.0}, {})
@@ -1971,7 +2011,7 @@ class TestObjectFunctions:
 
     def test_quat_identity(self):
         modifier = MathModifier(operation="quat", arguments=[])
-        result = modifier.apply({"x": 0.0, "y": 0.0, "z": 0.0}, {})
+        result = modifier.apply({"roll": 0.0, "pitch": 0.0, "yaw": 0.0}, {})
         assert abs(result.x) < 1e-10
         assert abs(result.y) < 1e-10
         assert abs(result.z) < 1e-10
@@ -1980,12 +2020,12 @@ class TestObjectFunctions:
     def test_quat_field_access(self):
         """Test that .@quat result supports .x, .y, .z, .w field access."""
         path = parse_message_path("/topic.euler.@quat.w")
-        result = path.apply({"euler": {"x": 0.0, "y": 0.0, "z": 0.0}})
+        result = path.apply({"euler": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}})
         assert abs(result - 1.0) < 1e-10
 
     def test_quat_rpy_roundtrip(self):
         """Test that quat -> rpy -> quat is a roundtrip."""
-        original_rpy = {"x": 0.1, "y": 0.2, "z": 0.3}
+        original_rpy = {"roll": 0.1, "pitch": 0.2, "yaw": 0.3}
 
         quat_mod = MathModifier(operation="quat", arguments=[])
         quat_result = quat_mod.apply(original_rpy, {})
@@ -1998,6 +2038,42 @@ class TestObjectFunctions:
         assert abs(rpy_result.roll - 0.1) < 1e-10
         assert abs(rpy_result.pitch - 0.2) < 1e-10
         assert abs(rpy_result.yaw - 0.3) < 1e-10
+
+    def test_rpy_quat_path_roundtrip(self):
+        path = parse_message_path("/topic.orientation.@rpy.@quat")
+        angle = math.pi / 4
+        original = {
+            "orientation": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": math.sin(angle / 2),
+                "w": math.cos(angle / 2),
+            }
+        }
+
+        result = path.apply(original)
+
+        assert abs(result.x) < 1e-10
+        assert abs(result.y) < 1e-10
+        assert abs(result.z - original["orientation"]["z"]) < 1e-10
+        assert abs(result.w - original["orientation"]["w"]) < 1e-10
+
+    def test_quat_rejects_legacy_xyz_input(self):
+        modifier = MathModifier(operation="quat", arguments=[])
+
+        with pytest.raises(MessagePathError, match="roll, pitch, yaw"):
+            modifier.apply({"x": 0.1, "y": 0.2, "z": 0.3}, {})
+
+    def test_length_list(self):
+        modifier = MathModifier(operation="length", arguments=[])
+
+        assert modifier.apply([1, 2, 3], {}) == 3
+
+    def test_length_memoryview(self):
+        modifier = MathModifier(operation="length", arguments=[])
+        values = memoryview(array.array("d", [1.0, 2.0]))
+
+        assert modifier.apply(values, {}) == 2
 
     def test_magnitude_list(self):
         modifier = MathModifier(operation="magnitude", arguments=[])
@@ -2021,8 +2097,8 @@ class TestObjectFunctions:
 
     def test_norm_missing_field(self):
         modifier = MathModifier(operation="norm", arguments=[])
-        with pytest.raises(MessagePathError, match="x, y, z"):
-            modifier.apply({"x": 1.0, "y": 2.0}, {})
+        with pytest.raises(MessagePathError, match="x, y"):
+            modifier.apply({"x": 1.0}, {})
 
     def test_rpy_missing_field(self):
         modifier = MathModifier(operation="rpy", arguments=[])
@@ -2197,6 +2273,43 @@ class TestMathModifierValidation:
         result_type, _ = mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
         assert result_type.type_name == "float64"
 
+    def test_validate_norm_on_xy_type(self):
+        vector_def = MessageDefinition(
+            name="geometry_msgs/Vector2",
+            fields_all=[
+                Field(type=_FLOAT64_TYPE, name="x"),
+                Field(type=_FLOAT64_TYPE, name="y"),
+            ],
+        )
+        vector_type = Type(type_name="Vector2", package_name="geometry_msgs")
+        mod = MathModifier(operation="norm", arguments=[])
+
+        result_type, _ = mod.validate(vector_type, vector_def, _ALL_DEFS)
+
+        assert result_type.type_name == "float64"
+
+    def test_validate_norm_on_numeric_array(self):
+        mod = MathModifier(operation="norm", arguments=[])
+
+        result_type, result_def = mod.validate(_INT32_ARRAY_TYPE, None, _ALL_DEFS)
+
+        assert result_type.type_name == "float64"
+        assert result_def is None
+
+    def test_validate_length_returns_int64(self):
+        mod = MathModifier(operation="length", arguments=[])
+
+        result_type, result_def = mod.validate(_INT32_ARRAY_TYPE, None, _ALL_DEFS)
+
+        assert result_type.type_name == "int64"
+        assert result_def is None
+
+    def test_validate_length_rejects_scalar(self):
+        mod = MathModifier(operation="length", arguments=[])
+
+        with pytest.raises(ValidationError, match="requires an array"):
+            mod.validate(_INT32_TYPE, None, _ALL_DEFS)
+
     def test_validate_rpy_returns_euler_type(self):
         mod = MathModifier(operation="rpy", arguments=[])
         result_type, result_def = mod.validate(_QUAT_TYPE, _QUAT_MSGDEF, _ALL_DEFS)
@@ -2209,6 +2322,29 @@ class TestMathModifierValidation:
         """rpy needs x, y, z, w; a Point (x, y, z) must be rejected."""
         mod = MathModifier(operation="rpy", arguments=[])
         with pytest.raises(ValidationError, match="missing w"):
+            mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_quat_requires_named_euler_fields(self):
+        euler_def = MessageDefinition(
+            name="EulerAngles",
+            fields_all=[
+                Field(type=_FLOAT64_TYPE, name="roll"),
+                Field(type=_FLOAT64_TYPE, name="pitch"),
+                Field(type=_FLOAT64_TYPE, name="yaw"),
+            ],
+        )
+        euler_type = Type(type_name="EulerAngles")
+        mod = MathModifier(operation="quat", arguments=[])
+
+        result_type, result_def = mod.validate(euler_type, euler_def, _ALL_DEFS)
+
+        assert result_type.type_name == "Quaternion"
+        assert result_def is not None
+
+    def test_validate_quat_rejects_legacy_xyz_type(self):
+        mod = MathModifier(operation="quat", arguments=[])
+
+        with pytest.raises(ValidationError, match="roll, pitch, yaw"):
             mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
 
     def test_validate_to_sec_on_primitive_raises(self):
@@ -2294,6 +2430,14 @@ class TestMessagePathValidation:
         bad_path = parse_message_path("/topic.w")
         with pytest.raises(ValidationError, match="not found"):
             bad_path.validate(_POINT_MSGDEF, _ALL_DEFS)
+
+    def test_resolve_type_returns_final_modifier_type(self):
+        path = parse_message_path("/topic.@norm")
+
+        result_type, result_definition = path.resolve_type(_POINT_MSGDEF, _ALL_DEFS)
+
+        assert result_type.type_name == "float64"
+        assert result_definition is None
 
     def test_validate_nested_field_resolves_type(self):
         nested_def = MessageDefinition(
