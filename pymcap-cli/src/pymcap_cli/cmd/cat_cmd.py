@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from ros_parser.message_path import (
+    MessagePath,
     MessagePathError,
     parse_message_path,
 )
@@ -58,10 +59,14 @@ def cat(
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
     query: Annotated[
-        str | None,
+        list[str] | None,
         Parameter(
             name=["-q", "--query"],
             group=FILTERING_GROUP,
+            help=(
+                "MessagePath expression scoping output to one topic and/or subfield. "
+                "Repeat for additional topics."
+            ),
         ),
     ] = None,
     grep: Annotated[
@@ -166,6 +171,9 @@ def cat(
       # Query specific field using message path
       pymcap-cli cat recording.mcap --query '/odom.pose.position.x'
 
+      # Query fields from multiple topics
+      pymcap-cli cat recording.mcap -q '/odom.pose' -q '/imu.angular_velocity'
+
       # Filter array elements
       pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
 
@@ -188,13 +196,22 @@ def cat(
         logger.error(str(exc))  # noqa: TRY400
         return 1
 
-    parsed_query = None
-    if query:
+    parsed_queries: dict[str, MessagePath] = {}
+    query_reprs: dict[str, str] = {}
+    for query_repr in query or []:
         try:
-            parsed_query = parse_message_path(query)
+            parsed_query = parse_message_path(query_repr)
         except Exception:
             logger.exception("Invalid query syntax")
             return 1
+        if parsed_query.topic in parsed_queries:
+            logger.error(
+                f"Only one --query per topic is supported; "
+                f"topic '{parsed_query.topic}' was specified more than once"
+            )
+            return 1
+        parsed_queries[parsed_query.topic] = parsed_query
+        query_reprs[parsed_query.topic] = query_repr
 
     grep_pattern: re.Pattern[str] | None = None
     if grep:
@@ -209,6 +226,7 @@ def cat(
 
     message_count = 0
     validated_topics: set[str] = set()
+    summary_query_topics: set[str] | None = None
     schema_cache = SchemaCache()
     previous_by_topic: dict[str, Any] = {}
 
@@ -216,7 +234,7 @@ def cat(
         channel: Channel,
         _schema: Schema | None,
     ) -> bool:
-        return parsed_query is None or channel.topic == parsed_query.topic
+        return not parsed_queries or channel.topic in parsed_queries
 
     should_include_message = message_filter.create_channel_predicate(base_predicate)
 
@@ -235,10 +253,14 @@ def cat(
     try:
         with open_input(file) as (input_stream, file_size), ExitStack() as stack:
             try:
-                resolved_filter = message_filter.resolve(get_summary(input_stream))
+                summary = get_summary(input_stream)
+                resolved_filter = message_filter.resolve(summary)
             except ValueError as exc:
                 logger.error(str(exc))  # noqa: TRY400
                 return 1
+            if summary is not None:
+                available_topics = {channel.topic for channel in summary.channels.values()}
+                summary_query_topics = parsed_queries.keys() & available_topics
             stream: IO[bytes] = input_stream
             if writing_to_file and file_size:
                 progress = file_progress("[bold blue]Reading MCAP...")
@@ -266,8 +288,10 @@ def cat(
                 if limit is not None and message_count >= limit:
                     break
 
+                parsed_query = parsed_queries.get(msg.channel.topic)
+
                 # Validate query against schema on first message of each topic
-                if parsed_query and msg.channel.topic not in validated_topics:
+                if parsed_query is not None and msg.channel.topic not in validated_topics:
                     validated_topics.add(msg.channel.topic)
 
                     if msg.schema is None:
@@ -276,12 +300,15 @@ def cat(
                             "(no schema available)"
                         )
                     elif not schema_cache.validate_query(
-                        parsed_query, msg.schema, msg.channel.topic, query_repr=query or ""
+                        parsed_query,
+                        msg.schema,
+                        msg.channel.topic,
+                        query_repr=query_reprs[msg.channel.topic],
                     ):
                         return 1
 
                 # Apply query filter
-                if parsed_query:
+                if parsed_query is not None:
                     try:
                         data = parsed_query.apply(msg.decoded_message)
                         if query_result_is_empty(data):
@@ -349,8 +376,17 @@ def cat(
         if writing_to_file:
             logger.info(f"Wrote {message_count:,} messages to {output}")
 
-        if parsed_query and not validated_topics:
-            logger.error(f"Topic '{parsed_query.topic}' not found in MCAP file")
+        found_query_topics = (
+            summary_query_topics if summary_query_topics is not None else validated_topics
+        )
+        missing_query_topics = parsed_queries.keys() - found_query_topics
+        if missing_query_topics:
+            if len(missing_query_topics) == 1:
+                missing_topic = next(iter(missing_query_topics))
+                logger.error(f"Topic '{missing_topic}' not found in MCAP file")
+            else:
+                topics = ", ".join(f"'{topic}'" for topic in sorted(missing_query_topics))
+                logger.error(f"Topics {topics} not found in MCAP file")
             return 1
 
     except KeyboardInterrupt:

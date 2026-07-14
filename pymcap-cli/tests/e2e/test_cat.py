@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from pymcap_cli.cli import app
 from pymcap_cli.cmd.cat_cmd import cat
 
 
@@ -218,15 +219,46 @@ class TestCat:
 class TestCatQueryValidation:
     """Test query validation in cat command."""
 
+    def test_query_option_is_repeatable(self, multi_topic_mcap: Path, capsys, monkeypatch) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            app(
+                [
+                    "cat",
+                    str(multi_topic_mcap),
+                    "--query",
+                    "/camera/front.msg",
+                    "--query",
+                    "/lidar/points.msg",
+                    "--limit",
+                    "2",
+                ]
+            )
+
+        assert exc_info.value.code == 0
+        messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [message["topic"] for message in messages] == [
+            "/camera/front",
+            "/lidar/points",
+        ]
+        assert [message["message"] for message in messages] == [0, 0]
+
+    def test_query_rejects_multiple_paths_for_one_topic(self, simple_mcap: Path, capsys) -> None:
+        exit_code = cat(file=str(simple_mcap), query=["/test.i", "/test"])
+
+        assert exit_code == 1
+        assert "Only one --query per topic" in capsys.readouterr().err
+
     def test_query_valid_field(self, image_small_mcap: Path):
         """Test that valid query on existing field works."""
-        cat(file=str(image_small_mcap), query="/camera/image_compressed.header", limit=1)
+        cat(file=str(image_small_mcap), query=["/camera/image_compressed.header"], limit=1)
         # Should output successfully
 
     def test_query_invalid_field_fails(self, image_small_mcap: Path, capsys):
         """Test that query on non-existent field fails with error."""
         exit_code = cat(
-            file=str(image_small_mcap), query="/camera/image_compressed.nonexistent", limit=1
+            file=str(image_small_mcap), query=["/camera/image_compressed.nonexistent"], limit=1
         )
 
         assert exit_code == 1
@@ -236,14 +268,18 @@ class TestCatQueryValidation:
 
     def test_query_nested_field_valid(self, image_small_mcap: Path):
         """Test valid nested field access."""
-        cat(file=str(image_small_mcap), query="/camera/image_compressed.header.stamp.sec", limit=1)
+        cat(
+            file=str(image_small_mcap),
+            query=["/camera/image_compressed.header.stamp.sec"],
+            limit=1,
+        )
 
     def test_query_current_value_filter_skips_rejected_scalars(
         self, simple_mcap: Path, capsys, monkeypatch
     ) -> None:
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)
 
-        exit_code = cat(file=str(simple_mcap), query="/test.i{>=99}")
+        exit_code = cat(file=str(simple_mcap), query=["/test.i{>=99}"])
 
         assert exit_code == 0
         lines = capsys.readouterr().out.strip().splitlines()
@@ -254,7 +290,7 @@ class TestCatQueryValidation:
         """Test invalid nested field access fails."""
         exit_code = cat(
             file=str(image_small_mcap),
-            query="/camera/image_compressed.header.invalid_field",
+            query=["/camera/image_compressed.header.invalid_field"],
             limit=1,
         )
 
@@ -266,7 +302,7 @@ class TestCatQueryValidation:
         """Test accessing field on primitive type fails."""
         exit_code = cat(
             file=str(image_small_mcap),
-            query="/camera/image_compressed.format.something",
+            query=["/camera/image_compressed.format.something"],
             limit=1,
         )
 
@@ -277,7 +313,7 @@ class TestCatQueryValidation:
     def test_query_array_index_without_array_fails(self, image_small_mcap: Path, capsys):
         """Test indexing non-array field fails."""
         exit_code = cat(
-            file=str(image_small_mcap), query="/camera/image_compressed.format[0]", limit=1
+            file=str(image_small_mcap), query=["/camera/image_compressed.format[0]"], limit=1
         )
 
         assert exit_code == 1
@@ -289,13 +325,13 @@ class TestCatQueryValidation:
         # Assuming multi_topic_mcap has messages with numeric fields
         # This might fail if the topic doesn't exist, but should fail gracefully
         # The important thing is it doesn't crash
-        exit_code = cat(file=str(multi_topic_mcap), query="/odom.pose", limit=1)
+        exit_code = cat(file=str(multi_topic_mcap), query=["/odom.pose"], limit=1)
         assert exit_code in [0, 1]
 
     def test_validation_error_shows_helpful_message(self, image_small_mcap: Path, capsys):
         """Test that validation errors show helpful messages with available fields."""
         exit_code = cat(
-            file=str(image_small_mcap), query="/camera/image_compressed.bad_field", limit=1
+            file=str(image_small_mcap), query=["/camera/image_compressed.bad_field"], limit=1
         )
 
         assert exit_code == 1
