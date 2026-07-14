@@ -392,6 +392,10 @@ CodecOption = Annotated[
     Literal["h264", "h265", "vp9", "av1"],
     Parameter(name=["--codec"], group=ENCODING_GROUP),
 ]
+OptionalCodecOption = Annotated[
+    Literal["h264", "h265", "vp9", "av1"] | None,
+    Parameter(name=["--codec"], group=ENCODING_GROUP, help="Preset default: h264."),
+]
 VideoCodecOption = Annotated[
     VideoCodec,
     Parameter(name=["--codec"], group=ENCODING_GROUP),
@@ -411,6 +415,10 @@ ScaleOption = Annotated[
 BackendOption = Annotated[
     EncoderMode,
     Parameter(name=["--backend"], group=ENCODING_GROUP),
+]
+OptionalBackendOption = Annotated[
+    Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"] | None,
+    Parameter(name=["--backend"], group=ENCODING_GROUP, help="Preset default: auto."),
 ]
 ImageFormatOption = Annotated[
     Literal["video", "jpeg", "png", "none"],
@@ -456,7 +464,19 @@ PointCloudDropInvalidOption = Annotated[
         group=POINTCLOUD_GROUP,
     ),
 ]
+OptionalPointCloudDropInvalidOption = Annotated[
+    bool | None,
+    Parameter(
+        name=["--pointcloud-drop-invalid"],
+        negative="--no-pointcloud-drop-invalid",
+        group=POINTCLOUD_GROUP,
+    ),
+]
 PointCloudSortFieldOption = Annotated[
+    str | None,
+    Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
+]
+OptionalPointCloudSortFieldOption = Annotated[
     str | None,
     Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
 ]

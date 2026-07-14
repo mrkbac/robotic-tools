@@ -65,7 +65,7 @@ class PlaybackStats:
     max_lag: float = 0.0
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PlaybackClock:
     record_origin_ns: int
     wall_origin: float
@@ -80,6 +80,9 @@ class PlaybackClock:
         wall_now = time.monotonic() if now is None else now
         elapsed_ns = int((wall_now - self.wall_origin) * self.speed * 1_000_000_000)
         return min(self.record_origin_ns + max(0, elapsed_ns), self.recording_end_ns)
+
+    def delay(self, duration: float) -> None:
+        self.wall_origin += duration
 
 
 class PlaybackSink(Protocol):
@@ -98,6 +101,38 @@ class PlaybackSink(Protocol):
     async def close(self) -> None: ...
 
     def status_rows(self) -> tuple[tuple[str, str], ...]: ...
+
+    def is_channel_active(self, channel: PlaybackChannel) -> bool: ...
+
+    async def wait_until_active(self) -> float: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackOutput:
+    channel: PlaybackChannel
+    timestamp_ns: int
+    payload: bytes | memoryview
+
+
+class PlaybackTransformSession(Protocol):
+    async def transform(
+        self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
+    ) -> tuple[PlaybackOutput, ...]: ...
+
+    async def finish(self) -> tuple[PlaybackOutput, ...]: ...
+
+    async def deactivate(self, channel: PlaybackChannel) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class PlaybackTransformPlan(Protocol):
+    mode: str
+    channels: tuple[PlaybackChannel, ...]
+
+    def create_session(self) -> PlaybackTransformSession: ...
+
+    def output_channel(self, source: PlaybackChannel) -> PlaybackChannel: ...
 
 
 def _playback_channel(schema: Schema | None, channel: Channel) -> PlaybackChannel:
@@ -231,6 +266,7 @@ def _build_status(
     sink: PlaybackSink,
     stats: PlaybackStats,
     speed: float,
+    transform_mode: str,
 ) -> RenderableType:
     table = Table.grid(padding=(0, 1))
     table.add_column(style="bold blue")
@@ -240,6 +276,7 @@ def _build_status(
     table.add_row("State:", stats.state)
     table.add_row("Inputs:", str(len(prepared.files)))
     table.add_row("Topics:", str(len(prepared.channels)))
+    table.add_row("Transform:", transform_mode)
     table.add_row("Speed:", f"{speed:g}x")
     table.add_row("Loop:", str(stats.loop_number))
     table.add_row("Messages:", f"{stats.messages:,}")
@@ -255,6 +292,7 @@ async def run_playback(
     speed: float,
     loop: bool,
     show_status: bool,
+    transform_plan: PlaybackTransformPlan | None = None,
 ) -> PlaybackStats:
     if not math.isfinite(speed) or speed <= 0:
         raise PlaybackError("--speed must be finite and positive")
@@ -264,18 +302,20 @@ async def run_playback(
     live: Live | None = None
     status_task: asyncio.Task[None] | None = None
     channel_cache: dict[tuple[int, int], PlaybackChannel] = {}
+    transform_mode = "none" if transform_plan is None else transform_plan.mode
 
     async def refresh_status() -> None:
         assert live is not None
         while not done.is_set():
-            live.update(_build_status(prepared, sink, stats, speed))
+            live.update(_build_status(prepared, sink, stats, speed, transform_mode))
             try:
                 await asyncio.wait_for(done.wait(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
 
     try:
-        await sink.start(prepared.channels)
+        output_channels = prepared.channels if transform_plan is None else transform_plan.channels
+        await sink.start(output_channels)
         stats.state = "Waiting"
         await sink.wait_until_ready()
         if show_status:
@@ -286,49 +326,100 @@ async def run_playback(
         while True:
             stats.state = "Playing"
             first_time_ns: int | None = None
+            last_input_time_ns: int | None = None
             last_time_ns: int | None = None
             clock: PlaybackClock | None = None
-            with open_playback_messages(prepared) as messages:
-                for schema, channel, message in messages:
-                    if (
-                        prepared.resolved_filter.early_bail
-                        and message.log_time >= prepared.resolved_filter.end_time_ns
-                    ):
-                        break
-                    if first_time_ns is None:
-                        first_time_ns = message.log_time
-                        clock = PlaybackClock(
-                            record_origin_ns=first_time_ns,
-                            wall_origin=time.monotonic(),
-                            speed=speed,
-                            recording_end_ns=prepared.recording_end_ns,
-                        )
-                        await sink.timeline_started(clock)
-                    assert clock is not None
-                    deadline = clock.deadline(message.log_time)
-                    delay = deadline - time.monotonic()
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    lag = max(0.0, time.monotonic() - deadline)
-                    stats.current_lag = lag
-                    stats.max_lag = max(stats.max_lag, lag)
-                    cache_key = (0 if schema is None else schema.id, channel.id)
-                    playback_channel = channel_cache.get(cache_key)
-                    if playback_channel is None:
-                        playback_channel = _playback_channel(schema, channel)
-                        channel_cache[cache_key] = playback_channel
-                    await sink.publish(playback_channel, message.log_time, message.data)
-                    stats.messages += 1
-                    stats.payload_bytes += len(message.data)
-                    stats.playhead_ns = message.log_time
-                    last_time_ns = message.log_time
+            transform_session = None if transform_plan is None else transform_plan.create_session()
 
-            if first_time_ns is None or last_time_ns is None:
+            async def publish_output(output: PlaybackOutput, playback_clock: PlaybackClock) -> None:
+                nonlocal last_time_ns
+                deadline = playback_clock.deadline(output.timestamp_ns)
+                delay = deadline - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await sink.publish(output.channel, output.timestamp_ns, output.payload)
+                lag = max(0.0, time.monotonic() - deadline)
+                stats.current_lag = lag
+                stats.max_lag = max(stats.max_lag, lag)
+                stats.messages += 1
+                stats.payload_bytes += len(output.payload)
+                stats.playhead_ns = output.timestamp_ns
+                last_time_ns = (
+                    output.timestamp_ns
+                    if last_time_ns is None
+                    else max(last_time_ns, output.timestamp_ns)
+                )
+
+            try:
+                with open_playback_messages(prepared) as messages:
+                    for schema, channel, message in messages:
+                        if (
+                            prepared.resolved_filter.early_bail
+                            and message.log_time >= prepared.resolved_filter.end_time_ns
+                        ):
+                            break
+                        if first_time_ns is None:
+                            first_time_ns = message.log_time
+                            clock = PlaybackClock(
+                                record_origin_ns=first_time_ns,
+                                wall_origin=time.monotonic(),
+                                speed=speed,
+                                recording_end_ns=prepared.recording_end_ns,
+                            )
+                            await sink.timeline_started(clock)
+                        assert clock is not None
+                        last_input_time_ns = message.log_time
+                        clock.delay(await sink.wait_until_active())
+                        input_deadline = clock.deadline(message.log_time)
+                        input_delay = input_deadline - time.monotonic()
+                        if input_delay > 0:
+                            await asyncio.sleep(input_delay)
+                        cache_key = (0 if schema is None else schema.id, channel.id)
+                        playback_channel = channel_cache.get(cache_key)
+                        if playback_channel is None:
+                            playback_channel = _playback_channel(schema, channel)
+                            channel_cache[cache_key] = playback_channel
+                        advertised_channel = (
+                            playback_channel
+                            if transform_plan is None
+                            else transform_plan.output_channel(playback_channel)
+                        )
+                        if not sink.is_channel_active(advertised_channel):
+                            if transform_session is not None:
+                                await transform_session.deactivate(playback_channel)
+                            continue
+                        if transform_session is None:
+                            outputs = (
+                                PlaybackOutput(
+                                    playback_channel,
+                                    message.log_time,
+                                    message.data,
+                                ),
+                            )
+                        else:
+                            outputs = await transform_session.transform(
+                                playback_channel,
+                                message.log_time,
+                                message.data,
+                            )
+                        for output in outputs:
+                            await publish_output(output, clock)
+                if transform_session is not None:
+                    for output in await transform_session.finish():
+                        assert clock is not None
+                        await publish_output(output, clock)
+            finally:
+                if transform_session is not None:
+                    await transform_session.close()
+
+            if first_time_ns is None or last_input_time_ns is None:
                 raise PlaybackError("Filters selected no messages")
-            await sink.timeline_finished(last_time_ns)
+            await sink.timeline_finished(
+                last_input_time_ns if last_time_ns is None else last_time_ns
+            )
             if not loop:
                 break
-            if last_time_ns == first_time_ns:
+            if last_input_time_ns == first_time_ns:
                 raise PlaybackError("Cannot loop a zero-duration selection")
             stats.loop_number += 1
 
@@ -339,6 +430,6 @@ async def run_playback(
         if status_task is not None:
             await status_task
         if live is not None:
-            live.update(_build_status(prepared, sink, stats, speed))
+            live.update(_build_status(prepared, sink, stats, speed, transform_mode))
             live.stop()
         await sink.close()

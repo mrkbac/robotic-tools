@@ -9,6 +9,10 @@ from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    OptionalBackendOption,
+    OptionalCodecOption,
+    OptionalPointCloudDropInvalidOption,
+    OptionalPointCloudSortFieldOption,
     ProgressOption,
     ServerHostOption,
     ServerPortOption,
@@ -24,6 +28,25 @@ from pymcap_cli.cmd.bridge._playback import (
     prepare_playback,
     run_playback,
 )
+from pymcap_cli.cmd.bridge._playback_transforms import (
+    OptionalDracoCompressionLevelOption,
+    OptionalEncoderOption,
+    OptionalImageFormatOption,
+    OptionalJpegQualityOption,
+    OptionalPointCloudCompressionOption,
+    OptionalPointCloudEncodingOption,
+    OptionalPointCloudFormatOption,
+    OptionalPointCloudOption,
+    OptionalPointCloudSchemaOption,
+    OptionalQualityOption,
+    OptionalResolutionOption,
+    OptionalScaleOption,
+    OptionalVideoFormatOption,
+    OptionalVideoOption,
+    TransformModeOption,
+    create_playback_transform_plan,
+    resolve_playback_transform_config,
+)
 from pymcap_cli.cmd.bridge._shared import console
 from pymcap_cli.cmd.bridge.play import LoopOption, SpeedOption
 from pymcap_cli.log_setup import ERR
@@ -38,7 +61,7 @@ class BridgeServerPlaybackSink:
         self.url = f"ws://{host}:{port}"
         self.server: WebSocketBridgeServer | None = None
         self.channel_ids: dict[PlaybackChannel, int] = {}
-        self._subscriptions: set[tuple[ServerConnection, int]] = set()
+        self._subscriptions: set[tuple[ServerConnection, int, int]] = set()
         self._has_subscription = asyncio.Event()
         self.started = asyncio.Event()
         self._clock_done = asyncio.Event()
@@ -68,14 +91,14 @@ class BridgeServerPlaybackSink:
                 )
             )
 
-        def on_subscribe(state: ConnectionState, subscription_id: int, _channel_id: int) -> None:
+        def on_subscribe(state: ConnectionState, subscription_id: int, channel_id: int) -> None:
             websocket = state.websocket
-            self._subscriptions.add((websocket, subscription_id))
+            self._subscriptions.add((websocket, subscription_id, channel_id))
             self._has_subscription.set()
 
-        def on_unsubscribe(state: ConnectionState, subscription_id: int, _channel_id: int) -> None:
+        def on_unsubscribe(state: ConnectionState, subscription_id: int, channel_id: int) -> None:
             websocket = state.websocket
-            self._subscriptions.discard((websocket, subscription_id))
+            self._subscriptions.discard((websocket, subscription_id, channel_id))
             if not self._subscriptions:
                 self._has_subscription.clear()
 
@@ -152,12 +175,44 @@ class BridgeServerPlaybackSink:
             ("Subscriptions", str(len(self._subscriptions))),
         )
 
+    def is_channel_active(self, channel: PlaybackChannel) -> bool:
+        channel_id = self.channel_ids[channel]
+        return any(
+            active_channel_id == channel_id for _, _, active_channel_id in self._subscriptions
+        )
+
+    async def wait_until_active(self) -> float:
+        if self._has_subscription.is_set():
+            return 0.0
+        started = asyncio.get_running_loop().time()
+        await self._has_subscription.wait()
+        return asyncio.get_running_loop().time() - started
+
 
 def serve(
     files: list[str],
     *,
     host: ServerHostOption = "127.0.0.1",
     port: ServerPortOption = 8765,
+    transform: TransformModeOption = "none",
+    image_format: OptionalImageFormatOption = None,
+    codec: OptionalCodecOption = None,
+    quality: OptionalQualityOption = None,
+    encoder: OptionalEncoderOption = None,
+    backend: OptionalBackendOption = None,
+    scale: OptionalScaleOption = None,
+    jpeg_quality: OptionalJpegQualityOption = None,
+    video: OptionalVideoOption = None,
+    video_format: OptionalVideoFormatOption = None,
+    pointcloud: OptionalPointCloudOption = None,
+    resolution: OptionalResolutionOption = None,
+    pc_format: OptionalPointCloudFormatOption = None,
+    pc_schema: OptionalPointCloudSchemaOption = None,
+    pc_encoding: OptionalPointCloudEncodingOption = None,
+    pc_compression: OptionalPointCloudCompressionOption = None,
+    draco_compression_level: OptionalDracoCompressionLevelOption = None,
+    pointcloud_drop_invalid: OptionalPointCloudDropInvalidOption = None,
+    pointcloud_sort_field: OptionalPointCloudSortFieldOption = None,
     speed: SpeedOption = 1.0,
     loop: LoopOption = False,
     topic: TopicOption = None,
@@ -184,6 +239,27 @@ def serve(
         ERR.print("[red]Error:[/] --port must be in [1, 65535]")
         return 1
     try:
+        transform_config = resolve_playback_transform_config(
+            transform=transform,
+            image_format=image_format,
+            codec=codec,
+            quality=quality,
+            encoder=encoder,
+            backend=backend,
+            scale=scale,
+            jpeg_quality=jpeg_quality,
+            video=video,
+            video_format=video_format,
+            pointcloud=pointcloud,
+            resolution=resolution,
+            pc_format=pc_format,
+            pc_schema=pc_schema,
+            pc_encoding=pc_encoding,
+            pc_compression=pc_compression,
+            draco_compression_level=draco_compression_level,
+            pointcloud_drop_invalid=pointcloud_drop_invalid,
+            pointcloud_sort_field=pointcloud_sort_field,
+        )
         message_filter = create_message_filter(
             topic=topic,
             exclude_topic=exclude_topic,
@@ -192,6 +268,7 @@ def serve(
             early_bail=early_bail,
         )
         prepared = prepare_playback(files, message_filter)
+        transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
         stats = asyncio.run(
             run_playback(
                 prepared,
@@ -199,8 +276,17 @@ def serve(
                 speed=speed,
                 loop=loop,
                 show_status=progress and console.is_terminal,
+                transform_plan=transform_plan,
             )
         )
+    except ImportError as exc:
+        missing = exc.name or str(exc)
+        ERR.print(
+            "[red]Error:[/] JIT ROS transform dependencies are missing. "
+            "Install the required pymcap-cli video, pointcloud, image, or draco extra.\n"
+            f"Missing: {missing}"
+        )
+        return 1
     except (PlaybackError, OSError, ValueError) as exc:
         ERR.print(f"[red]Error:[/] {exc}")
         return 1

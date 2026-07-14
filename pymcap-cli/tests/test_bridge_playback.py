@@ -9,6 +9,9 @@ import struct
 from typing import TYPE_CHECKING
 
 import pytest
+from mcap_codec_support.pointcloud import POINTCLOUD2
+from mcap_ros2_support_fast.decoder import DecoderFactory
+from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.bridge._playback import (
     PlaybackChannel,
     PlaybackClock,
@@ -17,12 +20,19 @@ from pymcap_cli.cmd.bridge._playback import (
     prepare_playback,
     run_playback,
 )
+from pymcap_cli.cmd.bridge._playback_transforms import (
+    RoscompressConfig,
+    RosdecompressConfig,
+    create_playback_transform_plan,
+    resolve_playback_transform_config,
+)
 from pymcap_cli.cmd.bridge.play import BridgeClientPlaybackSink
 from pymcap_cli.cmd.bridge.serve import BridgeServerPlaybackSink
 from pymcap_cli.core.message_filter import MessageFilterOptions
-from robo_ws_bridge import WebSocketBridgeServer
+from pymcap_cli.core.processors.image_compress import ImageCompressProcessor
+from robo_ws_bridge import ConnectionGraph, WebSocketBridgeServer
 from robo_ws_bridge.ws_types import BinaryOpCodes
-from small_mcap import McapWriter
+from small_mcap import McapWriter, Schema
 from websockets.asyncio.client import connect
 
 if TYPE_CHECKING:
@@ -50,6 +60,37 @@ def _write_mcap(
         writer.add_channel(1, topic, "raw", 1)
         for timestamp_ns, payload in messages:
             writer.add_message(1, timestamp_ns, payload, publish_time=timestamp_ns)
+        writer.finish()
+
+
+def _write_pointcloud_mcap(path: Path) -> None:
+    fields = [
+        {"name": "x", "offset": 0, "datatype": 7, "count": 1},
+        {"name": "y", "offset": 4, "datatype": 7, "count": 1},
+        {"name": "z", "offset": 8, "datatype": 7, "count": 1},
+    ]
+    data = struct.pack("<fff", 1.0, 2.0, 3.0) + struct.pack("<fff", 0.0, 0.0, 0.0)
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, encoder_factory=ROS2EncoderFactory())
+        writer.start(profile="ros2")
+        writer.add_schema(1, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2.encode())
+        writer.add_channel(1, "/points", "cdr", 1)
+        writer.add_message_encode(
+            1,
+            100,
+            {
+                "header": {"stamp": {"sec": 0, "nanosec": 100}, "frame_id": "lidar"},
+                "height": 1,
+                "width": 2,
+                "fields": fields,
+                "is_bigendian": False,
+                "point_step": 12,
+                "row_step": 24,
+                "data": data,
+                "is_dense": True,
+            },
+            publish_time=100,
+        )
         writer.finish()
 
 
@@ -150,6 +191,48 @@ class _CollectingSink:
     def status_rows(self) -> tuple[tuple[str, str], ...]:
         return ()
 
+    def is_channel_active(self, _channel: PlaybackChannel) -> bool:
+        return True
+
+    async def wait_until_active(self) -> float:
+        return 0.0
+
+
+class _TransformedCollectingSink:
+    def __init__(self, *, is_active: bool = True) -> None:
+        self.channels: tuple[PlaybackChannel, ...] = ()
+        self.messages: list[tuple[PlaybackChannel, int, bytes]] = []
+        self.is_active = is_active
+
+    async def start(self, channels: tuple[PlaybackChannel, ...]) -> None:
+        self.channels = channels
+
+    async def wait_until_ready(self) -> None:
+        return
+
+    async def publish(
+        self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
+    ) -> None:
+        self.messages.append((channel, timestamp_ns, bytes(payload)))
+
+    async def timeline_started(self, _clock: PlaybackClock) -> None:
+        return
+
+    async def timeline_finished(self, _timestamp_ns: int) -> None:
+        return
+
+    async def close(self) -> None:
+        return
+
+    def status_rows(self) -> tuple[tuple[str, str], ...]:
+        return ()
+
+    def is_channel_active(self, _channel: PlaybackChannel) -> bool:
+        return self.is_active
+
+    async def wait_until_active(self) -> float:
+        return 0.0
+
 
 def test_run_playback_preserves_merged_order_and_closes(tmp_path: Path) -> None:
     first = tmp_path / "first.mcap"
@@ -170,6 +253,219 @@ def test_run_playback_preserves_merged_order_and_closes(tmp_path: Path) -> None:
     assert stats.messages == 3
 
 
+def test_transform_config_uses_standalone_defaults_and_rejects_wrong_mode() -> None:
+    common = {
+        "image_format": None,
+        "codec": None,
+        "quality": None,
+        "encoder": None,
+        "backend": None,
+        "scale": None,
+        "jpeg_quality": None,
+        "video": None,
+        "video_format": None,
+        "pointcloud": None,
+        "resolution": None,
+        "pc_format": None,
+        "pc_schema": None,
+        "pc_encoding": None,
+        "pc_compression": None,
+        "draco_compression_level": None,
+        "pointcloud_drop_invalid": None,
+        "pointcloud_sort_field": None,
+    }
+
+    compress = resolve_playback_transform_config(transform="roscompress", **common)
+    assert compress == RoscompressConfig()
+    decompress = resolve_playback_transform_config(transform="rosdecompress", **common)
+    assert decompress == RosdecompressConfig()
+
+    with pytest.raises(ValueError, match="requires --transform"):
+        resolve_playback_transform_config(transform="none", **(common | {"codec": "h265"}))
+    with pytest.raises(ValueError, match="requires --transform rosdecompress"):
+        resolve_playback_transform_config(
+            transform="roscompress", **(common | {"video_format": "raw"})
+        )
+
+
+def test_run_playback_roscompress_jpeg_is_jit_and_lossless(image_small_mcap: Path) -> None:
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    plan = create_playback_transform_plan(
+        RoscompressConfig(image_format="jpeg", pointcloud=False),
+        prepared.channels,
+    )
+    assert plan is not None
+    sink = _TransformedCollectingSink()
+
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            transform_plan=plan,
+        )
+    )
+
+    assert sink.channels[0].schema_name == "sensor_msgs/msg/CompressedImage"
+    assert stats.messages == len(sink.messages) > 0
+    output_channel = sink.channels[0]
+    schema = Schema(
+        id=1,
+        name=output_channel.schema_name,
+        encoding=output_channel.schema_encoding,
+        data=output_channel.schema_text.encode(),
+    )
+    decoder = DecoderFactory().decoder_for(output_channel.message_encoding, schema)
+    assert decoder is not None
+    decoded = [decoder(payload) for _, _, payload in sink.messages]
+    assert all(message.format == "jpeg" for message in decoded)
+    assert all(bytes(message.data).startswith(b"\xff\xd8") for message in decoded)
+    assert [timestamp for _, timestamp, _ in sink.messages] == sorted(
+        timestamp for _, timestamp, _ in sink.messages
+    )
+
+
+def test_jit_transform_skips_inactive_channels_before_decoding(
+    image_small_mcap: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    plan = create_playback_transform_plan(
+        RoscompressConfig(image_format="jpeg", pointcloud=False),
+        prepared.channels,
+    )
+    assert plan is not None
+
+    def fail_if_called(*_args) -> None:
+        raise AssertionError("inactive topic was transformed")
+
+    monkeypatch.setattr(ImageCompressProcessor, "transform", fail_if_called)
+    sink = _TransformedCollectingSink(is_active=False)
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            transform_plan=plan,
+        )
+    )
+
+    assert stats.messages == 0
+    assert sink.messages == []
+
+
+def test_jit_video_compress_then_decompress_preserves_every_frame(
+    image_small_mcap: Path,
+) -> None:
+    pytest.importorskip("av")
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    compress_plan = create_playback_transform_plan(
+        RoscompressConfig(
+            image_format="video",
+            encoder="libx264",
+            backend="pyav",
+            pointcloud=False,
+        ),
+        prepared.channels,
+    )
+    assert compress_plan is not None
+    compressed_sink = _TransformedCollectingSink()
+    asyncio.run(
+        run_playback(
+            prepared,
+            compressed_sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            transform_plan=compress_plan,
+        )
+    )
+
+    assert compressed_sink.messages
+    assert compressed_sink.channels[0].schema_name == "foxglove_msgs/msg/CompressedVideo"
+    decompress_plan = create_playback_transform_plan(
+        RosdecompressConfig(backend="pyav", pointcloud=False),
+        compressed_sink.channels,
+    )
+    assert decompress_plan is not None
+
+    async def decompress() -> list[tuple[int, bytes]]:
+        session = decompress_plan.create_session()
+        outputs = []
+        try:
+            for channel, timestamp_ns, payload in compressed_sink.messages:
+                outputs.extend(await session.transform(channel, timestamp_ns, payload))
+            outputs.extend(await session.finish())
+        finally:
+            await session.close()
+        return [(output.timestamp_ns, bytes(output.payload)) for output in outputs]
+
+    decompressed = asyncio.run(decompress())
+    assert len(decompressed) == len(compressed_sink.messages)
+    assert [timestamp for timestamp, _ in decompressed] == [
+        timestamp for _, timestamp, _ in compressed_sink.messages
+    ]
+    assert decompress_plan.channels[0].schema_name == "sensor_msgs/msg/CompressedImage"
+
+
+def test_jit_pointcloud_compress_then_decompress_preserves_message(tmp_path: Path) -> None:
+    path = tmp_path / "pointcloud.mcap"
+    _write_pointcloud_mcap(path)
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    compress_plan = create_playback_transform_plan(
+        RoscompressConfig(image_format="none"), prepared.channels
+    )
+    assert compress_plan is not None
+    compressed_sink = _TransformedCollectingSink()
+    asyncio.run(
+        run_playback(
+            prepared,
+            compressed_sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            transform_plan=compress_plan,
+        )
+    )
+
+    assert len(compressed_sink.messages) == 1
+    assert "CompressedPointCloud" in compressed_sink.channels[0].schema_name
+    decompress_plan = create_playback_transform_plan(
+        RosdecompressConfig(video=False), compressed_sink.channels
+    )
+    assert decompress_plan is not None
+
+    async def decompress():
+        session = decompress_plan.create_session()
+        channel, timestamp_ns, payload = compressed_sink.messages[0]
+        try:
+            outputs = list(await session.transform(channel, timestamp_ns, payload))
+            outputs.extend(await session.finish())
+            return outputs
+        finally:
+            await session.close()
+
+    outputs = asyncio.run(decompress())
+    assert len(outputs) == 1
+    output_channel = decompress_plan.channels[0]
+    assert output_channel.schema_name == "sensor_msgs/msg/PointCloud2"
+    schema = Schema(
+        1,
+        output_channel.schema_name,
+        output_channel.schema_encoding,
+        output_channel.schema_text.encode(),
+    )
+    decoder = DecoderFactory().decoder_for(output_channel.message_encoding, schema)
+    assert decoder is not None
+    decoded = decoder(outputs[0].payload)
+    assert decoded.width == 1
+    assert outputs[0].timestamp_ns == 100
+
+
 def test_playback_clock_uses_absolute_speed_scaled_deadlines() -> None:
     clock = PlaybackClock(
         record_origin_ns=1_000_000_000,
@@ -179,6 +475,9 @@ def test_playback_clock_uses_absolute_speed_scaled_deadlines() -> None:
     )
     assert clock.deadline(3_000_000_000) == 11.0
     assert clock.current_time_ns(now=10.5) == 2_000_000_000
+    clock.delay(2.0)
+    assert clock.deadline(3_000_000_000) == 13.0
+    assert clock.current_time_ns(now=12.5) == 2_000_000_000
 
 
 def test_bridge_client_sink_publishes_to_existing_server(
@@ -219,6 +518,150 @@ def test_bridge_client_sink_publishes_to_existing_server(
     monkeypatch.setattr("pymcap_cli.cmd.bridge.play._SETTLE_SECONDS", 0.0)
     asyncio.run(run())
     assert received == [b"payload"]
+
+
+def test_bridge_client_only_subscribed_tracks_dynamic_graph() -> None:
+    sink = BridgeClientPlaybackSink("ws://127.0.0.1:1", connect_timeout=1, only_subscribed=True)
+    channel = PlaybackChannel(
+        topic="/camera",
+        message_encoding="cdr",
+        schema_name="sensor_msgs/msg/Image",
+        schema_encoding="ros2msg",
+        schema_text="uint8[] data",
+    )
+    sink._selected_topics = {channel.topic}
+    sink._on_connection_graph_update(
+        ConnectionGraph(
+            published_topics=(),
+            subscribed_topics=(({"name": "/camera", "subscriberIds": ["viewer"]}),),
+            advertised_services=(),
+        )
+    )
+    assert sink.is_channel_active(channel)
+
+    sink._on_connection_graph_update(
+        ConnectionGraph(
+            published_topics=(),
+            subscribed_topics=(({"name": "/camera", "subscriberIds": []}),),
+            advertised_services=(),
+        )
+    )
+    assert not sink.is_channel_active(channel)
+
+    async def wait_for_consumer() -> float:
+        waiting = asyncio.create_task(sink.wait_until_active())
+        await asyncio.sleep(0.01)
+        assert not waiting.done()
+        sink._on_connection_graph_update(
+            ConnectionGraph(
+                published_topics=(),
+                subscribed_topics=(({"name": "/camera", "subscriberIds": ["viewer-2"]}),),
+                advertised_services=(),
+            )
+        )
+        return await waiting
+
+    assert asyncio.run(wait_for_consumer()) > 0
+
+
+def test_bridge_client_only_subscribed_requires_connection_graph(tmp_path: Path) -> None:
+    path = tmp_path / "input.mcap"
+    _write_mcap(path, "/raw", [(1, b"payload")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    port = _free_port()
+
+    async def run() -> None:
+        server = WebSocketBridgeServer(
+            host="127.0.0.1",
+            port=port,
+            capabilities=["clientPublish"],
+            supported_encodings=["raw"],
+        )
+        sink = BridgeClientPlaybackSink(
+            f"ws://127.0.0.1:{port}", connect_timeout=2, only_subscribed=True
+        )
+        await server.start()
+        try:
+            with pytest.raises(PlaybackError, match="connectionGraph"):
+                await sink.start(prepared.channels)
+        finally:
+            await sink.close()
+            await server.stop()
+
+    asyncio.run(run())
+
+
+def test_bridge_client_sink_publishes_jit_transformed_payload(
+    image_small_mcap: Path,
+    monkeypatch,
+) -> None:
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    plan = create_playback_transform_plan(
+        RoscompressConfig(image_format="jpeg", pointcloud=False),
+        prepared.channels,
+    )
+    assert plan is not None
+    port = _free_port()
+    advertised: list[dict] = []
+    received: list[bytes] = []
+
+    async def run() -> None:
+        server = WebSocketBridgeServer(
+            host="127.0.0.1",
+            port=port,
+            capabilities=["clientPublish", "connectionGraph"],
+            supported_encodings=["cdr"],
+        )
+
+        async def on_advertise(_state, message: dict) -> None:
+            advertised.extend(message["channels"])
+
+        async def on_message(_state, payload: bytes) -> None:
+            received.append(payload[5:])
+
+        async def on_graph_subscription(state, _message: dict) -> None:
+            await state.websocket.send(
+                json.dumps(
+                    {
+                        "op": "connectionGraphUpdate",
+                        "subscribedTopics": [
+                            {"name": plan.channels[0].topic, "subscriberIds": ["viewer-1"]}
+                        ],
+                    }
+                )
+            )
+
+        server.register_json_handler("advertise", on_advertise)
+        server.register_json_handler("subscribeConnectionGraph", on_graph_subscription)
+        server.register_binary_handler(BinaryOpCodes.CLIENT_MESSAGE_DATA, on_message)
+        await server.start()
+        try:
+            await run_playback(
+                prepared,
+                BridgeClientPlaybackSink(
+                    f"ws://127.0.0.1:{port}",
+                    connect_timeout=2,
+                    only_subscribed=True,
+                ),
+                speed=1_000_000,
+                loop=False,
+                show_status=False,
+                transform_plan=plan,
+            )
+            await asyncio.sleep(0.05)
+        finally:
+            await server.stop()
+
+    monkeypatch.setattr("pymcap_cli.cmd.bridge.play._SETTLE_SECONDS", 0.0)
+    asyncio.run(run())
+    assert advertised[0]["schemaName"] == "sensor_msgs/msg/CompressedImage"
+    assert len(received) > 0
+
+    channel = plan.channels[0]
+    schema = Schema(1, channel.schema_name, channel.schema_encoding, channel.schema_text.encode())
+    decoder = DecoderFactory().decoder_for(channel.message_encoding, schema)
+    assert decoder is not None
+    assert decoder(received[0]).format == "jpeg"
 
 
 def test_bridge_server_sink_sends_recorded_timestamp_and_time(
@@ -276,3 +719,65 @@ def test_bridge_server_sink_sends_recorded_timestamp_and_time(
     assert timestamp == 123
     assert payload == b"payload"
     assert 123 in times
+
+
+def test_bridge_server_sink_advertises_and_sends_jit_transform(
+    image_small_mcap: Path,
+    monkeypatch,
+) -> None:
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    plan = create_playback_transform_plan(
+        RoscompressConfig(image_format="jpeg", pointcloud=False),
+        prepared.channels,
+    )
+    assert plan is not None
+    port = _free_port()
+
+    async def run() -> tuple[dict, bytes]:
+        sink = BridgeServerPlaybackSink("127.0.0.1", port)
+        task = asyncio.create_task(
+            run_playback(
+                prepared,
+                sink,
+                speed=1_000_000,
+                loop=False,
+                show_status=False,
+                transform_plan=plan,
+            )
+        )
+        await sink.started.wait()
+        async with connect(
+            f"ws://127.0.0.1:{port}", subprotocols=["foxglove.websocket.v1"]
+        ) as websocket:
+            await websocket.recv()
+            advertise = json.loads(await websocket.recv())
+            channel_id = advertise["channels"][0]["id"]
+            await websocket.send(
+                json.dumps(
+                    {
+                        "op": "subscribe",
+                        "subscriptions": [{"id": 7, "channelId": channel_id}],
+                    }
+                )
+            )
+            payload = b""
+            while not payload:
+                frame = await websocket.recv()
+                if isinstance(frame, bytes) and frame[0] == int(BinaryOpCodes.MESSAGE_DATA):
+                    payload = frame[13:]
+            await task
+            return advertise, payload
+
+    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
+    advertise, payload = asyncio.run(run())
+    channel_info = advertise["channels"][0]
+    assert channel_info["schemaName"] == "sensor_msgs/msg/CompressedImage"
+    schema = Schema(
+        1,
+        channel_info["schemaName"],
+        channel_info["schemaEncoding"],
+        channel_info["schema"].encode(),
+    )
+    decoder = DecoderFactory().decoder_for(channel_info["encoding"], schema)
+    assert decoder is not None
+    assert decoder(payload).format == "jpeg"

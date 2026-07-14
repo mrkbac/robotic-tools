@@ -117,6 +117,39 @@ def test_bridge_proxy_uses_roscompress_option_names(
         assert bridge_only_name not in proxy_help
 
 
+@pytest.mark.parametrize("command", ["play", "serve"])
+def test_bridge_playback_exposes_ros_transform_presets(
+    command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = _help(capsys, "bridge", command)
+
+    assert "--transform" in output
+    if command == "play":
+        assert "--only-subscribed" in output
+    for option in (
+        "--image-format",
+        "--codec",
+        "--quality",
+        "--encoder",
+        "--backend",
+        "--scale",
+        "--jpeg-quality",
+        "--video",
+        "--video-format",
+        "--pointcloud",
+        "--resolution",
+        "--pc-format",
+        "--pc-schema",
+        "--pc-encoding",
+        "--pc-compression",
+        "--draco-compression-level",
+        "--pointcloud-drop-invalid",
+        "--pointcloud-sort-field",
+    ):
+        assert option in output
+
+
 def test_shared_options_are_declared_only_in_central_lookup() -> None:
     shared_names = {
         "--always-decode-chunk",

@@ -770,7 +770,22 @@ PYMCAP_BRIDGE=localhost pymcap-cli bridge play recording.mcap -t '/camera/.*'
 
 # Host an MCAP directly for Foxglove clients
 pymcap-cli bridge serve recording.mcap --port 8765
+
+# Compress images and point clouds just in time while serving (no temporary MCAP)
+pymcap-cli bridge serve recording.mcap --transform roscompress --port 8765
+
+# Publish a compressed recording as standard JPEG images and PointCloud2 messages
+pymcap-cli bridge play compressed.mcap --target localhost --transform rosdecompress
+
+# Avoid JIT work for topics without consumers (target must support connectionGraph)
+pymcap-cli bridge play recording.mcap --target localhost \
+  --transform roscompress --only-subscribed
 ```
+
+`bridge serve` only transforms messages on channels that currently have subscribers,
+and releases per-channel codec state after the last subscriber leaves. For
+`bridge play`, `--only-subscribed` uses the target's `connectionGraph` capability to
+follow consumers dynamically and pauses playback while no selected topic has one.
 
 ### Shell Autocompletion
 
