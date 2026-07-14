@@ -171,6 +171,57 @@ def downsample_lttb(
     return out_t, out_v
 
 
+def downsample_xy_lttb(
+    x_values: list[float],
+    y_values: list[float],
+    target: int,
+) -> tuple[list[float], list[float]]:
+    """LTTB downsampling over paired XY trajectory coordinates."""
+    point_count = len(x_values)
+    if point_count <= target:
+        return x_values, y_values
+
+    out_x = [x_values[0]]
+    out_y = [y_values[0]]
+    bucket_size = (point_count - 2) / (target - 2)
+    previous_index = 0
+
+    for bucket_index in range(1, target - 1):
+        bucket_start = int((bucket_index - 1) * bucket_size) + 1
+        bucket_end = min(int(bucket_index * bucket_size) + 1, point_count)
+        next_start = int(bucket_index * bucket_size) + 1
+        next_end = min(int((bucket_index + 1) * bucket_size) + 1, point_count)
+
+        average_x = sum(x_values[next_start:next_end]) / (next_end - next_start)
+        average_y = sum(y_values[next_start:next_end]) / (next_end - next_start)
+        previous_x = x_values[previous_index]
+        previous_y = y_values[previous_index]
+
+        best_index = bucket_start
+        best_area = -1.0
+        best_distance = -1.0
+        for candidate_index in range(bucket_start, bucket_end):
+            candidate_x = x_values[candidate_index]
+            candidate_y = y_values[candidate_index]
+            area = abs(
+                (previous_x - average_x) * (candidate_y - previous_y)
+                - (previous_x - candidate_x) * (average_y - previous_y)
+            )
+            distance = (candidate_x - previous_x) ** 2 + (candidate_y - previous_y) ** 2
+            if area > best_area or (area == best_area and distance > best_distance):
+                best_area = area
+                best_distance = distance
+                best_index = candidate_index
+
+        out_x.append(x_values[best_index])
+        out_y.append(y_values[best_index])
+        previous_index = best_index
+
+    out_x.append(x_values[-1])
+    out_y.append(y_values[-1])
+    return out_x, out_y
+
+
 def _validate_series_against_schema(
     series: SeriesData, schema_name: str, schema_data: bytes
 ) -> str | None:
@@ -398,7 +449,7 @@ class PlotExporter(Exporter):
             (ps, [(ts - first_ns) / 1e9 for ts in ps.times_ns]) for ps in plot_series if ps.times_ns
         ]
 
-        if self._downsample:
+        if self._downsample and self._kind != "xy":
             new_rendered: list[tuple[_PlotSeries, list[float]]] = []
             for ps, times_s in rendered_series:
                 if any(isinstance(v, str) for v in ps.values[:10]):
@@ -408,8 +459,6 @@ class PlotExporter(Exporter):
                 t_out, v_out = downsample_lttb(times_s, ps.values, self._downsample)
                 if before != len(t_out):
                     logger.info(f"Downsampled {ps.label!r}: {before} → {len(t_out)} points")
-                # Stash the downsampled values back onto the series so XY
-                # mode also benefits.
                 ps.values = v_out
                 new_rendered.append((ps, t_out))
             rendered_series = new_rendered
@@ -597,6 +646,20 @@ class PlotExporter(Exporter):
 
         if not matched_x:
             raise RuntimeError("No matching timestamps between the two paths")
+
+        if self._downsample and not any(
+            isinstance(value, str) for value in (*matched_x, *matched_y)
+        ):
+            before = len(matched_x)
+            sampled_x, sampled_y = downsample_xy_lttb(
+                [float(value) for value in matched_x],
+                [float(value) for value in matched_y],
+                self._downsample,
+            )
+            matched_x[:] = sampled_x
+            matched_y[:] = sampled_y
+            if before != len(matched_x):
+                logger.info(f"Downsampled XY trajectory: {before} → {len(matched_x)} points")
 
         fig = go.Figure()
         fig.add_trace(

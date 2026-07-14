@@ -157,6 +157,29 @@ class TestRendering:
 
         assert isinstance(figure.data[0], go.Scattergl)
 
+    def test_xy_downsampling_keeps_samples_paired(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/pose.x", "/pose.y"],
+            kind="xy",
+            downsample=3,
+        )
+        times = list(range(20))
+        exporter._series[0].times_ns = times
+        exporter._series[0].values = [10.0 if index == 3 else 0.0 for index in times]
+        exporter._series[1].times_ns = times
+        exporter._series[1].values = [10.0 if index == 12 else 0.0 for index in times]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        trace = figure.data[0]
+        assert isinstance(trace, go.Scattergl)
+        assert len(trace.x) == 3
+        assert len(trace.y) == 3
+        assert any(x != 0.0 or y != 0.0 for x, y in zip(trace.x, trace.y, strict=True))
+
     def test_numeric_histogram_caps_bins_at_distinct_value_count(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
