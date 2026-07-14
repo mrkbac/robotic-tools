@@ -77,6 +77,7 @@ def _build_summary(info: BridgeInfo) -> Table:
     if session_id:
         summary.add_row("Session:", f"[dim]{session_id}[/]")
     summary.add_row("Channels:", f"[green]{len(info.channels):,}[/]")
+    summary.add_row("Services:", f"[green]{len(info.services):,}[/]")
     return summary
 
 
@@ -224,6 +225,24 @@ def _build_channels_table(
     return table
 
 
+def _build_services_table(services: Iterable[ServiceInfo]) -> Table:
+    table = Table(
+        title="Services",
+        title_justify="left",
+        title_style="bold cyan",
+    )
+    table.add_column("ID", justify="right", style="cyan")
+    table.add_column("Service")
+    table.add_column("Type")
+    for svc in sorted(services, key=lambda s: s["name"]):
+        table.add_row(
+            str(svc["id"]),
+            _format_parts_with_colors(svc["name"]),
+            _format_schema_with_link(svc.get("type")),
+        )
+    return table
+
+
 def _build_display(
     info: BridgeInfo, sort: SortChoice, reverse: bool, graph: bool
 ) -> RenderableType:
@@ -237,6 +256,8 @@ def _build_display(
         else None
     )
     parts.append(_build_channels_table(sorted_channels, topic_counts))
+    if info.services:
+        parts.extend([Text(""), _build_services_table(info.services)])
     if info.connection_graph is not None:
         if graph:
             graph_section = _build_connection_graph_tree(

@@ -27,6 +27,7 @@ from pymcap_cli.cmd.bridge.info import (
     _build_channels_table,
     _build_connection_graph_summary,
     _build_connection_graph_tree,
+    _build_services_table,
     _topic_connection_counts,
 )
 from pymcap_cli.cmd.bridge.record import (
@@ -329,6 +330,27 @@ def test_channels_table_shows_pub_sub_counts_when_graph_available() -> None:
     assert "Sub" in output
     # A topic absent from the graph falls back to zero counts rather than being dropped.
     assert "/quiet" in output
+
+
+def test_services_table_lists_name_and_type() -> None:
+    services = [
+        {"id": 1, "name": "/reset", "type": "std_srvs/srv/Empty"},
+        {"id": 2, "name": "/set_speed", "type": "custom_srvs/srv/SetSpeed"},
+    ]
+    output = _render(_build_services_table(services))
+    assert "/reset" in output
+    assert "std_srvs/srv/Empty" in output
+    assert "/set_speed" in output
+    assert "custom_srvs/srv/SetSpeed" in output
+
+
+def test_services_table_sorted_by_name() -> None:
+    services = [
+        {"id": 5, "name": "/zeta", "type": "pkg/srv/Z"},
+        {"id": 3, "name": "/alpha", "type": "pkg/srv/A"},
+    ]
+    output = _render(_build_services_table(services))
+    assert output.index("/alpha") < output.index("/zeta")
 
 
 def test_status_cache_replaces_and_removes_id_statuses() -> None:
