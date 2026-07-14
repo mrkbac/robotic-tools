@@ -18,10 +18,15 @@ from robo_ws_bridge.ws_types import ChannelInfo
 from ros_parser.message_path import (
     MessagePath,
     MessagePathError,
+    MessagePathVariables,
     parse_message_path,
 )
 from small_mcap import JSONDecoderFactory, Schema
 
+from pymcap_cli.cmd._message_path_options import (
+    MessagePathVariablesOption,
+    create_message_path_variables,
+)
 from pymcap_cli.cmd.bridge._shared import (
     CONNECTION_GROUP,
     BridgeTarget,
@@ -63,7 +68,9 @@ async def _cat_async(
     connect_timeout: float,
     flat: bool = False,
     changed: bool = False,
+    variables: MessagePathVariables | None = None,
 ) -> int:
+    path_variables = dict(variables or {})
     parsed_query: MessagePath | None = None
     if query:
         try:
@@ -222,7 +229,7 @@ async def _cat_async(
 
         if parsed_query is not None:
             try:
-                data = parsed_query.apply(decoded)
+                data = parsed_query.apply(decoded, path_variables)
             except MessagePathError as exc:
                 logger.warning(f"Filter error on {topic}: {exc}")
                 return
@@ -313,6 +320,7 @@ def cat(
             help="MessagePath expression scoping output to one topic and/or subfield.",
         ),
     ] = None,
+    var: MessagePathVariablesOption = None,
     grep: Annotated[
         str | None,
         Parameter(
@@ -428,6 +436,12 @@ def cat(
         ERR.print("[red]Error:[/] --limit must be positive")
         return 1
 
+    try:
+        variables = create_message_path_variables(var) if query or var else {}
+    except ValueError as exc:
+        ERR.print(f"[red]Error:[/] {exc}")
+        return 1
+
     url = to_ws_url(target)
 
     try:
@@ -445,6 +459,7 @@ def cat(
                 flat=flat,
                 changed=changed,
                 connect_timeout=connect_timeout,
+                variables=variables,
             )
         )
     except KeyboardInterrupt:

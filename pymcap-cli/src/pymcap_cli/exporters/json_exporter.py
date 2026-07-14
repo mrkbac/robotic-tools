@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from ros_parser.message_path import MessagePathVariables
+
     from pymcap_cli.exporters.base import TopicContext, Writer
 
 
@@ -75,10 +77,12 @@ class JsonExporter(PerTopicFileExporter):
         include_blobs: bool = False,
         per_message: bool = False,
         select: list[str] | None = None,
+        variables: MessagePathVariables | None = None,
     ) -> None:
         super().__init__(
             include_blobs=include_blobs,
             select=select,
+            variables=variables,
         )
         self._per_message = per_message
 

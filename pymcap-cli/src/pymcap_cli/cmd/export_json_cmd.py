@@ -13,6 +13,10 @@ from pymcap_cli.cmd._message_filter_options import (
     TopicOption,
     create_message_filter,
 )
+from pymcap_cli.cmd._message_path_options import (
+    MessagePathVariablesOption,
+    create_message_path_variables,
+)
 from pymcap_cli.cmd._structured_export_options import SelectColumnsOption
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.json_exporter import JsonExporter
@@ -35,6 +39,7 @@ def export_json(
     per_message: Annotated[bool, Parameter(name=["--per-message"])] = False,
     num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
     select: SelectColumnsOption = None,
+    var: MessagePathVariablesOption = None,
 ) -> int:
     """Export an MCAP file to NDJSON (one line per message) or per-message JSON files.
 
@@ -50,10 +55,12 @@ def export_json(
             end=end,
             early_bail=early_bail,
         )
+        variables = create_message_path_variables(var) if select or var else {}
         exporter = JsonExporter(
             include_blobs=include_blobs,
             per_message=per_message,
             select=select,
+            variables=variables,
         )
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400

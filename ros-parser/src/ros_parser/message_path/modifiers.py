@@ -101,16 +101,59 @@ def _round_with_arg(value: float, precision: float | None = None) -> int | float
     return round(value, int(precision))
 
 
-@modifier("min")
+def _numeric_array(obj: Any, operation: str) -> list[int | float]:
+    if not isinstance(obj, _ARRAY_TYPES):
+        raise MessagePathError(f"{operation} requires a numeric array")
+    values: list[int | float] = []
+    for value in obj:
+        if type(value) not in (int, float) or (isinstance(value, float) and math.isnan(value)):
+            raise MessagePathError(f"{operation} requires a numeric array without NaN values")
+        values.append(value)
+    return values
+
+
+def _array_min(obj: Any) -> int | float | None:
+    """Return the minimum array element, or None for an empty array."""
+    values = _numeric_array(obj, "min")
+    return min(values) if values else None
+
+
+def _array_max(obj: Any) -> int | float | None:
+    """Return the maximum array element, or None for an empty array."""
+    values = _numeric_array(obj, "max")
+    return max(values) if values else None
+
+
+@modifier("min", array_reducer=_array_min, preserves_element_type=True)
 def _min(*args: float) -> float:
-    """Return minimum of values."""
+    """Return minimum of a scalar and its arguments, or reduce a bare array."""
     return min(args)
 
 
-@modifier("max")
+@modifier("max", array_reducer=_array_max, preserves_element_type=True)
 def _max(*args: float) -> float:
-    """Return maximum of values."""
+    """Return maximum of a scalar and its arguments, or reduce a bare array."""
     return max(args)
+
+
+@modifier("sum", kind="aggregate", return_type=_FLOAT64_TYPE)
+def _aggregate_sum(obj: Any) -> float:
+    """Return the floating-point sum of an array."""
+    return math.fsum(_numeric_array(obj, "sum"))
+
+
+@modifier("mean", kind="aggregate", return_type=_FLOAT64_TYPE)
+def _aggregate_mean(obj: Any) -> float | None:
+    """Return the arithmetic mean, or None for an empty array."""
+    values = _numeric_array(obj, "mean")
+    return math.fsum(values) / len(values) if values else None
+
+
+@modifier("rms", kind="aggregate", return_type=_FLOAT64_TYPE)
+def _aggregate_rms(obj: Any) -> float | None:
+    """Return the root mean square, or None for an empty array."""
+    values = _numeric_array(obj, "rms")
+    return math.sqrt(math.fsum(value * value for value in values) / len(values)) if values else None
 
 
 @modifier("wrap_angle")

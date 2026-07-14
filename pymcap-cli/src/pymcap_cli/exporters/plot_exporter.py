@@ -28,6 +28,7 @@ from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
     MessagePath,
     MessagePathError,
+    MessagePathVariables,
     ValidationError,
     parse_message_path,
 )
@@ -195,8 +196,13 @@ def _validate_series_against_schema(
 class _PlotTopicWriter:
     """Buffer values for every series whose topic matches this writer."""
 
-    def __init__(self, series: list[SeriesData]) -> None:
+    def __init__(
+        self,
+        series: list[SeriesData],
+        variables: MessagePathVariables | None = None,
+    ) -> None:
         self.series = series
+        self._variables = dict(variables or {})
         self._checked = False
 
     def write(self, msg: DecodedMessage) -> None:
@@ -207,7 +213,7 @@ class _PlotTopicWriter:
         log_time_ns = int(msg.message.log_time)
         for series in self.series:
             try:
-                value = series.parsed.apply(msg.decoded_message)
+                value = series.parsed.apply(msg.decoded_message, self._variables)
             except MessagePathError:
                 continue
             if value is None or isinstance(value, dict):
@@ -243,7 +249,7 @@ class _PlotTopicWriter:
             # No schema to validate against (e.g. JSON): a runtime resolution
             # error on the first message means a bad field, not a filter miss.
             try:
-                series.parsed.apply(msg.decoded_message)
+                series.parsed.apply(msg.decoded_message, self._variables)
             except MessagePathError as exc:
                 series.warned_no_match = True
                 logger.warning(
@@ -276,6 +282,7 @@ class PlotExporter(Exporter):
         xy: bool = False,
         force: bool = False,
         source_name: str | None = None,
+        variables: MessagePathVariables | None = None,
     ) -> None:
         if not paths:
             raise ValueError("PlotExporter requires at least one path")
@@ -288,6 +295,7 @@ class PlotExporter(Exporter):
         self._xy = xy
         self._force = force
         self._source_name = source_name
+        self._variables = dict(variables or {})
 
         # Pre-parse paths up-front; surface syntax errors immediately.
         self._series: list[SeriesData] = []
@@ -331,7 +339,7 @@ class PlotExporter(Exporter):
 
     def open_topic(self, ctx: TopicContext) -> _PlotTopicWriter:
         series = self._series_by_topic.get(ctx.topic, [])
-        return _PlotTopicWriter(series)
+        return _PlotTopicWriter(series, self._variables)
 
     def finish(
         self,

@@ -2421,6 +2421,108 @@ class TestMathModifierApplyErrors:
         assert result == (1, 2, 3)
 
 
+class TestAggregateModifiers:
+    @pytest.mark.parametrize(
+        ("operation", "expected"),
+        [
+            ("min", -2),
+            ("max", 8),
+            ("sum", 11.0),
+            ("mean", 2.75),
+            ("rms", math.sqrt(85 / 4)),
+        ],
+    )
+    def test_apply_numeric_array(self, operation: str, expected: float) -> None:
+        path = parse_message_path(f"/topic.values.@{operation}")
+
+        assert path.apply({"values": [4, -2, 1, 8]}) == pytest.approx(expected)
+
+    def test_apply_after_filter_and_field_mapping(self) -> None:
+        path = parse_message_path("/topic.items[:]{value>0}.value.@mean")
+
+        result = path.apply({"items": [{"value": -2}, {"value": 4}, {"value": 8}]})
+
+        assert result == 6.0
+
+    @pytest.mark.parametrize("operation", ["min", "max", "mean", "rms"])
+    def test_empty_array_returns_none(self, operation: str) -> None:
+        path = parse_message_path(f"/topic.values.@{operation}")
+
+        assert path.apply({"values": []}) is None
+
+    def test_empty_sum_returns_zero(self) -> None:
+        path = parse_message_path("/topic.values.@sum")
+
+        assert path.apply({"values": []}) == 0.0
+
+    def test_rejects_scalar(self) -> None:
+        modifier = MathModifier(operation="mean", arguments=[])
+
+        with pytest.raises(MessagePathError, match="requires a numeric array"):
+            modifier.apply(5, {})
+
+    def test_rejects_arguments(self) -> None:
+        modifier = MathModifier(operation="sum", arguments=[5])
+
+        with pytest.raises(MessagePathError, match="does not accept arguments"):
+            modifier.apply([1, 2], {})
+
+    def test_rejects_non_numeric_element(self) -> None:
+        modifier = MathModifier(operation="max", arguments=[])
+
+        with pytest.raises(MessagePathError, match="numeric array"):
+            modifier.apply([1, "bad"], {})
+
+    def test_existing_max_remains_element_wise(self) -> None:
+        path = parse_message_path("/topic.values.@max(5)")
+
+        assert path.apply({"values": [1, 10]}) == [5, 10]
+
+    def test_validate_min_preserves_element_type(self) -> None:
+        modifier = MathModifier(operation="min", arguments=[])
+
+        result_type, result_definition = modifier.validate(_INT32_ARRAY_TYPE, None, _ALL_DEFS)
+
+        assert result_type == _INT32_TYPE
+        assert result_definition is None
+
+    @pytest.mark.parametrize("operation", ["sum", "mean", "rms"])
+    def test_validate_float_aggregates_return_float64(self, operation: str) -> None:
+        modifier = MathModifier(operation=operation, arguments=[])
+
+        result_type, result_definition = modifier.validate(_INT32_ARRAY_TYPE, None, _ALL_DEFS)
+
+        assert result_type == _FLOAT64_TYPE
+        assert result_definition is None
+
+    def test_validate_rejects_scalar(self) -> None:
+        modifier = MathModifier(operation="mean", arguments=[])
+
+        with pytest.raises(ValidationError, match="requires a numeric array"):
+            modifier.validate(_INT32_TYPE, None, _ALL_DEFS)
+
+
+def test_missing_variable_raises_message_path_error() -> None:
+    path = parse_message_path("/topic.value{>=$threshold}")
+
+    with pytest.raises(MessagePathError, match=r"Variable '\$threshold' was not provided"):
+        path.apply({"value": 5})
+
+
+def test_array_index_variable_requires_integer() -> None:
+    path = parse_message_path("/topic.values[$index]")
+
+    with pytest.raises(MessagePathError, match=r"Variable '\$index' must be an integer"):
+        path.apply({"values": [10, 20]}, {"index": "1"})
+
+
+def test_modifier_variable_requires_number() -> None:
+    path = parse_message_path("/topic.value.@mul($scale)")
+
+    with pytest.raises(MessagePathError, match=r"Variable '\$scale' must be numeric"):
+        path.apply({"value": 5}, {"scale": "2"})
+
+
 class TestMessagePathValidation:
     def test_validate_valid_field_path_does_not_raise(self):
         # x is a valid field on Point — should not raise

@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pyarrow as pa
+    from ros_parser.message_path import MessagePathVariables
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -229,6 +230,7 @@ class ParquetExporter(StructuredExporter):
         include_blobs: bool = False,
         skip_schema: list[str] | None = None,
         select: list[str] | None = None,
+        variables: MessagePathVariables | None = None,
     ) -> None:
         # Surface the missing-pyarrow case at construction time so the CLI
         # can return early before opening any inputs.
@@ -241,6 +243,7 @@ class ParquetExporter(StructuredExporter):
             include_blobs=include_blobs,
             skip_schema=skip_schema,
             select=select,
+            variables=variables,
         )
 
         self._factories: list[Any] = [Pointcloud2DecoderFactory()]

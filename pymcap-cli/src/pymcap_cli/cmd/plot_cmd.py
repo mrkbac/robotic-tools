@@ -18,6 +18,10 @@ from pymcap_cli.cmd._message_filter_options import (
     TopicOption,
     create_message_filter,
 )
+from pymcap_cli.cmd._message_path_options import (
+    MessagePathVariablesOption,
+    create_message_path_variables,
+)
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.plot_exporter import PlotExporter
 
@@ -35,6 +39,7 @@ def plot(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
+    var: MessagePathVariablesOption = None,
     output: Annotated[
         str | None,
         Parameter(name=["-o", "--output"], group=OUTPUT_GROUP),
@@ -87,6 +92,7 @@ def plot(
     output_path = Path(output) if output else None
 
     try:
+        variables = create_message_path_variables(var)
         exporter = PlotExporter(
             output=output_path,
             paths=paths,
@@ -95,6 +101,7 @@ def plot(
             xy=xy,
             force=force,
             source_name=Path(file).name,
+            variables=variables,
         )
     except (ValueError, ValidationError) as exc:
         logger.error(str(exc))  # noqa: TRY400

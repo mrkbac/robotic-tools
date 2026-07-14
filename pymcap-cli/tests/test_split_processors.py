@@ -309,6 +309,16 @@ class TestExpressionSplitProcessor:
         with pytest.raises(Exception, match="Unexpected"):
             ExpressionSplitProcessor("not a valid path !!!")
 
+    def test_variables_are_passed_to_expression(self) -> None:
+        proc = ExpressionSplitProcessor("/t.field{==$expected}", variables={"expected": "alpha"})
+        proc.channels[1] = Channel(
+            id=1, schema_id=1, topic="/t", message_encoding="json", metadata={}
+        )
+        proc._decoders[1] = lambda data: type("M", (), {"field": bytes(data).decode()})()
+
+        assert _route_message(proc, _message(0, channel_id=1, data=b"alpha")) == 0
+        assert _route_message(proc, _message(1, channel_id=1, data=b"beta")) == 1
+
     def test_decodes_chunks_with_target_topic(self):
         proc = _make_expression_proc()
         indexes = [MessageIndex(channel_id=1, timestamps=[], offsets=[])]

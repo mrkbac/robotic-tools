@@ -234,6 +234,29 @@ The results of `.@rpy` and `.@quat` are objects with named fields, so you can ch
 /joint_states.position.@length     # Number of array elements
 ```
 
+#### Aggregate Functions
+
+Aggregate modifiers reduce one numeric array in the current message to one
+scalar. Bare `.@min` and `.@max` reduce arrays, while argument-taking forms
+such as `.@max(5)` continue to map over arrays element by element.
+
+| Modifier | Output | Empty array |
+| --- | --- | --- |
+| `.@min` | Smallest element | no value |
+| `.@max` | Largest element | no value |
+| `.@sum` | Floating-point sum | `0.0` |
+| `.@mean` | Arithmetic mean | no value |
+| `.@rms` | Root mean square | no value |
+
+```
+/joint_states.position.@max
+/samples[:]{!=0}.@rms
+/detections[:]{confidence>0.8}.score.@mean
+```
+
+These functions aggregate within each message. They do not retain history or
+combine values across messages or files.
+
 #### Time-Series Functions
 
 These require a `TransformContext` and cannot be used in standalone evaluation. They track state across messages.
@@ -252,17 +275,19 @@ These require a `TransformContext` and cannot be used in standalone evaluation. 
 
 ### 7. Variables
 
-Variables are prefixed with `$` and can be used in slices and filters:
+Variables are prefixed with `$` and can be used in slices, filters, and
+modifier arguments:
 
 ```
 /my_topic.array[$start_idx:$end_idx]
 /my_topic.items[:]{id == $selected_id}
 /my_topic{timestamp > $min_time}{timestamp < $max_time}
+/my_topic.temperature.@mul($scale).@add($offset)
 ```
 
 **Restrictions**:
 
-- Variables can **only** appear in array slices and filter expressions
+- Variables can appear in array indices, slices, filters, and modifier arguments
 - Variables cannot be used in topic names or field names
 
 ### 7. Value Literals

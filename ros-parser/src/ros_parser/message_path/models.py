@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from ros_parser.models import MessageDefinition, PrimitiveValue, Type
 
@@ -89,7 +89,30 @@ class Variable:
     name: str
 
 
-_VariableStore = dict[str, Any]
+MessagePathVariable: TypeAlias = bool | int | float | str
+MessagePathVariables: TypeAlias = Mapping[str, MessagePathVariable]
+_VariableStore: TypeAlias = MessagePathVariables
+
+
+def _resolve_variable(variable: Variable, variables: _VariableStore) -> MessagePathVariable:
+    try:
+        return variables[variable.name]
+    except KeyError as exc:
+        raise MessagePathError(f"Variable '${variable.name}' was not provided") from exc
+
+
+def _resolve_integer_variable(variable: Variable, variables: _VariableStore) -> int:
+    value = _resolve_variable(variable, variables)
+    if type(value) is not int:
+        raise MessagePathError(f"Variable '${variable.name}' must be an integer")
+    return value
+
+
+def _resolve_numeric_variable(variable: Variable, variables: _VariableStore) -> int | float:
+    value = _resolve_variable(variable, variables)
+    if type(value) not in (int, float):
+        raise MessagePathError(f"Variable '${variable.name}' must be numeric")
+    return cast("int | float", value)
 
 
 class Action(ABC):
@@ -192,7 +215,11 @@ class ArrayIndex(Action):
 
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """Index into a sequence (list, tuple, str) by position."""
-        idx = variables[self.index.name] if isinstance(self.index, Variable) else self.index
+        idx = (
+            _resolve_integer_variable(self.index, variables)
+            if isinstance(self.index, Variable)
+            else self.index
+        )
 
         if not isinstance(obj, Sequence):
             obj_type = type(obj).__name__
@@ -251,8 +278,16 @@ class ArraySlice(Action):
         Unlike Python slicing where [1:3] returns indices 1 and 2,
         the Foxglove spec requires [1:3] to return indices 1, 2, and 3.
         """
-        start_idx = variables[self.start.name] if isinstance(self.start, Variable) else self.start
-        end_idx = variables[self.end.name] if isinstance(self.end, Variable) else self.end
+        start_idx = (
+            _resolve_integer_variable(self.start, variables)
+            if isinstance(self.start, Variable)
+            else self.start
+        )
+        end_idx = (
+            _resolve_integer_variable(self.end, variables)
+            if isinstance(self.end, Variable)
+            else self.end
+        )
 
         if not isinstance(obj, Sequence):
             obj_type = type(obj).__name__
@@ -343,7 +378,7 @@ def _resolve_field_path(obj: Any, field_path: str) -> Any:
 def _resolve_filter_value(val: FilterValue, obj: Any, variables: _VariableStore) -> Any:
     """Resolve a filter value to a concrete value for comparison."""
     if isinstance(val, Variable):
-        return variables[val.name]
+        return _resolve_variable(val, variables)
     if isinstance(val, FilterFieldRef):
         return val.resolve(obj)
     return val
@@ -611,7 +646,7 @@ _NUMERIC_TYPE_NAMES = {
 #   scalar     numeric in → numeric out, applied element-wise over arrays
 #   object     operates on a whole message value (norm, rpy, to_sec, ...)
 #   timeseries needs history; raises without a TransformContext
-ModifierKind = Literal["scalar", "object", "timeseries"]
+ModifierKind = Literal["scalar", "object", "aggregate", "timeseries"]
 
 
 @dataclass(frozen=True)
@@ -619,10 +654,12 @@ class _Modifier:
     """How a math modifier is dispatched and validated."""
 
     func: Callable[..., Any]
+    array_reducer: Callable[[Any], Any] | None = None
     kind: ModifierKind = "scalar"
     requires_fields: tuple[str, ...] = ()
     requires_array: bool = False
     accepts_array: bool = False
+    preserves_element_type: bool = False
     return_type: "Type | None" = None
     return_def: "MessageDefinition | None" = None
 
@@ -634,9 +671,11 @@ def modifier(
     name: str,
     *,
     kind: ModifierKind = "scalar",
+    array_reducer: Callable[[Any], Any] | None = None,
     requires_fields: tuple[str, ...] = (),
     requires_array: bool = False,
     accepts_array: bool = False,
+    preserves_element_type: bool = False,
     return_type: "Type | None" = None,
     return_def: "MessageDefinition | None" = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -645,10 +684,12 @@ def modifier(
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         _MODIFIERS[name] = _Modifier(
             func=func,
+            array_reducer=array_reducer,
             kind=kind,
             requires_fields=requires_fields,
             requires_array=requires_array,
             accepts_array=accepts_array,
+            preserves_element_type=preserves_element_type,
             return_type=return_type,
             return_def=return_def,
         )
@@ -672,13 +713,36 @@ class MathModifier(Action):
 
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """Apply the math operation to the object, supporting element-wise array operations."""
+        spec = self._spec()
+        if spec.kind == "aggregate" and self.arguments:
+            raise MessagePathError(
+                f"Aggregate modifier '{self.operation}' does not accept arguments"
+            )
+
         # Resolve arguments (convert Variables to actual values)
-        resolved_args = [
-            variables[arg.name] if isinstance(arg, Variable) else arg for arg in self.arguments
+        resolved_args: list[int | float] = [
+            _resolve_numeric_variable(arg, variables) if isinstance(arg, Variable) else arg
+            for arg in self.arguments
         ]
 
+        if spec.array_reducer is not None and not resolved_args and isinstance(obj, _ARRAY_TYPES):
+            try:
+                return spec.array_reducer(obj)
+            except MessagePathError:
+                raise
+            except Exception as exc:
+                raise MessagePathError(f"Error in '{self.operation}': {exc!s}") from exc
+
+        if spec.kind == "aggregate":
+            if not isinstance(obj, _ARRAY_TYPES):
+                raise MessagePathError(
+                    f"Aggregate modifier '{self.operation}' requires a numeric array, "
+                    f"got {type(obj).__name__}"
+                )
+            return self._apply_operation(obj, resolved_args)
+
         # Object-level functions operate on the whole object (not element-wise)
-        if self._spec().kind == "object":
+        if spec.kind == "object":
             return self._apply_operation(obj, resolved_args)
 
         # Element-wise over numeric arrays. Decoded numeric arrays are memoryview
@@ -697,7 +761,7 @@ class MathModifier(Action):
         spec = self._spec()
 
         # Object-level functions accept non-numeric inputs (whole message values)
-        if spec.kind == "object":
+        if spec.kind in ("object", "aggregate"):
             try:
                 return spec.func(value, *args) if args else spec.func(value)
             except MessagePathError:
@@ -778,6 +842,54 @@ class MathModifier(Action):
         if spec is None:
             raise ValidationError(f"Unknown math modifier '{self.operation}'")
 
+        if spec.array_reducer is not None and not self.arguments and current_type.is_array:
+            if not current_type.is_primitive or current_type.type_name not in _NUMERIC_TYPE_NAMES:
+                raise ValidationError(
+                    f"Math modifier '{self.operation}' requires a numeric array, "
+                    f"got '{current_type}'"
+                )
+            if spec.preserves_element_type:
+                return (
+                    Type(
+                        type_name=current_type.type_name,
+                        package_name=current_type.package_name,
+                        is_array=False,
+                        array_size=None,
+                        is_upper_bound=False,
+                        string_upper_bound=current_type.string_upper_bound,
+                    ),
+                    None,
+                )
+            return spec.return_type or _FLOAT64_TYPE, None
+
+        if spec.kind == "aggregate":
+            if self.arguments:
+                raise ValidationError(
+                    f"Aggregate modifier '{self.operation}' does not accept arguments"
+                )
+            if (
+                not current_type.is_array
+                or not current_type.is_primitive
+                or current_type.type_name not in _NUMERIC_TYPE_NAMES
+            ):
+                raise ValidationError(
+                    f"Aggregate modifier '{self.operation}' requires a numeric array, "
+                    f"got '{current_type}'"
+                )
+            if spec.preserves_element_type:
+                return (
+                    Type(
+                        type_name=current_type.type_name,
+                        package_name=current_type.package_name,
+                        is_array=False,
+                        array_size=None,
+                        is_upper_bound=False,
+                        string_upper_bound=current_type.string_upper_bound,
+                    ),
+                    None,
+                )
+            return spec.return_type or _FLOAT64_TYPE, None
+
         # Math operations work on both single numeric values and arrays of numeric values
         working_type = current_type
 
@@ -827,7 +939,7 @@ class MessagePath:
     topic: str
     segments: list[FieldAccess | ArrayIndex | ArraySlice | Filter | MathModifier]
 
-    def apply(self, obj: Any, variables: _VariableStore | None = None) -> Any:
+    def apply(self, obj: Any, variables: MessagePathVariables | None = None) -> Any:
         """
         Apply all segments in the message path to an object.
 

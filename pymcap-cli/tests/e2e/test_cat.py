@@ -1,5 +1,6 @@
 """E2E tests for the cat command."""
 
+import io
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -7,6 +8,23 @@ from pathlib import Path
 import pytest
 from pymcap_cli.cli import app
 from pymcap_cli.cmd.cat_cmd import cat
+from small_mcap import CompressionType, McapWriter
+
+
+def _make_array_mcap(path: Path) -> None:
+    output = io.BytesIO()
+    writer = McapWriter(output, chunk_size=4096, compression=CompressionType.ZSTD)
+    writer.start()
+    writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+    writer.add_channel(channel_id=1, topic="/arr", message_encoding="json", schema_id=1)
+    writer.add_message(
+        channel_id=1,
+        log_time=1,
+        publish_time=1,
+        data=b'{"values":[1,8,3]}',
+    )
+    writer.finish()
+    path.write_bytes(output.getvalue())
 
 
 def call_cat_expect_success(func: Callable, *args, **kwargs):
@@ -285,6 +303,50 @@ class TestCatQueryValidation:
         lines = capsys.readouterr().out.strip().splitlines()
         assert len(lines) == 1
         assert json.loads(lines[0])["message"] == 99
+
+    def test_query_aggregate_emits_scalar(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        mcap = tmp_path / "array.mcap"
+        _make_array_mcap(mcap)
+
+        exit_code = cat(file=str(mcap), query=["/arr.values.@max"])
+
+        assert exit_code == 0
+        assert json.loads(capsys.readouterr().out)["message"] == 8
+
+    def test_query_reads_variables_from_environment(
+        self, simple_mcap: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        monkeypatch.setenv("PYMCAP_VAR_threshold", "99")
+
+        exit_code = cat(file=str(simple_mcap), query=["/test.i{>=$threshold}"])
+
+        assert exit_code == 0
+        messages = [json.loads(line)["message"] for line in capsys.readouterr().out.splitlines()]
+        assert messages == [99]
+
+    def test_query_cli_variable_overrides_environment(
+        self, simple_mcap: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        monkeypatch.setenv("PYMCAP_VAR_threshold", "99")
+
+        with pytest.raises(SystemExit) as exc_info:
+            app(
+                [
+                    "cat",
+                    str(simple_mcap),
+                    "--query",
+                    "/test.i{>=$threshold}",
+                    "--var",
+                    "threshold=98",
+                ]
+            )
+
+        assert exc_info.value.code == 0
+        messages = [json.loads(line)["message"] for line in capsys.readouterr().out.splitlines()]
+        assert messages == [98, 99]
 
     def test_query_invalid_nested_field(self, image_small_mcap: Path, capsys):
         """Test invalid nested field access fails."""

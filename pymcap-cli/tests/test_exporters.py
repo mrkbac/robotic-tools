@@ -191,6 +191,24 @@ def test_export_csv_select_writes_only_named_paths_and_timestamps(tmp_path):
     assert float(rows[1]["magnitude"]) == pytest.approx(14**0.5)
 
 
+def test_export_csv_passes_cli_variables_to_selected_paths(tmp_path: Path) -> None:
+    src = tmp_path / "src.mcap"
+    _make_pose_mcap(src, num_messages=3)
+    out = tmp_path / "out"
+
+    rc = export_csv(
+        str(src),
+        out,
+        select=["x=/pose.x{>=$minimum}"],
+        var=["minimum=1"],
+    )
+
+    assert rc == 0
+    with next(out.glob("*.csv")).open(newline="") as file:
+        rows = list(DictReader(file))
+    assert [row["x"] for row in rows] == ["", "1.0", "2.0"]
+
+
 @pytest.mark.parametrize(
     ("select", "message"),
     [

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from ros_parser.message_path import MessagePathVariables
     from small_mcap import Channel, DecodedMessage, Schema, Summary
 
 PlainScalar = bool | int | float | str | bytes | None
@@ -85,10 +86,11 @@ class StructuredExporter(Exporter, ABC):
         include_blobs: bool = False,
         skip_schema: list[str] | None = None,
         select: list[str] | None = None,
+        variables: MessagePathVariables | None = None,
     ) -> None:
         self._skipped_schemas = set() if include_blobs else set(DEFAULT_BLOB_SCHEMAS)
         self._skipped_schemas.update(normalize_schema_name(schema) for schema in skip_schema or ())
-        self._columns = ColumnSelection(select)
+        self._columns = ColumnSelection(select, variables)
 
     def accepts(self, channel: Channel, schema: Schema | None) -> bool:
         if not self._columns.includes_topic(channel.topic):

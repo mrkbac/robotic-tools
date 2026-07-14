@@ -18,6 +18,8 @@ from .models import (
     MathModifier,
     MessagePath,
     MessagePathError,
+    MessagePathVariable,
+    MessagePathVariables,
     ValidationError,
     Variable,
 )
@@ -43,6 +45,8 @@ __all__ = [
     "MathModifier",
     "MessagePath",
     "MessagePathError",
+    "MessagePathVariable",
+    "MessagePathVariables",
     "Quaternion",
     "ValidationError",
     "Variable",

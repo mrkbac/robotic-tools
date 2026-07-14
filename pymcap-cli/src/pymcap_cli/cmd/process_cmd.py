@@ -19,6 +19,10 @@ from pymcap_cli.cmd._message_filter_options import (
     TopicOption,
     create_message_filter,
 )
+from pymcap_cli.cmd._message_path_options import (
+    MessagePathVariablesOption,
+    create_message_path_variables,
+)
 from pymcap_cli.cmd._pointcloud_cleanup import (
     pointcloud_worker_count,
     resolve_pointcloud_cleanup,
@@ -428,6 +432,7 @@ def process(
             ),
         ),
     ] = None,
+    var: MessagePathVariablesOption = None,
     split_max_size: Annotated[
         str | None,
         Parameter(
@@ -801,6 +806,7 @@ def process(
 
     if split_expression:
         try:
+            variables = create_message_path_variables(var)
             routers.append(
                 ExpressionSplitProcessor(
                     split_expression,
@@ -808,6 +814,7 @@ def process(
                     hysteresis_count=split_hysteresis_count,
                     trailing_context_ns=split_keep_trailing_context,
                     trailing_context_count=split_keep_trailing_count,
+                    variables=variables,
                 )
             )
         except MessagePathError:

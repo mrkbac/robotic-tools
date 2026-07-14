@@ -32,6 +32,10 @@ from pymcap_cli.cmd._message_filter_options import (
     TopicOption,
     create_message_filter,
 )
+from pymcap_cli.cmd._message_path_options import (
+    MessagePathVariablesOption,
+    create_message_path_variables,
+)
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query, query_result_is_empty
 from pymcap_cli.display.message_render import (
@@ -69,6 +73,7 @@ def cat(
             ),
         ),
     ] = None,
+    var: MessagePathVariablesOption = None,
     grep: Annotated[
         str | None,
         Parameter(
@@ -192,6 +197,7 @@ def cat(
             end=end,
             early_bail=early_bail,
         )
+        variables = create_message_path_variables(var) if query or var else {}
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
         return 1
@@ -310,7 +316,7 @@ def cat(
                 # Apply query filter
                 if parsed_query is not None:
                     try:
-                        data = parsed_query.apply(msg.decoded_message)
+                        data = parsed_query.apply(msg.decoded_message, variables)
                         if query_result_is_empty(data):
                             continue
                     except MessagePathError as e:

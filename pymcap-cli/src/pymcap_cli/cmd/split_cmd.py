@@ -8,6 +8,10 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
+from pymcap_cli.cmd._message_path_options import (
+    MessagePathVariablesOption,
+    create_message_path_variables,
+)
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     processing_had_errors,
@@ -85,6 +89,7 @@ def split(
             ),
         ),
     ] = None,
+    var: MessagePathVariablesOption = None,
     max_size: Annotated[
         str | None,
         Parameter(
@@ -310,6 +315,7 @@ def split(
             logger.exception("Error parsing hysteresis/trailing-context duration")
             return 1
         try:
+            variables = create_message_path_variables(var)
             processors.append(
                 ExpressionSplitProcessor(
                     expression,
@@ -317,6 +323,7 @@ def split(
                     hysteresis_count=hysteresis_count,
                     trailing_context_ns=trailing_ns,
                     trailing_context_count=keep_trailing_count,
+                    variables=variables,
                 )
             )
         except MessagePathError:

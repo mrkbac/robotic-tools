@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ros_parser import MessageDefinition, Type, parse_schema_to_definitions
-from ros_parser.message_path import MathModifier, MessagePathError, ValidationError
+from ros_parser.message_path import (
+    MathModifier,
+    MessagePathError,
+    MessagePathVariables,
+    ValidationError,
+)
 
 from pymcap_cli.core.named_message_path import NamedMessagePath, parse_named_columns
 from pymcap_cli.types.to_plain import to_plain
@@ -28,8 +33,13 @@ class ResolvedColumn:
 
 
 class ColumnSelection:
-    def __init__(self, select: list[str] | None) -> None:
+    def __init__(
+        self,
+        select: list[str] | None,
+        variables: MessagePathVariables | None = None,
+    ) -> None:
         self.columns = parse_named_columns(select)
+        self._variables = dict(variables or {})
         by_topic: dict[str, list[NamedMessagePath]] = {}
         for column in self.columns:
             by_topic.setdefault(column.path.topic, []).append(column)
@@ -46,7 +56,7 @@ class ColumnSelection:
         values: dict[str, ColumnValue] = {}
         for column in self._by_topic.get(topic, ()):
             try:
-                value = column.path.apply(msg.decoded_message)
+                value = column.path.apply(msg.decoded_message, self._variables)
             except MessagePathError as exc:
                 raise ValueError(
                     f"Cannot evaluate column {column.name!r} from {column.source!r}: {exc}"

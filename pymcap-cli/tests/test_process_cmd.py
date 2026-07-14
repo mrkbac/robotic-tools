@@ -279,6 +279,22 @@ class TestSplitRouters:
         assert rec.output_options is not None
         assert any(isinstance(r, ExpressionSplitProcessor) for r in rec.output_options.routers)
 
+    def test_split_expression_passes_variables(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_multi(monkeypatch, rec)
+
+        process_cmd.process(
+            file=["input.mcap"],
+            split_expression="/gps/fix.status.status{==$expected}",
+            var=["expected=2"],
+        )
+
+        assert rec.output_options is not None
+        router = next(
+            r for r in rec.output_options.routers if isinstance(r, ExpressionSplitProcessor)
+        )
+        assert router._variables == {"expected": 2}
+
     @pytest.mark.parametrize(
         "extra",
         [

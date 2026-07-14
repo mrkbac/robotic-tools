@@ -850,6 +850,25 @@ def test_cat_async_grep_drops_non_matching_messages(
     assert lines[0]["message"]["data"] == "ERROR: boom"
 
 
+def test_cat_async_passes_variables_to_query(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = _run_cat_against_server(
+        register=[_json_string_channel(1, "/chatter")],
+        publish=[
+            (1, b'{"data":"skip"}', 1),
+            (1, b'{"data":"keep"}', 2),
+        ],
+        cat_kwargs=_default_cat_kwargs(
+            query="/chatter.data{==$wanted}",
+            variables={"wanted": "keep"},
+            limit=1,
+        ),
+    )
+
+    assert rc == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert [entry["message"] for entry in lines] == ["keep"]
+
+
 def test_cat_async_skips_channel_with_unknown_encoding(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

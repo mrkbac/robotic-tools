@@ -158,6 +158,16 @@ pymcap-cli cat recording.mcap --query '/odom.pose.position.x'
 # Filter array elements
 pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
 
+# Reduce an array in each message to one scalar
+pymcap-cli cat recording.mcap --query '/joint_states.position.@max'
+
+# Supply MessagePath variables on the command line
+pymcap-cli cat recording.mcap --query '/temperature{>=$minimum}' --var minimum=-40
+
+# Or reuse variables from the environment; --var overrides matching names
+PYMCAP_VAR_minimum=-40 PYMCAP_VAR_maximum=125 \
+  pymcap-cli cat recording.mcap --query '/temperature{>=$minimum && <=$maximum}'
+
 # Pipe to file as JSONL
 pymcap-cli cat recording.mcap > messages.jsonl
 

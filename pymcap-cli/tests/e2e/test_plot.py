@@ -213,6 +213,21 @@ class TestPlot:
         assert "position[:][0]" in content
         assert "position[:][2]" in content
 
+    def test_plot_passes_cli_variables_to_message_path(
+        self, simple_mcap: Path, tmp_path: Path, capsys
+    ) -> None:
+        output = tmp_path / "plot.html"
+
+        exit_code = plot(
+            file=str(simple_mcap),
+            paths=["/test.i{>=$threshold}"],
+            var=["threshold=98"],
+            output=str(output),
+        )
+
+        assert exit_code == 0
+        assert "2 points" in capsys.readouterr().err
+
     def test_plot_reports_per_path_matches(self, simple_mcap: Path, tmp_path: Path, capsys):
         """A valid path reports its point count; a mistyped one is flagged for the user."""
         output = tmp_path / "plot.html"

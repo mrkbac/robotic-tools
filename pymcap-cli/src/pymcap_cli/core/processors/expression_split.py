@@ -27,6 +27,7 @@ from pymcap_cli.core.processors.base import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from ros_parser.message_path import MessagePathVariables
     from small_mcap import Channel, Chunk, LazyChunk, Message, MessageIndex, Schema
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class ExpressionSplitProcessor(OutputRouter):
         hysteresis_count: int | None = None,
         trailing_context_ns: int | None = None,
         trailing_context_count: int | None = None,
+        variables: MessagePathVariables | None = None,
     ) -> None:
         if hysteresis_ns is not None and hysteresis_ns <= 0:
             raise ValueError("hysteresis_ns must be positive")
@@ -103,6 +105,7 @@ class ExpressionSplitProcessor(OutputRouter):
         self._trailing_ns = trailing_context_ns
         self._trailing_count = trailing_context_count
         self._tail_windows: list[_TailWindow] = []
+        self._variables = dict(variables or {})
 
     @override
     def initialize(self, context: PipelineContext) -> None:
@@ -211,7 +214,7 @@ class ExpressionSplitProcessor(OutputRouter):
         if dec is None or ch is None or ch.topic != self.parsed.topic:
             return (self._segment_index,)
         try:
-            value = self.parsed.apply(dec(message.data))
+            value = self.parsed.apply(dec(message.data), self._variables)
         except MessagePathError:
             return (self._segment_index,)
 
