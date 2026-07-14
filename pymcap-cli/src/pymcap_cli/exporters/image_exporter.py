@@ -19,7 +19,7 @@ from pymcap_cli.exporters._common import (
     schema_name_in,
     unique_message_path,
 )
-from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
+from pymcap_cli.exporters.base import Exporter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from PIL.Image import Image as PILImage
-    from small_mcap import DecodedMessage, Schema
+    from small_mcap import Channel, DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -169,7 +169,7 @@ def _format_to_extension(format_str: str) -> str:
     return "bin"
 
 
-class _CompressedImageWriter(TopicWriter):
+class _CompressedImageWriter:
     """Write compressed images, optionally re-encoded to `target_format`."""
 
     def __init__(self, dir_path: Path, *, target_format: str | None) -> None:
@@ -209,7 +209,7 @@ class _CompressedImageWriter(TopicWriter):
         pass
 
 
-class _RawImageWriter(TopicWriter):
+class _RawImageWriter:
     """Encode raw ``sensor_msgs/Image`` via Pillow."""
 
     def __init__(self, dir_path: Path, *, raw_format: str) -> None:
@@ -239,7 +239,7 @@ class _RawImageWriter(TopicWriter):
         pass
 
 
-class ImageExporter(Ros2Exporter):
+class ImageExporter(Exporter):
     """Pluggable image exporter.
 
     ``CompressedImage`` payloads are written with the source extension unless
@@ -254,7 +254,7 @@ class ImageExporter(Ros2Exporter):
         self._raw_format = raw_format
         self._output_format = output_format
 
-    def accepts(self, schema: Schema | None) -> bool:
+    def accepts(self, channel: Channel, schema: Schema | None) -> bool:  # noqa: ARG002
         return schema_name_in(schema, _IMAGE_SCHEMAS)
 
     def open_topic(self, ctx: TopicContext) -> _CompressedImageWriter | _RawImageWriter:

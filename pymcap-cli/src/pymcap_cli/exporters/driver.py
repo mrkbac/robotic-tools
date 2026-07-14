@@ -1,7 +1,7 @@
 """Generic export driver.
 
 Iterates decoded messages from an MCAP file and dispatches them to per-topic
-:class:`~pymcap_cli.exporters.base.TopicWriter` instances created by the
+:class:`~pymcap_cli.exporters.base.Writer` instances created by the
 selected :class:`~pymcap_cli.exporters.base.Exporter`.
 """
 
@@ -26,7 +26,9 @@ from pymcap_cli.exporters.base import TopicContext
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pymcap_cli.exporters.base import Exporter, TopicWriter
+    from small_mcap import DecodedMessage
+
+    from pymcap_cli.exporters.base import Exporter, Writer
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,6 @@ def run_export(
     output: str | Path | None,
     exporter: Exporter,
     message_filter: MessageFilterOptions | None = None,
-    required_topics: list[str] | None = None,
     force: bool = False,
     num_workers: int = 8,
 ) -> int:
@@ -51,14 +52,13 @@ def run_export(
     the figure is shown interactively).
 
     ``message_filter`` is the canonical topic/time selection shared by every
-    file-reading command. ``required_topics`` is an additional command-owned
-    restriction, used by plot paths and other semantic readers.
+    file-reading command. Exporter-specific channel requirements are expressed
+    by :meth:`Exporter.accepts`.
     """
     filters = message_filter or MessageFilterOptions()
     should_include = make_should_include(
         message_filter=filters,
-        accepts_schema=exporter.accepts,
-        required_topics=required_topics,
+        accepts=exporter.accepts,
     )
 
     # Read the summary exactly once, then derive both the progress total and
@@ -76,6 +76,12 @@ def run_export(
         logger.error(str(exc))  # noqa: TRY400
         return 1
 
+    try:
+        exporter.validate_input(summary)
+    except ValueError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+
     resolved_output = exporter.validate_output(output, force=force)
     if resolved_output is None:
         return 1
@@ -83,7 +89,7 @@ def run_export(
     total = count_included_messages(summary, should_include)
     warn_topic_coverage(summary, file, None)
 
-    writers: dict[int, TopicWriter] = {}
+    writers: dict[int, Writer[DecodedMessage]] = {}
     used_filenames: set[str] = set()
     counts: dict[int, int] = {}
     error_count = 0
@@ -91,8 +97,6 @@ def run_export(
     logger.info(f"Input: {file}")
     logger.info(f"Output: {resolved_output}")
     logger.info(f"Format: {exporter.name}")
-
-    exporter.setup(resolved_output)
 
     read_buffer_bytes = 4 * 1024 * 1024
     try:

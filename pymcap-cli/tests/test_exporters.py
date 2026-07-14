@@ -10,10 +10,13 @@ from __future__ import annotations
 import io
 import json
 import struct
+from csv import DictReader
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
+from pymcap_cli.cmd.export_csv_cmd import export_csv
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.exporters import run_export
@@ -25,9 +28,36 @@ from pymcap_cli.exporters.image_exporter import (
     _supported_image_formats,
 )
 from pymcap_cli.exporters.json_exporter import JsonExporter
+from pymcap_cli.exporters.structured import StructuredExporter, StructuredRecord
 from small_mcap import CompressionType, McapWriter
 
+if TYPE_CHECKING:
+    from pymcap_cli.exporters.base import TopicContext, Writer
+
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+class _MemoryWriter:
+    def __init__(self) -> None:
+        self.records: list[StructuredRecord] = []
+        self.is_closed = False
+
+    def write(self, record: StructuredRecord) -> None:
+        self.records.append(record)
+
+    def close(self) -> None:
+        self.is_closed = True
+
+
+class _MemoryExporter(StructuredExporter):
+    name: ClassVar[str] = "memory"
+
+    def __init__(self, *, select: list[str] | None = None) -> None:
+        super().__init__(select=select)
+        self.writer = _MemoryWriter()
+
+    def create_writer(self, _ctx: TopicContext) -> Writer[StructuredRecord]:
+        return self.writer
 
 
 def _make_pose_mcap(
@@ -114,6 +144,78 @@ def test_csv_exporter_writes_one_file_per_topic(tmp_path):
     assert "_log_time_ns" in lines[0]
 
 
+def test_structured_exporter_owns_projection_and_message_dispatch(tmp_path):
+    src = tmp_path / "src.mcap"
+    _make_pose_mcap(src, num_messages=2)
+    exporter = _MemoryExporter(select=["magnitude=/pose.@norm"])
+
+    rc = run_export(
+        file=str(src),
+        output=tmp_path / "out",
+        exporter=exporter,
+    )
+
+    assert rc == 0
+    assert exporter.writer.is_closed
+    assert [record.log_time_ns for record in exporter.writer.records] == [0, NS_TO_SEC]
+    assert [record.columns["magnitude"] for record in exporter.writer.records] == pytest.approx(
+        [5**0.5, 14**0.5]
+    )
+    assert all(record.is_projection for record in exporter.writer.records)
+
+
+def test_structured_selection_controls_channel_acceptance() -> None:
+    exporter = CsvExporter(select=["x=/pose.x"])
+    schema = SimpleNamespace(name="test_msgs/Pose")
+
+    assert exporter.accepts(SimpleNamespace(topic="/pose"), schema)  # type: ignore[arg-type]
+    assert not exporter.accepts(SimpleNamespace(topic="/other"), schema)  # type: ignore[arg-type]
+
+
+def test_export_csv_select_writes_only_named_paths_and_timestamps(tmp_path):
+    src = tmp_path / "src.mcap"
+    _make_pose_mcap(src, num_messages=2)
+
+    out = tmp_path / "out"
+    rc = export_csv(
+        str(src),
+        out,
+        select=["magnitude=/pose.@norm"],
+    )
+
+    assert rc == 0
+    with next(out.glob("*.csv")).open(newline="") as file:
+        rows = list(DictReader(file))
+    assert list(rows[0]) == ["_log_time_ns", "_publish_time_ns", "magnitude"]
+    assert float(rows[0]["magnitude"]) == pytest.approx(5**0.5)
+    assert float(rows[1]["magnitude"]) == pytest.approx(14**0.5)
+
+
+@pytest.mark.parametrize(
+    ("select", "message"),
+    [
+        (["missing=/missing.x"], "was not found"),
+        (["bad=/pose.missing"], "Invalid path"),
+        (["_log_time_ns=/pose.x"], "reserved"),
+    ],
+)
+def test_export_csv_rejects_invalid_selection_before_creating_output(
+    tmp_path: Path,
+    select: list[str],
+    message: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    src = tmp_path / "src.mcap"
+    _make_pose_mcap(src, num_messages=1)
+
+    out = tmp_path / "out"
+    rc = export_csv(str(src), out, select=select)
+
+    assert rc == 1
+    assert message in caplog.text
+    assert not out.exists()
+
+
 def test_json_exporter_ndjson_line_count_matches_messages(tmp_path):
     src = tmp_path / "src.mcap"
     _make_pose_mcap(src, num_messages=4)
@@ -129,6 +231,24 @@ def test_json_exporter_ndjson_line_count_matches_messages(tmp_path):
     record = json.loads(lines[0])
     assert "_log_time_ns" in record
     assert "data" in record
+
+
+def test_json_exporter_inherits_structured_selection(tmp_path):
+    src = tmp_path / "src.mcap"
+    _make_pose_mcap(src, num_messages=1)
+    exporter = JsonExporter(select=["magnitude=/pose.@norm"])
+
+    out = tmp_path / "out"
+    rc = run_export(
+        file=str(src),
+        output=out,
+        exporter=exporter,
+    )
+
+    assert rc == 0
+    record = json.loads(next(out.glob("*.ndjson")).read_text())
+    assert list(record) == ["_log_time_ns", "_publish_time_ns", "magnitude"]
+    assert record["magnitude"] == pytest.approx(5**0.5)
 
 
 def test_json_exporter_applies_shared_time_window(tmp_path):
@@ -289,5 +409,6 @@ def test_csv_exporter_skips_blob_schemas_by_default():
     class _Schema:
         name = "sensor_msgs/msg/Image"
 
-    assert CsvExporter().accepts(_Schema()) is False  # type: ignore[arg-type]
-    assert CsvExporter(include_blobs=True).accepts(_Schema()) is True  # type: ignore[arg-type]
+    channel = SimpleNamespace(topic="/camera")
+    assert CsvExporter().accepts(channel, _Schema()) is False  # type: ignore[arg-type]
+    assert CsvExporter(include_blobs=True).accepts(channel, _Schema()) is True  # type: ignore[arg-type]

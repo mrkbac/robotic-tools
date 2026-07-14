@@ -30,13 +30,12 @@ from mcap_codec_support.pointcloud import (
 from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 
 from pymcap_cli.encoding.arrow_schema import ArrowSchemaCache
+from pymcap_cli.encoding.arrow_schema import _type_to_arrow as type_to_arrow
 from pymcap_cli.exporters._common import (
-    SkipSchemaMixin,
-    message_timestamps_ns,
     normalize_schema_name,
     prepare_output_file,
 )
-from pymcap_cli.exporters.base import Exporter, TopicWriter
+from pymcap_cli.exporters.structured import StructuredExporter, StructuredRecord
 from pymcap_cli.types.to_plain import to_plain
 
 if TYPE_CHECKING:
@@ -44,7 +43,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pyarrow as pa
-    from small_mcap import DecodedMessage
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -56,28 +54,30 @@ logger = logging.getLogger(__name__)
 _MAX_WRITER_BACKLOG = 4
 
 
-def _build_row(msg: DecodedMessage) -> dict[str, Any]:
+def _build_row(record: StructuredRecord) -> dict[str, Any]:
     import numpy as np  # noqa: PLC0415
 
-    decoded = msg.decoded_message
-    if isinstance(decoded, np.ndarray) and decoded.dtype.names:
-        # PointCloud2 — keep the structured numpy array as-is; pyarrow preserves
-        # the per-field dtypes when we hand it a StructArray at flush time.
-        payload: dict[str, Any] = {"points": decoded}
+    timestamps = record.timestamp_fields()
+    payload: dict[str, Any]
+    if record.is_projection:
+        payload = dict(timestamps)
     else:
-        payload = to_plain(decoded)
-        if not isinstance(payload, dict):
-            payload = {"value": payload}
-
-    log_time_ns, publish_time_ns = message_timestamps_ns(msg)
-    payload["_log_time_ns"] = log_time_ns
-    payload["_publish_time_ns"] = publish_time_ns
+        decoded = record.message.decoded_message
+        if isinstance(decoded, np.ndarray) and decoded.dtype.names:
+            payload = {"points": decoded}
+        else:
+            payload = to_plain(decoded)
+            if not isinstance(payload, dict):
+                payload = {"value": payload}
+        payload.update(timestamps)
+    payload.update(record.columns)
     return payload
 
 
 def _build_table(
     rows: list[dict[str, Any]],
     schema_type: pa.StructType | None = None,
+    derived_types: Mapping[str, pa.DataType] | None = None,
 ) -> pa.Table:
     """Build a pyarrow Table from rows, preserving exact primitive widths.
 
@@ -97,6 +97,7 @@ def _build_table(
         for i in range(schema_type.num_fields):
             f = schema_type.field(i)
             field_types[f.name] = f.type
+    field_types.update(derived_types or {})
 
     column_names = list(rows[0].keys())
     arrays: list[pa.Array] = []
@@ -139,7 +140,7 @@ class _LockedParquetWriter:
             self._writer.close()
 
 
-class _ParquetTopicWriter(TopicWriter):
+class _ParquetTopicWriter:
     """Per-topic row buffer + lazy ParquetWriter, dispatched via shared pool."""
 
     def __init__(
@@ -151,6 +152,7 @@ class _ParquetTopicWriter(TopicWriter):
         writer_pool: ThreadPoolExecutor,
         pending: deque[Future[None]],
         schema_cache: ArrowSchemaCache,
+        derived_types: Mapping[str, pa.DataType],
     ) -> None:
         self.topic = ctx.topic
         self.writer_key = ctx.writer_key
@@ -170,27 +172,28 @@ class _ParquetTopicWriter(TopicWriter):
         self._parquet_writer: _LockedParquetWriter | None = None
         self._schema_type: pa.StructType | None = None
         self._schema_type_resolved = False
+        self._derived_types = dict(derived_types)
 
-    def _resolve_schema_type(self, msg: DecodedMessage) -> None:
+    def _resolve_schema_type(self, record: StructuredRecord) -> None:
         import numpy as np  # noqa: PLC0415
 
-        if isinstance(msg.decoded_message, np.ndarray):
+        if isinstance(record.message.decoded_message, np.ndarray):
             self._schema_type = None
         else:
             self._schema_type = self._schema_cache.get(self._ctx_schema)
         self._schema_type_resolved = True
 
-    def write(self, msg: DecodedMessage) -> None:
+    def write(self, record: StructuredRecord) -> None:
         if not self._schema_type_resolved:
-            self._resolve_schema_type(msg)
-        self._buffer.append(_build_row(msg))
+            self._resolve_schema_type(record)
+        self._buffer.append(_build_row(record))
         if len(self._buffer) >= self._batch_size:
             self._flush()
 
     def _flush(self) -> None:
         if not self._buffer:
             return
-        batch = _build_table(self._buffer, self._schema_type)
+        batch = _build_table(self._buffer, self._schema_type, self._derived_types)
         self._buffer.clear()
         if self._parquet_writer is None:
             self._parquet_writer = _LockedParquetWriter(self._path, batch.schema, self._compression)
@@ -207,7 +210,7 @@ class _ParquetTopicWriter(TopicWriter):
             self._parquet_writer.close()
 
 
-class ParquetExporter(SkipSchemaMixin, Exporter):
+class ParquetExporter(StructuredExporter):
     """Pluggable Parquet exporter.
 
     One ``<topic>.parquet`` per topic plus a ``_topics.parquet`` index file
@@ -225,6 +228,7 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
         compression: str = "zstd",
         include_blobs: bool = False,
         skip_schema: list[str] | None = None,
+        select: list[str] | None = None,
     ) -> None:
         # Surface the missing-pyarrow case at construction time so the CLI
         # can return early before opening any inputs.
@@ -233,9 +237,10 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
         self._batch_size = batch_size
         self._writer_threads = writer_threads
         self._compression = compression
-        self._set_skipped_schemas(
+        super().__init__(
             include_blobs=include_blobs,
-            skip_schema=skip_schema or (),
+            skip_schema=skip_schema,
+            select=select,
         )
 
         self._factories: list[Any] = [Pointcloud2DecoderFactory()]
@@ -260,7 +265,10 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
     def decoder_factories(self) -> list[Any]:
         return list(self._factories)
 
-    def setup(self, output_path: Path) -> None:
+    def validate_output(self, output: str | Path | None, *, force: bool) -> Path | None:
+        output_path = super().validate_output(output, force=force)
+        if output_path is None:
+            return None
         if self._compressed_pointcloud_warning:
             logger.warning(self._compressed_pointcloud_warning)
         if self._skipped_schemas:
@@ -272,13 +280,21 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
         # new outputs (validate_output_dir leaves the directory intact).
         for p in output_path.glob("*.parquet"):
             p.unlink()
-        self._writer_pool = ThreadPoolExecutor(
-            max_workers=self._writer_threads, thread_name_prefix="parquet-writer"
-        )
+        return output_path
 
-    def open_topic(self, ctx: TopicContext) -> _ParquetTopicWriter:
+    def create_writer(self, ctx: TopicContext) -> _ParquetTopicWriter:
         if self._writer_pool is None:
-            raise RuntimeError("ParquetExporter.setup() must be called before open_topic()")
+            self._writer_pool = ThreadPoolExecutor(
+                max_workers=self._writer_threads,
+                thread_name_prefix="parquet-writer",
+            )
+        resolved_columns = (
+            self._columns.resolve_for_schema(ctx.topic, ctx.schema) if ctx.schema else ()
+        )
+        derived_types = {
+            resolved.column.name: type_to_arrow(resolved.result_type, resolved.definitions)
+            for resolved in resolved_columns
+        }
         writer = _ParquetTopicWriter(
             ctx,
             batch_size=self._batch_size,
@@ -286,6 +302,7 @@ class ParquetExporter(SkipSchemaMixin, Exporter):
             writer_pool=self._writer_pool,
             pending=self._pending,
             schema_cache=self._schema_cache,
+            derived_types=derived_types,
         )
         self._writers[ctx.writer_key] = writer
         return writer

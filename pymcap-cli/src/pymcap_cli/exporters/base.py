@@ -1,9 +1,9 @@
 """Base class and shared types for pluggable exporters.
 
 The driver (:func:`pymcap_cli.exporters.driver.run_export`) calls into an
-:class:`Exporter` to obtain per-topic :class:`TopicWriter` instances and
-forwards decoded MCAP messages to them. A new export format is one new
-:class:`Exporter` subclass.
+:class:`Exporter` to obtain per-topic :class:`Writer` instances and forwards
+decoded MCAP messages to them. Artifact exporters use this low-level API
+directly; record-oriented formats extend ``StructuredExporter`` instead.
 """
 
 from __future__ import annotations
@@ -11,13 +11,13 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from small_mcap import Channel, DecodedMessage, Schema
+    from small_mcap import Channel, DecodedMessage, Schema, Summary
 
 logger = logging.getLogger(__name__)
 
@@ -35,31 +35,31 @@ class TopicContext:
     force: bool
 
 
-class TopicWriter(ABC):
-    """Per-topic writer. Lives for the duration of one export run."""
+WrittenValue_contra = TypeVar("WrittenValue_contra", contravariant=True)
 
-    @abstractmethod
-    def write(self, msg: DecodedMessage) -> None:
-        """Persist a single decoded message."""
 
-    @abstractmethod
+class Writer(Protocol[WrittenValue_contra]):
+    """Destination that consumes values for the duration of one export run."""
+
+    def write(self, value: WrittenValue_contra, /) -> None:
+        """Persist one value."""
+        ...
+
     def close(self) -> None:
         """Flush and release resources."""
+        ...
 
 
 class Exporter(ABC):
-    """Base class for per-format exporters.
+    """Low-level base for artifact and transforming exporters.
 
-    Subclasses must implement :meth:`decoder_factories`, :meth:`accepts`, and
-    :meth:`open_topic`. The lifecycle hooks :meth:`setup` and :meth:`finish`
-    default to no-ops; override them when a format needs global state (e.g.
-    a shared writer-thread pool, an end-of-run index file).
+    Subclasses implement :meth:`open_topic` and optionally specialize decoder
+    factories, channel acceptance, output validation, or end-of-run handling.
     """
 
     name: ClassVar[str]
     """Short format identifier, e.g. ``"csv"``."""
 
-    @abstractmethod
     def decoder_factories(self) -> list[Any]:
         """Decoder factories to plug into ``small_mcap.read_message_decoded``.
 
@@ -67,18 +67,18 @@ class Exporter(ABC):
         return any format-specific decoders followed by the standard ROS2 CDR
         decoder factory.
         """
+        from mcap_ros2_support_fast.decoder import (  # noqa: PLC0415
+            DecoderFactory as Ros2DecoderFactory,
+        )
+
+        return [Ros2DecoderFactory()]
+
+    def accepts(self, channel: Channel, schema: Schema | None) -> bool:  # noqa: ARG002
+        """Return whether this exporter can handle a channel and schema."""
+        return True
 
     @abstractmethod
-    def accepts(self, schema: Schema | None) -> bool:
-        """Return True if this exporter can handle messages with this schema.
-
-        Called by the driver to filter messages at the reader level — the
-        chunk decoder skips entire channels whose schema this method rejects,
-        so unsupported / blob schemas never get CDR-decoded.
-        """
-
-    @abstractmethod
-    def open_topic(self, ctx: TopicContext) -> TopicWriter:
+    def open_topic(self, ctx: TopicContext) -> Writer[DecodedMessage]:
         """Create a per-topic writer. Called once per topic on first message."""
 
     def validate_output(self, output: str | Path | None, *, force: bool) -> Path | None:
@@ -96,39 +96,16 @@ class Exporter(ABC):
             return None
         return validate_output_dir(output, force=force)
 
-    def setup(self, output_path: Path) -> None:  # noqa: B027
-        """Called once before iteration. Default is a no-op."""
+    def validate_input(self, summary: Summary | None) -> None:  # noqa: B027
+        """Validate command-specific input requirements before creating output."""
 
     def finish(  # noqa: B027
         self,
         output_path: Path,
         counts: Mapping[int, int],
     ) -> None:
-        """Called once after every :class:`TopicWriter` has closed.
+        """Called once after every per-topic :class:`Writer` has closed.
 
         ``counts`` maps each ``TopicContext.writer_key`` to the number of
         messages successfully written. Default is a no-op.
         """
-
-
-class Ros2Exporter(Exporter):
-    """Exporter whose only decoder is the standard ROS2 CDR decoder."""
-
-    def decoder_factories(self) -> list[Any]:
-        from mcap_ros2_support_fast.decoder import (  # noqa: PLC0415
-            DecoderFactory as Ros2DecoderFactory,
-        )
-
-        return [Ros2DecoderFactory()]
-
-
-class JsonRos2Exporter(Exporter):
-    """Exporter that accepts JSON-encoded messages plus standard ROS2 CDR."""
-
-    def decoder_factories(self) -> list[Any]:
-        from mcap_ros2_support_fast.decoder import (  # noqa: PLC0415
-            DecoderFactory as Ros2DecoderFactory,
-        )
-        from small_mcap import JSONDecoderFactory  # noqa: PLC0415
-
-        return [JSONDecoderFactory(), Ros2DecoderFactory()]

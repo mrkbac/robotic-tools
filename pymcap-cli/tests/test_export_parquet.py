@@ -183,6 +183,37 @@ def test_export_fixed_size_float_array_keeps_exact_length(
     assert stamps_ns == [0, NS_TO_SEC, 2 * NS_TO_SEC]
 
 
+def test_export_parquet_select_writes_only_named_paths_and_timestamps(
+    fixed_array_mcap: Path, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    rc = export_parquet(
+        str(fixed_array_mcap),
+        out_dir,
+        select=["temperature=/imu.temperature"],
+    )
+
+    assert rc == 0
+    table = pq.read_table(out_dir / "imu.parquet")
+    assert table.column_names == ["_log_time_ns", "_publish_time_ns", "temperature"]
+    assert table.column("temperature").to_pylist() == pytest.approx([20.0, 21.0, 22.0])
+
+
+def test_export_parquet_filtered_selected_value_is_null(
+    fixed_array_mcap: Path, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    rc = export_parquet(
+        str(fixed_array_mcap),
+        out_dir,
+        select=["hot_temperature=/imu.temperature{>20}"],
+    )
+
+    assert rc == 0
+    values = pq.read_table(out_dir / "imu.parquet").column("hot_temperature").to_pylist()
+    assert values == [None, 21.0, 22.0]
+
+
 def test_export_expands_pointcloud_to_list_struct(pointcloud_mcap: Path, tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     rc = export_parquet(str(pointcloud_mcap), out_dir, force=True)

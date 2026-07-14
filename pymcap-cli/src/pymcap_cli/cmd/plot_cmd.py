@@ -120,6 +120,5 @@ def plot(
         output=output_path,
         exporter=exporter,
         message_filter=message_filter,
-        required_topics=exporter.topics_needed,
         force=force,
     )

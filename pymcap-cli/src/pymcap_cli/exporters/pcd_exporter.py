@@ -26,12 +26,12 @@ from pymcap_cli.exporters._common import (
     schema_name_in,
     unique_message_path,
 )
-from pymcap_cli.exporters.base import Exporter, TopicWriter
+from pymcap_cli.exporters.base import Exporter
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from small_mcap import DecodedMessage, Schema
+    from small_mcap import Channel, DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -101,7 +101,7 @@ _POINTCLOUD_SCHEMAS: frozenset[str] = frozenset(
 )
 
 
-class _PcdTopicWriter(TopicWriter):
+class _PcdTopicWriter:
     def __init__(self, dir_path: Path) -> None:
         self.dir_path = dir_path
         self._used_counts: dict[int, int] = {}
@@ -130,7 +130,7 @@ class PcdExporter(Exporter):
     def decoder_factories(self) -> list[Any]:
         return list(self._factories)
 
-    def accepts(self, schema: Schema | None) -> bool:
+    def accepts(self, channel: Channel, schema: Schema | None) -> bool:  # noqa: ARG002
         if not schema_name_in(schema, _POINTCLOUD_SCHEMAS):
             return False
         assert schema is not None

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
     from small_mcap import Channel, DecodedMessage, Schema
 
@@ -55,27 +55,6 @@ DEFAULT_BLOB_SCHEMAS: frozenset[str] = frozenset(
         "audio_common_msgs/AudioData",
     }
 )
-
-
-class SkipSchemaMixin:
-    """Shared ``accepts`` implementation for exporters with skip-lists."""
-
-    _skipped_schemas: set[str]
-
-    def _set_skipped_schemas(
-        self,
-        *,
-        include_blobs: bool,
-        skip_schema: Iterable[str] = (),
-    ) -> None:
-        skipped: set[str] = set() if include_blobs else set(DEFAULT_BLOB_SCHEMAS)
-        skipped.update(normalize_schema_name(schema) for schema in skip_schema)
-        self._skipped_schemas = skipped
-
-    def accepts(self, schema: Schema | None) -> bool:
-        if schema is None:
-            return True
-        return normalize_schema_name(schema.name) not in self._skipped_schemas
 
 
 def topic_to_filename(topic: str) -> str:
@@ -162,20 +141,11 @@ def validate_output_dir(output: str | Path, *, force: bool) -> Path | None:
 def make_should_include(
     *,
     message_filter: MessageFilterOptions,
-    accepts_schema: Callable[[Schema | None], bool],
-    required_topics: list[str] | None = None,
+    accepts: Callable[[Channel, Schema | None], bool],
 ) -> Callable[[Channel, Schema | None], bool]:
     """Build a ``should_include`` predicate for ``small_mcap.read_message_decoded``.
 
-    Composes the shared user topic filter with exporter schema acceptance and
-    optional command-required topics, so rejected channels are skipped before
-    payload decoding.
+    Composes the shared user filters with exporter channel acceptance so
+    rejected channels are skipped before payload decoding.
     """
-    required = frozenset(required_topics or ())
-
-    def base_predicate(channel: Channel, schema: Schema | None) -> bool:
-        if not accepts_schema(schema):
-            return False
-        return not required or channel.topic in required
-
-    return message_filter.create_channel_predicate(base_predicate)
+    return message_filter.create_channel_predicate(accepts)

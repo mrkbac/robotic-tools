@@ -13,6 +13,7 @@ from pymcap_cli.cmd._message_filter_options import (
     TopicOption,
     create_message_filter,
 )
+from pymcap_cli.cmd._structured_export_options import SelectColumnsOption
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.csv_exporter import CsvExporter
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
@@ -32,6 +33,7 @@ def export_csv(
     early_bail: EarlyBailOption = False,
     include_blobs: Annotated[bool, Parameter(name=["--include-blobs"])] = False,
     num_workers: Annotated[int, Parameter(name=["--num-workers"])] = 8,
+    select: SelectColumnsOption = None,
 ) -> int:
     """Export an MCAP file to a directory of CSV files (one per topic).
 
@@ -48,6 +50,10 @@ def export_csv(
             end=end,
             early_bail=early_bail,
         )
+        exporter = CsvExporter(
+            include_blobs=include_blobs,
+            select=select,
+        )
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
         return 1
@@ -55,7 +61,7 @@ def export_csv(
     return run_export(
         file=file,
         output=output,
-        exporter=CsvExporter(include_blobs=include_blobs),
+        exporter=exporter,
         message_filter=message_filter,
         force=force,
         num_workers=num_workers,

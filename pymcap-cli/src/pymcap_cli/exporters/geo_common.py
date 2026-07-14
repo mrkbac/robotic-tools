@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.exporters._common import normalize_schema_name
-from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
+from pymcap_cli.exporters.base import Exporter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from small_mcap import DecodedMessage, Schema
+    from small_mcap import Channel, DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -219,7 +219,7 @@ def is_no_fix(sample: Sample) -> bool:
     return sample.properties.get("status_code") == -1
 
 
-class GeoSampleTopicWriter(TopicWriter):
+class GeoSampleTopicWriter:
     """Collect geographic samples for one topic."""
 
     def __init__(self, topic: str, include_no_fix: bool) -> None:
@@ -238,7 +238,7 @@ class GeoSampleTopicWriter(TopicWriter):
         pass
 
 
-class GeoRos2Exporter(Ros2Exporter):
+class GeoExporter(Exporter):
     """Shared options and schema acceptance for geographic ROS2 exporters."""
 
     def __init__(
@@ -254,11 +254,11 @@ class GeoRos2Exporter(Ros2Exporter):
         self._stride_n = stride_n
         self._include_no_fix = include_no_fix
 
-    def accepts(self, schema: Schema | None) -> bool:
+    def accepts(self, channel: Channel, schema: Schema | None) -> bool:  # noqa: ARG002
         return schema_is_geographic(schema)
 
 
-class SingleFileGeoExporter(GeoRos2Exporter):
+class SingleFileGeoExporter(GeoExporter):
     """Shared state for geographic exporters that write one aggregate file."""
 
     def __init__(

@@ -21,7 +21,7 @@ import array
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import plotly.graph_objects as go
 from ros_parser import parse_schema_to_definitions
@@ -32,12 +32,13 @@ from ros_parser.message_path import (
     parse_message_path,
 )
 
-from pymcap_cli.exporters.base import JsonRos2Exporter, TopicWriter
+from pymcap_cli.core.named_message_path import parse_path_arg
+from pymcap_cli.exporters.base import Exporter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from small_mcap import DecodedMessage, Schema
+    from small_mcap import Channel, DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -113,14 +114,6 @@ def _expand_series(series: SeriesData) -> list[_PlotSeries]:
         for idx in indices
     )
     return out
-
-
-def parse_path_arg(arg: str) -> tuple[str, str]:
-    """Parse 'Label=/path' or just '/path'. Returns (label, path_str)."""
-    if "=" in arg and not arg.startswith("/"):
-        label, _, path_str = arg.partition("=")
-        return label, path_str
-    return arg, arg
 
 
 def downsample_lttb(
@@ -199,7 +192,7 @@ def _validate_series_against_schema(
     return None
 
 
-class _PlotTopicWriter(TopicWriter):
+class _PlotTopicWriter:
     """Buffer values for every series whose topic matches this writer."""
 
     def __init__(self, series: list[SeriesData]) -> None:
@@ -264,7 +257,7 @@ class _PlotTopicWriter(TopicWriter):
         pass
 
 
-class PlotExporter(JsonRos2Exporter):
+class PlotExporter(Exporter):
     """Exporter that gathers message-path series into a single Plotly figure.
 
     A ``PlotExporter`` instance is single-use — the gathered series live on
@@ -307,15 +300,16 @@ class PlotExporter(JsonRos2Exporter):
         for series in self._series:
             self._series_by_topic.setdefault(series.parsed.topic, []).append(series)
 
-    @property
-    def topics_needed(self) -> list[str]:
-        return list(self._series_by_topic.keys())
+    def decoder_factories(self) -> list[Any]:
+        from mcap_ros2_support_fast.decoder import (  # noqa: PLC0415
+            DecoderFactory as Ros2DecoderFactory,
+        )
+        from small_mcap import JSONDecoderFactory  # noqa: PLC0415
 
-    def accepts(self, schema: Schema | None) -> bool:  # noqa: ARG002
-        # Topic filtering is handled upstream by the shared message filter.
-        # Per-schema validation happens lazily on the first message inside
-        # the writer.
-        return True
+        return [JSONDecoderFactory(), Ros2DecoderFactory()]
+
+    def accepts(self, channel: Channel, schema: Schema | None) -> bool:  # noqa: ARG002
+        return channel.topic in self._series_by_topic
 
     def validate_output(self, output: str | Path | None, *, force: bool) -> Path | None:
         if output is None:

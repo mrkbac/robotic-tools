@@ -32,6 +32,7 @@ from pymcap_cli.cmd._message_filter_options import (
     TopicOption,
     create_message_filter,
 )
+from pymcap_cli.cmd._structured_export_options import SelectColumnsOption
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.parquet_exporter import ParquetExporter
 from pymcap_cli.types.types_manual import ForceOverwriteOption, OutputPathOption
@@ -55,6 +56,7 @@ def export_parquet(
     early_bail: EarlyBailOption = False,
     include_blobs: Annotated[bool, Parameter(name=["--include-blobs"])] = False,
     skip_schema: Annotated[list[str] | None, Parameter(name=["--skip-schema"])] = None,
+    select: SelectColumnsOption = None,
 ) -> int:
     """Export an MCAP file to a directory of Parquet files (one per topic).
 
@@ -97,6 +99,7 @@ def export_parquet(
             compression=compression,
             include_blobs=include_blobs,
             skip_schema=skip_schema,
+            select=select,
         )
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400

@@ -44,7 +44,7 @@ from pymcap_cli.exporters._common import (
     prepare_output_file,
     schema_name_in,
 )
-from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
+from pymcap_cli.exporters.base import Exporter
 from pymcap_cli.exporters.video_file_writer import (
     VideoFileWriterSession,
     create_video_file_writer,
@@ -53,7 +53,7 @@ from pymcap_cli.exporters.video_file_writer import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from small_mcap import DecodedMessage, Schema
+    from small_mcap import Channel, DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
 
@@ -67,7 +67,7 @@ _CANONICAL_IMAGE_SCHEMAS = frozenset(normalize_schema_name(s) for s in IMAGE_SCH
 # ---------------------------------------------------------------------------
 
 
-class _VideoTopicWriter(TopicWriter):
+class _VideoTopicWriter:
     """Encodes one image topic to one MP4 file via the chosen strategy."""
 
     def __init__(
@@ -116,7 +116,7 @@ class _VideoTopicWriter(TopicWriter):
         logger.info(f"[green]✓[/green] {self.path}  ({count} frame(s))")
 
 
-class VideoExporter(Ros2Exporter):
+class VideoExporter(Exporter):
     """Per-topic MP4 exporter — writes ``<output>/<safe_topic>.mp4`` per topic.
 
     Uses the default :meth:`Exporter.validate_output` (directory mode).
@@ -137,7 +137,7 @@ class VideoExporter(Ros2Exporter):
         self._quality = quality
         self._mode = mode
 
-    def accepts(self, schema: Schema | None) -> bool:
+    def accepts(self, channel: Channel, schema: Schema | None) -> bool:  # noqa: ARG002
         return schema_name_in(schema, _CANONICAL_IMAGE_SCHEMAS)
 
     def open_topic(self, ctx: TopicContext) -> _VideoTopicWriter:

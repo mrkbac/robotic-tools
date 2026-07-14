@@ -6,22 +6,14 @@ import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pymcap_cli.display.message_render import format_bytes_skip
-from pymcap_cli.exporters._common import (
-    SkipSchemaMixin,
-    message_timestamps_ns,
-    prepare_output_file,
-    prepare_topic_dir,
-    unique_message_path,
-)
-from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
-from pymcap_cli.types.to_plain import to_plain
+from pymcap_cli.exporters._common import prepare_topic_dir, unique_message_path
+from pymcap_cli.exporters.structured import PerTopicFileExporter, StructuredRecord
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
-    from small_mcap import DecodedMessage
-
-    from pymcap_cli.exporters.base import TopicContext
+    from pymcap_cli.exporters.base import TopicContext, Writer
 
 
 def _bytes_default(obj: Any) -> Any:
@@ -30,58 +22,68 @@ def _bytes_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def _build_record(msg: DecodedMessage) -> tuple[int, dict[str, Any]]:
-    log_time_ns, publish_time_ns = message_timestamps_ns(msg)
-    record = {
-        "_log_time_ns": log_time_ns,
-        "_publish_time_ns": publish_time_ns,
-        "data": to_plain(msg.decoded_message),
-    }
-    return log_time_ns, record
+def _build_record(source: StructuredRecord) -> dict[str, Any]:
+    record: dict[str, Any] = source.timestamp_fields()
+    if not source.is_projection:
+        record["data"] = source.plain_payload()
+    record.update(source.columns)
+    return record
 
 
-class _NdjsonWriter(TopicWriter):
+class _NdjsonWriter:
     def __init__(self, path: Path) -> None:
-        self.path = path
         self._fh = path.open("w", encoding="utf-8")
 
-    def write(self, msg: DecodedMessage) -> None:
-        _, record = _build_record(msg)
-        self._fh.write(json.dumps(record, default=_bytes_default))
+    def write(self, record: StructuredRecord) -> None:
+        self._fh.write(json.dumps(_build_record(record), default=_bytes_default))
         self._fh.write("\n")
 
     def close(self) -> None:
         self._fh.close()
 
 
-class _PerMessageWriter(TopicWriter):
+class _PerMessageWriter:
     def __init__(self, dir_path: Path) -> None:
         self.dir_path = dir_path
         self._used_counts: dict[int, int] = {}
 
-    def write(self, msg: DecodedMessage) -> None:
-        log_time_ns, record = _build_record(msg)
-        path = unique_message_path(self.dir_path, log_time_ns, "json", self._used_counts)
+    def write(self, record: StructuredRecord) -> None:
+        path = unique_message_path(
+            self.dir_path,
+            record.log_time_ns,
+            "json",
+            self._used_counts,
+        )
         with path.open("w", encoding="utf-8") as f:
-            json.dump(record, f, default=_bytes_default)
+            json.dump(_build_record(record), f, default=_bytes_default)
 
     def close(self) -> None:
         pass
 
 
-class JsonExporter(SkipSchemaMixin, Ros2Exporter):
+class JsonExporter(PerTopicFileExporter):
     """JSON exporter. NDJSON per topic by default; ``per_message=True`` writes
     one ``<log_time_ns>.json`` per message under a per-topic directory."""
 
     name: ClassVar[str] = "json"
+    file_suffix: ClassVar[str] = ".ndjson"
+    writer_factory: ClassVar[Callable[[Path], Writer[StructuredRecord]]] = _NdjsonWriter
 
-    def __init__(self, *, include_blobs: bool = False, per_message: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        include_blobs: bool = False,
+        per_message: bool = False,
+        select: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            include_blobs=include_blobs,
+            select=select,
+        )
         self._per_message = per_message
-        self._set_skipped_schemas(include_blobs=include_blobs)
 
-    def open_topic(self, ctx: TopicContext) -> _NdjsonWriter | _PerMessageWriter:
+    def create_writer(self, ctx: TopicContext) -> Writer[StructuredRecord]:
         if self._per_message:
             dir_path = prepare_topic_dir(ctx.output_path / ctx.safe_filename, force=ctx.force)
             return _PerMessageWriter(dir_path)
-        path = prepare_output_file(ctx.output_path / f"{ctx.safe_filename}.ndjson", force=ctx.force)
-        return _NdjsonWriter(path)
+        return super().create_writer(ctx)

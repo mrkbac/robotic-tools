@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pymcap_cli.exporters._common import prepare_output_file
 from pymcap_cli.exporters.geo_common import (
+    GeoExporter,
     GeoMode,
-    GeoRos2Exporter,
     GeoSampleTopicWriter,
     Sample,
     log_time_ns_to_rfc3339,
@@ -108,7 +108,7 @@ class _GeoJsonTopicWriter(GeoSampleTopicWriter):
             json.dump(fc, fh)
 
 
-class GeoJsonExporter(GeoRos2Exporter):
+class GeoJsonExporter(GeoExporter):
     """Per-topic GeoJSON ``FeatureCollection`` files."""
 
     name: ClassVar[str] = "geojson"

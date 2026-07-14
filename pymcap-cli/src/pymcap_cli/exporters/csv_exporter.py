@@ -13,20 +13,13 @@ import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pymcap_cli.display.message_render import format_bytes_skip
-from pymcap_cli.exporters._common import (
-    SkipSchemaMixin,
-    message_timestamps_ns,
-    prepare_output_file,
-)
-from pymcap_cli.exporters.base import Ros2Exporter, TopicWriter
-from pymcap_cli.types.to_plain import to_plain
+from pymcap_cli.exporters.structured import PerTopicFileExporter, StructuredRecord
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
-    from small_mcap import DecodedMessage
-
-    from pymcap_cli.exporters.base import TopicContext
+    from pymcap_cli.exporters.base import Writer
 
 
 def _flatten(value: Any, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -46,24 +39,19 @@ def _flatten(value: Any, prefix: str = "", out: dict[str, Any] | None = None) ->
     return out
 
 
-class _CsvWriter(TopicWriter):
+class _CsvWriter:
     def __init__(self, path: Path) -> None:
-        self.path = path
         self._fh = path.open("w", newline="", encoding="utf-8")
         self._writer: csv.DictWriter | None = None
         self._fieldnames_set: set[str] = set()
 
-    def write(self, msg: DecodedMessage) -> None:
-        plain = to_plain(msg.decoded_message)
-        log_time_ns, publish_time_ns = message_timestamps_ns(msg)
-        row: dict[str, Any] = {
-            "_log_time_ns": log_time_ns,
-            "_publish_time_ns": publish_time_ns,
-        }
-        if isinstance(plain, dict):
-            row.update(_flatten(plain))
-        else:
-            row["value"] = plain
+    def write(self, record: StructuredRecord) -> None:
+        row: dict[str, Any] = record.timestamp_fields()
+        if not record.is_projection:
+            plain = record.plain_payload()
+            payload = _flatten(plain) if isinstance(plain, dict) else {"value": plain}
+            row.update(payload)
+        row.update(record.columns)
 
         if self._writer is None:
             fieldnames = list(row.keys())
@@ -81,14 +69,9 @@ class _CsvWriter(TopicWriter):
         self._fh.close()
 
 
-class CsvExporter(SkipSchemaMixin, Ros2Exporter):
+class CsvExporter(PerTopicFileExporter):
     """One CSV file per topic, with dot-flattened columns."""
 
     name: ClassVar[str] = "csv"
-
-    def __init__(self, *, include_blobs: bool = False) -> None:
-        self._set_skipped_schemas(include_blobs=include_blobs)
-
-    def open_topic(self, ctx: TopicContext) -> _CsvWriter:
-        path = prepare_output_file(ctx.output_path / f"{ctx.safe_filename}.csv", force=ctx.force)
-        return _CsvWriter(path)
+    file_suffix: ClassVar[str] = ".csv"
+    writer_factory: ClassVar[Callable[[Path], Writer[StructuredRecord]]] = _CsvWriter
