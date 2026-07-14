@@ -1,4 +1,4 @@
-"""Plot command for pymcap-cli — visualize MCAP time-series data with plotly.
+"""Plot command for pymcap-cli — visualize MCAP values with Plotly.
 
 Wraps :class:`pymcap_cli.exporters.plot_exporter.PlotExporter`.
 """
@@ -23,16 +23,23 @@ from pymcap_cli.cmd._cli_options import (
 from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.exporters import run_export
-from pymcap_cli.exporters.plot_exporter import PlotExporter
+from pymcap_cli.exporters.plot_exporter import (
+    HistogramNormalization,
+    PlotExporter,
+    PlotKind,
+)
 
 logger = logging.getLogger(__name__)
 
-OUTPUT_GROUP = Group("Output")
+CHART_GROUP = Group("Chart")
 
 
 def plot(
-    file: str,
-    paths: list[str],
+    file: Annotated[str, Parameter(help="Input MCAP file or HTTP/HTTPS URL.")],
+    paths: Annotated[
+        list[str],
+        Parameter(help="Message paths to plot; prefix with LABEL= to set a display name."),
+    ],
     *,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
@@ -43,23 +50,63 @@ def plot(
     output: OptionalOutputPathOption = None,
     title: Annotated[
         str | None,
-        Parameter(name=["--title"], group=OUTPUT_GROUP),
+        Parameter(
+            name=["--title"],
+            group=CHART_GROUP,
+            help="Override the figure title, for example --title 'Wheel speed'.",
+        ),
     ] = None,
+    kind: Annotated[
+        PlotKind,
+        Parameter(
+            name=["--kind"],
+            group=CHART_GROUP,
+            help=(
+                "Chart type: time series, value histogram, or XY trajectory; "
+                "for example --kind histogram."
+            ),
+        ),
+    ] = "time",
     downsample: Annotated[
         int | None,
-        Parameter(name=["-d", "--downsample"], group=OUTPUT_GROUP),
+        Parameter(
+            name=["-d", "--downsample"],
+            group=CHART_GROUP,
+            help=(
+                "Reduce each time/XY series to at most N points using LTTB "
+                "(minimum 3), for example -d 1000."
+            ),
+        ),
     ] = None,
-    xy: Annotated[
-        bool,
-        Parameter(name=["--xy"], group=OUTPUT_GROUP),
-    ] = False,
+    bins: Annotated[
+        int | None,
+        Parameter(
+            name=["--bins"],
+            group=CHART_GROUP,
+            help=(
+                "Maximum number of bins for numeric histograms; capped at the number "
+                "of distinct values. Plotly chooses when omitted. Example: --bins 40."
+            ),
+        ),
+    ] = None,
+    normalize: Annotated[
+        HistogramNormalization,
+        Parameter(
+            name=["--normalize"],
+            group=CHART_GROUP,
+            help=(
+                "Histogram Y scale: raw count, probability, or probability density; "
+                "for example --normalize probability."
+            ),
+        ),
+    ] = "count",
     force: ForceOverwriteOption = False,
 ) -> int:
-    """Plot time-series data from an MCAP file using message paths.
+    """Plot MCAP message-path values as time series, histograms, or XY trajectories.
 
-    Extracts values along message paths and plots them over time using plotly.
-    Supports numeric, boolean, and string values natively. Multiple paths can
-    be overlaid. Array-valued paths expand into one trace per element index.
+    Time plots support numeric, boolean, and string values. Histogram plots use
+    numeric bins or categorical frequency bars, with one subplot per expanded
+    series. Array-valued paths expand into one trace or subplot per element.
 
     Output format is chosen from the ``-o`` suffix: ``.html`` (interactive) or
     ``.png`` / ``.svg`` / ``.pdf`` / ``.jpg`` / ``.webp`` (static image, no
@@ -71,7 +118,9 @@ def plot(
     Examples:
       pymcap-cli plot recording.mcap /odom.pose.position.x
       pymcap-cli plot recording.mcap "Vel X=/odom.twist.twist.linear.x"
-      pymcap-cli plot recording.mcap --xy /odom.pose.position.x /odom.pose.position.y
+      pymcap-cli plot recording.mcap --kind xy /odom.pose.position.x /odom.pose.position.y
+      pymcap-cli plot recording.mcap /imu.linear_acceleration.x --kind histogram --bins 40
+      pymcap-cli plot recording.mcap /mode.name --kind histogram --normalize probability
       pymcap-cli plot recording.mcap /odom.pose.position.x -d 1000
       pymcap-cli plot recording.mcap /odom.pose.position.x -S @10s -E @20s -o plot.html
       pymcap-cli plot recording.mcap "/joints.position[:].@degrees" -o joints.svg
@@ -79,8 +128,8 @@ def plot(
     if not paths:
         logger.error("At least one message path is required")
         return 1
-    if xy and len(paths) != 2:
-        logger.error("--xy mode requires exactly 2 paths")
+    if "--xy" in paths:
+        logger.error("--xy was removed; use --kind xy")
         return 1
 
     output_path = Path(output) if output else None
@@ -92,7 +141,9 @@ def plot(
             paths=paths,
             title=title,
             downsample=downsample,
-            xy=xy,
+            kind=kind,
+            bins=bins,
+            normalize=normalize,
             force=force,
             source_name=Path(file).name,
             variables=variables,

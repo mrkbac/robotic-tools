@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import plotly.graph_objects as go
+import pytest
 from pymcap_cli.exporters.plot_exporter import (
     _MAX_ARRAY_COLUMNS,
     PlotExporter,
@@ -129,6 +131,197 @@ class TestComposeTitle:
         assert title.startswith("My Plot")
         assert "drive.mcap" in title
         assert "labels-here" not in title
+
+
+class TestRendering:
+    @staticmethod
+    def _finish_and_capture(
+        exporter: PlotExporter,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> go.Figure:
+        figures: list[go.Figure] = []
+        monkeypatch.setattr(exporter, "_emit", figures.append)
+        exporter.finish(tmp_path, {})
+        assert len(figures) == 1
+        return figures[0]
+
+    def test_time_kind_renders_scatter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(output=None, paths=["/odom.x"], kind="time")
+        exporter._series[0].times_ns = [0, 1_000_000_000]
+        exporter._series[0].values = [1.0, 2.0]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        assert isinstance(figure.data[0], go.Scattergl)
+
+    def test_numeric_histogram_caps_bins_at_distinct_value_count(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/odom.x"],
+            kind="histogram",
+            bins=7,
+            normalize="probability",
+        )
+        exporter._series[0].times_ns = [0, 1, 2, 3]
+        exporter._series[0].values = [1.0, 2.0, 2.0, 3.0]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        trace = figure.data[0]
+        assert isinstance(trace, go.Histogram)
+        assert trace.nbinsx == 3
+        assert trace.histnorm == "probability"
+
+    def test_numeric_histogram_keeps_smaller_bin_limit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/odom.x"],
+            kind="histogram",
+            bins=2,
+        )
+        exporter._series[0].times_ns = [0, 1, 2]
+        exporter._series[0].values = [1.0, 2.0, 3.0]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        assert figure.data[0].nbinsx == 2
+
+    def test_constant_numeric_histogram_renders_as_point_mass(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(output=None, paths=["/joint.position"], kind="histogram")
+        exporter._series[0].times_ns = [0, 1, 2]
+        exporter._series[0].values = [0.0, 0.0, 0.0]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        trace = figure.data[0]
+        assert isinstance(trace, go.Bar)
+        assert list(trace.x) == [0.0]
+        assert list(trace.y) == [3]
+        assert list(figure.layout.xaxis.tickvals) == [0.0]
+        assert figure.layout.annotations[0].text == "/joint.position — constant 0"
+
+    def test_numeric_histogram_supports_density(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/odom.x"],
+            kind="histogram",
+            normalize="density",
+        )
+        exporter._series[0].times_ns = [0, 1, 2]
+        exporter._series[0].values = [1.0, 2.0, 3.0]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        assert figure.data[0].histnorm == "probability density"
+
+    def test_categorical_histogram_uses_deterministic_frequency_bars(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/state.name"],
+            kind="histogram",
+            normalize="probability",
+        )
+        exporter._series[0].times_ns = [0, 1, 2, 3]
+        exporter._series[0].values = ["warn", "ok", "warn", "ok"]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        trace = figure.data[0]
+        assert isinstance(trace, go.Bar)
+        assert list(trace.x) == ["ok", "warn"]
+        assert list(trace.y) == [0.5, 0.5]
+
+    def test_boolean_histogram_orders_false_before_true(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(output=None, paths=["/state.ready"], kind="histogram")
+        exporter._series[0].times_ns = [0, 1, 2]
+        exporter._series[0].values = [True, False, True]
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        trace = figure.data[0]
+        assert isinstance(trace, go.Bar)
+        assert list(trace.x) == [False, True]
+        assert list(trace.y) == [1, 2]
+
+    def test_histogram_creates_one_subplot_per_expanded_series(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/joints.position[:]"],
+            kind="histogram",
+        )
+        series = exporter._series[0]
+        series.array_times_ns = {0: [0, 1], 1: [0, 1]}
+        series.array_values = {0: [1.0, 2.0], 1: [10.0, 20.0]}
+
+        figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        assert len(figure.data) == 2
+        assert [annotation.text for annotation in figure.layout.annotations] == [
+            "/joints.position[:][0]",
+            "/joints.position[:][1]",
+        ]
+        assert figure.layout.height == 600
+        assert figure.layout.yaxis.domain[0] - figure.layout.yaxis2.domain[1] >= 0.1
+
+    def test_histogram_rejects_mixed_value_types(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(output=None, paths=["/mixed.value"], kind="histogram")
+        exporter._series[0].times_ns = [0, 1]
+        exporter._series[0].values = [1.0, "one"]
+        monkeypatch.setattr(exporter, "_emit", lambda _figure: None)
+
+        with pytest.raises(RuntimeError, match="mixed numeric and categorical"):
+            exporter.finish(tmp_path, {})
+
+    def test_density_rejects_categorical_series(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        exporter = PlotExporter(
+            output=None,
+            paths=["/state.name"],
+            kind="histogram",
+            normalize="density",
+        )
+        exporter._series[0].times_ns = [0, 1]
+        exporter._series[0].values = ["ok", "warn"]
+        monkeypatch.setattr(exporter, "_emit", lambda _figure: None)
+
+        with pytest.raises(RuntimeError, match=r"density.*categorical"):
+            exporter.finish(tmp_path, {})
+
+    def test_numeric_histogram_drops_non_finite_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        exporter = PlotExporter(output=None, paths=["/odom.x"], kind="histogram")
+        exporter._series[0].times_ns = [0, 1, 2, 3]
+        exporter._series[0].values = [1.0, math.nan, math.inf, 2.0]
+
+        with caplog.at_level("WARNING"):
+            figure = self._finish_and_capture(exporter, monkeypatch, tmp_path)
+
+        assert list(figure.data[0].x) == [1.0, 2.0]
+        assert "Dropped 2 non-finite values" in caplog.text
 
 
 class TestEmitRouting:

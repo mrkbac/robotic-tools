@@ -1,4 +1,4 @@
-"""Plot exporter — collect message-path series and render to a Plotly figure.
+"""Plot exporter — render message-path values as Plotly charts.
 
 Lives in the Exporter pipeline so plot benefits from the shared progress UI,
 topic filter, decoder-factory plumbing, and lifecycle hooks. The Plotly
@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import array
 import logging
+import math
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
     MessagePath,
@@ -44,6 +47,9 @@ if TYPE_CHECKING:
     from pymcap_cli.exporters.base import TopicContext
 
 logger = logging.getLogger(__name__)
+
+PlotKind = Literal["time", "histogram", "xy"]
+HistogramNormalization = Literal["count", "probability", "density"]
 
 # Static-image suffixes rendered via kaleido; everything else falls back to HTML.
 IMAGE_SUFFIXES: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp", ".svg", ".pdf"})
@@ -279,20 +285,34 @@ class PlotExporter(Exporter):
         paths: list[str],
         title: str | None = None,
         downsample: int | None = None,
-        xy: bool = False,
+        kind: PlotKind = "time",
+        bins: int | None = None,
+        normalize: HistogramNormalization = "count",
         force: bool = False,
         source_name: str | None = None,
         variables: MessagePathVariables | None = None,
     ) -> None:
         if not paths:
             raise ValueError("PlotExporter requires at least one path")
-        if xy and len(paths) != 2:
-            raise ValueError("--xy mode requires exactly 2 paths")
+        if kind == "xy" and len(paths) != 2:
+            raise ValueError("XY plots require exactly 2 paths")
+        if downsample is not None and downsample < 3:
+            raise ValueError("--downsample must be at least 3")
+        if kind == "histogram" and downsample is not None:
+            raise ValueError("--downsample is only valid with --kind time or --kind xy")
+        if bins is not None and bins <= 0:
+            raise ValueError("--bins must be a positive integer")
+        if kind != "histogram" and bins is not None:
+            raise ValueError("--bins is only valid with --kind histogram")
+        if kind != "histogram" and normalize != "count":
+            raise ValueError("--normalize is only valid with --kind histogram")
 
         self._output = output
         self._title = title
         self._downsample = downsample
-        self._xy = xy
+        self._kind = kind
+        self._bins = bins
+        self._normalize = normalize
         self._force = force
         self._source_name = source_name
         self._variables = dict(variables or {})
@@ -354,6 +374,15 @@ class PlotExporter(Exporter):
         # (array-valued paths fan out into per-index traces).
         plot_series = [ps for series in self._series for ps in _expand_series(series)]
 
+        if not plot_series:
+            raise RuntimeError(
+                "No plottable data found for any path — every message path matched 0 messages."
+            )
+
+        if self._kind == "histogram":
+            self._render_histogram(plot_series)
+            return
+
         # Convert absolute log_time_ns into "seconds since first sample".
         first_ns: int | None = None
         for ps in plot_series:
@@ -385,10 +414,16 @@ class PlotExporter(Exporter):
                 new_rendered.append((ps, t_out))
             rendered_series = new_rendered
 
-        if self._xy:
+        if self._kind == "xy":
             self._render_xy(rendered_series)
             return
 
+        self._render_time(rendered_series)
+
+    def _render_time(
+        self,
+        rendered_series: list[tuple[_PlotSeries, list[float]]],
+    ) -> None:
         fig = go.Figure()
         for ps, times_s in rendered_series:
             fig.add_trace(
@@ -407,13 +442,147 @@ class PlotExporter(Exporter):
         )
         self._emit(fig)
 
+    def _render_histogram(self, plot_series: list[_PlotSeries]) -> None:
+        fig = make_subplots(
+            rows=len(plot_series),
+            cols=1,
+            shared_xaxes=False,
+            subplot_titles=[series.label for series in plot_series],
+            vertical_spacing=min(0.12, 0.45 / len(plot_series)),
+        )
+        y_axis_title = {
+            "count": "Count",
+            "probability": "Probability",
+            "density": "Density",
+        }[self._normalize]
+
+        for row, series in enumerate(plot_series, start=1):
+            values = series.values
+            row_y_axis_title = y_axis_title
+            is_boolean = all(type(value) is bool for value in values)
+            is_string = all(isinstance(value, str) for value in values)
+            is_numeric = all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) for value in values
+            )
+
+            if is_numeric:
+                finite_values = [value for value in values if math.isfinite(float(value))]
+                dropped = len(values) - len(finite_values)
+                if dropped:
+                    logger.warning(
+                        f"Dropped {dropped} non-finite values from {series.label!r} histogram"
+                    )
+                if not finite_values:
+                    raise RuntimeError(
+                        f"Histogram series {series.label!r} has no finite numeric values"
+                    )
+                distinct_count = len(set(finite_values))
+                if distinct_count == 1:
+                    constant_value = float(finite_values[0])
+                    value_label = f"{constant_value:g}"
+                    half_range = max(abs(constant_value) * 0.01, 0.1)
+                    frequency: int | float = (
+                        len(finite_values) if self._normalize == "count" else 1.0
+                    )
+                    if self._normalize == "density":
+                        row_y_axis_title = "Probability mass"
+                        logger.info(
+                            f"Density is undefined for constant series {series.label!r}; "
+                            "showing probability mass 1"
+                        )
+                    fig.add_trace(
+                        go.Bar(
+                            x=[constant_value],
+                            y=[frequency],
+                            width=[half_range / 2],
+                            name=series.label,
+                            showlegend=False,
+                        ),
+                        row=row,
+                        col=1,
+                    )
+                    fig.update_xaxes(
+                        tickmode="array",
+                        tickvals=[constant_value],
+                        ticktext=[value_label],
+                        range=[constant_value - half_range, constant_value + half_range],
+                        row=row,
+                        col=1,
+                    )
+                    fig.layout.annotations[
+                        row - 1
+                    ].text = f"{series.label} — constant {value_label}"
+                else:
+                    histnorm = {
+                        "count": None,
+                        "probability": "probability",
+                        "density": "probability density",
+                    }[self._normalize]
+                    effective_bins: int | None = None
+                    if self._bins is not None:
+                        effective_bins = min(self._bins, distinct_count)
+                        if effective_bins < self._bins:
+                            logger.info(
+                                f"Reduced histogram bins for {series.label!r}: "
+                                f"{self._bins} → {effective_bins} for "
+                                f"{distinct_count} distinct values"
+                            )
+                    fig.add_trace(
+                        go.Histogram(
+                            x=finite_values,
+                            name=series.label,
+                            nbinsx=effective_bins,
+                            histnorm=histnorm,
+                            showlegend=False,
+                        ),
+                        row=row,
+                        col=1,
+                    )
+            elif is_boolean or is_string:
+                if self._normalize == "density":
+                    raise RuntimeError(
+                        "Histogram density normalization is not defined for categorical "
+                        f"series {series.label!r}"
+                    )
+                counts = Counter(values)
+                categories = sorted(counts)
+                frequencies: list[int | float] = [counts[value] for value in categories]
+                if self._normalize == "probability":
+                    frequencies = [frequency / len(values) for frequency in frequencies]
+                fig.add_trace(
+                    go.Bar(
+                        x=categories,
+                        y=frequencies,
+                        name=series.label,
+                        showlegend=False,
+                    ),
+                    row=row,
+                    col=1,
+                )
+            else:
+                raise RuntimeError(
+                    f"Histogram series {series.label!r} contains mixed numeric and categorical "
+                    "values"
+                )
+
+            fig.update_xaxes(title_text="Value", row=row, col=1)
+            fig.update_yaxes(title_text=row_y_axis_title, row=row, col=1)
+
+        fig.update_layout(
+            title=self._compose_title("Value distributions"),
+            height=max(450, 300 * len(plot_series)),
+            bargap=0.05,
+            hovermode="closest",
+        )
+        self._emit(fig)
+
     def _render_xy(
         self,
         rendered_series: list[tuple[_PlotSeries, list[float]]],
     ) -> None:
         if len(rendered_series) != 2:
             raise RuntimeError(
-                "--xy mode needs exactly two scalar series with data "
+                "XY plots need exactly two scalar series with data "
                 "(array-valued paths expand into multiple series)."
             )
 
@@ -481,7 +650,7 @@ class PlotExporter(Exporter):
                 raise RuntimeError(
                     f"Failed to render image {self._output}: {exc}. "
                     "Static image export needs kaleido — install it with "
-                    "`pip install 'pymcap-cli[plot]'` (or `uv add kaleido`)."
+                    "`uv add 'pymcap-cli[plot]'`."
                 ) from exc
         else:
             fig.write_html(str(self._output))

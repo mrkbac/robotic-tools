@@ -259,9 +259,9 @@ pymcap-cli diag recording.mcap --tree
 pymcap-cli diag recording.mcap --json
 ```
 
-### `plot` — Time-Series Visualization
+### `plot` — Time-Series And Distribution Visualization
 
-Plot message fields over time using Plotly. Supports named labels, LTTB downsampling, XY trajectory mode, and saves to interactive HTML. Requires the `plot` extra (`uv add pymcap-cli[plot]`).
+Plot message fields as time series, value histograms, categorical frequency bars, or XY trajectories using Plotly. Supports named labels, LTTB downsampling, interactive HTML, and static image output. Requires the `plot` extra (`uv add pymcap-cli[plot]`).
 
 ```bash
 # Plot a single field
@@ -271,7 +271,15 @@ pymcap-cli plot recording.mcap /odom.pose.position.x
 pymcap-cli plot recording.mcap "Vel X=/odom.twist.twist.linear.x"
 
 # XY trajectory plot
-pymcap-cli plot recording.mcap --xy /odom.pose.position.x /odom.pose.position.y
+pymcap-cli plot recording.mcap --kind xy /odom.pose.position.x /odom.pose.position.y
+
+# Numeric histogram with at most 40 bins
+pymcap-cli plot recording.mcap /imu.linear_acceleration.x \
+  --kind histogram --bins 40
+
+# Categorical frequencies as probabilities
+pymcap-cli plot recording.mcap /system.mode \
+  --kind histogram --normalize probability
 
 # Downsample to 1000 points and save to file
 pymcap-cli plot recording.mcap /odom.pose.position.x -d 1000 -o plot.html

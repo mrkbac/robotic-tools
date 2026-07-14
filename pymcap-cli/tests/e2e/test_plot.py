@@ -1,9 +1,11 @@
 """E2E tests for the plot command."""
 
 import io
+import json
 from pathlib import Path
 
 import pytest
+from pymcap_cli.cli import app
 from pymcap_cli.cmd.plot_cmd import plot
 from pymcap_cli.exporters.plot_exporter import downsample_lttb, parse_path_arg
 from small_mcap import CompressionType, McapWriter
@@ -22,6 +24,24 @@ def _make_array_mcap(path: Path, *, num_messages: int = 5, width: int = 3) -> No
             channel_id=1,
             log_time=i * 1_000_000,
             data=f'{{"position": [{values}]}}'.encode(),
+            publish_time=i * 1_000_000,
+        )
+    writer.finish()
+    path.write_bytes(output.getvalue())
+
+
+def _make_mixed_value_mcap(path: Path) -> None:
+    output = io.BytesIO()
+    writer = McapWriter(output, chunk_size=4096, compression=CompressionType.ZSTD)
+    writer.start()
+    writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+    writer.add_channel(channel_id=1, topic="/sample", message_encoding="json", schema_id=1)
+    states = ["idle", "moving", "moving", "idle"]
+    for i, state in enumerate(states):
+        writer.add_message(
+            channel_id=1,
+            log_time=i * 1_000_000,
+            data=json.dumps({"value": i, "state": state}).encode(),
             publish_time=i * 1_000_000,
         )
     writer.finish()
@@ -163,12 +183,42 @@ class TestPlot:
         assert "No plottable data" in captured.err + captured.out
 
     def test_plot_xy_requires_two_paths(self, simple_mcap: Path, capsys):
-        """Test --xy mode requires exactly 2 paths."""
-        exit_code = plot(file=str(simple_mcap), paths=["/test.i"], xy=True)
+        """Test XY mode requires exactly 2 paths."""
+        exit_code = plot(file=str(simple_mcap), paths=["/test.i"], kind="xy")
 
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "exactly 2" in captured.err
+
+    def test_plot_removed_xy_flag_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            app(["plot", "recording.mcap", "/test.i", "/test.i", "--xy"])
+
+        output = capsys.readouterr().err
+        assert exc_info.value.code == 1
+        assert "Unknown option: --xy" in output
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"kind": "histogram", "downsample": 10}, "--downsample"),
+            ({"kind": "time", "bins": 10}, "--bins"),
+            ({"kind": "time", "normalize": "probability"}, "--normalize"),
+            ({"kind": "histogram", "bins": 0}, "positive integer"),
+            ({"kind": "time", "downsample": 2}, "at least 3"),
+        ],
+    )
+    def test_plot_rejects_incompatible_chart_options(
+        self,
+        simple_mcap: Path,
+        capsys: pytest.CaptureFixture[str],
+        kwargs: dict[str, str | int],
+        message: str,
+    ) -> None:
+        exit_code = plot(file=str(simple_mcap), paths=["/test.i"], **kwargs)
+
+        assert exit_code == 1
+        assert message in capsys.readouterr().err
 
     def test_plot_downsample(self, simple_mcap: Path, tmp_path: Path, capsys):
         """Test downsampling output."""
@@ -207,6 +257,60 @@ class TestPlot:
         output = tmp_path / "plot.html"
 
         exit_code = plot(file=str(mcap), paths=["/arr.position[:]"], output=str(output))
+
+        assert exit_code == 0
+        content = output.read_text()
+        assert "position[:][0]" in content
+        assert "position[:][2]" in content
+
+    def test_plot_numeric_histogram(self, simple_mcap: Path, tmp_path: Path) -> None:
+        output = tmp_path / "histogram.html"
+
+        exit_code = plot(
+            file=str(simple_mcap),
+            paths=["/test.i"],
+            kind="histogram",
+            bins=8,
+            normalize="probability",
+            output=output,
+        )
+
+        assert exit_code == 0
+        content = output.read_text()
+        assert '"type":"histogram"' in content
+        assert '"nbinsx":8' in content
+        assert '"histnorm":"probability"' in content
+
+    def test_plot_histogram_supports_numeric_and_categorical_subplots(self, tmp_path: Path) -> None:
+        mcap = tmp_path / "mixed.mcap"
+        _make_mixed_value_mcap(mcap)
+        output = tmp_path / "histogram.html"
+
+        exit_code = plot(
+            file=str(mcap),
+            paths=["Value=/sample.value", "State=/sample.state"],
+            kind="histogram",
+            output=output,
+        )
+
+        assert exit_code == 0
+        content = output.read_text()
+        assert '"type":"histogram"' in content
+        assert '"type":"bar"' in content
+        assert "Value" in content
+        assert "State" in content
+
+    def test_plot_histogram_expands_array_series(self, tmp_path: Path) -> None:
+        mcap = tmp_path / "arr.mcap"
+        _make_array_mcap(mcap, width=3)
+        output = tmp_path / "histogram.html"
+
+        exit_code = plot(
+            file=str(mcap),
+            paths=["/arr.position[:]"],
+            kind="histogram",
+            output=output,
+        )
 
         assert exit_code == 0
         content = output.read_text()
