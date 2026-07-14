@@ -7,7 +7,8 @@ backends (interpreted, compiled, code-generated, etc.).
 
 from collections.abc import Callable
 from copy import copy
-from dataclasses import make_dataclass
+from dataclasses import dataclass, make_dataclass
+from types import new_class
 from typing import Any
 
 from ros_parser import MessageDefinition
@@ -94,6 +95,20 @@ _TYPE_SIZES = {
 }
 
 
+class _MessageType(type):
+    _constant_names: frozenset[str] = frozenset()
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in cls._constant_names:
+            raise AttributeError(f"message constant {name!r} is read-only")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in cls._constant_names:
+            raise AttributeError(f"message constant {name!r} is read-only")
+        super().__delattr__(name)
+
+
 def _generate_plan(
     msgdef: MessageDefinition,
     msgdefs: dict[str, MessageDefinition],
@@ -110,23 +125,45 @@ def _generate_plan(
 
     # Build the _fields_and_field_types dictionary
     fields_and_types_dict = {field.name: _format_field_type(field.type) for field in msgdef.fields}
+    constants = {constant.name: constant.value for constant in msgdef.constants}
 
     # Define the get_fields_and_field_types classmethod
     def get_fields_and_field_types(cls: type) -> dict[str, str]:
         return copy(cls._fields_and_field_types)
 
-    msg_class = make_dataclass(
-        class_name,
-        fields,
-        namespace={
-            "_type": msgdef.name,
-            "_full_text": str(msgdef),
-            "_fields_and_field_types": fields_and_types_dict,
-            "get_fields_and_field_types": classmethod(get_fields_and_field_types),
-        },
-        slots=True,  # Use slots for better performance
-        eq=True,
-    )
+    class_namespace = {
+        "_type": msgdef.name,
+        "_full_text": str(msgdef),
+        "_fields_and_field_types": fields_and_types_dict,
+        "get_fields_and_field_types": classmethod(get_fields_and_field_types),
+    }
+    if constants:
+        class_namespace.update(constants)
+        class_namespace["_constant_names"] = frozenset(constants)
+        class_namespace["__annotations__"] = dict(fields)
+        class_namespace["__module__"] = __name__
+
+        def populate_class_namespace(namespace: dict[str, Any]) -> None:
+            namespace.update(class_namespace)
+
+        msg_class = dataclass(
+            new_class(
+                class_name,
+                (),
+                {"metaclass": _MessageType},
+                populate_class_namespace,
+            ),
+            slots=True,
+            eq=True,
+        )
+    else:
+        msg_class = make_dataclass(
+            class_name,
+            fields,
+            namespace=class_namespace,
+            slots=True,
+            eq=True,
+        )
 
     for field in msgdef.fields:
         field_type = field.type

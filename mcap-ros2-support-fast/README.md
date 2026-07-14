@@ -25,6 +25,17 @@ with open("recording.mcap", "rb") as f:
         print(f"{msg.channel.topic}: {msg.decoded_message}")
 ```
 
+For a schema constant such as `uint8 STATE_ACTIVE=1`, decoded messages expose the same
+read-only class and instance access used by ROS2 Python messages:
+
+```python
+message = msg.decoded_message
+assert type(message).STATE_ACTIVE == 1
+assert message.STATE_ACTIVE == 1
+```
+
+Constants are metadata and are not serialized as message fields.
+
 ### Encoding Messages
 
 ```python
