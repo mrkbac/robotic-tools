@@ -3,7 +3,7 @@
 ## Context
 
 - `uv` workspace of Python libraries and CLIs for robotics data: MCAP, ROS messages, point clouds, video.
-- Workspace packages: `digitalis/`, `pymcap-cli/`, `small-mcap/`, `mcap-ros2-support-fast/`, `ros-parser/`, `pointcloud2/`, `pureini/`, `websocket-proxy/`, `robo-ws-bridge/`.
+- Workspace packages: `digitalis/`, `pymcap-cli/`, `small-mcap/`, `mcap-ros2-support-fast/`, `ros-parser/`, `pointcloud2/`, `pureini/`, `robo-ws-bridge/`.
 - `mcap-web-inspector/` is the Bun-based web UI.
 - Pure Python only: no ROS runtime, hardware, or real-time assumptions.
 

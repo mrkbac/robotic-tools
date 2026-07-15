@@ -26,7 +26,6 @@ members = [
     "pureini",
     "pymcap-cli",
     "small-mcap",
-    "websocket-proxy",
     "robo-ws-bridge",
     "ros-parser",
 ]

@@ -44,7 +44,6 @@ The workspace also ships the libraries pymcap-cli is built on. Each is usable st
 | [`pointcloud2`](pointcloud2/) | Helpers for `sensor_msgs/PointCloud2` access and conversion. |
 | [`pureini`](pureini/) | Pure-Python implementation of the Cloudini point-cloud compression format. |
 | [`robo-ws-bridge`](robo-ws-bridge/) | Python implementation of the Foxglove WebSocket protocol for streaming robotics data. |
-| [`websocket-proxy`](websocket-proxy/) | Proxy in front of [Foxglove Bridge](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge) with just-in-time message conversion, image compression, and point-cloud compression. |
 
 ## License & credits
 
