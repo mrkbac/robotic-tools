@@ -28,6 +28,7 @@ jobs:
         run: |
           uv build --package pymcap-cli --out-dir dist/optional-dependencies
           uv build --package mcap-codec-support --out-dir dist/optional-dependencies
+          uv build --package small-mcap --out-dir dist/optional-dependencies
 
       - name: Test base install and each extra independently
         run: >-
@@ -40,6 +41,12 @@ jobs:
           uv run --no-project --python 3.13 python
           mcap-codec-support/tests/check_optional_dependencies.py
           dist/optional-dependencies/mcap_codec_support-*.whl
+
+      - name: Test small-mcap base install and each extra independently
+        run: >-
+          uv run --no-project --python 3.13 python
+          small-mcap/tests/check_optional_dependencies.py
+          dist/optional-dependencies/small_mcap-*.whl
 
   test:
     runs-on: ubuntu-latest

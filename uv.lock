@@ -2754,6 +2754,7 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=15.0.0" },
     { name = "pymcap-cli", extras = ["image", "draco", "bridge", "xxhash"], marker = "extra == 'lite'" },
     { name = "pymcap-cli", extras = ["video", "pointcloud", "plot", "parquet", "image", "draco", "bridge", "xxhash", "serve"], marker = "extra == 'all'" },
+    { name = "pymcap-cli", extras = ["xxhash"], marker = "extra == 'serve'" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "robo-ws-bridge", marker = "extra == 'bridge'", editable = "robo-ws-bridge" },
@@ -2761,7 +2762,6 @@ requires-dist = [
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
-    { name = "xxhash", marker = "extra == 'serve'", specifier = ">=3.0.0" },
     { name = "xxhash", marker = "extra == 'xxhash'", specifier = ">=3.0.0" },
 ]
 provides-extras = ["all", "lite", "bridge", "bridge-proxy", "draco", "image", "parquet", "plot", "pointcloud", "video", "xxhash", "serve"]

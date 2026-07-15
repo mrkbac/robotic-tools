@@ -72,13 +72,13 @@ def test_command_help_does_not_import_unrelated_optional_dependencies(
     assert f"pymcap-cli {args[0]}" in result.stdout
 
 
-def test_serve_extra_includes_stable_index_hash_dependency() -> None:
+def test_serve_extra_reuses_xxhash_extra() -> None:
     requirements = metadata.requires("pymcap-cli") or []
     serve_requirements = [
         requirement for requirement in requirements if "extra == 'serve'" in requirement
     ]
 
-    assert any(requirement.startswith("xxhash") for requirement in serve_requirements)
+    assert any(requirement.startswith("pymcap-cli[xxhash]") for requirement in serve_requirements)
 
 
 def test_unavailable_command_accepts_command_args(capsys) -> None:

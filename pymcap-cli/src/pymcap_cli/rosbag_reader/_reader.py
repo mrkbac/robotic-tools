@@ -134,7 +134,7 @@ def _lz4_decompress(data: bytes) -> bytes:
     except ImportError:
         raise ImportError(
             "lz4 package is required to read LZ4-compressed bag files. "
-            "Install it with: pip install lz4"
+            "Run with: uvx --with lz4 pymcap-cli"
         ) from None
     return lz4.frame.decompress(data)
 

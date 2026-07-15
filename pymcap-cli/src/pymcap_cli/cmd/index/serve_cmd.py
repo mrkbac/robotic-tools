@@ -3,7 +3,7 @@
 Launches Datasette against the index DB from the *same* interpreter
 (``sys.executable -m datasette``), so the bundled ``pymcap_render`` plugin can
 ``import pymcap_cli``. Datasette and its plugins ship in the ``serve`` extra
-(``pip install 'pymcap-cli[serve]'``).
+(``uvx --from 'pymcap-cli[serve]' pymcap-cli index serve``).
 """
 
 import importlib.resources
@@ -119,7 +119,7 @@ def index_serve(
 
     Serves the sidecar DB read-only with the bundled metadata, dashboards, and
     ``pymcap_render`` plugin. Needs the ``serve`` extra
-    (``pip install 'pymcap-cli\\[serve]'``).
+    (``uvx --from 'pymcap-cli\\[serve]' pymcap-cli index serve``).
     """
     db_path = _resolve_db(db)
     if not db_path.exists():
@@ -128,9 +128,8 @@ def index_serve(
 
     if not _datasette_is_installed():
         ERR.print(
-            "[red]Error:[/red] Datasette is not installed. Install the serve extra: "
-            "`uv run --package pymcap-cli --extra serve pymcap-cli index serve` "
-            "or `pip install 'pymcap-cli[serve]'`."
+            "[red]Error:[/red] Datasette is not installed. Run with the serve extra: "
+            "`uvx --from 'pymcap-cli[serve]' pymcap-cli index serve`."
         )
         return 1
 

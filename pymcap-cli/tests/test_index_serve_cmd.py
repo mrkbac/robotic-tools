@@ -164,6 +164,7 @@ def test_serve_reports_missing_datasette(
     assert index_serve(db=db, no_browser=True) == 1
     err = " ".join(capsys.readouterr().err.split())
     assert "serve extra" in err
+    assert "uvx --from" in err
 
 
 def test_json_link_url_encodes_query_parameters() -> None:
@@ -191,4 +192,5 @@ def test_serve_is_registered_in_top_level_cli_help(
     output = captured.out + captured.err
     assert exc_info.value.code == 0
     assert "Usage: pymcap-cli index serve" in output
+    assert "uvx --from" in output
     assert "pymcap-cli[serve]" in output

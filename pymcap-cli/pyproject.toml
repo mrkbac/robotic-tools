@@ -63,7 +63,7 @@ xxhash = ["xxhash>=3.0.0"]
 # `index serve` web UI. datasette<1 pin: datasette-dashboards 500s on the 1.0
 # pre-release. Run from the same env so the bundled pymcap_render plugin imports.
 serve = [
-    "xxhash>=3.0.0",
+    "pymcap-cli[xxhash]",
     "datasette>=0.65.2,<1",
     "datasette-block-robots>=1.1,<2",
     "datasette-copyable>=0.3.2,<1",

@@ -111,7 +111,6 @@ root_packages = [
     "robo_ws_bridge",
     "ros_parser",
     "small_mcap",
-    "websocket_proxy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -127,7 +126,6 @@ modules = [
     "robo_ws_bridge",
     "ros_parser",
     "small_mcap",
-    "websocket_proxy",
 ]
 unmatched_ignore_imports_alerting = "none"
 # `**` matches one+ components, so each allowed edge needs both bare and `.**` forms.
@@ -172,13 +170,6 @@ ignore_imports = [
     "digitalis.reader.websocket -> robo_ws_bridge.ws_types",
     "digitalis.reader.websocket.source -> robo_ws_bridge",
     "digitalis.reader.websocket.source -> robo_ws_bridge.ws_types",
-    "websocket_proxy.transformers.image_to_video -> mcap_codec_support.video",
-    "websocket_proxy.transformers.image_to_video -> mcap_codec_support.video.pyav",
-    "websocket_proxy.transformers.pointcloud_cloudini -> mcap_codec_support.pointcloud",
-    "websocket_proxy.proxy -> mcap_ros2_support_fast._planner",
-    "websocket_proxy.proxy -> robo_ws_bridge",
-    "websocket_proxy.proxy -> robo_ws_bridge.server",
-    "websocket_proxy.proxy -> robo_ws_bridge.ws_types",
 ]
 
 [[tool.importlinter.contracts]]
@@ -267,8 +258,6 @@ allowed_importers = [
     "pymcap_cli.exporters.pcd_exporter",
     "pymcap_cli.exporters.video_exporter",
     "pymcap_cli.exporters.video_file_writer",
-    "websocket_proxy.transformers.image_to_video",
-    "websocket_proxy.transformers.pointcloud_cloudini",
 ]
 
 [[tool.importlinter.contracts]]
@@ -324,7 +313,28 @@ protected_modules = ["robo_ws_bridge"]
 allowed_importers = [
     "digitalis.reader.websocket",
     "pymcap_cli.cmd.bridge",
-    "websocket_proxy.proxy",
+]
+
+[[tool.importlinter.contracts]]
+name = "Compression backend imports are owned by compression features"
+type = "protected"
+protected_modules = ["lz4", "zstandard"]
+allowed_importers = [
+    "pureini.decoder",
+    "pureini.encoder",
+    "pymcap_cli.doctor",
+    "pymcap_cli.rosbag_reader._reader",
+    "small_mcap.reader",
+    "small_mcap.writer",
+]
+
+[[tool.importlinter.contracts]]
+name = "Numba imports are owned by compiled numeric features"
+type = "protected"
+protected_modules = ["numba"]
+allowed_importers = [
+    "mcap_codec_support.pointcloud.preprocess",
+    "pureini",
 ]
 
 [[tool.importlinter.contracts]]
