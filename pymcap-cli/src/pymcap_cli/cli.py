@@ -73,7 +73,7 @@ def _unavailable_command(
 
     command.__name__ = function_name
     command.__qualname__ = function_name
-    command.__doc__ = f"{message}\n\nInstall with:\n\n    {install_command}"
+    command.__doc__ = f"{message}\n\nInstall with:\n\n    {escape(install_command)}"
     return command
 
 

@@ -5,7 +5,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
-from mcap_codec_support._schemas import normalize_schema_name
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import Channel, Schema
 
@@ -29,6 +28,13 @@ _COMPRESSED_IMAGE_SCHEMAS = frozenset({"sensor_msgs/CompressedImage"})
 _IMAGE_SCHEMAS = _RAW_IMAGE_SCHEMAS | _COMPRESSED_IMAGE_SCHEMAS
 _POINTCLOUD2_SCHEMAS = frozenset({"sensor_msgs/PointCloud2"})
 COMPRESSED_VIDEO_SCHEMA = "foxglove_msgs/msg/CompressedVideo"
+
+
+def _normalize_schema_name(name: str) -> str:
+    parts = name.split("/")
+    if len(parts) == 3 and parts[1] in ("msg", "srv", "action"):
+        return f"{parts[0]}/{parts[2]}"
+    return name
 
 
 class _StampLike(Protocol):
@@ -191,7 +197,7 @@ class VideoRule:
     def create_transformer(self, channel: ChannelInfo) -> LiveTransformer | None:
         if self.config.image_format != "video" or not _is_ros_cdr_channel(channel):
             return None
-        schema_name = normalize_schema_name(channel.get("schemaName", ""))
+        schema_name = _normalize_schema_name(channel.get("schemaName", ""))
         if schema_name not in _IMAGE_SCHEMAS:
             return None
         return VideoTransformer(self.config, channel["topic"])
@@ -244,7 +250,7 @@ class VideoTransformer:
 
     def transform(self, decoded: object, timestamp_ns: int) -> TransformResult | None:
         del timestamp_ns
-        schema_name = normalize_schema_name(_message_type(decoded))
+        schema_name = _normalize_schema_name(_message_type(decoded))
         live = _LiveDecodedMessage(decoded_message=decoded, channel=_LiveChannel(self._topic))
         frame, width, height = self._session.decode_image(live, schema_name)
         outcome = self._session.encode_with_fallback(frame, width, height)

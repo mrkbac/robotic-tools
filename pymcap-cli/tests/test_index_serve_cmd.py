@@ -191,3 +191,4 @@ def test_serve_is_registered_in_top_level_cli_help(
     output = captured.out + captured.err
     assert exc_info.value.code == 0
     assert "Usage: pymcap-cli index serve" in output
+    assert "pymcap-cli[serve]" in output

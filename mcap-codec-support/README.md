@@ -10,6 +10,20 @@ Install all decoding backends:
 uv add "mcap-codec-support[all]"
 ```
 
+The base package contains shared protocols and schema helpers and imports
+without loading any codec backend. Install only the capability needed:
+
+| Extra | Enables |
+| --- | --- |
+| `ros2` | Fast generic ROS 2 CDR decoding |
+| `video` | Video/image codecs and `VideoDecompressFactory` |
+| `pointcloud` | Cloudini point-cloud codecs and decoder factories |
+| `draco` | Draco point-cloud codecs |
+| `all` | Combined decoder factory and every backend |
+
+Video, point-cloud, and Draco extras remain separate because their compiled
+dependencies account for most of the download and installed footprint.
+
 Read every supported message type with `small-mcap`:
 
 ```python

@@ -119,7 +119,7 @@ def index_serve(
 
     Serves the sidecar DB read-only with the bundled metadata, dashboards, and
     ``pymcap_render`` plugin. Needs the ``serve`` extra
-    (``pip install 'pymcap-cli[serve]'``).
+    (``pip install 'pymcap-cli\\[serve]'``).
     """
     db_path = _resolve_db(db)
     if not db_path.exists():

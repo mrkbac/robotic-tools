@@ -1608,6 +1608,7 @@ ros2 = [
 ]
 video = [
     { name = "av" },
+    { name = "mcap-ros2-support-fast" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "nvidia-nvjpeg", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
@@ -1629,6 +1630,7 @@ requires-dist = [
     { name = "mcap-ros2-support-fast", marker = "extra == 'draco'", editable = "mcap-ros2-support-fast" },
     { name = "mcap-ros2-support-fast", marker = "extra == 'pointcloud'", editable = "mcap-ros2-support-fast" },
     { name = "mcap-ros2-support-fast", marker = "extra == 'ros2'", editable = "mcap-ros2-support-fast" },
+    { name = "mcap-ros2-support-fast", marker = "extra == 'video'", editable = "mcap-ros2-support-fast" },
     { name = "numpy", marker = "extra == 'draco'", specifier = ">=1.24.0" },
     { name = "numpy", marker = "extra == 'pointcloud'", specifier = ">=1.24.0" },
     { name = "numpy", marker = "extra == 'video'", specifier = ">=1.24.0" },
@@ -2720,6 +2722,7 @@ serve = [
     { name = "datasette-dashboards" },
     { name = "datasette-export-notebook" },
     { name = "datasette-vega" },
+    { name = "xxhash" },
 ]
 video = [
     { name = "mcap-codec-support", extra = ["video"] },
@@ -2758,6 +2761,7 @@ requires-dist = [
     { name = "ros-parser", editable = "ros-parser" },
     { name = "small-mcap", extras = ["compression"], editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
+    { name = "xxhash", marker = "extra == 'serve'", specifier = ">=3.0.0" },
     { name = "xxhash", marker = "extra == 'xxhash'", specifier = ">=3.0.0" },
 ]
 provides-extras = ["all", "lite", "bridge", "bridge-proxy", "draco", "image", "parquet", "plot", "pointcloud", "video", "xxhash", "serve"]

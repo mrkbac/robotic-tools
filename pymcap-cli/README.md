@@ -27,6 +27,30 @@ uv add "pymcap-cli[video,pointcloud]"
 uv add "pymcap-cli[video,pointcloud,draco]"
 ```
 
+The base install includes the CLI framework, MCAP compression support, ROS
+schema parsing/decoding, configuration paths, and YAML handling because those
+are used across the core inspect and transform commands. Feature-specific
+binary and web stacks remain optional:
+
+| Extra | Enables | Why it is optional |
+| --- | --- | --- |
+| `bridge` | Foxglove WebSocket client, playback, and serving | Network-specific workflow |
+| `bridge-proxy` | Live video and point-cloud transforming proxy | Includes both heavy codec stacks |
+| `video` | Video export, compression, and decompression | PyAV, NumPy, and Pillow binary wheels |
+| `pointcloud` | PCD export and Cloudini processing | NumPy, Numba/LLVM, and point-cloud codecs |
+| `draco` | Draco point-cloud processing | DracoPy and NumPy binary wheels |
+| `image` | Image export | Pillow is only needed by image workflows |
+| `parquet` | Parquet export | PyArrow plus the point-cloud stack |
+| `plot` | Interactive and static plots | Plotly and Kaleido |
+| `xxhash` | Stable index fingerprints | Only index and hashing features require it |
+| `serve` | Datasette index browser, including `xxhash` | Large web application/plugin stack |
+| `lite` | Image, Draco, bridge, and index features | Compatibility bundle without video, Cloudini, plotting, Parquet, or Datasette |
+| `all` | Every optional feature | Full feature set |
+
+Each extra is tested from the built wheel in an isolated environment. Adding a
+new optional dependency requires assigning it to a feature module in the import
+contracts and adding its promised command to that wheel matrix.
+
 ## Why pymcap-cli over the official Go CLI?
 
 - **Advanced Recovery** — handles corrupt MCAP files with intelligent chunk-level recovery and MessageIndex validation

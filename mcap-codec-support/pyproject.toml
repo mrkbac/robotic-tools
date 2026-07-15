@@ -35,6 +35,7 @@ Issues = "https://github.com/mrkbac/robotic-tools/issues"
 ros2 = ["mcap-ros2-support-fast"]
 video = [
     "av>=12.0.0",
+    "mcap-ros2-support-fast",
     "numpy>=1.24.0",
     "nvidia-nvjpeg==13.0.0.40 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
     "pillow>=10.0",

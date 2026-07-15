@@ -100,6 +100,7 @@ omit = [
 # The contracts guard runtime coupling; `if TYPE_CHECKING:` imports are
 # annotation-only and don't require the target package at runtime.
 exclude_type_checking_imports = true
+include_external_packages = true
 root_packages = [
     "digitalis",
     "mcap_codec_support",
@@ -133,16 +134,21 @@ unmatched_ignore_imports_alerting = "none"
 ignore_imports = [
     # ros_parser is whitelisted at the submodule level — `ros1_msg` and the
     # private `_utils` / `_lark_standalone_runtime` stay off-limits.
-    "mcap_ros2_support_fast.** -> ros_parser",
-    "mcap_ros2_support_fast.** -> ros_parser.models",
-    "mcap_ros2_support_fast.** -> ros_parser.ros2_msg",
-    "mcap_codec_support.** -> mcap_ros2_support_fast",
-    "mcap_codec_support.** -> mcap_ros2_support_fast.**",
-    "mcap_codec_support.** -> small_mcap",
-    "mcap_codec_support.** -> small_mcap.**",
-    "mcap_codec_support.pointcloud.** -> pureini",
-    "mcap_codec_support.pointcloud.** -> pureini.**",
-    "mcap_codec_support.pointcloud.** -> pointcloud2",
+    "mcap_ros2_support_fast._planner -> ros_parser",
+    "mcap_ros2_support_fast._planner -> ros_parser.models",
+    "mcap_ros2_support_fast._planner -> ros_parser.ros2_msg",
+    "mcap_codec_support.decoders -> mcap_ros2_support_fast.decoder",
+    "mcap_codec_support.pointcloud.factories -> mcap_ros2_support_fast.decoder",
+    "mcap_codec_support.video.factories -> mcap_ros2_support_fast.decoder",
+    "mcap_codec_support.pointcloud.factories -> small_mcap",
+    "mcap_codec_support.video.compression -> small_mcap",
+    "mcap_codec_support.video.factories -> small_mcap",
+    "mcap_codec_support.pointcloud.compression -> pureini",
+    "mcap_codec_support.pointcloud.factories -> pureini",
+    "mcap_codec_support.pointcloud._messages -> pointcloud2",
+    "mcap_codec_support.pointcloud.compression -> pointcloud2",
+    "mcap_codec_support.pointcloud.factories -> pointcloud2",
+    "mcap_codec_support.pointcloud.preprocess -> pointcloud2",
     "pymcap_cli.** -> small_mcap",
     "pymcap_cli.** -> small_mcap.**",
     "pymcap_cli.** -> mcap_codec_support",
@@ -155,20 +161,24 @@ ignore_imports = [
     "pymcap_cli.** -> ros_parser.ros2_msg",
     "pymcap_cli.** -> robo_ws_bridge",
     "pymcap_cli.** -> robo_ws_bridge.**",
-    "digitalis.** -> small_mcap",
-    "digitalis.** -> small_mcap.**",
-    "digitalis.** -> mcap_ros2_support_fast",
-    "digitalis.** -> mcap_ros2_support_fast.**",
-    "digitalis.** -> ros_parser.message_path",
-    "digitalis.** -> pointcloud2",
-    "digitalis.** -> robo_ws_bridge",
-    "digitalis.** -> robo_ws_bridge.**",
-    "websocket_proxy.** -> mcap_codec_support",
-    "websocket_proxy.** -> mcap_codec_support.**",
-    "websocket_proxy.** -> mcap_ros2_support_fast",
-    "websocket_proxy.** -> mcap_ros2_support_fast.**",
-    "websocket_proxy.** -> robo_ws_bridge",
-    "websocket_proxy.** -> robo_ws_bridge.**",
+    "digitalis.reader.mcap.source -> small_mcap",
+    "digitalis.reader.websocket.source -> small_mcap",
+    "digitalis.reader.mcap.source -> mcap_ros2_support_fast.decoder",
+    "digitalis.reader.websocket.source -> mcap_ros2_support_fast.decoder",
+    "digitalis.transforms -> ros_parser.message_path",
+    "digitalis.ui.panels.plot -> ros_parser.message_path",
+    "digitalis.ui.panels.raw -> ros_parser.message_path",
+    "digitalis.ui.panels.pointcloud -> pointcloud2",
+    "digitalis.reader.websocket -> robo_ws_bridge.ws_types",
+    "digitalis.reader.websocket.source -> robo_ws_bridge",
+    "digitalis.reader.websocket.source -> robo_ws_bridge.ws_types",
+    "websocket_proxy.transformers.image_to_video -> mcap_codec_support.video",
+    "websocket_proxy.transformers.image_to_video -> mcap_codec_support.video.pyav",
+    "websocket_proxy.transformers.pointcloud_cloudini -> mcap_codec_support.pointcloud",
+    "websocket_proxy.proxy -> mcap_ros2_support_fast._planner",
+    "websocket_proxy.proxy -> robo_ws_bridge",
+    "websocket_proxy.proxy -> robo_ws_bridge.server",
+    "websocket_proxy.proxy -> robo_ws_bridge.ws_types",
 ]
 
 [[tool.importlinter.contracts]]
@@ -198,6 +208,123 @@ type = "independence"
 modules = [
     "mcap_codec_support.video",
     "mcap_codec_support.pointcloud",
+]
+
+[[tool.importlinter.contracts]]
+name = "mcap_codec_support optional dependencies stay in feature modules"
+type = "forbidden"
+source_modules = ["mcap_codec_support"]
+forbidden_modules = [
+    "av",
+    "DracoPy",
+    "mcap_ros2_support_fast",
+    "numpy",
+    "PIL",
+    "pointcloud2",
+    "pureini",
+]
+allow_indirect_imports = true
+ignore_imports = [
+    "mcap_codec_support.decoders -> mcap_ros2_support_fast.decoder",
+    "mcap_codec_support.pointcloud.compression -> numpy",
+    "mcap_codec_support.pointcloud.compression -> DracoPy",
+    "mcap_codec_support.pointcloud.compression -> pointcloud2",
+    "mcap_codec_support.pointcloud.compression -> pureini",
+    "mcap_codec_support.pointcloud.factories -> numpy",
+    "mcap_codec_support.pointcloud.factories -> DracoPy",
+    "mcap_codec_support.pointcloud.factories -> mcap_ros2_support_fast.decoder",
+    "mcap_codec_support.pointcloud.factories -> pointcloud2",
+    "mcap_codec_support.pointcloud.factories -> pureini",
+    "mcap_codec_support.pointcloud.preprocess -> numpy",
+    "mcap_codec_support.pointcloud.preprocess -> pointcloud2",
+    "mcap_codec_support.video.common -> numpy",
+    "mcap_codec_support.video.compression -> numpy",
+    "mcap_codec_support.video.compression -> av",
+    "mcap_codec_support.video.pyav -> av",
+    "mcap_codec_support.video.factories -> mcap_ros2_support_fast.decoder",
+    "mcap_codec_support.video.common -> PIL",
+    "mcap_codec_support.video.compression -> PIL",
+]
+
+[[tool.importlinter.contracts]]
+name = "Codec support imports are owned by codec adapters"
+type = "protected"
+protected_modules = ["mcap_codec_support"]
+allowed_importers = [
+    "pymcap_cli.cmd.bridge._playback_transforms",
+    "pymcap_cli.cmd.bridge._proxy_transforms",
+    "pymcap_cli.cmd.bridge.proxy",
+    "pymcap_cli.cmd.process_cmd",
+    "pymcap_cli.cmd.roscompress_cmd",
+    "pymcap_cli.cmd.rosdecompress_cmd",
+    "pymcap_cli.cmd.video_cmd",
+    "pymcap_cli.core.processors.decompress",
+    "pymcap_cli.core.processors.image_compress",
+    "pymcap_cli.core.processors.pointcloud_clean",
+    "pymcap_cli.core.processors.pointcloud_compress",
+    "pymcap_cli.core.processors.video_compress",
+    "pymcap_cli.exporters.parquet_exporter",
+    "pymcap_cli.exporters.pcd_exporter",
+    "pymcap_cli.exporters.video_exporter",
+    "pymcap_cli.exporters.video_file_writer",
+    "websocket_proxy.transformers.image_to_video",
+    "websocket_proxy.transformers.pointcloud_cloudini",
+]
+
+[[tool.importlinter.contracts]]
+name = "NumPy imports are owned by numeric feature packages"
+type = "protected"
+protected_modules = ["numpy"]
+allowed_importers = [
+    "digitalis",
+    "mcap_codec_support",
+    "mcap_ros2_support_fast._dynamic_encoder",
+    "pointcloud2",
+    "pureini",
+    "pymcap_cli.exporters.parquet_exporter",
+    "pymcap_cli.exporters.pcd_exporter",
+]
+
+[[tool.importlinter.contracts]]
+name = "Media dependency imports are owned by media adapters"
+type = "protected"
+protected_modules = ["av", "DracoPy", "PIL"]
+allowed_importers = [
+    "digitalis.ui.panels.image",
+    "mcap_codec_support.pointcloud",
+    "mcap_codec_support.video",
+    "pymcap_cli.exporters.image_exporter",
+    "pymcap_cli.exporters.video_file_writer",
+]
+
+[[tool.importlinter.contracts]]
+name = "Data export imports are owned by their exporters"
+type = "protected"
+protected_modules = ["plotly", "pyarrow"]
+allowed_importers = [
+    "pymcap_cli.encoding.arrow_schema",
+    "pymcap_cli.exporters.parquet_exporter",
+    "pymcap_cli.exporters.plot_exporter",
+]
+
+[[tool.importlinter.contracts]]
+name = "Stable hash imports are owned by hash features"
+type = "protected"
+protected_modules = ["xxhash"]
+allowed_importers = [
+    "pymcap_cli.core.mcap_compare",
+    "pymcap_cli.core.processors.dedup",
+    "pymcap_cli.index",
+]
+
+[[tool.importlinter.contracts]]
+name = "Bridge imports are owned by bridge features"
+type = "protected"
+protected_modules = ["robo_ws_bridge"]
+allowed_importers = [
+    "digitalis.reader.websocket",
+    "pymcap_cli.cmd.bridge",
+    "websocket_proxy.proxy",
 ]
 
 [[tool.importlinter.contracts]]

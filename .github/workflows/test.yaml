@@ -11,6 +11,36 @@ on:
       - ready_for_review
 
 jobs:
+  optional-dependencies:
+    name: optional dependency wheel matrix
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Build pymcap-cli wheel
+        run: |
+          uv build --package pymcap-cli --out-dir dist/optional-dependencies
+          uv build --package mcap-codec-support --out-dir dist/optional-dependencies
+
+      - name: Test base install and each extra independently
+        run: >-
+          uv run --no-project --python 3.13 python
+          pymcap-cli/tests/check_optional_dependencies.py
+          dist/optional-dependencies/pymcap_cli-*.whl
+
+      - name: Test codec-support base install and each extra independently
+        run: >-
+          uv run --no-project --python 3.13 python
+          mcap-codec-support/tests/check_optional_dependencies.py
+          dist/optional-dependencies/mcap_codec_support-*.whl
+
   test:
     runs-on: ubuntu-latest
     strategy:

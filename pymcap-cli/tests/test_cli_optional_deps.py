@@ -1,8 +1,10 @@
 """Tests for optional command dependency handling in the top-level CLI."""
 
+import json
 import subprocess
 import sys
 import textwrap
+from importlib import metadata
 from types import SimpleNamespace
 
 import pytest
@@ -10,14 +12,32 @@ from cyclopts import App, Parameter
 from pymcap_cli import cli
 
 
-def test_compress_help_does_not_import_optional_codec_dependencies() -> None:
-    script = textwrap.dedent(
-        """
+@pytest.mark.parametrize(
+    ("args", "blocked_modules"),
+    [
+        pytest.param(
+            ["compress", "--help"],
+            ["mcap_codec_support", "numpy", "robo_ws_bridge"],
+            id="base-compress",
+        ),
+        pytest.param(
+            ["bridge", "--help"],
+            ["mcap_codec_support", "numpy"],
+            id="bridge-without-codecs",
+        ),
+    ],
+)
+def test_command_help_does_not_import_unrelated_optional_dependencies(
+    args: list[str], blocked_modules: list[str]
+) -> None:
+    script = (
+        textwrap.dedent(
+            """
         import importlib.abc
         import sys
 
         class BlockOptionalModules(importlib.abc.MetaPathFinder):
-            blocked = ("mcap_codec_support", "numpy", "robo_ws_bridge")
+            blocked = __BLOCKED_MODULES__
 
             def find_spec(self, fullname, path=None, target=None):
                 if any(
@@ -34,8 +54,11 @@ def test_compress_help_does_not_import_optional_codec_dependencies() -> None:
 
         from pymcap_cli.cli import app
 
-        app(["compress", "--help"])
+        app(__ARGS__)
         """
+        )
+        .replace("__BLOCKED_MODULES__", repr(blocked_modules))
+        .replace("__ARGS__", json.dumps(args))
     )
 
     result = subprocess.run(
@@ -46,7 +69,16 @@ def test_compress_help_does_not_import_optional_codec_dependencies() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "pymcap-cli compress" in result.stdout
+    assert f"pymcap-cli {args[0]}" in result.stdout
+
+
+def test_serve_extra_includes_stable_index_hash_dependency() -> None:
+    requirements = metadata.requires("pymcap-cli") or []
+    serve_requirements = [
+        requirement for requirement in requirements if "extra == 'serve'" in requirement
+    ]
+
+    assert any(requirement.startswith("xxhash") for requirement in serve_requirements)
 
 
 def test_unavailable_command_accepts_command_args(capsys) -> None:
