@@ -111,6 +111,120 @@ def test_bump_detects_source_changes(tmp_path: Path) -> None:
     assert "⬆ sample (1.0.0) has changes" in result.stdout
 
 
+def test_bump_detects_readme_changes(tmp_path: Path) -> None:
+    repo, fake_bin = _create_repo(tmp_path)
+    (repo / "sample" / "README.md").write_text("Updated package documentation.\n")
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "update readme",
+    )
+
+    result = _run_bump(repo, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert "⬆ sample (1.0.0) has changes" in result.stdout
+
+
+def test_bump_detects_dependency_changes(tmp_path: Path) -> None:
+    repo, fake_bin = _create_repo(tmp_path)
+    (repo / "sample" / "pyproject.toml").write_text(
+        '[project]\nname = "sample"\nversion = "1.0.0"\ndependencies = ["example>=2"]\n'
+    )
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "add dependency",
+    )
+
+    result = _run_bump(repo, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert "⬆ sample (1.0.0) has changes" in result.stdout
+
+
+def test_bump_detects_extra_changes(tmp_path: Path) -> None:
+    repo, fake_bin = _create_repo(tmp_path)
+    (repo / "sample" / "pyproject.toml").write_text(
+        '[project]\nname = "sample"\nversion = "1.0.0"\n'
+        '[project.optional-dependencies]\nfeature = ["example>=2"]\n'
+    )
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "add extra",
+    )
+
+    result = _run_bump(repo, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert "⬆ sample (1.0.0) has changes" in result.stdout
+
+
+def test_bump_ignores_only_project_version_line(tmp_path: Path) -> None:
+    repo, fake_bin = _create_repo(tmp_path)
+    (repo / "sample" / "pyproject.toml").write_text(
+        '[project]\nname = "sample"\nversion = "1.0.0"\n[tool.example]\nversion = "2.0.0"\n'
+    )
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "update tool metadata",
+    )
+
+    result = _run_bump(repo, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert "⬆ sample (1.0.0) has changes" in result.stdout
+
+
+def test_bump_ignores_version_only_change(tmp_path: Path) -> None:
+    repo, fake_bin = _create_repo(tmp_path)
+    (repo / "sample" / "pyproject.toml").write_text(
+        '[project]\nname = "sample"\nversion = "1.1.0"\n'
+    )
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "bump version",
+    )
+
+    result = _run_bump(repo, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert "— sample: version 1.1.0 is already awaiting a tag, skipping" in result.stdout
+
+
 def test_bump_does_not_double_bump_untagged_release(tmp_path: Path) -> None:
     repo, fake_bin = _create_repo(tmp_path)
     (repo / "sample" / "src" / "sample" / "core.py").write_text("VALUE = 1\n")

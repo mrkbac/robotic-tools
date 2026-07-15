@@ -6,6 +6,60 @@ set -euo pipefail
 # Package-local tests do not change the published artifact and are ignored.
 # Guards against double-bumps before a prepared release receives its tag.
 
+version_is_newer() {
+    local current="$1"
+    local previous="$2"
+    local current_major current_minor current_patch
+    local previous_major previous_minor previous_patch
+
+    if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        return 1
+    fi
+    current_major="${BASH_REMATCH[1]}"
+    current_minor="${BASH_REMATCH[2]}"
+    current_patch="${BASH_REMATCH[3]}"
+
+    if [[ ! "$previous" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        return 1
+    fi
+    previous_major="${BASH_REMATCH[1]}"
+    previous_minor="${BASH_REMATCH[2]}"
+    previous_patch="${BASH_REMATCH[3]}"
+
+    if ((current_major != previous_major)); then
+        if ((current_major > previous_major)); then
+            return 0
+        fi
+        return 1
+    fi
+    if ((current_minor != previous_minor)); then
+        if ((current_minor > previous_minor)); then
+            return 0
+        fi
+        return 1
+    fi
+    if ((current_patch > previous_patch)); then
+        return 0
+    fi
+    return 1
+}
+
+strip_project_version() {
+    awk '
+        !removed && /^[[:space:]]*version[[:space:]]*=/ { removed = 1; next }
+        { print }
+    '
+}
+
+pyproject_changed_since() {
+    local reference="$1"
+    local pkg="$2"
+
+    ! cmp -s \
+        <(git show "$reference:$pkg/pyproject.toml" | strip_project_version) \
+        <(strip_project_version < "$pkg/pyproject.toml")
+}
+
 # Ensure working tree is clean before bumping
 if [ -n "$(git status --porcelain)" ]; then
     echo "Error: working tree is dirty. Commit or stash your changes first."
@@ -47,24 +101,23 @@ for pkg in "${members[@]}"; do
         continue
     fi
 
-    # Guard: if pyproject.toml already has an uncommitted version change, skip.
-    # This prevents double-bumps when a previous bump wasn't committed yet (e.g. lint hook failed).
-    version_diff=$(git diff HEAD -- "$pkg/pyproject.toml" 2>/dev/null | grep -E '^\+version\s*=' || true)
-    if [ -n "$version_diff" ]; then
-        echo "— $pkg: version already bumped (uncommitted), skipping"
-        skipped=$((skipped + 1))
-        continue
-    fi
-
     # Read current version from pyproject.toml
     current_version=$(grep -m1 '^version' "$pkg/pyproject.toml" | sed 's/.*"\(.*\)".*/\1/')
-    tag="${pkg}@${current_version}"
+    latest_tag=$(
+        git for-each-ref \
+            --sort=-version:refname \
+            --count=1 \
+            --format='%(refname:short)' \
+            "refs/tags/$pkg@*"
+    )
 
-    # Find the commit the tag points to
-    tag_commit=$(git rev-list -1 "$tag" 2>/dev/null || true)
-    package_tags=$(git tag --list "$pkg@*")
+    if [ -n "$latest_tag" ]; then
+        latest_version="${latest_tag#"$pkg@"}"
+    else
+        latest_version=""
+    fi
 
-    if [ -z "$tag_commit" ] && [ -n "$package_tags" ]; then
+    if [ -n "$latest_version" ] && version_is_newer "$current_version" "$latest_version"; then
         echo "— $pkg: version $current_version is already awaiting a tag, skipping"
         skipped=$((skipped + 1))
         continue
@@ -78,21 +131,23 @@ for pkg in "${members[@]}"; do
         ":(exclude)$pkg/tests/**"
     )
 
-    if [ -z "$tag_commit" ]; then
+    if [ -z "$latest_tag" ]; then
         # No tag for current version — any releasable package history needs a release.
-        if [ -n "$(git log -1 --format=%H -- "${change_paths[@]}" 2>/dev/null)" ]; then
+        initial_release_paths=(
+            "$pkg/"
+            ":(exclude)$pkg/tests"
+            ":(exclude)$pkg/tests/**"
+        )
+        if [ -n "$(git log -1 --format=%H -- "${initial_release_paths[@]}" 2>/dev/null)" ]; then
             needs_bump=true
         fi
     else
-        if ! git diff --quiet "$tag_commit"..HEAD -- "${change_paths[@]}"; then
+        if ! git diff --quiet "$latest_tag"..HEAD -- "${change_paths[@]}"; then
             needs_bump=true
         fi
-    fi
-
-    # Include staged and unstaged releasable changes. Untracked files are already
-    # rejected by the clean-working-tree guard above.
-    if ! git diff --quiet HEAD -- "${change_paths[@]}"; then
-        needs_bump=true
+        if pyproject_changed_since "$latest_tag" "$pkg"; then
+            needs_bump=true
+        fi
     fi
 
     if $needs_bump; then
