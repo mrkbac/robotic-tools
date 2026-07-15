@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
 from cyclopts import Group as CycloptsGroup
 from cyclopts import Parameter
-from mcap_codec_support.video import EncoderMode
 from mcap_ros2_support_fast.decoder import DecoderFactory, McapROS2DecodeError
 from robo_ws_bridge import (
     ConnectionState,
@@ -432,7 +431,7 @@ def proxy(
     codec: CodecOption = "h264",
     quality: QualityOption = 28,
     encoder: EncoderOption = None,
-    backend: BackendOption = EncoderMode.AUTO,
+    backend: BackendOption = "auto",
     scale: ScaleOption = None,
     jpeg_quality: JpegQualityOption = 90,
     pointcloud: PointCloudOption = True,
@@ -496,7 +495,7 @@ def proxy(
             codec=codec,
             quality=quality,
             encoder=encoder,
-            backend=backend.value,
+            backend=backend,
             scale=scale,
             jpeg_quality=jpeg_quality,
         ),

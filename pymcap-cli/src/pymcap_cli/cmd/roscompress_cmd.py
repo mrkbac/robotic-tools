@@ -87,7 +87,7 @@ def roscompress(
     scale: ScaleOption = None,
     image_format: ImageFormatOption = "video",
     jpeg_quality: JpegQualityOption = 90,
-    backend: BackendOption = EncoderMode.AUTO,
+    backend: BackendOption = "auto",
     pointcloud: PointCloudOption = True,
     pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
     pointcloud_sort_field: PointCloudSortFieldOption = None,
@@ -193,7 +193,7 @@ def roscompress(
                     quality=quality,
                     encoder=encoder,
                     scale=scale,
-                    backend=backend,
+                    backend=EncoderMode(backend),
                 )
             )
         elif image_format in {"jpeg", "png"}:

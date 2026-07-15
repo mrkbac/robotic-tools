@@ -53,7 +53,7 @@ def rosdecompress(
             group=VIDEO_GROUP,
         ),
     ] = 90,
-    backend: BackendOption = EncoderMode.AUTO,
+    backend: BackendOption = "auto",
     pointcloud: Annotated[
         bool,
         Parameter(
@@ -94,10 +94,11 @@ def rosdecompress(
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
     assert overwrite_policy is not None
 
+    encoder_mode = EncoderMode(backend)
     console.print(f"[cyan]Input:[/cyan] {file}")
     console.print(f"[cyan]Output:[/cyan] {output}")
     if video:
-        console.print(f"[cyan]Video format:[/cyan] {video_format} (backend={backend.value})")
+        console.print(f"[cyan]Video format:[/cyan] {video_format} (backend={encoder_mode.value})")
     else:
         console.print("[cyan]Video decompression:[/cyan] disabled")
     pc_state = "enabled" if pointcloud else "disabled"
@@ -111,7 +112,9 @@ def rosdecompress(
 
         extras.append(
             VideoDecompressProcessor(
-                video_format=video_format, jpeg_quality=jpeg_quality, backend=backend
+                video_format=video_format,
+                jpeg_quality=jpeg_quality,
+                backend=encoder_mode,
             )
         )
     if pointcloud:

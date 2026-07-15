@@ -62,7 +62,7 @@ def video(
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
     output: OutputPathOption,
-    codec: VideoCodecOption = VideoCodec.H264,
+    codec: VideoCodecOption = "h264",
     quality: Annotated[
         QualityPreset,
         Parameter(name=["--quality"], group=ENCODING_GROUP),
@@ -106,11 +106,12 @@ def video(
         logger.error("At least one --topic is required.")
         return 1
 
-    quality_value = crf if crf is not None else _QUALITY_PRESETS[codec][quality]
+    video_codec = VideoCodec(codec)
+    quality_value = crf if crf is not None else _QUALITY_PRESETS[video_codec][quality]
 
     try:
         exporter = VideoExporter(
-            codec=codec,
+            codec=video_codec,
             encoder_backend=encoder,
             quality=quality_value,
             mode=mode,

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import Group, Parameter
-from mcap_codec_support.video import EncoderMode, VideoCodec
 
 from pymcap_cli.core.msg_resolver import ROS2Distro
 from pymcap_cli.display.message_render import SMART_BYTES_INLINE_LIMIT, BytesMode
@@ -397,7 +396,7 @@ OptionalCodecOption = Annotated[
     Parameter(name=["--codec"], group=ENCODING_GROUP, help="Preset default: h264."),
 ]
 VideoCodecOption = Annotated[
-    VideoCodec,
+    Literal["h264", "h265", "vp9", "av1"],
     Parameter(name=["--codec"], group=ENCODING_GROUP),
 ]
 QualityOption = Annotated[
@@ -413,7 +412,7 @@ ScaleOption = Annotated[
     Parameter(name=["-s", "--scale"], group=ENCODING_GROUP),
 ]
 BackendOption = Annotated[
-    EncoderMode,
+    Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"],
     Parameter(name=["--backend"], group=ENCODING_GROUP),
 ]
 OptionalBackendOption = Annotated[

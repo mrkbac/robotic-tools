@@ -1,10 +1,52 @@
 """Tests for optional command dependency handling in the top-level CLI."""
 
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 import pytest
 from cyclopts import App, Parameter
 from pymcap_cli import cli
+
+
+def test_compress_help_does_not_import_optional_codec_dependencies() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class BlockOptionalModules(importlib.abc.MetaPathFinder):
+            blocked = ("mcap_codec_support", "numpy", "robo_ws_bridge")
+
+            def find_spec(self, fullname, path=None, target=None):
+                if any(
+                    fullname == name or fullname.startswith(f"{name}.")
+                    for name in self.blocked
+                ):
+                    root_name = fullname.partition(".")[0]
+                    raise ModuleNotFoundError(
+                        f"No module named '{root_name}'", name=root_name
+                    )
+                return None
+
+        sys.meta_path.insert(0, BlockOptionalModules())
+
+        from pymcap_cli.cli import app
+
+        app(["compress", "--help"])
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "pymcap-cli compress" in result.stdout
 
 
 def test_unavailable_command_accepts_command_args(capsys) -> None:
