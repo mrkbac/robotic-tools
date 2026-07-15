@@ -16,6 +16,13 @@ pre_commit:
   enabled: true
   arguments:
     - --color=never
+  # Only run the formatter on the freshly generated file. Without this, the tool
+  # invokes a bare `pre-commit run --files=<dest>`, and the `always_run` hooks
+  # (pytest, ty, import-linter) ignore `--files` and re-run the whole suite,
+  # turning a ~0.1s codegen into a ~50s one. ruff-format alone reproduces the
+  # committed output byte-for-byte.
+  hooks:
+    - ruff-format
 
 # Line length for code generation (matches project ruff config)
 lineLength: 100
