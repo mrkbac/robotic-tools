@@ -6,17 +6,23 @@ User-facing notes for releases.
 
 ## Unreleased
 
-### ros-parser
+### Packaging
 
-- MessagePath filters now short-circuit rejected values, resolve ROS enum names
-  from message constants, and support current-value membership expressions such
-  as `{in [1, 3, $selected]}`.
-- MessagePath functions add `.@length`; `.@norm` now accepts numeric arrays and
-  vector objects with `x`, `y`, and optional `z` fields.
-- Breaking: `.@quat` now requires Foxglove-compatible `roll`, `pitch`, and `yaw`
-  input fields instead of treating `x`, `y`, and `z` as Euler angles.
+- Optional dependency boundaries are now enforced for built wheels: base imports
+  and `compress` stay free of media codec stacks, while feature extras include
+  their complete runtime requirements (`video` includes ROS2 decoding and
+  `pymcap-cli[serve]` includes `xxhash` for `index serve` fingerprints).
 
-### pymcap-cli
+---
+
+## pymcap-cli 0.21.0, mcap-codec-support 0.11.0, mcap-ros2-support-fast 0.6.0, ros-parser 0.7.0, small-mcap 0.11.0, robo-ws-bridge 0.6.0
+
+Headline: MCAP inspection and transformation gain one shared filtering and
+MessagePath interface, richer plots and value-aware splitting, ROS2 QoS
+rewrites, and direct bridge playback with subscriber-aware just-in-time media
+transforms.
+
+### pymcap-cli 0.21.0
 
 - Breaking: file-reading commands now use one message-filter convention. Use
   repeatable `-t/--topic` and `-x/--exclude-topic` for full-match regexes;
@@ -26,10 +32,27 @@ User-facing notes for releases.
   `+10s`, `-30s`, `@10s`, and `end-30s`. The old
   `--topics`, `--exclude-topics`, separate regex/glob flags, `--start-secs`,
   `--end-secs`, `--start-nsecs`, and `--end-nsecs` aliases were removed.
+- New `bridge play` chronologically merges recordings into an existing Foxglove
+  bridge, while `bridge serve` hosts recordings directly. Both can apply
+  `roscompress` or `rosdecompress` just in time; serving transforms only topics
+  with active subscribers, and playback can opt into the same behavior.
+- MessagePath variables from repeatable `--var NAME=VALUE` options or
+  `PYMCAP_VAR_*` environment variables work across querying, exports, plots,
+  processing, splitting, and bridge commands. `cat --query` is repeatable, and
+  structured exports can select multiple named derived columns.
+- `split` and `process` can start segments when a MessagePath expression changes
+  value, with typed values available in output filenames plus options for
+  hysteresis, skipped values, and trailing context.
+- `plot` adds XY trajectories, numeric histograms, and categorical frequency
+  bars alongside time series. Paired XY samples remain aligned during LTTB
+  downsampling.
+- `process` can apply exact-topic YAML and regex-based QoS overrides, then
+  optionally rewrite ROS2 QoS policy names to Humble-compatible numeric values.
+- `bridge info` now lists advertised ROS services as well as channels.
 - Interrupting video compression now aborts active processor backends and keeps
   progress and error output on the correct terminal stream.
 
-### mcap-codec-support
+### mcap-codec-support 0.11.0
 
 - Video decoding now covers H.264, H.265, VP9, and AV1 with working decoder
   fallbacks. Multi-frame JPEG output uses monotonic timestamps and safely
@@ -38,15 +61,33 @@ User-facing notes for releases.
   point-cloud, and general ROS2 decoder stack for `small-mcap` readers.
 - AV1 software encoding falls back to SVT-AV1 when libaom is unavailable.
 
-### mcap-ros2-support-fast
+### mcap-ros2-support-fast 0.6.0
 
 - Fix CDR alignment after empty primitive sequences, including nested
   `ParameterEvent` messages found in real recordings.
+- Decoded ROS2 messages expose schema constants as read-only class and instance
+  attributes, matching standard generated ROS2 Python messages.
 
-### small-mcap
+### ros-parser 0.7.0
+
+- MessagePath filters short-circuit rejected values, resolve ROS enum names from
+  message constants, and support current-value comparisons and membership such
+  as `{>=-40}` and `{in [1, 3, $selected]}`.
+- Array reducers add `.@min`, `.@max`, `.@sum`, `.@mean`, and `.@rms`;
+  `.@length` reports sequence size, and `.@norm` accepts numeric arrays and
+  vector objects with `x`, `y`, and optional `z` fields.
+- Breaking: `.@quat` now requires Foxglove-compatible `roll`, `pitch`, and `yaw`
+  input fields instead of treating `x`, `y`, and `z` as Euler angles.
+
+### small-mcap 0.11.0
 
 - Decoded reads pass chunk-backed memoryviews directly to compatible decoder
   factories instead of copying every message payload to `bytes`.
+
+### robo-ws-bridge 0.6.0
+
+- Servers can broadcast playback clock updates to connected clients, enabling
+  `pymcap-cli bridge serve` to publish recording time during playback.
 
 ---
 
