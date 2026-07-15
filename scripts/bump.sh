@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bump patch version for workspace packages that have code changes since their last release.
+# Bump minor versions for workspace packages with releasable changes since their last release.
 # Uses per-package git tags (pkg@version) as the reference point for detecting changes.
-# Guards against double-bumps when pyproject.toml already has an uncommitted version change.
+# Package-local tests do not change the published artifact and are ignored.
+# Guards against double-bumps before a prepared release receives its tag.
 
 # Ensure working tree is clean before bumping
 if [ -n "$(git status --porcelain)" ]; then
@@ -61,25 +62,37 @@ for pkg in "${members[@]}"; do
 
     # Find the commit the tag points to
     tag_commit=$(git rev-list -1 "$tag" 2>/dev/null || true)
+    package_tags=$(git tag --list "$pkg@*")
+
+    if [ -z "$tag_commit" ] && [ -n "$package_tags" ]; then
+        echo "— $pkg: version $current_version is already awaiting a tag, skipping"
+        skipped=$((skipped + 1))
+        continue
+    fi
 
     needs_bump=false
+    change_paths=(
+        "$pkg/"
+        ":(exclude)$pkg/pyproject.toml"
+        ":(exclude)$pkg/tests"
+        ":(exclude)$pkg/tests/**"
+    )
 
     if [ -z "$tag_commit" ]; then
-        # No tag for current version — check for any committed or uncommitted changes
-        committed_files=$(git log --oneline -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null | head -1 || true)
-        uncommitted_diff=$(git diff HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
-        if [ -n "$committed_files" ] || [ -n "$uncommitted_diff" ]; then
+        # No tag for current version — any releasable package history needs a release.
+        if [ -n "$(git log -1 --format=%H -- "${change_paths[@]}" 2>/dev/null)" ]; then
             needs_bump=true
         fi
     else
-        # Check committed changes since tag (exclude pyproject.toml itself)
-        committed_diff=$(git diff "$tag_commit"..HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
-        # Check uncommitted changes — staged + unstaged (exclude pyproject.toml itself)
-        uncommitted_diff=$(git diff HEAD -- "$pkg/" ":(exclude)$pkg/pyproject.toml" 2>/dev/null || true)
-
-        if [ -n "$committed_diff" ] || [ -n "$uncommitted_diff" ]; then
+        if ! git diff --quiet "$tag_commit"..HEAD -- "${change_paths[@]}"; then
             needs_bump=true
         fi
+    fi
+
+    # Include staged and unstaged releasable changes. Untracked files are already
+    # rejected by the clean-working-tree guard above.
+    if ! git diff --quiet HEAD -- "${change_paths[@]}"; then
+        needs_bump=true
     fi
 
     if $needs_bump; then

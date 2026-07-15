@@ -6,12 +6,39 @@ User-facing notes for releases.
 
 ## Unreleased
 
-### Packaging
+---
 
-- Optional dependency boundaries are now enforced for built wheels: base imports
-  and `compress` stay free of media codec stacks, while feature extras include
-  their complete runtime requirements (`video` includes ROS2 decoding and
-  `pymcap-cli[serve]` includes `xxhash` for `index serve` fingerprints).
+## pymcap-cli 0.22.0, mcap-codec-support 0.12.0
+
+Headline: Base installs and lightweight commands no longer pull in optional
+codec, numeric, bridge, or compression stacks, and CI now verifies every extra
+from built wheels.
+
+### pymcap-cli 0.22.0
+
+- The base package and `compress` command no longer import NumPy,
+  `mcap-codec-support`, or bridge dependencies. Media and bridge modules load
+  only when their corresponding commands are used.
+- `index serve` reuses the existing `xxhash` extra instead of duplicating its
+  version constraint, and missing-extra guidance now shows complete `uvx`
+  commands.
+- Built-wheel checks cover the base install, every individual extra, and the
+  aggregate `lite` and `all` installs.
+
+### mcap-codec-support 0.12.0
+
+- Importing the package no longer eagerly imports optional video, point-cloud,
+  NumPy, or ROS2 dependencies. `create_decoder_factories()` loads them only
+  when the factory is called.
+- The `video` extra now includes the ROS2 decoder it uses, and built-wheel
+  checks verify the base package and every codec extra independently.
+
+### Workspace
+
+- Import-linter now enforces ownership of codec, numeric, media, export, hash,
+  compression, and bridge dependencies.
+- The deprecated `websocket-proxy` package was removed from the workspace,
+  lockfile, documentation, and publishing workflow.
 
 ---
 
