@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from time import monotonic
 from typing import Annotated
 
 from cyclopts import Group, Parameter
@@ -14,6 +15,7 @@ from pymcap_cli.cmd._cli_options import (
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
+    NumWorkersOption,
     StartTimeOption,
     StaticOnlyOption,
     TopicOption,
@@ -28,6 +30,8 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 DISPLAY_GROUP = Group("Display")
+LIVE_REFRESH_PER_SECOND = 4
+LIVE_REFRESH_INTERVAL = 1 / LIVE_REFRESH_PER_SECOND
 
 
 def tftree(
@@ -46,6 +50,7 @@ def tftree(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
+    num_workers: NumWorkersOption = 8,
 ) -> int:
     """Display TF transform tree from MCAP file.
 
@@ -77,7 +82,14 @@ def tftree(
         return 1
 
     try:
-        with open_input(file) as (f, _file_size), Live(console=console) as live:
+        next_refresh = 0.0
+        with (
+            open_input(file) as (f, _file_size),
+            Live(
+                console=console,
+                refresh_per_second=LIVE_REFRESH_PER_SECOND,
+            ) as live,
+        ):
             resolved_filter = message_filter.resolve(get_summary(f))
             for msg in read_message_decoded(
                 f,
@@ -87,6 +99,7 @@ def tftree(
                 end_time_ns=(
                     sys.maxsize if resolved_filter.early_bail else resolved_filter.end_time_ns
                 ),
+                num_workers=num_workers,
             ):
                 if (
                     resolved_filter.early_bail
@@ -95,9 +108,14 @@ def tftree(
                     break
                 tree_changed = add_tf_message(graph, msg.channel.topic, msg.decoded_message)
 
-                compact = console.width < TF_COMPACT_WIDTH
-                if not change_only or tree_changed:
-                    table = build_tf_table(graph.transforms, graph.counts, compact=compact)
+                now = monotonic()
+                if tree_changed or (not change_only and now >= next_refresh):
+                    next_refresh = now + LIVE_REFRESH_INTERVAL
+                    table = build_tf_table(
+                        graph.transforms,
+                        graph.counts,
+                        compact=console.width < TF_COMPACT_WIDTH,
+                    )
                     if table:
                         live.update(table)
 
