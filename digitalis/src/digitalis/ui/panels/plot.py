@@ -2,10 +2,11 @@ from typing import ClassVar
 
 from rich.text import Text
 from ros_parser.message_path import (
+    NO_OUTPUT,
     LarkError,
-    MathModifier,
     MessagePath,
     MessagePathError,
+    MessagePathEvaluator,
     parse_message_path,
 )
 from textual import events
@@ -16,7 +17,6 @@ from textual.validation import ValidationResult, Validator
 from textual.widgets import Input, Static
 
 from digitalis.reader.types import MessageEvent
-from digitalis.transforms import TIMESERIES_OPS, TransformContext, apply_with_history
 from digitalis.ui.panels.base import SCHEMA_ANY, BasePanel
 from digitalis.ui.panels.plot_buffer import TimeSeriesBuffer
 from digitalis.ui.panels.plot_renderer import SERIES_COLORS, PlotSeries, render_line_chart
@@ -88,8 +88,8 @@ class Plot(BasePanel[MessageEvent]):
     def __init__(self) -> None:
         super().__init__()
         self._buffers: list[TimeSeriesBuffer] = []
-        self._contexts: list[TransformContext] = []
         self._paths: list[MessagePath] = []
+        self._evaluators: list[MessagePathEvaluator] = []
         self._series_names: list[str] = []
         self._window_s: float = DEFAULT_WINDOW_S
         self._auto_fit: bool = False
@@ -118,8 +118,8 @@ class Plot(BasePanel[MessageEvent]):
                 else "Invalid path"
             )
             self._buffers.clear()
-            self._contexts.clear()
             self._paths.clear()
+            self._evaluators.clear()
             self._series_names.clear()
 
         self._update_display()
@@ -127,8 +127,8 @@ class Plot(BasePanel[MessageEvent]):
     def _parse_paths(self, text: str) -> None:
         """Parse comma-separated field paths into validated paths."""
         self._buffers.clear()
-        self._contexts.clear()
         self._paths.clear()
+        self._evaluators.clear()
         self._series_names.clear()
 
         if not text.strip():
@@ -141,31 +141,19 @@ class Plot(BasePanel[MessageEvent]):
             parsed = parse_message_path(_to_full_path(stripped))
             self._paths.append(parsed)
             self._buffers.append(TimeSeriesBuffer())
-            self._contexts.append(TransformContext())
+            self._evaluators.append(MessagePathEvaluator(parsed))
             self._series_names.append(stripped)
-
-    def _has_timeseries_op(self, path: MessagePath) -> bool:
-        """Check if path contains a time-series operation."""
-        return any(
-            isinstance(seg, MathModifier) and seg.operation in TIMESERIES_OPS
-            for seg in path.segments
-        )
 
     def watch_data(self, _data: MessageEvent | None) -> None:
         """Process new message data."""
         if not self.data or not self._paths:
             return
 
-        for i, path in enumerate(self._paths):
+        for i, evaluator in enumerate(self._evaluators):
             try:
-                if self._has_timeseries_op(path):
-                    value = apply_with_history(
-                        path, self.data.message, self.data.timestamp_ns, self._contexts[i]
-                    )
-                else:
-                    value = path.apply(self.data.message)
+                value = evaluator.observe(self.data.message, self.data.timestamp_ns)
 
-                if isinstance(value, (int, float)):
+                if value is not NO_OUTPUT and isinstance(value, (int, float)):
                     self._buffers[i].append(self.data.timestamp_ns, float(value))
             except (MessagePathError, ValueError, TypeError):
                 pass
@@ -327,9 +315,7 @@ class Plot(BasePanel[MessageEvent]):
     def action_clear_data(self) -> None:
         for buf in self._buffers:
             buf.clear()
-        for ctx in self._contexts:
-            ctx.prev_value = None
-            ctx.prev_timestamp_ns = None
+        self._evaluators = [MessagePathEvaluator(path) for path in self._paths]
         self._update_display()
 
 
