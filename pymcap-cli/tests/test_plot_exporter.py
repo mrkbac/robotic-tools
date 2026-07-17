@@ -15,7 +15,7 @@ from pymcap_cli.exporters.plot_exporter import (
     _expand_series,
     _PlotTopicWriter,
 )
-from ros_parser.message_path import parse_message_path
+from ros_parser.message_path import MessagePathEvaluator, parse_message_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -110,6 +110,27 @@ class TestWriterArrayExpansion:
 
         assert series.values == [1.5, 2.5]
         assert series.array_values == {}
+
+
+class TestStreamSeries:
+    def test_stream_transform_series_collects_deltas(self):
+        parsed = parse_message_path("/odom.x.@@delta")
+        series = SeriesData(
+            label="dx",
+            path_str="/odom.x.@@delta",
+            parsed=parsed,
+            evaluator=MessagePathEvaluator(parsed),
+        )
+        writer = _PlotTopicWriter([series])
+
+        _feed(writer, [(1, {"x": 1.0}), (2, {"x": 4.0}), (3, {"x": 2.0})])
+
+        assert series.times_ns == [2, 3]
+        assert series.values == pytest.approx([3.0, -2.0])
+
+    def test_stream_reducer_path_is_rejected(self):
+        with pytest.raises(ValueError, match="cannot be plotted"):
+            PlotExporter(output=None, paths=["/odom.x.@@max"])
 
 
 class TestComposeTitle:

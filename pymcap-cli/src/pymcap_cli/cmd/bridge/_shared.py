@@ -234,6 +234,33 @@ def bridge_to_dict(info: BridgeInfo) -> dict[str, object]:
     return payload
 
 
+def collect_graph_nodes(graph: ConnectionGraph) -> dict[str, dict[str, list[str]]]:
+    """Group a connection graph's topics and services by node id."""
+    nodes: dict[str, dict[str, list[str]]] = {}
+
+    def bucket(node_id: str) -> dict[str, list[str]]:
+        return nodes.setdefault(node_id, {"publishes": [], "subscribes": [], "provides": []})
+
+    for topic in graph.published_topics:
+        for publisher_id in topic["publisherIds"]:
+            bucket(publisher_id)["publishes"].append(topic["name"])
+    for topic in graph.subscribed_topics:
+        for subscriber_id in topic["subscriberIds"]:
+            bucket(subscriber_id)["subscribes"].append(topic["name"])
+    for service in graph.advertised_services:
+        for provider_id in service["providerIds"]:
+            bucket(provider_id)["provides"].append(service["name"])
+    return nodes
+
+
+def topic_connection_counts(graph: ConnectionGraph) -> dict[str, tuple[int, int]]:
+    """Map each graph topic to its publisher and subscriber counts."""
+    publishers = {topic["name"]: len(topic["publisherIds"]) for topic in graph.published_topics}
+    subscribers = {topic["name"]: len(topic["subscriberIds"]) for topic in graph.subscribed_topics}
+    names = set(publishers) | set(subscribers)
+    return {name: (publishers.get(name, 0), subscribers.get(name, 0)) for name in names}
+
+
 def _sort_channels(
     channels: Iterable[ChannelInfo], sort: SortChoice, reverse: bool
 ) -> list[ChannelInfo]:

@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 [dependency-groups]
 dev = [
     "import-linter>=2.11",
+    "jsonschema>=4.18",
     "jsonschema-gentypes>=2.13.0",
     "portable-ffmpeg>=0.2.0",
     "pyinstrument>=5.1.2",
@@ -93,6 +94,7 @@ omit = [
     "ros-parser/src/ros_parser/_lark_standalone_runtime.py",
     # Auto-generated TypedDicts from JSON schema
     "pymcap-cli/src/pymcap_cli/types/info_types.py",
+    "pymcap-cli/src/pymcap_cli/types/check_spec_types.py",
 ]
 
 [tool.importlinter]
@@ -411,3 +413,6 @@ ignore = [
 "*/examples/*" = ["T201", "INP001", "BLE001"]
 # Typer commands - function call in defaults is required pattern
 "*/cmd/*_cmd.py" = ["B008", "B904", "TC003"]
+# jsonschema-gentypes emits `Literal["a"] | Literal["b"]`; collapsing it would dirty
+# the file again on the next generation run
+"*/types/check_spec_types.py" = ["PYI030"]

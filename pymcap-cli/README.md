@@ -203,6 +203,117 @@ pymcap-cli cat recording.mcap --bytes base64   # base64-encoded
 pymcap-cli cat recording.mcap --bytes skip     # omit binary fields
 ```
 
+### `check` — Recording Contract Validation
+
+Check the topics, schemas, encodings, timing, and decoded values in a recording
+against a strict versioned YAML spec. Topic selectors are case-insensitive
+regular expressions matched against the whole topic name. Warnings are shown
+without causing a non-zero exit; errors exit with status 1.
+
+```bash
+pymcap-cli check recording.mcap --spec recording.yaml
+```
+
+```yaml
+version: 1
+
+topics:
+  imu:
+    topic: /imu
+    schema:
+      name: sensor_msgs/msg/Imu
+      encoding: ros2msg
+    message_encoding: cdr
+    frequency:
+      min: 95
+      max: 105
+      tolerance: 0.05
+      window: 1s
+    timeout: 50ms
+    values:
+      - '.linear_acceleration.@norm{<=30}'
+      - '.header.frame_id{=="imu_link"}'
+    live:
+      publishers:
+        min: 1
+        max: 1
+        node: /imu_driver
+      subscribers:
+        min: 1
+
+  forbidden_front_radar:
+    topic: /RADAR_FRONT
+    expected: false
+    severity: error
+
+live:
+  nodes:
+    localization:
+      node: /localization
+      expected: true
+```
+
+The spec format is described by
+[`schemas/mcap_check_spec.json`](schemas/mcap_check_spec.json); point your
+editor at it for validation and completion:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/mrkbac/robotic-tools/main/pymcap-cli/schemas/mcap_check_spec.json
+```
+
+`expected` defaults to `true`, `severity` defaults to `error`, and frequency
+tolerance defaults to zero. Predicate-ending MessagePaths are the preferred
+value-check form: a matching value passes and an empty result fails. Mapping
+rules with inclusive `min`/`max`, `equals`, or `one_of` remain available when a
+predicate is not convenient or when reports need the rejected scalar value:
+
+```yaml
+values:
+  - '.fields[:]{name == "z"}.@length{==1}'
+  - '.@product(width, height){>=1000 && <=100000}'
+  - path: .temperature
+    min: -40
+    max: 85
+```
+
+Cross-message modifiers use `@@`. Their state is isolated per concrete topic:
+
+```yaml
+values:
+  - '.temperature.@@mean{>=15 && <=35}'
+  - '.status{=="OK"}.@@timedelta.@@max{<=0.5}'
+  - '.header.stamp.@to_nsec.@@unchanged_for.@@max{<=0.5}'
+  - '.@@timedelta.@@stddev{<=0.005}'
+```
+
+Recorded stream timing uses MCAP log time; live checks use monotonic local
+arrival time. Select a timestamp field and use `@@delta` when checking that
+clock instead, such as
+`.header.stamp.@to_nsec.@@delta.@@max{<=200000000}`.
+
+Checks may reference `$log_time_ns`, `$publish_time_ns`,
+`$recording_start_ns`, and `$recording_end_ns` as evaluation variables.
+
+The repository includes a complete contract for its nuScenes fixture. From the
+workspace root, run:
+
+```bash
+pymcap-cli check data/data/nuScenes-v1.0-mini-scene-0061-ros2.mcap \
+  --spec pymcap-cli/examples/check/nuscenes.yaml
+```
+
+Use the same contract as a live preflight before recording:
+
+```bash
+pymcap-cli bridge check localhost --spec recording.yaml --duration 5
+```
+
+The recording command validates the shared topic rules and skips `live` constraints.
+`bridge check` validates advertised topics, schemas, publisher/subscriber counts and
+node identities, and samples only topics with frequency, timeout, or value rules.
+Live graph constraints require the bridge `connectionGraph` capability. A node is
+considered present when it publishes, subscribes, or provides a service in that graph.
+
 ### `doctor` — MCAP Container Validation
 
 Check an MCAP file structure against the MCAP container specification, with
@@ -783,6 +894,9 @@ the `bridge` extra.
 ```bash
 # Inspect advertised channels
 pymcap-cli bridge localhost:8765
+
+# Validate the live system before recording
+pymcap-cli bridge check localhost --spec recording.yaml --duration 5
 
 # Stream decoded messages
 pymcap-cli bridge cat localhost:8765 --topics /tf --limit 10

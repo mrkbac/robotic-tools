@@ -96,6 +96,10 @@ class ExpressionSplitProcessor(OutputRouter):
 
         self.path_str = path
         self.parsed = parse_message_path(path)
+        if self.parsed.has_stream:
+            raise ValueError(
+                f"Stream modifiers (@@) are not supported in split expressions: {path!r}"
+            )
         self._is_predicate = any(isinstance(segment, Filter) for segment in self.parsed.segments)
         self._factories = (JSONDecoderFactory(), Ros2DecoderFactory())
         self.channels: dict[int, Channel] = {}

@@ -1,10 +1,10 @@
-# jsonschema-gentypes configuration for MCAP info types
+# jsonschema-gentypes configuration for pymcap-cli JSON schemas
 # This file controls auto-generation of TypedDict definitions from JSON schema
 
 # Header added to generated files
 headers: |
   # ruff: noqa: I001, E501
-  # AUTO-GENERATED from pymcap-cli/schemas/mcap_info.json - DO NOT EDIT
+  # AUTO-GENERATED from pymcap-cli/schemas/ - DO NOT EDIT
 
 # Post-generation formatters
 # Note: Formatting is handled by pre-commit (ruff-format and ruff-check hooks)
@@ -35,6 +35,13 @@ generate:
   - source: pymcap-cli/schemas/mcap_info.json
     destination: pymcap-cli/src/pymcap_cli/types/info_types.py
     root_name: McapInfoOutput
+    api_arguments:
+      additional_properties: Only explicit # Strict typing - no extra fields allowed
+      get_name_properties: UpperFirst # Use UpperFirst for class names
+
+  - source: pymcap-cli/schemas/mcap_check_spec.json
+    destination: pymcap-cli/src/pymcap_cli/types/check_spec_types.py
+    root_name: CheckSpecInput
     api_arguments:
       additional_properties: Only explicit # Strict typing - no extra fields allowed
       get_name_properties: UpperFirst # Use UpperFirst for class names

@@ -21,6 +21,7 @@ from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.exporters import run_export
 from pymcap_cli.exporters.csv_exporter import CsvExporter
+from pymcap_cli.exporters.derived_columns import ColumnSelection
 from pymcap_cli.exporters.image_exporter import (
     ImageExporter,
     _format_to_extension,
@@ -142,6 +143,11 @@ def test_csv_exporter_writes_one_file_per_topic(tmp_path):
     assert "y" in lines[0]
     assert "z" in lines[0]
     assert "_log_time_ns" in lines[0]
+
+
+def test_column_selection_rejects_stream_modifiers():
+    with pytest.raises(ValueError, match="stream modifiers"):
+        ColumnSelection(["dx=/pose.x.@@delta"])
 
 
 def test_structured_exporter_owns_projection_and_message_dispatch(tmp_path):

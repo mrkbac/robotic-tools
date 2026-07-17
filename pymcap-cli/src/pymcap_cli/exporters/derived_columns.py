@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from ros_parser import MessageDefinition, Type, parse_schema_to_definitions
 from ros_parser.message_path import (
-    MathModifier,
     MessagePathError,
     MessagePathVariables,
     ValidationError,
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
     from small_mcap import DecodedMessage, Schema, Summary
 
 _RESERVED_COLUMNS = frozenset({"_log_time_ns", "_publish_time_ns"})
-_HISTORY_MODIFIERS = frozenset({"delta", "derivative", "timedelta"})
 ColumnScalar = bool | int | float | str | bytes
 ColumnValue = ColumnScalar | list[ColumnScalar] | None
 
@@ -39,6 +37,12 @@ class ColumnSelection:
         variables: MessagePathVariables | None = None,
     ) -> None:
         self.columns = parse_named_columns(select)
+        for column in self.columns:
+            if column.path.has_stream:
+                raise ValueError(
+                    f"Column {column.name!r} uses stream modifiers (@@), "
+                    "which export does not support"
+                )
         self._variables = dict(variables or {})
         by_topic: dict[str, list[NamedMessagePath]] = {}
         for column in self.columns:
@@ -95,12 +99,6 @@ class ColumnSelection:
         for column in self._by_topic.get(topic, ()):
             if column.name in _RESERVED_COLUMNS:
                 raise ValueError(f"Column name {column.name!r} is reserved")
-            for segment in column.path.segments:
-                if isinstance(segment, MathModifier) and segment.operation in _HISTORY_MODIFIERS:
-                    raise ValueError(
-                        f"Column {column.name!r} uses history-dependent modifier "
-                        f"@{segment.operation}, which export does not support"
-                    )
             try:
                 result_type, _result_definition = column.path.resolve_type(root, definitions)
             except ValidationError as exc:

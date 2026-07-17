@@ -1,0 +1,316 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CheckSpecInput",
+  "description": "Version 1 recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Structural rules only; regex validity, MessagePath validity, and cross-field constraints are enforced by the parser.",
+  "type": "object",
+  "required": ["version", "topics"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Spec format version; must be 1."
+    },
+    "topics": {
+      "type": "object",
+      "description": "Topic rules keyed by a human-readable rule name.",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicRuleSpec"
+      }
+    },
+    "live": {
+      "$ref": "#/definitions/LiveRootSpec"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "TopicRuleSpec": {
+      "title": "TopicRuleSpec",
+      "description": "Checks applied to every topic matching the selector. A rule with `expected: false` forbids the topic and must not define other checks.",
+      "type": "object",
+      "required": ["topic"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "expected": { "const": false }
+            },
+            "required": ["expected"]
+          },
+          "then": {
+            "propertyNames": {
+              "enum": ["topic", "expected", "severity"]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Case-insensitive regular expression matched against the whole topic name."
+        },
+        "expected": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the topic must be present (true) or absent (false)."
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
+        },
+        "schema": {
+          "$ref": "#/definitions/SchemaRuleSpec"
+        },
+        "message_encoding": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required channel message encoding, e.g. 'cdr'."
+        },
+        "frequency": {
+          "$ref": "#/definitions/FrequencyRuleSpec"
+        },
+        "timeout": {
+          "$ref": "#/definitions/Duration"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/ValueRuleSpec"
+          },
+          "description": "Value checks evaluated on every decoded message."
+        },
+        "live": {
+          "$ref": "#/definitions/LiveTopicRuleSpec"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Severity": {
+      "title": "Severity",
+      "description": "Violation severity; warnings do not cause a non-zero exit.",
+      "enum": ["warn", "error"],
+      "default": "error"
+    },
+    "SchemaRuleSpec": {
+      "title": "SchemaRuleSpec",
+      "description": "Required schema name and/or encoding; at least one must be set.",
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required schema name, e.g. 'sensor_msgs/msg/Imu'."
+        },
+        "encoding": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required schema encoding, e.g. 'ros2msg'."
+        }
+      },
+      "additionalProperties": false
+    },
+    "FrequencyRuleSpec": {
+      "title": "FrequencyRuleSpec",
+      "description": "Sliding-window message rate bounds; at least one of min or max must be set.",
+      "type": "object",
+      "required": ["window"],
+      "anyOf": [{ "required": ["min"] }, { "required": ["max"] }],
+      "properties": {
+        "min": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Minimum frequency in Hz."
+        },
+        "max": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Maximum frequency in Hz."
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0,
+          "description": "Relative tolerance applied to min and max, e.g. 0.05 for 5%."
+        },
+        "window": {
+          "$ref": "#/definitions/Duration"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Duration": {
+      "title": "Duration",
+      "description": "Positive duration such as '500ms', '2s', or '1.5m'; a bare number means seconds.",
+      "type": ["string", "number"],
+      "pattern": "^\\s*(?=[0-9.]*[1-9])[0-9]*\\.?[0-9]+\\s*(ns|us|ms|s|m|h)?\\s*$",
+      "exclusiveMinimum": 0
+    },
+    "ValueRuleSpec": {
+      "title": "ValueRuleSpec",
+      "description": "A relative MessagePath ending in a predicate filter, or a mapping with explicit bounds.",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/MessagePathSpec"
+        },
+        {
+          "$ref": "#/definitions/ValueRuleMappingSpec"
+        }
+      ]
+    },
+    "MessagePathSpec": {
+      "title": "MessagePathSpec",
+      "description": "Relative MessagePath starting with '.' or '{' and ending in a predicate filter, e.g. '.linear_acceleration.@norm{<=30}'.",
+      "type": "string",
+      "pattern": "^[.{].*\\}\\s*$"
+    },
+    "ValueRuleMappingSpec": {
+      "title": "ValueRuleMappingSpec",
+      "description": "Value check with explicit comparators; numeric bounds cannot be combined with equals or one_of.",
+      "type": "object",
+      "required": ["path"],
+      "allOf": [
+        { "not": { "required": ["min", "equals"] } },
+        { "not": { "required": ["max", "equals"] } },
+        { "not": { "required": ["min", "one_of"] } },
+        { "not": { "required": ["max", "one_of"] } },
+        { "not": { "required": ["equals", "one_of"] } },
+        {
+          "if": {
+            "not": {
+              "anyOf": [
+                { "required": ["min"] },
+                { "required": ["max"] },
+                { "required": ["equals"] },
+                { "required": ["one_of"] }
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "pattern": "\\}\\s*$"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[.{]",
+          "description": "Relative MessagePath starting with '.' or '{'."
+        },
+        "min": {
+          "type": "number",
+          "description": "Inclusive minimum for numeric results."
+        },
+        "max": {
+          "type": "number",
+          "description": "Inclusive maximum for numeric results."
+        },
+        "equals": {
+          "$ref": "#/definitions/ComparableValue"
+        },
+        "one_of": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/ComparableValue"
+          },
+          "description": "Result must equal one of these values."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ComparableValue": {
+      "title": "ComparableValue",
+      "description": "Scalar compared against evaluated values.",
+      "type": ["boolean", "number", "string"]
+    },
+    "LiveTopicRuleSpec": {
+      "title": "LiveTopicRuleSpec",
+      "description": "Live graph constraints for a topic; at least one of publishers or subscribers must be set. Only evaluated by `bridge check`.",
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "publishers": {
+          "$ref": "#/definitions/EndpointRuleSpec"
+        },
+        "subscribers": {
+          "$ref": "#/definitions/EndpointRuleSpec"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EndpointRuleSpec": {
+      "title": "EndpointRuleSpec",
+      "description": "Publisher/subscriber count bounds and node identity; at least one key must be set.",
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minimum endpoint count."
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum endpoint count."
+        },
+        "node": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Case-insensitive regular expression matched against endpoint node names."
+        }
+      },
+      "additionalProperties": false
+    },
+    "LiveRootSpec": {
+      "title": "LiveRootSpec",
+      "description": "Live-only constraints; only evaluated by `bridge check`.",
+      "type": "object",
+      "required": ["nodes"],
+      "properties": {
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Live node rules keyed by a human-readable rule name.",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/definitions/LiveNodeRuleSpec"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LiveNodeRuleSpec": {
+      "title": "LiveNodeRuleSpec",
+      "description": "Presence check for a node in the live connection graph.",
+      "type": "object",
+      "required": ["node"],
+      "properties": {
+        "node": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Case-insensitive regular expression matched against node names."
+        },
+        "expected": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the node must be present (true) or absent (false)."
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

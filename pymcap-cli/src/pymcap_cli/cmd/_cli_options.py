@@ -42,6 +42,10 @@ BridgeTarget = Annotated[
         ),
     ),
 ]
+CheckSpecOption = Annotated[
+    Path,
+    Parameter(name=["--spec"], help="Version 1 YAML recording and live-system contract."),
+]
 ConnectTimeoutOption = Annotated[
     float,
     Parameter(name=["--connect-timeout"], group=CONNECTION_GROUP),
@@ -69,7 +73,11 @@ LiveDurationOption = Annotated[
 ]
 SampleDurationOption = Annotated[
     float,
-    Parameter(name=["-d", "--duration"], group=OUTPUT_GROUP),
+    Parameter(
+        name=["-d", "--duration"],
+        group=OUTPUT_GROUP,
+        help="Seconds to sample live messages.",
+    ),
 ]
 OptionalOutputPathOption = Annotated[
     Path | None,

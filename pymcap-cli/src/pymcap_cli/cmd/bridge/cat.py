@@ -14,7 +14,9 @@ from rich.text import Text
 from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
 from ros_parser.message_path import (
+    NO_OUTPUT,
     MessagePathError,
+    MessagePathEvaluator,
     MessagePathVariables,
 )
 from small_mcap import JSONDecoderFactory, Schema
@@ -81,6 +83,11 @@ async def _cat_async(
     path_variables = dict(variables or {})
     try:
         parsed_queries = parse_cat_queries(query)
+        stream_evaluators = {
+            topic: MessagePathEvaluator(parsed.path)
+            for topic, parsed in parsed_queries.items()
+            if parsed.path.has_stream
+        }
     except Exception:
         logger.exception("Invalid --query syntax")
         return 1
@@ -113,6 +120,7 @@ async def _cat_async(
     warned_channels: set[int] = set()
     total = 0
     return_code = 0
+    is_subscribed = False
     done = asyncio.Event()
 
     def _topic_matches(topic: str) -> bool:
@@ -200,6 +208,29 @@ async def _cat_async(
             )
             console.print(Panel(tree, border_style="blue", expand=False))
 
+    def _emit_reduced() -> None:
+        # Stream reducers (@@count, @@max, ...) emit one value when the session ends
+        for stream_topic, evaluator in stream_evaluators.items():
+            try:
+                final = evaluator.finalize(path_variables)
+            except MessagePathError as exc:
+                logger.warning(f"Filter error on {stream_topic}: {exc}")
+                continue
+            if final is NO_OUTPUT:
+                continue
+            source = parsed_queries[stream_topic].source
+            value = message_to_dict(final, bytes_mode=bytes_mode)
+            if is_tty:
+                reduced_line = Text()
+                reduced_line.append(source, style="bold cyan")
+                reduced_line.append(" = ", style="dim")
+                reduced_line.append(json.dumps(value), style="green")
+                console.print(reduced_line)
+            else:
+                entry = {"topic": stream_topic, "query": source, "value": value}
+                sys.stdout.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                sys.stdout.flush()
+
     def _on_message(channel: ChannelInfo, log_time_ns: int, payload: bytes) -> None:
         nonlocal total, return_code
         if done.is_set():
@@ -238,8 +269,14 @@ async def _cat_async(
                 return
 
         if parsed_query is not None:
+            evaluator = stream_evaluators.get(topic)
             try:
-                data = parsed_query.apply(decoded, path_variables)
+                if evaluator is not None:
+                    data = evaluator.observe(decoded, log_time_ns, path_variables)
+                    if data is NO_OUTPUT:
+                        return
+                else:
+                    data = parsed_query.apply(decoded, path_variables)
             except MessagePathError as exc:
                 logger.warning(f"Filter error on {topic}: {exc}")
                 return
@@ -280,6 +317,7 @@ async def _cat_async(
             return 1
 
         await subscriber.subscribe_existing()
+        is_subscribed = True
 
         background: list[asyncio.Task[None]] = []
         if duration is not None:
@@ -301,6 +339,8 @@ async def _cat_async(
         return return_code
     finally:
         await client.disconnect()
+        if is_subscribed:
+            _emit_reduced()
 
 
 def cat(

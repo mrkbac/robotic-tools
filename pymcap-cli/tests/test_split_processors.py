@@ -311,6 +311,10 @@ class TestExpressionSplitProcessor:
         with pytest.raises(Exception, match="Unexpected"):
             ExpressionSplitProcessor("not a valid path !!!")
 
+    def test_stream_modifier_path_raises(self):
+        with pytest.raises(ValueError, match="not supported in split expressions"):
+            ExpressionSplitProcessor("/t.field.@@delta")
+
     def test_variables_are_passed_to_expression(self) -> None:
         proc = ExpressionSplitProcessor("/t.field{==$expected}", variables={"expected": "alpha"})
         proc.channels[1] = Channel(

@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=../../schemas/mcap_check_spec.json
+version: 1
+
+topics:
+  imu:
+    topic: /imu
+    schema:
+      name: sensor_msgs/Imu
+      encoding: ros2msg
+    message_encoding: cdr
+    frequency:
+      min: 90
+      max: 110
+      tolerance: 0.05
+      window: 5s
+    timeout: 650ms
+    values:
+      - '.linear_acceleration.@norm{<=30}'
+      - '.angular_velocity.@norm{<=10}'
+
+  odometry:
+    topic: /odom
+    schema:
+      name: nav_msgs/Odometry
+      encoding: ros2msg
+    message_encoding: cdr
+    frequency:
+      min: 40
+      max: 60
+      tolerance: 0.1
+      window: 5s
+    timeout: 650ms
+    values:
+      - '.twist.twist.linear.@norm{<=50}'
+
+  cameras:
+    topic: /CAM_.*/image_rect_compressed
+    schema:
+      name: sensor_msgs/CompressedImage
+      encoding: ros2msg
+    message_encoding: cdr
+
+  radars:
+    topic: /RADAR_.*
+    schema:
+      name: sensor_msgs/PointCloud2
+      encoding: ros2msg
+    message_encoding: cdr
+    values:
+      - '.@product(width, height){>=1}'
+
+  top_lidar:
+    topic: /LIDAR_TOP
+    schema:
+      name: sensor_msgs/PointCloud2
+      encoding: ros2msg
+    message_encoding: cdr
+    values:
+      - '.@product(width, height){>=100}'
+      - '.fields[:]{name == "z"}.@length{==1}'
+      - '.data.@length{>0}'
+
+  no_clock:
+    topic: /clock
+    expected: false

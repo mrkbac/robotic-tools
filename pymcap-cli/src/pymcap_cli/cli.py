@@ -11,6 +11,7 @@ from rich.markup import escape
 from pymcap_cli.cmd import (
     bag2mcap_cmd,
     cat_cmd,
+    check_cmd,
     compress_cmd,
     convert_cmd,
     diag_cmd,
@@ -221,6 +222,7 @@ transform_group = Group("Transform", sort_key=1)
 bridge_app.group = (inspect_group,)
 app.command(bridge_app, name="bridge")
 app.command(name="cat", group=inspect_group)(cat_cmd.cat)
+app.command(name="check", group=inspect_group)(check_cmd.check)
 app.command(name="diag", group=inspect_group)(diag_cmd.diag)
 app.command(name="doctor", group=inspect_group)(doctor_cmd.doctor)
 app.command(name="du", group=inspect_group)(du_cmd.du)

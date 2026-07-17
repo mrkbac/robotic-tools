@@ -183,6 +183,7 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--pointcloud-sort-field",
         "--query",
         "--select",
+        "--spec",
         "--split-at",
         "--start",
         "--var",
@@ -197,3 +198,16 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
 
     assert {name: paths for name, paths in declarations.items() if paths} == {}
     assert not list((CMD_DIR / "_options").glob("*.py"))
+
+
+def test_file_and_bridge_check_share_spec_option(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    file_help = _help(capsys, "check")
+    bridge_help = _help(capsys, "bridge", "check")
+
+    for output in (file_help, bridge_help):
+        assert "--spec" in output
+        # Rich wraps help text to the console width; compare space-normalized.
+        normalized = " ".join(output.replace("│", " ").split())
+        assert "Version 1 YAML recording and live-system contract." in normalized

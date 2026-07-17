@@ -1,5 +1,5 @@
 # ruff: noqa: I001, E501
-# AUTO-GENERATED from pymcap-cli/schemas/mcap_info.json - DO NOT EDIT
+# AUTO-GENERATED from pymcap-cli/schemas/ - DO NOT EDIT
 
 
 from typing import TypedDict, Union

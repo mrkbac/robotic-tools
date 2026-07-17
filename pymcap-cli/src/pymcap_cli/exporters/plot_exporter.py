@@ -29,8 +29,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
+    NO_OUTPUT,
     MessagePath,
     MessagePathError,
+    MessagePathEvaluator,
     MessagePathVariables,
     ValidationError,
     parse_message_path,
@@ -77,6 +79,7 @@ class SeriesData:
     label: str
     path_str: str
     parsed: MessagePath
+    evaluator: MessagePathEvaluator | None = None
     times_ns: list[int] = field(default_factory=list)
     values: list[float | bool | str] = field(default_factory=list)
     array_times_ns: dict[int, list[int]] = field(default_factory=dict)
@@ -270,7 +273,14 @@ class _PlotTopicWriter:
         log_time_ns = int(msg.message.log_time)
         for series in self.series:
             try:
-                value = series.parsed.apply(msg.decoded_message, self._variables)
+                if series.evaluator is not None:
+                    value = series.evaluator.observe(
+                        msg.decoded_message, log_time_ns, self._variables
+                    )
+                    if value is NO_OUTPUT:
+                        continue
+                else:
+                    value = series.parsed.apply(msg.decoded_message, self._variables)
             except MessagePathError:
                 continue
             if value is None or isinstance(value, dict):
@@ -302,6 +312,9 @@ class _PlotTopicWriter:
                     f"Path {series.path_str!r} is not valid for topic {topic!r}: {error} "
                     "It will match nothing — check the field names (Ctrl-C to abort)."
                 )
+                continue
+            if series.parsed.has_stream:
+                # Stream paths need the stateful evaluator; a probe apply() always raises.
                 continue
             # No schema to validate against (e.g. JSON): a runtime resolution
             # error on the first message means a bad field, not a filter miss.
@@ -373,7 +386,15 @@ class PlotExporter(Exporter):
         for arg in paths:
             label, path_str = parse_path_arg(arg)
             parsed = parse_message_path(path_str)  # raises on syntax error
-            self._series.append(SeriesData(label=label, path_str=path_str, parsed=parsed))
+            if parsed.has_stream_reducer:
+                raise ValueError(
+                    f"Stream reducers (@@count, @@max, ...) produce a single value and "
+                    f"cannot be plotted: {path_str!r}"
+                )
+            evaluator = MessagePathEvaluator(parsed) if parsed.has_stream else None
+            self._series.append(
+                SeriesData(label=label, path_str=path_str, parsed=parsed, evaluator=evaluator)
+            )
 
         self._series_by_topic: dict[str, list[SeriesData]] = {}
         for series in self._series:

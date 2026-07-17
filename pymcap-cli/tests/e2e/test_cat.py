@@ -27,6 +27,24 @@ def _make_array_mcap(path: Path) -> None:
     path.write_bytes(output.getvalue())
 
 
+def _make_series_mcap(path: Path) -> None:
+    output = io.BytesIO()
+    writer = McapWriter(output, chunk_size=4096, compression=CompressionType.ZSTD)
+    writer.start()
+    writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+    writer.add_channel(channel_id=1, topic="/val", message_encoding="json", schema_id=1)
+    for index, value in enumerate([1.0, 4.0, 2.0]):
+        log_time = (index + 1) * 1_000_000_000
+        writer.add_message(
+            channel_id=1,
+            log_time=log_time,
+            publish_time=log_time,
+            data=f'{{"i":{value}}}'.encode(),
+        )
+    writer.finish()
+    path.write_bytes(output.getvalue())
+
+
 def call_cat_expect_success(func: Callable, *args, **kwargs):
     """Call cat function and handle both success return and SystemExit(0)."""
     try:
@@ -313,6 +331,45 @@ class TestCatQueryValidation:
 
         assert exit_code == 0
         assert json.loads(capsys.readouterr().out)["message"] == 8
+
+    def test_query_stream_transform_streams_per_message(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        mcap = tmp_path / "series.mcap"
+        _make_series_mcap(mcap)
+
+        exit_code = cat(file=str(mcap), query=["/val.i.@@delta"])
+
+        assert exit_code == 0
+        messages = [json.loads(line)["message"] for line in capsys.readouterr().out.splitlines()]
+        assert messages == [3.0, -2.0]
+
+    def test_query_stream_reducer_emits_final_value(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        mcap = tmp_path / "series.mcap"
+        _make_series_mcap(mcap)
+
+        exit_code = cat(file=str(mcap), query=["/val.i.@@max"])
+
+        assert exit_code == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0]) == {"topic": "/val", "query": "/val.i.@@max", "value": 4.0}
+
+    def test_query_stream_transform_then_reducer(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        mcap = tmp_path / "series.mcap"
+        _make_series_mcap(mcap)
+
+        exit_code = cat(file=str(mcap), query=["/val.i.@@delta.@@count"])
+
+        assert exit_code == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["value"] == 2
 
     def test_query_reads_variables_from_environment(
         self, simple_mcap: Path, capsys, monkeypatch

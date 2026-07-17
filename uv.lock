@@ -2893,6 +2893,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "import-linter" },
+    { name = "jsonschema" },
     { name = "jsonschema-gentypes" },
     { name = "portable-ffmpeg" },
     { name = "pyinstrument" },
@@ -2908,6 +2909,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "import-linter", specifier = ">=2.11" },
+    { name = "jsonschema", specifier = ">=4.18" },
     { name = "jsonschema-gentypes", specifier = ">=2.13.0" },
     { name = "portable-ffmpeg", specifier = ">=0.2.0" },
     { name = "pyinstrument", specifier = ">=5.1.2" },

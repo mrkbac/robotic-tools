@@ -44,6 +44,12 @@ from pymcap_cli.cmd.bridge._shared import (
     fetch_bridge_info,
     to_ws_url,
 )
+from pymcap_cli.cmd.bridge._shared import (
+    collect_graph_nodes as _collect_graph_nodes,
+)
+from pymcap_cli.cmd.bridge._shared import (
+    topic_connection_counts as _topic_connection_counts,
+)
 from pymcap_cli.display.display_utils import _format_parts_with_colors, _format_schema_with_link
 from pymcap_cli.log_setup import ERR
 
@@ -96,38 +102,6 @@ def _build_statuses_table(statuses: tuple[BridgeStatus, ...]) -> Table:
             status.status_id or "",
         )
     return table
-
-
-def _collect_graph_nodes(graph: ConnectionGraph) -> dict[str, dict[str, list[str]]]:
-    """Group a connection graph's topics/services by the node that owns them."""
-    nodes: dict[str, dict[str, list[str]]] = {}
-
-    def _bucket(node_id: str) -> dict[str, list[str]]:
-        return nodes.setdefault(node_id, {"publishes": [], "subscribes": [], "provides": []})
-
-    for topic in graph.published_topics:
-        for pub_id in topic["publisherIds"]:
-            _bucket(pub_id)["publishes"].append(topic["name"])
-    for topic in graph.subscribed_topics:
-        for sub_id in topic["subscriberIds"]:
-            _bucket(sub_id)["subscribes"].append(topic["name"])
-    for svc in graph.advertised_services:
-        for provider_id in svc["providerIds"]:
-            _bucket(provider_id)["provides"].append(svc["name"])
-
-    return nodes
-
-
-def _topic_connection_counts(graph: ConnectionGraph) -> dict[str, tuple[int, int]]:
-    """Map topic name -> (publisher count, subscriber count)."""
-    pubs: dict[str, int] = {}
-    subs: dict[str, int] = {}
-    for topic in graph.published_topics:
-        pubs[topic["name"]] = len(topic["publisherIds"])
-    for topic in graph.subscribed_topics:
-        subs[topic["name"]] = len(topic["subscriberIds"])
-    names = set(pubs) | set(subs)
-    return {name: (pubs.get(name, 0), subs.get(name, 0)) for name in names}
 
 
 def _build_connection_graph_summary(graph: ConnectionGraph) -> Table | None:

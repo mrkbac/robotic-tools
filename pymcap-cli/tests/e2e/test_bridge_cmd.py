@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd.bridge._shared import fetch_bridge_info
+from pymcap_cli.cmd.bridge.check import check as bridge_check
 from pymcap_cli.cmd.bridge.info import info
 from robo_ws_bridge import WebSocketBridgeServer
 from robo_ws_bridge.server import Channel
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 
 def _pick_free_port() -> int:
@@ -133,6 +135,65 @@ def test_bridge_cmd_json_output(
     assert payload["server"]["supportedEncodings"] == ["cdr", "json"]
     topics = sorted(c["topic"] for c in payload["channels"])
     assert topics == ["/bar", "/foo"]
+
+
+@pytest.mark.e2e
+def test_bridge_check_against_real_server(
+    bridge_server: _ServerThread,
+    tmp_path: Path,
+) -> None:
+    spec = tmp_path / "recording.yaml"
+    spec.write_text(
+        """\
+version: 1
+topics:
+  sample:
+    topic: /foo
+    schema:
+      name: std_msgs/String
+      encoding: ros2msg
+    message_encoding: cdr
+"""
+    )
+
+    result = bridge_check(
+        target=f"127.0.0.1:{bridge_server.port}",
+        spec=spec,
+        duration=0.01,
+        connect_timeout=5.0,
+        discover_seconds=0.05,
+    )
+
+    assert result == 0
+
+
+@pytest.mark.e2e
+def test_bridge_check_requires_graph_only_for_live_constraints(
+    bridge_server: _ServerThread,
+    tmp_path: Path,
+) -> None:
+    spec = tmp_path / "recording.yaml"
+    spec.write_text(
+        """\
+version: 1
+topics:
+  sample:
+    topic: /foo
+    live:
+      publishers:
+        min: 1
+"""
+    )
+
+    result = bridge_check(
+        target=f"127.0.0.1:{bridge_server.port}",
+        spec=spec,
+        duration=0,
+        connect_timeout=5.0,
+        discover_seconds=0.05,
+    )
+
+    assert result == 1
 
 
 @pytest.mark.e2e

@@ -15,7 +15,7 @@ from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from ros_parser.message_path import MessagePathError
+from ros_parser.message_path import NO_OUTPUT, MessagePathError, MessagePathEvaluator
 from small_mcap import Channel, JSONDecoderFactory, get_summary, read_message_decoded
 
 from pymcap_cli.cmd._cli_options import (
@@ -109,6 +109,12 @@ def cat(
       # Filter array elements
       pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
 
+      # Cross-message stream transforms (one value per message)
+      pymcap-cli cat recording.mcap -q '/odom.pose.position.x.@@delta'
+
+      # Cross-message reducers (one value at end of stream)
+      pymcap-cli cat recording.mcap -q '/imu.linear_acceleration.@norm.@@max'
+
       # Skip binary data (images, pointclouds)
       pymcap-cli cat recording.mcap --bytes skip
 
@@ -131,6 +137,11 @@ def cat(
 
     try:
         parsed_queries = parse_cat_queries(query)
+        stream_evaluators = {
+            topic: MessagePathEvaluator(parsed.path)
+            for topic, parsed in parsed_queries.items()
+            if parsed.path.has_stream
+        }
     except Exception:
         logger.exception("Invalid query syntax")
         return 1
@@ -232,8 +243,16 @@ def cat(
 
                 # Apply query filter
                 if parsed_query is not None:
+                    evaluator = stream_evaluators.get(msg.channel.topic)
                     try:
-                        data = parsed_query.apply(msg.decoded_message, variables)
+                        if evaluator is not None:
+                            data = evaluator.observe(
+                                msg.decoded_message, msg.message.log_time, variables
+                            )
+                            if data is NO_OUTPUT:
+                                continue
+                        else:
+                            data = parsed_query.apply(msg.decoded_message, variables)
                         if query_result_is_empty(data):
                             continue
                     except MessagePathError as e:
@@ -295,6 +314,33 @@ def cat(
                         out_file.write(line + "\n")
                     else:
                         print(line, file=sys.stdout)  # noqa: T201
+
+            # Stream reducers (@@count, @@max, ...) emit one value at end of stream
+            for stream_topic, evaluator in stream_evaluators.items():
+                try:
+                    final = evaluator.finalize(variables)
+                except MessagePathError as e:
+                    logger.warning(f"Filter error on {stream_topic}: {e}")
+                    continue
+                if final is NO_OUTPUT:
+                    continue
+                source = parsed_queries[stream_topic].source
+                value = message_to_dict(final, bytes_mode=bytes_mode)
+                if is_tty:
+                    reduced_line = Text()
+                    reduced_line.append(source, style="bold cyan")
+                    reduced_line.append(" = ", style="dim")
+                    reduced_line.append(json.dumps(value), style="green")
+                    console_out.print(reduced_line)
+                else:
+                    reduced_entry = json.dumps(
+                        {"topic": stream_topic, "query": source, "value": value},
+                        separators=(",", ":"),
+                    )
+                    if out_file is not None:
+                        out_file.write(reduced_entry + "\n")
+                    else:
+                        print(reduced_entry, file=sys.stdout)  # noqa: T201
 
         if writing_to_file:
             logger.info(f"Wrote {message_count:,} messages to {output}")
