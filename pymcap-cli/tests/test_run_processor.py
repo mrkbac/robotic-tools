@@ -60,6 +60,13 @@ def test_open_output_stream_fails_in_error_mode(tmp_path: Path):
         _open_output_stream(output, OverwriteCollisionPolicy.ERROR)
 
 
+def test_open_output_stream_fails_when_output_directory_missing(tmp_path: Path):
+    output = tmp_path / "missing" / "output.mcap"
+
+    with pytest.raises(FileNotFoundError, match=f"Output directory '{output.parent}'"):
+        _open_output_stream(output, OverwriteCollisionPolicy.OVERWRITE)
+
+
 def test_open_output_stream_overwrites_in_overwrite_mode(tmp_path: Path, monkeypatch):
     output = tmp_path / "output.mcap"
     output.write_bytes(b"existing")

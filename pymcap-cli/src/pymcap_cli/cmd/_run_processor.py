@@ -187,6 +187,8 @@ def _open_output_stream(
     async_buffer_bytes: int = 0,
 ) -> BinaryIO:
     """Open a single-output destination with the configured overwrite policy."""
+    if not output.parent.is_dir():
+        raise FileNotFoundError(f"Output directory '{output.parent}' does not exist.")
     if overwrite_policy == OverwriteCollisionPolicy.ASK:
         confirm_output_overwrite(output, force=False)
     elif overwrite_policy == OverwriteCollisionPolicy.ERROR and output.exists():

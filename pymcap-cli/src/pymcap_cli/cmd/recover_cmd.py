@@ -92,6 +92,9 @@ def recover(
     except WriterNotStartedError:
         logger.warning("File appears to be empty or severely corrupted")
         logger.warning("No valid MCAP data found to recover")
+    except (FileNotFoundError, FileExistsError) as e:
+        logger.error(str(e))  # noqa: TRY400
+        return 1
     except RuntimeError:
         logger.exception("Error during recovery")
         return 1
