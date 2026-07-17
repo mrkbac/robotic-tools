@@ -1,0 +1,1 @@
+"""MessagePath benchmarks."""

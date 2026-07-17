@@ -124,36 +124,82 @@ def _array_max(obj: Any) -> int | float | None:
     return max(values) if values else None
 
 
-@modifier("min", array_reducer=_array_min, preserves_element_type=True)
+def _argument_min(values: list[int | float]) -> float:
+    return float(min(values))
+
+
+def _argument_max(values: list[int | float]) -> float:
+    return float(max(values))
+
+
+def _argument_sum(values: list[int | float]) -> float:
+    return math.fsum(values)
+
+
+def _argument_mean(values: list[int | float]) -> float:
+    return math.fsum(values) / len(values)
+
+
+def _argument_rms(values: list[int | float]) -> float:
+    return math.sqrt(math.fsum(value * value for value in values) / len(values))
+
+
+def _argument_product(values: list[int | float]) -> float:
+    return float(math.prod(values))
+
+
+@modifier(
+    "min",
+    array_reducer=_array_min,
+    argument_reducer=_argument_min,
+    preserves_element_type=True,
+)
 def _min(*args: float) -> float:
     """Return minimum of a scalar and its arguments, or reduce a bare array."""
     return min(args)
 
 
-@modifier("max", array_reducer=_array_max, preserves_element_type=True)
+@modifier(
+    "max",
+    array_reducer=_array_max,
+    argument_reducer=_argument_max,
+    preserves_element_type=True,
+)
 def _max(*args: float) -> float:
     """Return maximum of a scalar and its arguments, or reduce a bare array."""
     return max(args)
 
 
-@modifier("sum", kind="aggregate", return_type=_FLOAT64_TYPE)
+@modifier("sum", kind="aggregate", argument_reducer=_argument_sum, return_type=_FLOAT64_TYPE)
 def _aggregate_sum(obj: Any) -> float:
     """Return the floating-point sum of an array."""
     return math.fsum(_numeric_array(obj, "sum"))
 
 
-@modifier("mean", kind="aggregate", return_type=_FLOAT64_TYPE)
+@modifier("mean", kind="aggregate", argument_reducer=_argument_mean, return_type=_FLOAT64_TYPE)
 def _aggregate_mean(obj: Any) -> float | None:
     """Return the arithmetic mean, or None for an empty array."""
     values = _numeric_array(obj, "mean")
     return math.fsum(values) / len(values) if values else None
 
 
-@modifier("rms", kind="aggregate", return_type=_FLOAT64_TYPE)
+@modifier("rms", kind="aggregate", argument_reducer=_argument_rms, return_type=_FLOAT64_TYPE)
 def _aggregate_rms(obj: Any) -> float | None:
     """Return the root mean square, or None for an empty array."""
     values = _numeric_array(obj, "rms")
     return math.sqrt(math.fsum(value * value for value in values) / len(values)) if values else None
+
+
+@modifier(
+    "product",
+    kind="object",
+    argument_reducer=_argument_product,
+    return_type=_FLOAT64_TYPE,
+    min_args=1,
+)
+def _product(_obj: Any, *values: float) -> float:
+    """Multiply numeric field references, variables, and literal arguments."""
+    return float(math.prod(values))
 
 
 @modifier("wrap_angle")
@@ -206,17 +252,6 @@ for _name, _builtin in {
     "radians": math.radians,
 }.items():
     modifier(_name)(_builtin)
-
-
-@modifier("delta", kind="timeseries")
-@modifier("derivative", kind="timeseries")
-@modifier("timedelta", kind="timeseries")
-def _timeseries_sentinel(value: float) -> float:  # noqa: ARG001
-    """Sentinel for time-series functions. Raises when called without TransformContext."""
-    raise MessagePathError(
-        "Time-series function requires TransformContext. "
-        "Use digitalis transforms.apply_with_history() instead."
-    )
 
 
 @modifier("length", kind="object", requires_array=True, return_type=_INT64_TYPE)

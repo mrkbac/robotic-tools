@@ -24,6 +24,7 @@ topic_ref: "/" IDENTIFIER ("/" IDENTIFIER)*
              | array_slice
              | filter
              | math_modifier
+             | stream_modifier
 
 // Field access with dot notation
 field_access: "." IDENTIFIER
@@ -32,10 +33,14 @@ field_access: "." IDENTIFIER
 math_modifier: ".@" IDENTIFIER "(" modifier_args ")"  -> math_modifier_with_args
              | ".@" IDENTIFIER                        -> math_modifier_no_args
 
+// Stream modifier: .@@delta, .@@max — operates across messages.
+stream_modifier: ".@@" IDENTIFIER
+
 modifier_args: modifier_arg ("," modifier_arg)*
 
 ?modifier_arg: SIGNED_NUMBER
              | variable
+             | field_path -> modifier_field_ref
 
 // Array index: [5], [-1], [$var]
 array_index: "[" index_value "]"

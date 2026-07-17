@@ -158,7 +158,13 @@ Math modifiers transform numeric values using the `.@` syntax. They can be chain
 /topic.value.@add($offset)         # Variable argument
 /topic.value.@mul(1.8).@add(32)    # Chaining (Celsius to Fahrenheit)
 /topic.value.@add(5, 10, 3)        # Multiple arguments
+/topic.@product(width, height)     # Fields relative to the input object
 ```
+
+Object modifiers can take bare field paths such as `width` or `shape.height`.
+They are resolved relative to the object entering the modifier. A leading `$`
+continues to identify a variable, so `.@product(width, $scale)` multiplies a
+message field by a caller-provided value.
 
 **Element-wise arrays**: When applied to an array, modifiers operate on each element automatically:
 
@@ -196,6 +202,20 @@ These operate on numeric values (int/float). When applied to arrays, they work e
 | `.@div` | `(divisor)` | Divide (errors on zero) | `.@div(100)` |
 | `.@min` | `(a, b?, ...)` | Minimum of value and args | `.@min(5, 2, 8)` |
 | `.@max` | `(a, b?, ...)` | Maximum of value and args | `.@max(5, 2, 8)` |
+
+#### Object Arithmetic Functions
+
+| Modifier | Arguments | Description | Example |
+| --- | --- | --- | --- |
+| `.@product` | `(field, ...)` | Product of numeric field references, variables, and literals | `/image.@product(width, height)` |
+| `.@sum` | `(field, ...)` | Sum of explicit numeric fields | `/message.@sum(left, right)` |
+| `.@mean` | `(field, ...)` | Mean of explicit numeric fields | `/message.@mean(low, high)` |
+| `.@min` | `(field, ...)` | Minimum explicit numeric field | `/message.@min(width, height)` |
+| `.@max` | `(field, ...)` | Maximum explicit numeric field | `/message.@max(width, height)` |
+| `.@rms` | `(field, ...)` | RMS of explicit numeric fields | `/vector.@rms(x, y, z)` |
+
+`.@product` is schema-generic: it works with any message containing numeric
+dimensions, including images, matrices, grids, and point clouds.
 
 #### Trigonometric Functions
 
@@ -259,19 +279,58 @@ combine values across messages or files.
 
 #### Time-Series Functions
 
-These require a `TransformContext` and cannot be used in standalone evaluation. They track state across messages.
+Cross-message modifiers use `.@@` and are evaluated with a
+`MessagePathEvaluator`. Evaluator instances own their state, leaving parsed
+paths reusable across topics and threads.
 
 | Modifier | Description |
 | --- | --- |
-| `.@delta` | Difference from previous value |
-| `.@derivative` | Rate of change (delta / time_delta) |
-| `.@timedelta` | Time elapsed since previous message |
+| `.@@delta` | Difference from previous value |
+| `.@@derivative` | Rate of change (delta / time delta) |
+| `.@@timedelta` | Seconds elapsed since previous selected message |
+| `.@@unchanged_for` | Seconds the selected value has remained unchanged |
 
 ```
-/odom.pose.position.x.@delta       # Change in x per message
-/odom.pose.position.x.@derivative  # Velocity (dx/dt)
-/topic.header.stamp.@timedelta     # Time between messages
+/odom.pose.position.x.@@delta
+/odom.pose.position.x.@@derivative
+/topic.status{=="OK"}.@@timedelta
+/camera.header.stamp.@to_nsec.@@unchanged_for
 ```
+
+#### Cross-Message Aggregates
+
+Stream reducers consume the scalar emitted for each message and produce one
+value when the stream is finalized. Empty per-message results are skipped;
+arrays must be explicitly reduced within each message. All reducers use
+constant memory.
+
+| Modifier | Result |
+| --- | --- |
+| `.@@count` | Number of emitted message values |
+| `.@@min` / `.@@max` | Stream extrema |
+| `.@@sum` / `.@@mean` / `.@@rms` | Stream numeric aggregates |
+| `.@@variance` / `.@@stddev` | Population dispersion |
+| `.@@first` / `.@@last` | First or last emitted value |
+
+```text
+/imu.linear_acceleration.@norm.@@max{<=30}
+/lidar.@product(width, height).@@min{>=1000}
+/position.x.@@delta.@@max{<=0.2}
+/status{=="OK"}.@@timedelta.@@max{<=0.5}
+/camera.header.stamp.@to_nsec.@@unchanged_for.@@max{<=0.5}
+/value.@@delta{!=0}.@@count{<=10}
+```
+
+Normal MessagePath filters and modifiers may appear between stream stages. For
+example, `.value.@@delta{!=0}.@@count` counts changes without requiring a
+dedicated `@@changes` operation.
+
+The evaluator uses the timestamp supplied to `observe()`; `pymcap-cli check`
+supplies MCAP log time. To measure a message field's own clock, select that
+scalar and use `.@@delta`, for example `.header.stamp.@to_nsec.@@delta`. The
+first `delta`, `derivative`, or `timedelta` observation emits no value.
+Non-finite numeric observations fail evaluation rather than being silently
+skipped.
 
 ### 7. Variables
 

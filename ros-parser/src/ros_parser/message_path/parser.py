@@ -21,6 +21,9 @@ from .models import (
     InExpression,
     MathModifier,
     MessagePath,
+    ModifierArgument,
+    ModifierFieldRef,
+    StreamModifier,
     Variable,
 )
 
@@ -131,6 +134,10 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         """Build field path string from identifiers."""
         return ".".join(str(item) for item in items)
 
+    def modifier_field_ref(self, items: list[str]) -> ModifierFieldRef:
+        """Build a field reference resolved against the modifier input object."""
+        return ModifierFieldRef(field_path=items[0])
+
     def math_modifier_with_args(self, items: list[Any]) -> MathModifier:
         """Build MathModifier with arguments from parsed tokens."""
         operation = str(items[0])  # IDENTIFIER token
@@ -143,7 +150,11 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
         operation = str(items[0])  # IDENTIFIER token
         return MathModifier(operation=operation, arguments=[])
 
-    def modifier_args(self, items: list[Any]) -> list[int | float | Variable]:
+    def stream_modifier(self, items: list[Any]) -> StreamModifier:
+        """Build a cross-message stream modifier."""
+        return StreamModifier(operation=str(items[0]))
+
+    def modifier_args(self, items: list[ModifierArgument]) -> list[ModifierArgument]:
         """Collect all modifier arguments into a flat list."""
         return items
 

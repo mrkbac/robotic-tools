@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import pytest
 from ros_parser import parse_schema_to_definitions
 from ros_parser.message_path import (
+    NO_OUTPUT,
     ArrayIndex,
     ArraySlice,
     Comparison,
@@ -22,6 +23,9 @@ from ros_parser.message_path import (
     LarkError,
     MathModifier,
     MessagePathError,
+    MessagePathEvaluator,
+    ModifierFieldRef,
+    StreamModifier,
     Variable,
     parse_message_path,
 )
@@ -1461,6 +1465,17 @@ class TestMathModifierParsing:
         assert isinstance(result.segments[1].arguments[0], Variable)
         assert result.segments[1].arguments[0].name == "offset"
 
+    def test_parse_modifier_with_field_references(self):
+        result = parse_message_path("/topic.@product(width, shape.height, 2)")
+
+        modifier = result.segments[0]
+        assert isinstance(modifier, MathModifier)
+        assert modifier.arguments == [
+            ModifierFieldRef(field_path="width"),
+            ModifierFieldRef(field_path="shape.height"),
+            2,
+        ]
+
     def test_parse_chained_modifiers(self):
         """Test parsing multiple chained math modifiers."""
 
@@ -1487,6 +1502,181 @@ class TestMathModifierParsing:
         assert result.segments[1].operation == "round"
         assert result.segments[1].arguments == [2]
 
+    def test_parse_stream_modifier(self):
+        result = parse_message_path("/topic.value.@@delta.@@max{<=5}")
+
+        assert isinstance(result.segments[1], StreamModifier)
+        assert result.segments[1].operation == "delta"
+        assert isinstance(result.segments[2], StreamModifier)
+        assert result.segments[2].operation == "max"
+
+    def test_has_stream_properties(self):
+        transform_only = parse_message_path("/topic.value.@@delta")
+        reduced = parse_message_path("/topic.value.@@delta.@@max")
+        plain = parse_message_path("/topic.value.@abs")
+
+        assert transform_only.has_stream
+        assert not transform_only.has_stream_reducer
+        assert reduced.has_stream
+        assert reduced.has_stream_reducer
+        assert not plain.has_stream
+        assert not plain.has_stream_reducer
+
+
+class TestMessagePathEvaluator:
+    def test_stream_max_applies_final_predicate(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@max{<=5}"))
+
+        assert evaluator.observe({"value": 2}, 0) is NO_OUTPUT
+        assert evaluator.observe({"value": 5}, 1) is NO_OUTPUT
+
+        assert evaluator.finalize() == 5
+
+    def test_stream_max_failing_final_predicate_returns_none(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@max{<=5}"))
+
+        evaluator.observe({"value": 6}, 0)
+
+        assert evaluator.finalize() is None
+
+    def test_stream_delta_then_max(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@delta.@@max"))
+
+        assert evaluator.observe({"value": 1}, 0) is NO_OUTPUT
+        assert evaluator.observe({"value": 4}, 1) is NO_OUTPUT
+        assert evaluator.observe({"value": 10}, 2) is NO_OUTPUT
+
+        assert evaluator.finalize() == 6.0
+
+    def test_stream_filter_between_transform_and_reducer(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@delta{!=0}.@@count"))
+
+        for index, value in enumerate([1, 1, 3, 3, 7]):
+            evaluator.observe({"value": value}, index)
+
+        assert evaluator.finalize() == 2
+
+    def test_stream_modifier_between_transform_and_reducer(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@delta.@abs.@@max"))
+
+        for index, value in enumerate([5, 2, 8]):
+            evaluator.observe({"value": value}, index)
+
+        assert evaluator.finalize() == 6.0
+
+    def test_stream_evaluator_state_is_isolated(self):
+        path = parse_message_path("/topic.value.@@delta")
+        first = MessagePathEvaluator(path)
+        second = MessagePathEvaluator(path)
+
+        assert first.observe({"value": 1}, 0) is NO_OUTPUT
+        assert second.observe({"value": 10}, 0) is NO_OUTPUT
+        assert first.observe({"value": 3}, 1) == 2.0
+        assert second.observe({"value": 15}, 1) == 5.0
+
+    def test_stream_rejects_reducer_followed_by_transform(self):
+        with pytest.raises(MessagePathError, match="must precede the stream reducer"):
+            MessagePathEvaluator(parse_message_path("/topic.value.@@max.@@delta"))
+
+    def test_timedelta_uses_filtered_message_arrival_times(self):
+        evaluator = MessagePathEvaluator(parse_message_path('/topic.status{=="OK"}.@@timedelta'))
+
+        assert evaluator.observe({"status": "OK"}, 0) is NO_OUTPUT
+        assert evaluator.observe({"status": "BAD"}, 100_000_000) is NO_OUTPUT
+        assert evaluator.observe({"status": "OK"}, 500_000_000) == 0.5
+
+    def test_unchanged_for_emits_current_run_duration(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@unchanged_for"))
+
+        assert evaluator.observe({"value": 4}, 0) == 0.0
+        assert evaluator.observe({"value": 4}, 500_000_000) == 0.5
+        assert evaluator.observe({"value": 5}, 1_000_000_000) == 0.0
+
+    @pytest.mark.parametrize(
+        ("operation", "expected"),
+        [("variance", 2 / 3), ("stddev", math.sqrt(2 / 3))],
+    )
+    def test_stream_population_dispersion(self, operation: str, expected: float):
+        evaluator = MessagePathEvaluator(parse_message_path(f"/topic.value.@@{operation}"))
+        for index, value in enumerate([1, 2, 3]):
+            evaluator.observe({"value": value}, index)
+
+        assert evaluator.finalize() == pytest.approx(expected)
+
+    @pytest.mark.parametrize(
+        ("operation", "expected"),
+        [
+            ("count", 3),
+            ("min", 1.0),
+            ("max", 3.0),
+            ("sum", 6.0),
+            ("mean", 2.0),
+            ("rms", math.sqrt(14 / 3)),
+            ("first", 1),
+            ("last", 3),
+        ],
+    )
+    def test_stream_reducers(self, operation: str, expected: float):
+        evaluator = MessagePathEvaluator(parse_message_path(f"/topic.value.@@{operation}"))
+        for index, value in enumerate([1, 2, 3]):
+            evaluator.observe({"value": value}, index)
+
+        assert evaluator.finalize() == pytest.approx(expected)
+
+    def test_stream_mean_skips_empty_filtered_messages(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value{>0}.@@mean"))
+
+        for index, value in enumerate([-1, 2, 4]):
+            evaluator.observe({"value": value}, index)
+
+        assert evaluator.finalize() == 3.0
+
+    def test_stream_mean_rejects_arrays(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.values.@@mean"))
+
+        with pytest.raises(MessagePathError, match="finite numeric values"):
+            evaluator.observe({"values": [1, 2]}, 0)
+
+    def test_stream_mean_without_values_has_no_result(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value{>0}.@@mean"))
+
+        evaluator.observe({"value": -1}, 0)
+
+        assert evaluator.finalize() is NO_OUTPUT
+
+    def test_stream_count_without_selected_values_is_zero(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value{>0}.@@count"))
+
+        evaluator.observe({"value": -1}, 0)
+
+        assert evaluator.finalize() == 0
+
+    def test_stream_mean_skips_empty_typed_array(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.values.@@mean"))
+
+        assert evaluator.observe({"values": memoryview(b"")}, 0) is NO_OUTPUT
+        assert evaluator.finalize() is NO_OUTPUT
+
+    def test_stream_reducer_rejects_non_finite_values(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@max"))
+
+        with pytest.raises(MessagePathError, match="finite numeric values"):
+            evaluator.observe({"value": math.inf}, 0)
+
+    def test_stream_derivative_rejects_non_increasing_time(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@derivative"))
+        evaluator.observe({"value": 1}, 5)
+
+        with pytest.raises(MessagePathError, match="increasing timestamps"):
+            evaluator.observe({"value": 2}, 5)
+
+    def test_stream_timedelta_rejects_decreasing_time(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.@@timedelta"))
+        evaluator.observe({}, 5)
+
+        with pytest.raises(MessagePathError, match="non-decreasing timestamps"):
+            evaluator.observe({}, 4)
+
 
 class TestMathModifierApply:
     """Test applying math modifiers to data."""
@@ -1511,6 +1701,63 @@ class TestMathModifierApply:
         modifier = MathModifier(operation="add", arguments=[5])
         result = modifier.apply(10, {})
         assert result == 15
+
+    def test_product_resolves_field_references_against_input_object(self):
+        path = parse_message_path("/topic.@product(width, shape.height, 2)")
+
+        result = path.apply({"width": 3, "shape": {"height": 4}})
+
+        assert result == 24.0
+
+    def test_product_combines_field_reference_and_variable(self):
+        path = parse_message_path("/topic.@product(width, $scale)")
+
+        result = path.apply({"width": 3}, variables={"scale": 4})
+
+        assert result == 12.0
+
+    @pytest.mark.parametrize(
+        ("operation", "expected"),
+        [
+            ("sum", 7.0),
+            ("mean", 3.5),
+            ("min", 3.0),
+            ("max", 4.0),
+            ("rms", math.sqrt(12.5)),
+        ],
+    )
+    def test_argument_reducer_resolves_message_fields(
+        self, operation: str, expected: float
+    ) -> None:
+        path = parse_message_path(f"/topic.@{operation}(width, height)")
+
+        result = path.apply({"width": 3, "height": 4})
+
+        assert result == pytest.approx(expected)
+
+    def test_modifier_without_argument_reducer_rejects_field_reference(self) -> None:
+        path = parse_message_path("/topic.@add(width)")
+
+        with pytest.raises(MessagePathError, match="does not accept field references"):
+            path.apply({"width": 3})
+
+    def test_product_rejects_missing_field(self):
+        path = parse_message_path("/topic.@product(width, height)")
+
+        with pytest.raises(MessagePathError, match="Field 'height' not found"):
+            path.apply({"width": 3})
+
+    def test_product_rejects_non_numeric_field(self):
+        path = parse_message_path("/topic.@product(name, height)")
+
+        with pytest.raises(MessagePathError, match="must be numeric"):
+            path.apply({"name": "lidar", "height": 4})
+
+    def test_product_requires_at_least_one_argument(self):
+        path = parse_message_path("/topic.@product")
+
+        with pytest.raises(MessagePathError, match="at least 1 argument"):
+            path.apply({"width": 3})
 
     def test_sub_with_number(self):
         """Test subtract operation."""
@@ -2116,40 +2363,6 @@ class TestObjectFunctions:
         assert abs(result - 5.0) < 1e-10
 
 
-class TestTimeSeriesSentinels:
-    """Test that time-series functions parse but raise without TransformContext."""
-
-    def test_delta_parses(self):
-        path = parse_message_path("/topic.value.@delta")
-        assert isinstance(path.segments[-1], MathModifier)
-        assert path.segments[-1].operation == "delta"
-
-    def test_derivative_parses(self):
-        path = parse_message_path("/topic.value.@derivative")
-        assert isinstance(path.segments[-1], MathModifier)
-        assert path.segments[-1].operation == "derivative"
-
-    def test_timedelta_parses(self):
-        path = parse_message_path("/topic.value.@timedelta")
-        assert isinstance(path.segments[-1], MathModifier)
-        assert path.segments[-1].operation == "timedelta"
-
-    def test_delta_raises_without_context(self):
-        modifier = MathModifier(operation="delta", arguments=[])
-        with pytest.raises(MessagePathError, match="TransformContext"):
-            modifier.apply(5.0, {})
-
-    def test_derivative_raises_without_context(self):
-        modifier = MathModifier(operation="derivative", arguments=[])
-        with pytest.raises(MessagePathError, match="TransformContext"):
-            modifier.apply(5.0, {})
-
-    def test_timedelta_raises_without_context(self):
-        modifier = MathModifier(operation="timedelta", arguments=[])
-        with pytest.raises(MessagePathError, match="TransformContext"):
-            modifier.apply(5.0, {})
-
-
 # ---------------------------------------------------------------------------
 # Validation tests (validate() methods on actions and MessagePath)
 # ---------------------------------------------------------------------------
@@ -2251,6 +2464,103 @@ class TestMathModifierValidation:
         mod = MathModifier(operation="abs", arguments=[])
         result_type, _ = mod.validate(_INT32_TYPE, None, _ALL_DEFS)
         assert result_type == _INT32_TYPE
+
+    def test_validate_product_field_references(self):
+        mod = MathModifier(
+            operation="product",
+            arguments=[ModifierFieldRef("x"), ModifierFieldRef("y"), 2],
+        )
+
+        result_type, result_def = mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+        assert result_type == _FLOAT64_TYPE
+        assert result_def is None
+
+    @pytest.mark.parametrize("operation", ["sum", "mean", "min", "max", "rms"])
+    def test_validate_argument_reducer_field_references_return_float64(
+        self, operation: str
+    ) -> None:
+        mod = MathModifier(
+            operation=operation,
+            arguments=[ModifierFieldRef("x"), ModifierFieldRef("y")],
+        )
+
+        result_type, result_def = mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+        assert result_type == _FLOAT64_TYPE
+        assert result_def is None
+
+    def test_validate_product_missing_field_raises(self):
+        mod = MathModifier(
+            operation="product",
+            arguments=[ModifierFieldRef("x"), ModifierFieldRef("missing")],
+        )
+
+        with pytest.raises(ValidationError, match="Field 'missing' not found"):
+            mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
+
+    def test_validate_product_non_numeric_field_raises(self):
+        named_def = MessageDefinition(
+            name="pkg/NamedDimensions",
+            fields_all=[
+                Field(type=_STRING_TYPE, name="name"),
+                Field(type=_INT32_TYPE, name="height"),
+            ],
+        )
+        named_type = Type(type_name="NamedDimensions", package_name="pkg")
+        mod = MathModifier(
+            operation="product",
+            arguments=[ModifierFieldRef("name"), ModifierFieldRef("height")],
+        )
+
+        with pytest.raises(ValidationError, match="must resolve to a numeric primitive"):
+            mod.validate(named_type, named_def, _ALL_DEFS)
+
+    def test_validate_product_array_field_raises(self):
+        array_def = MessageDefinition(
+            name="pkg/ArrayDimensions",
+            fields_all=[Field(type=_INT32_ARRAY_TYPE, name="shape")],
+        )
+        mod = MathModifier(operation="product", arguments=[ModifierFieldRef("shape")])
+
+        with pytest.raises(ValidationError, match="must resolve to a numeric primitive"):
+            mod.validate(
+                Type(type_name="ArrayDimensions", package_name="pkg"),
+                array_def,
+                _ALL_DEFS,
+            )
+
+    def test_validate_product_nested_field_reference(self):
+        shape_def = MessageDefinition(
+            name="pkg/Shape",
+            fields_all=[Field(type=_INT32_TYPE, name="height")],
+        )
+        dimensions_def = MessageDefinition(
+            name="pkg/Dimensions",
+            fields_all=[
+                Field(type=_INT32_TYPE, name="width"),
+                Field(type=Type(type_name="Shape", package_name="pkg"), name="shape"),
+            ],
+        )
+        definitions = {**_ALL_DEFS, "pkg/Shape": shape_def}
+        mod = MathModifier(
+            operation="product",
+            arguments=[ModifierFieldRef("width"), ModifierFieldRef("shape.height")],
+        )
+
+        result_type, _ = mod.validate(
+            Type(type_name="Dimensions", package_name="pkg"),
+            dimensions_def,
+            definitions,
+        )
+
+        assert result_type == _FLOAT64_TYPE
+
+    def test_validate_product_requires_at_least_one_argument(self):
+        mod = MathModifier(operation="product", arguments=[])
+
+        with pytest.raises(ValidationError, match="at least 1 argument"):
+            mod.validate(_COMPLEX_TYPE, _POINT_MSGDEF, _ALL_DEFS)
 
     def test_validate_on_float_array(self):
         arr_type = Type(type_name="float64", package_name=None, is_array=True)
@@ -2377,11 +2687,6 @@ class TestMathModifierValidation:
         }
         with pytest.raises(ValidationError):
             path.validate(root, defs)
-
-    def test_validate_timeseries_preserves_type(self):
-        mod = MathModifier(operation="delta", arguments=[])
-        result_type, _ = mod.validate(_FLOAT64_TYPE, None, _ALL_DEFS)
-        assert result_type == _FLOAT64_TYPE
 
 
 class TestMathModifierApplyErrors:

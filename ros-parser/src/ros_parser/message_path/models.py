@@ -92,6 +92,7 @@ class Variable:
 MessagePathVariable: TypeAlias = bool | int | float | str
 MessagePathVariables: TypeAlias = Mapping[str, MessagePathVariable]
 _VariableStore: TypeAlias = MessagePathVariables
+_EMPTY_VARIABLES: MessagePathVariables = {}
 
 
 def _resolve_variable(variable: Variable, variables: _VariableStore) -> MessagePathVariable:
@@ -357,6 +358,24 @@ class FilterFieldRef:
 
 FilterValue = int | float | str | bool | Variable | FilterFieldRef
 CurrentFilterValue = int | float | str | bool | Variable
+
+
+@dataclass
+class ModifierFieldRef:
+    """A field path resolved against the object entering an object modifier."""
+
+    field_path: str
+    _parts: tuple[str, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._parts = tuple(self.field_path.split("."))
+
+    def resolve(self, obj: Any) -> Any:
+        """Resolve the field path against the modifier input object."""
+        return _resolve_parts(obj, self._parts)
+
+
+ModifierArgument: TypeAlias = int | float | Variable | ModifierFieldRef
 
 
 def _resolve_parts(obj: Any, parts: tuple[str, ...]) -> Any:
@@ -645,8 +664,7 @@ _NUMERIC_TYPE_NAMES = {
 # How a modifier is dispatched/validated:
 #   scalar     numeric in → numeric out, applied element-wise over arrays
 #   object     operates on a whole message value (norm, rpy, to_sec, ...)
-#   timeseries needs history; raises without a TransformContext
-ModifierKind = Literal["scalar", "object", "aggregate", "timeseries"]
+ModifierKind = Literal["scalar", "object", "aggregate"]
 
 
 @dataclass(frozen=True)
@@ -655,6 +673,7 @@ class _Modifier:
 
     func: Callable[..., Any]
     array_reducer: Callable[[Any], Any] | None = None
+    argument_reducer: Callable[[list[int | float]], int | float] | None = None
     kind: ModifierKind = "scalar"
     requires_fields: tuple[str, ...] = ()
     requires_array: bool = False
@@ -662,6 +681,7 @@ class _Modifier:
     preserves_element_type: bool = False
     return_type: "Type | None" = None
     return_def: "MessageDefinition | None" = None
+    min_args: int = 0
 
 
 _MODIFIERS: dict[str, _Modifier] = {}
@@ -672,12 +692,14 @@ def modifier(
     *,
     kind: ModifierKind = "scalar",
     array_reducer: Callable[[Any], Any] | None = None,
+    argument_reducer: Callable[[list[int | float]], int | float] | None = None,
     requires_fields: tuple[str, ...] = (),
     requires_array: bool = False,
     accepts_array: bool = False,
     preserves_element_type: bool = False,
     return_type: "Type | None" = None,
     return_def: "MessageDefinition | None" = None,
+    min_args: int = 0,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a math modifier and its metadata, co-located with the function."""
 
@@ -685,6 +707,7 @@ def modifier(
         _MODIFIERS[name] = _Modifier(
             func=func,
             array_reducer=array_reducer,
+            argument_reducer=argument_reducer,
             kind=kind,
             requires_fields=requires_fields,
             requires_array=requires_array,
@@ -692,6 +715,7 @@ def modifier(
             preserves_element_type=preserves_element_type,
             return_type=return_type,
             return_def=return_def,
+            min_args=min_args,
         )
         return func
 
@@ -703,7 +727,7 @@ class MathModifier(Action):
     """Apply mathematical operations to numeric values."""
 
     operation: str
-    arguments: list[int | float | Variable]
+    arguments: list[ModifierArgument]
 
     def _spec(self) -> _Modifier:
         spec = _MODIFIERS.get(self.operation)
@@ -714,16 +738,45 @@ class MathModifier(Action):
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """Apply the math operation to the object, supporting element-wise array operations."""
         spec = self._spec()
-        if spec.kind == "aggregate" and self.arguments:
+        if spec.min_args and len(self.arguments) < spec.min_args:
+            raise MessagePathError(
+                f"Math modifier '{self.operation}' requires at least {spec.min_args} argument"
+                f"{'s' if spec.min_args != 1 else ''}"
+            )
+
+        has_field_refs = False
+        resolved_args: list[int | float] = []
+        for arg in self.arguments:
+            if isinstance(arg, Variable):
+                resolved_args.append(_resolve_numeric_variable(arg, variables))
+                continue
+            if isinstance(arg, ModifierFieldRef):
+                has_field_refs = True
+                if spec.argument_reducer is None:
+                    raise MessagePathError(
+                        f"Math modifier '{self.operation}' does not accept field references"
+                    )
+                value = arg.resolve(obj)
+                if type(value) not in (int, float):
+                    raise MessagePathError(
+                        f"Field reference '{arg.field_path}' must be numeric, "
+                        f"got {type(value).__name__}"
+                    )
+                resolved_args.append(cast("int | float", value))
+                continue
+            resolved_args.append(arg)
+
+        if spec.kind == "aggregate" and self.arguments and not has_field_refs:
             raise MessagePathError(
                 f"Aggregate modifier '{self.operation}' does not accept arguments"
             )
 
-        # Resolve arguments (convert Variables to actual values)
-        resolved_args: list[int | float] = [
-            _resolve_numeric_variable(arg, variables) if isinstance(arg, Variable) else arg
-            for arg in self.arguments
-        ]
+        if has_field_refs:
+            assert spec.argument_reducer is not None
+            try:
+                return spec.argument_reducer(resolved_args)
+            except Exception as exc:
+                raise MessagePathError(f"Error in '{self.operation}': {exc!s}") from exc
 
         if spec.array_reducer is not None and not resolved_args and isinstance(obj, _ARRAY_TYPES):
             try:
@@ -739,27 +792,28 @@ class MathModifier(Action):
                     f"Aggregate modifier '{self.operation}' requires a numeric array, "
                     f"got {type(obj).__name__}"
                 )
-            return self._apply_operation(obj, resolved_args)
+            return self._apply_operation(obj, resolved_args, spec)
 
         # Object-level functions operate on the whole object (not element-wise)
         if spec.kind == "object":
-            return self._apply_operation(obj, resolved_args)
+            return self._apply_operation(obj, resolved_args, spec)
 
         # Element-wise over numeric arrays. Decoded numeric arrays are memoryview
         # (e.g. float64[]) or bytes (uint8[]); also accept list/tuple/array/bytearray.
         if isinstance(obj, _ARRAY_TYPES):
-            result = [self._apply_operation(item, resolved_args) for item in obj]
+            result = [self._apply_operation(item, resolved_args, spec) for item in obj]
             return tuple(result) if isinstance(obj, tuple) else result
 
         # Apply to single value
-        return self._apply_operation(obj, resolved_args)
+        return self._apply_operation(obj, resolved_args, spec)
 
     def _apply_operation(
-        self, value: Any, args: list[int | float]
+        self,
+        value: Any,
+        args: list[int | float],
+        spec: _Modifier,
     ) -> int | float | tuple[float, ...]:
         """Apply the math operation to a single value."""
-        spec = self._spec()
-
         # Object-level functions accept non-numeric inputs (whole message values)
         if spec.kind in ("object", "aggregate"):
             try:
@@ -769,7 +823,7 @@ class MathModifier(Action):
             except Exception as e:
                 raise MessagePathError(f"Error in '{self.operation}': {e!s}") from e
 
-        # Scalar / time-series functions require a numeric input
+        # Scalar functions require a numeric input
         if not isinstance(value, (int, float)):
             raise MessagePathError(
                 f"Math modifier '{self.operation}' can only be applied to numeric types, "
@@ -835,12 +889,43 @@ class MathModifier(Action):
         self,
         current_type: "Type",
         current_msgdef: "MessageDefinition | None",
-        all_definitions: dict[str, "MessageDefinition"],  # noqa: ARG002
+        all_definitions: dict[str, "MessageDefinition"],
     ) -> tuple["Type", "MessageDefinition | None"]:
         """Validate that the math modifier can be applied to the current type."""
         spec = _MODIFIERS.get(self.operation)
         if spec is None:
             raise ValidationError(f"Unknown math modifier '{self.operation}'")
+
+        if len(self.arguments) < spec.min_args:
+            raise ValidationError(
+                f"Math modifier '{self.operation}' requires at least {spec.min_args} argument"
+                f"{'s' if spec.min_args != 1 else ''}"
+            )
+
+        field_refs = [arg for arg in self.arguments if isinstance(arg, ModifierFieldRef)]
+        if field_refs and spec.argument_reducer is None:
+            raise ValidationError(
+                f"Math modifier '{self.operation}' does not accept field references"
+            )
+        for ref in field_refs:
+            field_type, _ = _validate_field_path(
+                ref.field_path,
+                current_type,
+                current_msgdef,
+                all_definitions,
+                context=f"modifier '{self.operation}' argument",
+            )
+            if (
+                field_type.is_array
+                or not field_type.is_primitive
+                or field_type.type_name not in _NUMERIC_TYPE_NAMES
+            ):
+                raise ValidationError(
+                    f"Field reference '{ref.field_path}' in modifier '{self.operation}' "
+                    f"must resolve to a numeric primitive, got '{field_type}'"
+                )
+        if field_refs:
+            return _FLOAT64_TYPE, None
 
         if spec.array_reducer is not None and not self.arguments and current_type.is_array:
             if not current_type.is_primitive or current_type.type_name not in _NUMERIC_TYPE_NAMES:
@@ -912,10 +997,6 @@ class MathModifier(Action):
                 return result_type, spec.return_def
             return spec.return_type or _FLOAT64_TYPE, None
 
-        # Time-series functions work on numeric types, preserve type
-        if spec.kind == "timeseries":
-            return current_type, current_msgdef
-
         # Check if the base type is numeric
         if not working_type.is_primitive:
             raise ValidationError(
@@ -934,10 +1015,89 @@ class MathModifier(Action):
         return current_type, current_msgdef
 
 
+_STREAM_TRANSFORMS = {"delta", "derivative", "timedelta", "unchanged_for"}
+_STREAM_REDUCERS = {
+    "count",
+    "min",
+    "max",
+    "sum",
+    "mean",
+    "rms",
+    "variance",
+    "stddev",
+    "first",
+    "last",
+}
+
+
+@dataclass
+class StreamModifier(Action):
+    """A stateful transform or reducer evaluated across messages."""
+
+    operation: str
+
+    def apply(self, obj: Any, variables: _VariableStore) -> Any:  # noqa: ARG002
+        raise MessagePathError(
+            f"Stream modifier '@@{self.operation}' requires MessagePathEvaluator"
+        )
+
+    def validate(
+        self,
+        current_type: "Type",
+        current_msgdef: "MessageDefinition | None",
+        all_definitions: dict[str, "MessageDefinition"],  # noqa: ARG002
+    ) -> tuple["Type", "MessageDefinition | None"]:
+        if self.operation not in _STREAM_TRANSFORMS | _STREAM_REDUCERS:
+            raise ValidationError(f"Unknown stream modifier '{self.operation}'")
+        if self.operation == "count":
+            return Type(type_name="int64", package_name=None), None
+        if self.operation in {"first", "last"}:
+            return current_type, current_msgdef
+        if self.operation == "timedelta":
+            if current_type.is_array:
+                raise ValidationError(
+                    f"Stream modifier '{self.operation}' requires one value per message, "
+                    f"got '{current_type}'"
+                )
+            return _FLOAT64_TYPE, None
+        if self.operation == "unchanged_for":
+            if current_type.is_array or not current_type.is_primitive:
+                raise ValidationError(
+                    "Stream modifier 'unchanged_for' requires a primitive scalar, "
+                    f"got '{current_type}'"
+                )
+            return _FLOAT64_TYPE, None
+        if (
+            current_type.is_array
+            or not current_type.is_primitive
+            or current_type.type_name not in _NUMERIC_TYPE_NAMES
+        ):
+            raise ValidationError(
+                f"Stream modifier '{self.operation}' requires a numeric scalar, "
+                f"got '{current_type}'"
+            )
+        if self.operation in {"min", "max"}:
+            return current_type, current_msgdef
+        return _FLOAT64_TYPE, None
+
+
 @dataclass
 class MessagePath:
     topic: str
-    segments: list[FieldAccess | ArrayIndex | ArraySlice | Filter | MathModifier]
+    segments: list[FieldAccess | ArrayIndex | ArraySlice | Filter | MathModifier | StreamModifier]
+
+    @property
+    def has_stream(self) -> bool:
+        """Whether this path contains cross-message evaluation."""
+        return any(isinstance(segment, StreamModifier) for segment in self.segments)
+
+    @property
+    def has_stream_reducer(self) -> bool:
+        """Whether this path aggregates the whole stream into one final value."""
+        return any(
+            isinstance(segment, StreamModifier) and segment.operation in _STREAM_REDUCERS
+            for segment in self.segments
+        )
 
     def apply(self, obj: Any, variables: MessagePathVariables | None = None) -> Any:
         """
@@ -954,7 +1114,7 @@ class MessagePath:
             MessagePathError: If any segment fails to apply
         """
         if variables is None:
-            variables = {}
+            variables = _EMPTY_VARIABLES
 
         result = obj
         for segment in self.segments:
@@ -1042,6 +1202,8 @@ def _validate_field_path(
     validate_type: "Type",
     validate_msgdef: "MessageDefinition | None",
     all_definitions: dict[str, "MessageDefinition"],
+    *,
+    context: str = "filter",
 ) -> tuple["Type", "MessageDefinition"]:
     """Validate a field path against a type schema."""
     field_parts = field_path.split(".")
@@ -1053,13 +1215,13 @@ def _validate_field_path(
         if working_type.is_primitive:
             raise ValidationError(
                 f"Cannot access field '{part}' on primitive type '{working_type}' "
-                f"in filter field path '{field_path}'"
+                f"in {context} field path '{field_path}'"
             )
 
         if working_type.is_array:
             raise ValidationError(
                 f"Cannot access field '{part}' on array type '{working_type}' "
-                f"in filter field path '{field_path}'. "
+                f"in {context} field path '{field_path}'. "
                 "Nested array filtering is not supported"
             )
 
@@ -1073,7 +1235,7 @@ def _validate_field_path(
             available = [f.name for f in working_msgdef.fields]
             raise ValidationError(
                 f"Field '{part}' not found in message '{working_type}' "
-                f"in filter field path '{field_path}'. "
+                f"in {context} field path '{field_path}'. "
                 f"Available fields: {', '.join(available) if available else 'none'}"
             )
 
@@ -1084,7 +1246,9 @@ def _validate_field_path(
                 working_msgdef = _get_message_definition(working_type, all_definitions)
 
     if owner_msgdef is None:
-        raise ValidationError(f"Filter field path '{field_path}' does not resolve to a field")
+        raise ValidationError(
+            f"{context.capitalize()} field path '{field_path}' does not resolve to a field"
+        )
     return working_type, owner_msgdef
 
 
