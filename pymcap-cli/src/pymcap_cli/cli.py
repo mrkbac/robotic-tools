@@ -39,6 +39,7 @@ from pymcap_cli.cmd import (
     topic_chunks_cmd,
 )
 from pymcap_cli.cmd import msg as msg_pkg
+from pymcap_cli.core.input_handler import set_debug_io_default
 from pymcap_cli.log_setup import ERR, setup_logging
 
 CommandFunction: TypeAlias = Callable[..., int]
@@ -296,8 +297,16 @@ def launcher(
             help="Decrease log verbosity. Once: WARNING; twice: ERROR.",
         ),
     ] = 0,
+    debug_io: Annotated[
+        bool,
+        Parameter(
+            name=["--debug-io"],
+            help="Print I/O statistics (read/seek calls, bytes read) for every opened input.",
+        ),
+    ] = False,
 ) -> int | None:
     setup_logging(verbose=verbose, quiet=quiet)
+    set_debug_io_default(debug_io)
     return app(tokens)
 
 

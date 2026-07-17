@@ -55,13 +55,13 @@ class DebugStreamWrapper(io.RawIOBase):
     def close(self) -> None:
         return self.stream.close()
 
-    def print_stats(self, total_file_size: int) -> None:
-        # """Print debug statistics."""
+    def print_stats(self, total_file_size: int, name: str | None = None) -> None:
         from rich.console import Console  # noqa: PLC0415
         from rich.table import Table  # noqa: PLC0415
 
         console = Console()
-        table = Table(title="Debug I/O Statistics")
+        title = "Debug I/O Statistics" if name is None else f"Debug I/O Statistics — {name}"
+        table = Table(title=title)
         table.add_column("Metric", style="bold cyan")
         table.add_column("Value", justify="right", style="green")
 

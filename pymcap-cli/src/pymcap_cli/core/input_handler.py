@@ -10,6 +10,18 @@ from urllib.parse import ParseResult, urlparse
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.http_utils import open_http_stream
 
+_debug_io_default = False
+
+
+def set_debug_io_default(enabled: bool) -> None:
+    """Wrap every subsequent ``open_input`` stream in the I/O statistics wrapper.
+
+    Set by the CLI's global ``--debug-io`` flag; individual call sites can still
+    opt in explicitly via ``open_input(..., debug=True)``.
+    """
+    global _debug_io_default
+    _debug_io_default = enabled
+
 
 def resolve_mcap_path(path: str) -> str:
     """Resolve a rosbag2 bag directory to its single ``.mcap`` file.
@@ -69,7 +81,7 @@ def open_input(
         original_stream, size = opener(result)
 
         # Optionally wrap in debug wrapper (cast since DebugStreamWrapper implements interface)
-        if debug:
+        if debug or _debug_io_default:
             debug_wrapper = DebugStreamWrapper(original_stream)
             base_stream = debug_wrapper
         else:
@@ -88,6 +100,6 @@ def open_input(
             base_stream.close()
 
         if debug_wrapper:
-            debug_wrapper.print_stats(size)
+            debug_wrapper.print_stats(size, name=path)
 
     return
