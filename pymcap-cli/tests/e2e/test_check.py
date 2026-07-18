@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,7 @@ topics:
 
     assert result.returncode == 0
     assert "sample/expected" in result.stdout
-    assert "0 ERROR" in result.stdout
+    assert re.search(r"\b0\s+ERROR\b", result.stdout)
 
 
 @pytest.mark.e2e
@@ -58,7 +59,7 @@ topics:
 
     assert result.returncode == 1
     assert "expected topic is missing" in result.stdout
-    assert "1 ERROR" in result.stdout
+    assert re.search(r"\b1\s+ERROR\b", result.stdout)
 
 
 @pytest.mark.e2e
@@ -75,4 +76,4 @@ def test_check_nuscenes_example(nuscenes_mcap: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "0 ERROR" in result.stdout
+    assert re.search(r"\b0\s+ERROR\b", result.stdout)

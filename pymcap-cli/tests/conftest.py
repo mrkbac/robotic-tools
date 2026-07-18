@@ -1,13 +1,19 @@
 """Pytest configuration and shared fixtures."""
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
 from pymcap_cli.log_setup import setup_logging
 
+from tests._ffmpeg_setup import ensure_ffmpeg
 from tests.fixtures.image_mcap_generator import ensure_image_fixtures
 from tests.fixtures.mcap_generator import ensure_fixtures
+
+
+def pytest_configure() -> None:
+    ensure_ffmpeg(os.environ.get("PYTEST_XDIST_WORKER"))
 
 
 @pytest.fixture(autouse=True)
