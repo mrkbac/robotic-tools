@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import cast, overload
 
 from websockets.asyncio.server import Server, ServerConnection, serve
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.typing import Subprotocol
 
 from .ws_types import (
@@ -30,6 +30,39 @@ JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "Jso
 JsonDict = dict[str, JsonValue]
 
 Logger = logging.getLogger(__name__)
+
+
+class _InvalidHandshakeLogFilter(logging.Filter):
+    """Rewrite websockets' handshake-failure tracebacks into one-line warnings.
+
+    Non-WebSocket clients (HTTP/1.0 text browsers, health checks, port scanners)
+    otherwise produce a full ERROR traceback for every connection attempt.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info is None:
+            return True
+        exception = record.exc_info[1]
+        if not isinstance(exception, InvalidHandshake):
+            return True
+        reason = str(exception)
+        if exception.__cause__ is not None:
+            reason = f"{reason} ({exception.__cause__})"
+        record.msg = "rejected invalid WebSocket handshake: %s"
+        record.args = (reason,)
+        record.exc_info = None
+        record.exc_text = None
+        record.levelno = logging.WARNING
+        record.levelname = logging.getLevelName(logging.WARNING)
+        return True
+
+
+_INVALID_HANDSHAKE_LOG_FILTER = _InvalidHandshakeLogFilter()
+
+
+def install_invalid_handshake_log_filter() -> None:
+    """Log invalid client handshakes as one-line warnings instead of tracebacks."""
+    logging.getLogger("websockets.server").addFilter(_INVALID_HANDSHAKE_LOG_FILTER)
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +477,7 @@ class WebSocketBridgeServer(WebSocketBridgeEndpoint):
             raise RuntimeError("server already running")
 
         Logger.info("Starting WebSocket bridge server on %s:%d", self._host, self._port)
+        install_invalid_handshake_log_filter()
         self._server = await serve(
             self.handle_connection,
             self._host,

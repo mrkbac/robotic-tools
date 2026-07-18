@@ -9,7 +9,12 @@ from .client import (
     ServiceCallResponse,
     WebSocketBridgeClient,
 )
-from .server import ConnectionState, WebSocketBridgeEndpoint, WebSocketBridgeServer
+from .server import (
+    ConnectionState,
+    WebSocketBridgeEndpoint,
+    WebSocketBridgeServer,
+    install_invalid_handshake_log_filter,
+)
 
 __all__ = [
     "ConnectionGraph",
@@ -21,4 +26,5 @@ __all__ = [
     "WebSocketBridgeClient",
     "WebSocketBridgeEndpoint",
     "WebSocketBridgeServer",
+    "install_invalid_handshake_log_filter",
 ]

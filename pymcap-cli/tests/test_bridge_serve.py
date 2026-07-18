@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from inspect import signature
 from urllib.parse import parse_qs, urlsplit
@@ -85,3 +86,33 @@ def test_serve_direct_file_launches_foxglove_unless_disabled(
         == 0
     )
     assert launched == []
+
+
+def test_is_graphical_session_requires_display_on_linux(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert not serve_module._is_graphical_session()
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    assert serve_module._is_graphical_session()
+
+    monkeypatch.delenv("DISPLAY")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert serve_module._is_graphical_session()
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delenv("WAYLAND_DISPLAY")
+    assert serve_module._is_graphical_session()
+
+
+def test_launch_url_skips_terminal_only_sessions(monkeypatch) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(serve_module.webbrowser, "open", opened.append)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+    serve_module._launch_url("foxglove://open?ds=foxglove-websocket")
+
+    assert opened == []

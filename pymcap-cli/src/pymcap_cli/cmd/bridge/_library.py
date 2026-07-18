@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 from urllib.parse import parse_qs, urlsplit
 
-from robo_ws_bridge import WebSocketBridgeEndpoint
+from robo_ws_bridge import WebSocketBridgeEndpoint, install_invalid_handshake_log_filter
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
@@ -809,6 +809,7 @@ class RecordingLibraryServer:
     async def start(self) -> None:
         if self._server is not None:
             raise RuntimeError("server already running")
+        install_invalid_handshake_log_filter()
         self._server = await serve(
             self._handle_connection,
             self.host,

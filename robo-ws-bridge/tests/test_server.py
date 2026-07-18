@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import logging
 import socket
 import struct
+from contextlib import suppress
 
 from robo_ws_bridge import WebSocketBridgeEndpoint, WebSocketBridgeServer
 from robo_ws_bridge.server import Channel
@@ -82,3 +84,31 @@ def test_endpoint_can_share_listener_and_isolates_channels_by_path() -> None:
             await server.wait_closed()
 
     assert asyncio.run(run()) == ("/first", "/second")
+
+
+def test_bridge_server_logs_non_websocket_clients_without_traceback(caplog) -> None:
+    port = _free_port()
+
+    async def run() -> None:
+        server = WebSocketBridgeServer(host="127.0.0.1", port=port)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.0\r\nHost: example\r\n\r\n")
+            await writer.drain()
+            with suppress(ConnectionError):
+                await reader.read()
+            writer.close()
+            with suppress(ConnectionError):
+                await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    with caplog.at_level(logging.WARNING, logger="websockets.server"):
+        asyncio.run(run())
+
+    records = [record for record in caplog.records if record.name == "websockets.server"]
+    assert records, "expected the rejected handshake to be logged"
+    assert all(record.levelno < logging.ERROR for record in records)
+    assert all(record.exc_info is None for record in records)
+    assert any("HTTP/1.0" in record.getMessage() for record in records)

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import struct
 import urllib.error
 import urllib.request
-from contextlib import closing
+from contextlib import closing, suppress
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
@@ -500,3 +501,42 @@ def test_library_server_removes_session_after_last_listener_disconnects(
             await server.stop()
 
     asyncio.run(run())
+
+
+def test_library_server_logs_non_websocket_clients_without_traceback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    async def request() -> None:
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            writer.write(b"GET / HTTP/1.0\r\nHost: example\r\n\r\n")
+            await writer.drain()
+            with suppress(ConnectionError):
+                await reader.read()
+            writer.close()
+            with suppress(ConnectionError):
+                await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    with caplog.at_level(logging.WARNING, logger="websockets.server"):
+        asyncio.run(request())
+
+    records = [record for record in caplog.records if record.name == "websockets.server"]
+    assert records, "expected the rejected handshake to be logged"
+    assert all(record.levelno < logging.ERROR for record in records)
+    assert all(record.exc_info is None for record in records)
+    assert any("handshake" in record.getMessage() for record in records)

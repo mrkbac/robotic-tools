@@ -1,6 +1,8 @@
 """`pymcap-cli bridge serve` — host MCAP playback over Foxglove WebSocket."""
 
 import asyncio
+import os
+import sys
 import threading
 import webbrowser
 from collections.abc import Callable
@@ -94,7 +96,18 @@ def _foxglove_url(host: str, port: int) -> str:
     return f"foxglove://open?{query}"
 
 
+def _is_graphical_session() -> bool:
+    if sys.platform in {"darwin", "win32", "cygwin"}:
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def _launch_url(url: str) -> None:
+    if not _is_graphical_session():
+        # webbrowser would fall back to a terminal browser (w3m, lynx, ...),
+        # which hijacks the terminal and cannot open foxglove:// links.
+        console.print(f"[dim]No graphical session; open[/] {url} [dim]from your desktop.[/]")
+        return
     threading.Thread(
         target=webbrowser.open,
         args=(url,),
