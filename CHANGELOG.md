@@ -8,6 +8,83 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.23.0, digitalis 0.11.0, robo-ws-bridge 0.7.0, ros-parser 0.8.0
+
+Headline: MCAP validation becomes spec-driven and works against both recordings
+and live bridges, recording libraries open directly in Foxglove with shared
+playback controls, and MessagePath gains stateful cross-message transforms and
+reducers.
+
+### pymcap-cli 0.23.0
+
+- New `check` validates recordings against a YAML specification covering
+  required topics, message counts, schemas, frequency windows, and MessagePath
+  value rules. `bridge check` applies the same rules to live Foxglove WebSocket
+  connections and can additionally validate publishers, subscribers, and
+  connection-graph nodes.
+- Checks correctly handle summary-less and torn recordings: frequency maxima
+  include the final complete window, and rules that require an unknown
+  `$recording_end_ns` now report an explicit evaluation error. Offline and live
+  checks share their message-rule evaluator and channel decoder cache, including
+  negative caching for malformed schemas.
+- `bridge serve DIRECTORY` provides a minimal recursive recording browser.
+  Selecting one or more MCAPs opens Foxglove Desktop through
+  `foxglove://open`; repeated `file` query parameters merge recordings by log
+  time. Matching clients share play/pause, seek, speed, and loop controls.
+- Directory playback does no transform or playback work without subscribers,
+  releases unused codec state, and removes idle sessions after the final
+  listener disconnects. At speeds the encoder or connection cannot sustain,
+  stale inputs are dropped before further transform work instead of building a
+  backlog; the UI reports the dropped-message count.
+- Global `--debug-io` reports read and seek calls plus bytes read for every
+  opened input, with per-file labels for multi-input commands.
+- `cat`, bridge streaming, plots, derived exports, and expression splits use the
+  stateful MessagePath evaluator and support the new `@@` stream operations.
+- `tftree` scans messages concurrently and throttles terminal refreshes while
+  still rendering topology changes immediately.
+- Commands that write MCAP output now fail before processing with a concise
+  error when the destination directory does not exist; `recover` no longer
+  exposes the underlying `FileNotFoundError` traceback.
+
+### digitalis 0.11.0
+
+- Plot panels use `ros-parser`'s shared `MessagePathEvaluator` instead of a
+  separate transform implementation. Cross-message plot transforms now use the
+  `@@` syntax, such as `@@delta`.
+- Plot-path validation catches incomplete and invalid modifier pipelines while
+  editing instead of crashing the Textual input handler. Stream reducers such
+  as `@@max` are rejected with a clear explanation because they do not produce
+  a plot series.
+
+### robo-ws-bridge 0.7.0
+
+- New `WebSocketBridgeEndpoint` separates Foxglove protocol state and connected
+  clients from the TCP listener. Applications can attach multiple routed
+  WebSocket sessions to independent endpoints, while `WebSocketBridgeServer`
+  remains the listener-owning convenience API.
+
+### ros-parser 0.8.0
+
+- Breaking: cross-message transforms move from single-`@` modifiers to dedicated
+  `@@` segments. `@@delta`, `@@derivative`, `@@timedelta`, and
+  `@@unchanged_for` run through the new stateful `MessagePathEvaluator`.
+  Removed legacy spellings fail with a migration hint.
+- Constant-memory stream reducers add `@@count`, `@@min`, `@@max`, `@@mean`,
+  `@@sum`, `@@rms`, `@@first`, and `@@last`. Object arithmetic modifiers can
+  aggregate selected fields within one message.
+- Unknown `@` and `@@` modifier names fail during parsing rather than the first
+  evaluation. Stream state re-baselines after backward timestamps such as a
+  playback seek, and derivatives skip equal-timestamp samples.
+
+### Workspace
+
+- Package bump detection now includes package metadata changes, so release
+  automation does not miss dependency or packaging-only updates.
+- Pre-commit's fast-test workflow skips generated-schema churn and benchmark
+  suites while retaining package-level coverage.
+
+---
+
 ## pymcap-cli 0.22.0, mcap-codec-support 0.12.0
 
 Headline: Base installs and lightweight commands no longer pull in optional
