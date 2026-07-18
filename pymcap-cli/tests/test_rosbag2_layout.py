@@ -63,6 +63,31 @@ def test_find_bag_splits_ignores_foreign_names(tmp_path: Path) -> None:
     assert [p.name for p in find_bag_splits(bag)] == ["rec_0.mcap"]
 
 
+def test_find_bag_splits_accepts_compression_tagged_names(tmp_path: Path) -> None:
+    bag = tmp_path / "rosbag2_2026_06_04-10_56_12"
+    bag.mkdir()
+    for index in (0, 1, 10):
+        (bag / f"rosbag2_2026_06_04-10_56_12_{index}.zstd.mcap").write_bytes(b"x")
+    (bag / "rosbag2_2026_06_04-10_56_12_notes.zstd.mcap").write_bytes(b"x")
+
+    result = [p.name for p in find_bag_splits(bag)]
+    assert result == [
+        "rosbag2_2026_06_04-10_56_12_0.zstd.mcap",
+        "rosbag2_2026_06_04-10_56_12_1.zstd.mcap",
+        "rosbag2_2026_06_04-10_56_12_10.zstd.mcap",
+    ]
+
+
+def test_find_bag_splits_rejects_multiple_variants_for_one_index(tmp_path: Path) -> None:
+    bag = tmp_path / "rec"
+    bag.mkdir()
+    (bag / "rec_0.mcap").write_bytes(b"raw")
+    (bag / "rec_0.zstd.mcap").write_bytes(b"compressed")
+
+    with pytest.raises(ValueError, match="multiple files for split 0"):
+        find_bag_splits(bag)
+
+
 def test_find_bag_splits_falls_back_to_single_file(tmp_path: Path) -> None:
     bag = tmp_path / "rec"
     bag.mkdir()

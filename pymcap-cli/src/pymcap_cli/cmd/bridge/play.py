@@ -40,12 +40,13 @@ from pymcap_cli.cmd.bridge._playback_transforms import (
     OptionalPointCloudFormatOption,
     OptionalPointCloudOption,
     OptionalPointCloudSchemaOption,
+    OptionalPresetOption,
     OptionalQualityOption,
     OptionalResolutionOption,
     OptionalScaleOption,
     OptionalVideoFormatOption,
     OptionalVideoOption,
-    TransformModeOption,
+    apply_preset,
     create_playback_transform_plan,
     resolve_playback_transform_config,
 )
@@ -178,6 +179,9 @@ class BridgeClientPlaybackSink:
     def is_channel_active(self, channel: PlaybackChannel) -> bool:
         return not self.only_subscribed or channel.topic in self._consumer_topics
 
+    def is_channel_congested(self, channel: PlaybackChannel) -> bool:  # noqa: ARG002
+        return False
+
     async def wait_until_active(self) -> float:
         if not self.only_subscribed or self._has_consumers.is_set():
             return 0.0
@@ -203,7 +207,7 @@ def play(
     *,
     target: BridgeTarget,
     only_subscribed: OnlySubscribedOption = False,
-    transform: TransformModeOption = "none",
+    preset: OptionalPresetOption = None,
     image_format: OptionalImageFormatOption = None,
     codec: OptionalCodecOption = None,
     quality: OptionalQualityOption = None,
@@ -241,14 +245,21 @@ def play(
     --------
     ```
     pymcap-cli bridge play recording.mcap --target localhost
+    pymcap-cli bridge play recording.mcap --target localhost --preset compress
     pymcap-cli bridge play part1.mcap part2.mcap --target localhost --speed 2
     pymcap-cli bridge play recording.mcap --target localhost --only-subscribed
     PYMCAP_BRIDGE=localhost pymcap-cli bridge play recording.mcap -t '/camera/.*'
     ```
     """
     try:
+        image_format, scale = apply_preset(
+            preset,
+            image_format=image_format,
+            scale=scale,
+        )
         transform_config = resolve_playback_transform_config(
-            transform=transform,
+            preset=preset,
+            adaptive_quality=None,
             image_format=image_format,
             codec=codec,
             quality=quality,

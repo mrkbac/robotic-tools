@@ -259,7 +259,7 @@ def roscompress(
     if exclude_topic:
         logger.info(f"Excluding topics matching: {', '.join(exclude_topic)}")
     if image_format == "video":
-        logger.info(f"Image mode: video ({encoder or 'auto'}, {codec}, backend={backend.value})")
+        logger.info(f"Image mode: video ({encoder or 'auto'}, {codec}, backend={backend})")
         logger.info(f"Quality (CRF): {quality}")
     elif image_format == "jpeg":
         logger.info(f"Image mode: jpeg (raw → CompressedImage, q={jpeg_quality})")

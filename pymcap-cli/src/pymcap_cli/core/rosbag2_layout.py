@@ -35,21 +35,30 @@ _MCAP_SUFFIX = ".mcap"
 def find_bag_splits(directory: Path) -> list[Path]:
     """Ordered split files for a rosbag2 directory.
 
-    Globs ``<name>_<N>.mcap`` and sorts by the integer ``N`` (so ``_10`` follows
-    ``_9``, not ``_1``). When no indexed splits exist, falls back to a single
-    ``<name>.mcap`` if present. Returns ``[]`` when the directory holds no
-    resolvable MCAP. Pure; never raises.
+    Globs ``<name>_<N>[.<tag>].mcap`` and sorts by the integer ``N`` (so
+    ``_10`` follows ``_9``, not ``_1``). The optional ``<tag>`` covers
+    recompressed recordings such as ``<name>_0.zstd.mcap``. When no indexed
+    splits exist, falls back to a single ``<name>.mcap`` if present. Returns
+    ``[]`` when the directory holds no resolvable MCAP. Raises when more than
+    one file claims the same split index.
     """
     name = directory.name
     prefix = f"{name}_"
-    indexed: list[tuple[int, Path]] = []
+    indexed: dict[int, Path] = {}
     for candidate in directory.glob(f"{prefix}*{_MCAP_SUFFIX}"):
-        stem = candidate.name[len(prefix) : -len(_MCAP_SUFFIX)]
-        if stem.isdigit():
-            indexed.append((int(stem), candidate))
+        stem = candidate.stem[len(prefix) :]
+        index = stem.partition(".")[0]
+        if index.isdigit():
+            split_index = int(index)
+            previous = indexed.get(split_index)
+            if previous is not None:
+                raise ValueError(
+                    f"{directory} contains multiple files for split {split_index}: "
+                    f"{previous.name}, {candidate.name}"
+                )
+            indexed[split_index] = candidate
     if indexed:
-        indexed.sort(key=lambda item: item[0])
-        return [path for _, path in indexed]
+        return [indexed[index] for index in sorted(indexed)]
 
     single = directory / f"{name}{_MCAP_SUFFIX}"
     if single.is_file():

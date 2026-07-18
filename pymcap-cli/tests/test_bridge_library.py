@@ -18,8 +18,10 @@ from pymcap_cli.cmd.bridge._library import (
     _CONTROL_HTML,
     _CONTROL_JS,
     _INDEX_HTML,
+    _STYLE_CSS,
     RecordingLibrary,
     RecordingLibraryServer,
+    RecordingSession,
 )
 from pymcap_cli.cmd.bridge.serve import _library_root
 from pymcap_cli.core.message_filter import MessageFilterOptions
@@ -56,11 +58,45 @@ def test_recording_library_discovers_nested_mcap_files(tmp_path: Path) -> None:
     assert all(recording.size_bytes > 0 for recording in recordings)
 
 
+def test_recording_library_groups_rosbag_splits_as_one_entry(tmp_path: Path) -> None:
+    first = tmp_path / "bag1" / "bag1_0.mcap"
+    second = tmp_path / "bag1" / "bag1_1.mcap"
+    solo = tmp_path / "solo.mcap"
+    _write_mcap(first, "/first", 1, b"first")
+    _write_mcap(second, "/second", 2, b"second")
+    _write_mcap(solo, "/solo", 3, b"solo")
+
+    recordings = RecordingLibrary(tmp_path).recordings()
+
+    assert [recording.path for recording in recordings] == ["bag1", "solo.mcap"]
+    assert recordings[0].size_bytes == first.stat().st_size + second.stat().st_size
+
+
 def test_library_ui_always_uses_foxglove_desktop_deep_link() -> None:
     for script in (_APP_JS, _CONTROL_JS):
         assert 'new URL("foxglove://open")' in script
         assert "app.foxglove.dev" not in script
         assert "openIn" not in script
+
+
+def test_library_ui_navigates_to_control_view_without_popup() -> None:
+    assert "window.open" not in _APP_JS
+    assert "popup" not in _APP_JS
+    assert "controllerUrl(files).toString()" in _APP_JS
+    assert 'new URL("/control"' in _APP_JS
+    assert "const foxgloveUrl" in _APP_JS
+
+
+def test_control_ui_has_speed_presets_and_stable_play_pause_width() -> None:
+    for preset in ("1", "5", "10"):
+        assert f'data-speed="{preset}"' in _CONTROL_HTML
+    assert ">1x<" in _CONTROL_HTML
+    assert ">5x<" in _CONTROL_HTML
+    assert ">10x<" in _CONTROL_HTML
+    assert 'class="speed-preset"' in _CONTROL_HTML
+    assert "speed-preset" in _CONTROL_JS
+    assert 'control("speed", {speed:' in _CONTROL_JS
+    assert "#play-pause { min-width:" in _STYLE_CSS
 
 
 def test_library_ui_uses_one_play_pause_control_and_speed_selector() -> None:
@@ -131,6 +167,20 @@ def test_recording_library_resolves_order_and_rejects_unsafe_paths(tmp_path: Pat
         library.resolve(["../outside.mcap"])
     with pytest.raises(ValueError, match="MCAP"):
         library.resolve(["missing.txt"])
+
+
+def test_recording_library_resolves_bag_directory_and_rejects_plain_directory(
+    tmp_path: Path,
+) -> None:
+    bag = tmp_path / "bag"
+    plain = tmp_path / "plain"
+    _write_mcap(bag / "bag_0.mcap", "/first", 1, b"first")
+    plain.mkdir()
+    library = RecordingLibrary(tmp_path)
+
+    assert library.resolve(["bag"]) == (bag,)
+    with pytest.raises(ValueError, match="rosbag2"):
+        library.resolve(["plain"])
 
 
 def test_library_root_preserves_rosbag2_directory_behavior(tmp_path: Path) -> None:
@@ -213,6 +263,64 @@ def test_library_server_lists_recordings_and_merges_query_files(
     assert received == [(1, b"first"), (2, b"second")]
     assert state == "finished"
     assert dropped_messages == 0
+
+
+def test_library_server_streams_grouped_bag_splits(tmp_path: Path, monkeypatch) -> None:
+    _write_mcap(tmp_path / "bag" / "bag_0.mcap", "/first", 2, b"second")
+    _write_mcap(tmp_path / "bag" / "bag_1.mcap", "/second", 1, b"first")
+    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
+
+    async def run() -> tuple[list[str], list[tuple[int, bytes]]]:
+        server = RecordingLibraryServer(
+            RecordingLibrary(tmp_path),
+            host="127.0.0.1",
+            port=0,
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1_000_000,
+            loop=False,
+        )
+        await server.start()
+        try:
+
+            def get_listing() -> dict[str, object]:
+                with closing(
+                    urllib.request.urlopen(f"http://127.0.0.1:{server.port}/api/recordings")
+                ) as response:
+                    return json.loads(response.read())
+
+            listing = await asyncio.to_thread(get_listing)
+            paths = [entry["path"] for entry in listing["recordings"]]
+            query = urlencode([("file", "bag")])
+            async with connect(
+                f"ws://127.0.0.1:{server.port}/ws?{query}",
+                subprotocols=["foxglove.websocket.v1"],
+            ) as websocket:
+                await websocket.recv()
+                advertisement = json.loads(await websocket.recv())
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "op": "subscribe",
+                            "subscriptions": [
+                                {"id": channel["id"], "channelId": channel["id"]}
+                                for channel in advertisement["channels"]
+                            ],
+                        }
+                    )
+                )
+                messages: list[tuple[int, bytes]] = []
+                while len(messages) < 2:
+                    frame = await asyncio.wait_for(websocket.recv(), timeout=2)
+                    if isinstance(frame, bytes) and frame[0] == int(BinaryOpCodes.MESSAGE_DATA):
+                        messages.append((struct.unpack_from("<Q", frame, 5)[0], frame[13:]))
+            return paths, messages
+        finally:
+            await server.stop()
+
+    paths, messages = asyncio.run(run())
+    assert paths == ["bag"]
+    assert messages == [(1, b"first"), (2, b"second")]
 
 
 def test_library_server_control_requires_a_valid_action(tmp_path: Path) -> None:
@@ -540,3 +648,154 @@ def test_library_server_logs_non_websocket_clients_without_traceback(
     assert all(record.levelno < logging.ERROR for record in records)
     assert all(record.exc_info is None for record in records)
     assert any("handshake" in record.getMessage() for record in records)
+
+
+def test_library_ui_counts_network_drops_in_status_line() -> None:
+    for script in (_APP_JS, _CONTROL_JS):
+        assert "droppedFrames" in script
+
+
+def test_library_server_lists_active_sessions(tmp_path: Path) -> None:
+    _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    async def get_json(url: str) -> dict[str, object]:
+        def request() -> dict[str, object]:
+            with closing(urllib.request.urlopen(url)) as response:  # noqa: S310
+                return json.loads(response.read())
+
+        return await asyncio.to_thread(request)
+
+    async def run() -> tuple[list[object], list[object]]:
+        await server.start()
+        try:
+            base = f"http://127.0.0.1:{server.port}"
+            empty = await get_json(f"{base}/api/sessions")
+            query = urlencode([("file", "first.mcap")])
+            await get_json(f"{base}/api/control?{query}&action=toggle")
+            populated = await get_json(f"{base}/api/sessions")
+            return list(empty["sessions"]), list(populated["sessions"])
+        finally:
+            await server.stop()
+
+    empty_sessions, populated_sessions = asyncio.run(run())
+    assert empty_sessions == []
+    assert len(populated_sessions) == 1
+    session = populated_sessions[0]
+    assert isinstance(session, dict)
+    assert session["files"] == ["first.mcap"]
+    assert "state" in session
+
+
+def test_recording_session_close_retrieves_keyboard_interrupt(tmp_path: Path) -> None:
+    _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    results: dict[str, object] = {}
+
+    async def raise_keyboard_interrupt() -> None:
+        raise KeyboardInterrupt
+
+    async def run() -> None:
+        try:
+            files = server.library.resolve(["first.mcap"])
+            session = await server.manager.get_or_create(files)
+            await session._cancel_task()
+
+            task: asyncio.Task[None] = asyncio.ensure_future(raise_keyboard_interrupt())
+            while not task.done():
+                with suppress(asyncio.CancelledError):
+                    await asyncio.sleep(0)
+            session._task = task
+
+            await session.close()
+            results["closed"] = True
+            results["done"] = task.done()
+            results["exception"] = task.exception()
+        finally:
+            await server.stop()
+
+    with suppress(KeyboardInterrupt):
+        asyncio.run(run())
+
+    assert results.get("closed") is True
+    assert results.get("done") is True
+    assert isinstance(results.get("exception"), KeyboardInterrupt)
+
+
+def test_library_session_status_reports_dropped_frames(tmp_path: Path) -> None:
+    _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    async def request() -> dict[str, object]:
+        await server.start()
+        try:
+            query = urlencode([("file", "first.mcap")])
+            url = f"http://127.0.0.1:{server.port}/api/session?{query}"
+
+            def get_json() -> dict[str, object]:
+                with closing(urllib.request.urlopen(url)) as response:  # noqa: S310
+                    return json.loads(response.read())
+
+            return await asyncio.to_thread(get_json)
+        finally:
+            await server.stop()
+
+    status = asyncio.run(request())
+    assert status["droppedFrames"] == 0
+
+
+def test_recording_session_seek_clears_pending_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_mcap(tmp_path / "rec.mcap", "/x", 1, b"a")
+
+    async def run() -> int:
+        session = await RecordingSession.create(
+            (tmp_path / "rec.mcap",),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1_000_000,
+            loop=False,
+        )
+        calls = 0
+        original = session.endpoint.clear_pending_frames
+
+        def counting_clear() -> None:
+            nonlocal calls
+            calls += 1
+            original()
+
+        monkeypatch.setattr(session.endpoint, "clear_pending_frames", counting_clear)
+        try:
+            await session.seek(0.0)
+        finally:
+            await session.close()
+        return calls
+
+    assert asyncio.run(run()) >= 1

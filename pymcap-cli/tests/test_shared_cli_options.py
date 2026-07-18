@@ -124,7 +124,7 @@ def test_bridge_playback_exposes_ros_transform_presets(
 ) -> None:
     output = _help(capsys, "bridge", command)
 
-    assert "--transform" in output
+    assert "--preset" in output
     if command == "play":
         assert "--only-subscribed" in output
     for option in (

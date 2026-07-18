@@ -30,6 +30,7 @@ from pymcap_cli.cmd.bridge._playback import (
 )
 from pymcap_cli.cmd.bridge._playback_transforms import create_playback_transform_plan
 from pymcap_cli.cmd.bridge.serve import BridgeServerPlaybackSink
+from pymcap_cli.core.rosbag2_layout import find_bag_splits
 
 if TYPE_CHECKING:
     from pymcap_cli.cmd.bridge._playback import PlaybackTransformPlan
@@ -66,6 +67,10 @@ _INDEX_HTML = """\
       <span id="status" class="muted">No recording selected</span>
     </div>
     <div id="recordings" class="recordings"></div>
+    <section id="sessions">
+      <h2>Active sessions</h2>
+      <div id="active-sessions"></div>
+    </section>
   </main>
   <script src="/app.js"></script>
 </body>
@@ -92,6 +97,9 @@ _CONTROL_HTML = """\
       <label class="playback-control">Speed x
         <input id="speed" type="number" min="0.1" step="0.25" value="1">
       </label>
+      <button class="speed-preset" data-speed="1">1x</button>
+      <button class="speed-preset" data-speed="5">5x</button>
+      <button class="speed-preset" data-speed="10">10x</button>
       <label class="playback-control"><input id="loop" type="checkbox" checked> Loop</label>
     </div>
     <div class="timeline">
@@ -195,11 +203,32 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .playback-control { display: inline-flex; gap: .35rem; align-items: center; }
 #speed { width: 4.5rem; }
+#play-pause { min-width: 5rem; text-align: center; }
+.speed-preset.active { border-color: var(--accent); color: var(--accent); }
+#sessions { margin-top: 2rem; }
+#sessions h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+#active-sessions { display: grid; gap: .4rem; }
+.session {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: .75rem;
+  align-items: center;
+  padding: .6rem .8rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+}
+.session .files {
+  font: 13px/1.4 ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+.session .meta { color: var(--muted); white-space: nowrap; }
 """
 
 _APP_JS = """\
 (() => {
   const list = document.getElementById("recordings");
+  const activeSessions = document.getElementById("active-sessions");
   const status = document.getElementById("status");
   const open = document.getElementById("open");
   const playPause = document.getElementById("play-pause");
@@ -234,12 +263,7 @@ _APP_JS = """\
   };
 
   const openSession = (files) => {
-    window.open(
-      controllerUrl(files),
-      "_blank",
-      "popup,width=500,height=430"
-    );
-    window.location.href = foxgloveUrl(files);
+    window.location.href = controllerUrl(files).toString();
   };
 
   const updateButtons = () => {
@@ -262,7 +286,8 @@ _APP_JS = """\
       const response = await fetch(`/api/session?${query(files)}`);
       const value = await response.json();
       const viewers = value.viewers === 1 ? "1 viewer" : `${value.viewers} viewers`;
-      const dropped = value.droppedMessages ? ` · ${value.droppedMessages} dropped` : "";
+      const droppedCount = (value.droppedMessages || 0) + (value.droppedFrames || 0);
+      const dropped = droppedCount ? ` · ${droppedCount} dropped` : "";
       status.textContent = `${value.state} · ${viewers} · ${value.messages} messages${dropped}`;
       playPause.textContent = value.isPlaying ? "Pause" : "Play";
       if (document.activeElement !== speed) speed.value = String(value.speed);
@@ -280,6 +305,45 @@ _APP_JS = """\
     const value = await response.json();
     status.textContent = value.error || value.state;
     await refreshStatus();
+  };
+
+  const formatTime = (seconds) => {
+    const total = Math.max(0, Math.round(seconds));
+    const minutes = Math.floor(total / 60);
+    const remainder = total % 60;
+    return `${minutes}:${String(remainder).padStart(2, "0")}`;
+  };
+
+  const refreshSessions = async () => {
+    try {
+      const response = await fetch("/api/sessions");
+      const value = await response.json();
+      activeSessions.replaceChildren();
+      if (!value.sessions.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "No active sessions";
+        activeSessions.append(empty);
+        return;
+      }
+      for (const session of value.sessions) {
+        const row = document.createElement("div");
+        row.className = "session";
+        const files = document.createElement("span");
+        files.className = "files";
+        files.textContent = session.files.join(" + ");
+        const viewers = session.viewers === 1 ? "1 viewer" : `${session.viewers} viewers`;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        const position = formatTime(session.positionSeconds);
+        const duration = formatTime(session.durationSeconds);
+        meta.textContent = `${session.state} · ${viewers} · ${position} / ${duration}`;
+        row.append(files, meta);
+        activeSessions.append(row);
+      }
+    } catch (_error) {
+      activeSessions.replaceChildren();
+    }
   };
 
   playPause.onclick = () => control("toggle");
@@ -328,7 +392,8 @@ _APP_JS = """\
     .catch(() => { list.innerHTML = '<p class="muted">Could not load recordings.</p>'; });
 
   updateButtons();
-  setInterval(refreshStatus, 1000);
+  refreshSessions();
+  setInterval(() => { refreshStatus(); refreshSessions(); }, 1000);
 })();
 """
 
@@ -341,6 +406,7 @@ _CONTROL_JS = """\
   const status = document.getElementById("status");
   const playPause = document.getElementById("play-pause");
   const speed = document.getElementById("speed");
+  const speedPresets = [...document.querySelectorAll(".speed-preset")];
   const loop = document.getElementById("loop");
   let isSeeking = false;
   let speedChangeTimer = null;
@@ -380,10 +446,14 @@ _CONTROL_JS = """\
       const response = await fetch(`/api/session?${query()}`);
       const value = await response.json();
       const viewers = value.viewers === 1 ? "1 viewer" : `${value.viewers} viewers`;
-      const dropped = value.droppedMessages ? ` · ${value.droppedMessages} dropped` : "";
+      const droppedCount = (value.droppedMessages || 0) + (value.droppedFrames || 0);
+      const dropped = droppedCount ? ` · ${droppedCount} dropped` : "";
       status.textContent = `${value.state} · ${viewers} · ${value.messages} messages${dropped}`;
       playPause.textContent = value.isPlaying ? "Pause" : "Play";
       if (document.activeElement !== speed) speed.value = String(value.speed);
+      for (const preset of speedPresets) {
+        preset.classList.toggle("active", Number(preset.dataset.speed) === value.speed);
+      }
       loop.checked = value.loop;
       seek.max = String(value.durationSeconds);
       duration.textContent = formatTime(value.durationSeconds);
@@ -418,6 +488,13 @@ _CONTROL_JS = """\
       speedChangeTimer = setTimeout(() => control("speed", {speed: value}), 250);
     }
   };
+  for (const preset of speedPresets) {
+    preset.onclick = () => {
+      const value = Number(preset.dataset.speed);
+      speed.value = String(value);
+      control("speed", {speed: value});
+    };
+  }
   loop.onchange = () => control("loop", {enabled: loop.checked});
   seek.oninput = () => {
     isSeeking = true;
@@ -450,14 +527,37 @@ class RecordingLibrary:
 
     def recordings(self) -> tuple[RecordingEntry, ...]:
         entries: dict[str, RecordingEntry] = {}
+        candidates: list[Path] = []
         for candidate in self.root.rglob("*.mcap"):
             resolved = candidate.resolve()
             try:
-                relative = resolved.relative_to(self.root)
+                resolved.relative_to(self.root)
             except ValueError:
                 continue
             if not resolved.is_file():
                 continue
+            candidates.append(resolved)
+
+        grouped_splits: set[Path] = set()
+        for parent in {candidate.parent for candidate in candidates}:
+            if parent == self.root:
+                continue
+            splits = find_bag_splits(parent)
+            if not splits:
+                continue
+            resolved_splits = {split.resolve() for split in splits}
+            grouped_splits.update(resolved_splits)
+            relative = parent.relative_to(self.root)
+            path = relative.as_posix()
+            entries[path] = RecordingEntry(
+                path=path,
+                size_bytes=sum(split.stat().st_size for split in resolved_splits),
+            )
+
+        for resolved in candidates:
+            if resolved in grouped_splits:
+                continue
+            relative = resolved.relative_to(self.root)
             path = relative.as_posix()
             entries[path] = RecordingEntry(path=path, size_bytes=resolved.stat().st_size)
         return tuple(entries[path] for path in sorted(entries, key=str.casefold))
@@ -472,14 +572,20 @@ class RecordingLibrary:
         seen: set[Path] = set()
         for raw_path in requested:
             relative = Path(raw_path)
-            if relative.is_absolute() or relative.suffix.lower() != ".mcap":
-                raise ValueError("Only relative MCAP file paths are allowed")
+            if relative.is_absolute():
+                raise ValueError(
+                    "Only relative MCAP file paths and rosbag2 directories are allowed"
+                )
             candidate = (self.root / relative).resolve()
             try:
                 candidate.relative_to(self.root)
             except ValueError as exc:
                 raise ValueError(f"File is outside the recording root: {raw_path}") from exc
-            if not candidate.is_file():
+            is_mcap = candidate.is_file() and relative.suffix.lower() == ".mcap"
+            is_bag = candidate.is_dir() and bool(find_bag_splits(candidate))
+            if not is_mcap and not is_bag:
+                if candidate.is_dir():
+                    raise ValueError(f"Directory is not a rosbag2 MCAP recording: {raw_path}")
                 raise ValueError(f"MCAP file does not exist: {raw_path}")
             if candidate in seen:
                 raise ValueError(f"duplicate file selection: {raw_path}")
@@ -580,6 +686,7 @@ class RecordingSession:
             "viewers": len(self.endpoint.connections),
             "messages": self.stats.messages,
             "droppedMessages": self.stats.dropped_messages,
+            "droppedFrames": self.endpoint.dropped_frames,
             "payloadBytes": self.stats.payload_bytes,
             "playheadNs": playhead_ns,
             "positionSeconds": (playhead_ns - self.timeline_start_ns) / 1_000_000_000,
@@ -636,6 +743,9 @@ class RecordingSession:
         should_play = self.state in {"Preparing", "Waiting", "Playing"}
         self.controller.stop()
         await self._cancel_task()
+        # Drop frames still queued for slow clients so the post-seek stream is
+        # not preceded by stale pre-seek frames (which look like a jump back).
+        self.endpoint.clear_pending_frames()
         self._start_time_ns = self.timeline_start_ns + round(offset_seconds * 1_000_000_000)
         self.controller = PlaybackController(
             start_paused=not should_play,
@@ -650,10 +760,12 @@ class RecordingSession:
         self._task = asyncio.create_task(self._run())
 
     async def _cancel_task(self) -> None:
-        if self._task is not None and not self._task.done():
+        if self._task is None:
+            return
+        if not self._task.done():
             self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+        with suppress(asyncio.CancelledError, KeyboardInterrupt):
+            await self._task
 
     async def close(self) -> None:
         self.controller.stop()
@@ -727,6 +839,9 @@ class RecordingSessionManager:
 
     def get(self, files: tuple[Path, ...]) -> RecordingSession | None:
         return self._sessions.get(files)
+
+    def active_sessions(self) -> tuple[dict[str, JsonValue], ...]:
+        return tuple(session.status() for session in self._sessions.values())
 
     def _activity_changed(
         self,
@@ -880,6 +995,11 @@ class RecordingLibraryServer:
                     for entry in self.library.recordings()
                 ]
                 return _json_response(200, {"recordings": recordings})
+            if parsed.path == "/api/sessions":
+                return _json_response(
+                    200,
+                    {"sessions": list(self.manager.active_sessions())},
+                )
             if parsed.path == "/api/session":
                 files = self._resolve_query(parsed.query)
                 session = self.manager.get(files)
@@ -891,6 +1011,7 @@ class RecordingLibraryServer:
                             "viewers": 0,
                             "messages": 0,
                             "droppedMessages": 0,
+                            "droppedFrames": 0,
                             "payloadBytes": 0,
                             "playheadNs": 0,
                             "positionSeconds": 0,

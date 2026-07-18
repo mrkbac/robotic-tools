@@ -13,7 +13,7 @@ import pytest
 from mcap_codec_support.pointcloud import POINTCLOUD2
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
-from pymcap_cli.cmd.bridge import _playback
+from pymcap_cli.cmd.bridge import _playback, _playback_transforms
 from pymcap_cli.cmd.bridge._playback import (
     PlaybackChannel,
     PlaybackClock,
@@ -34,7 +34,7 @@ from pymcap_cli.cmd.bridge.play import BridgeClientPlaybackSink
 from pymcap_cli.cmd.bridge.serve import BridgeServerPlaybackSink
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.core.processors.image_compress import ImageCompressProcessor
-from robo_ws_bridge import ConnectionGraph, WebSocketBridgeServer
+from robo_ws_bridge import ConnectionGraph, WebSocketBridgeEndpoint, WebSocketBridgeServer
 from robo_ws_bridge.ws_types import BinaryOpCodes
 from small_mcap import McapWriter, Schema
 from websockets.asyncio.client import connect
@@ -69,13 +69,18 @@ def _write_mcap(
         writer.finish()
 
 
-def _write_pointcloud_mcap(path: Path) -> None:
+def _write_pointcloud_mcap(
+    path: Path,
+    points: list[tuple[float, float, float]] | None = None,
+) -> None:
     fields = [
         {"name": "x", "offset": 0, "datatype": 7, "count": 1},
         {"name": "y", "offset": 4, "datatype": 7, "count": 1},
         {"name": "z", "offset": 8, "datatype": 7, "count": 1},
     ]
-    data = struct.pack("<fff", 1.0, 2.0, 3.0) + struct.pack("<fff", 0.0, 0.0, 0.0)
+    if points is None:
+        points = [(1.0, 2.0, 3.0), (0.0, 0.0, 0.0)]
+    data = b"".join(struct.pack("<fff", *point) for point in points)
     with path.open("wb") as stream:
         writer = McapWriter(stream, encoder_factory=ROS2EncoderFactory())
         writer.start(profile="ros2")
@@ -87,11 +92,11 @@ def _write_pointcloud_mcap(path: Path) -> None:
             {
                 "header": {"stamp": {"sec": 0, "nanosec": 100}, "frame_id": "lidar"},
                 "height": 1,
-                "width": 2,
+                "width": len(points),
                 "fields": fields,
                 "is_bigendian": False,
                 "point_step": 12,
-                "row_step": 24,
+                "row_step": 12 * len(points),
                 "data": data,
                 "is_dense": True,
             },
@@ -243,6 +248,9 @@ class _CollectingSink:
     def is_channel_active(self, _channel: PlaybackChannel) -> bool:
         return True
 
+    def is_channel_congested(self, _channel: PlaybackChannel) -> bool:
+        return False
+
     async def wait_until_active(self) -> float:
         return 0.0
 
@@ -278,6 +286,9 @@ class _TransformedCollectingSink:
 
     def is_channel_active(self, _channel: PlaybackChannel) -> bool:
         return self.is_active
+
+    def is_channel_congested(self, _channel: PlaybackChannel) -> bool:
+        return False
 
     async def wait_until_active(self) -> float:
         return 0.0
@@ -410,6 +421,98 @@ def test_run_playback_controller_can_disable_loop_after_current_pass(
     assert stats.loop_number == 1
 
 
+def test_run_playback_reuses_transform_session_across_loop_passes(tmp_path: Path) -> None:
+    path = tmp_path / "loop-transform.mcap"
+    _write_mcap(path, "/loop", [(1, b"first"), (2, b"second")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    controller = PlaybackController(is_looping=True)
+    events: list[str] = []
+
+    class _Session:
+        async def observe_congestion(
+            self,
+            _channel: PlaybackChannel,
+            *,
+            is_congested: bool,  # noqa: ARG002
+            now: float,  # noqa: ARG002
+        ) -> None:
+            return
+
+        async def transform(
+            self,
+            channel: PlaybackChannel,
+            timestamp_ns: int,
+            payload: bytes | memoryview,
+        ) -> tuple[PlaybackOutput, ...]:
+            return (PlaybackOutput(channel, timestamp_ns, payload),)
+
+        async def finish(self) -> tuple[PlaybackOutput, ...]:
+            events.append("finish")
+            return ()
+
+        async def restart(self) -> None:
+            events.append("restart")
+
+        async def deactivate(self, _channel: PlaybackChannel) -> None:
+            return
+
+        async def close(self) -> None:
+            events.append("close")
+
+    class _Plan:
+        mode = "test"
+        channels = prepared.channels
+
+        def create_session(self) -> _Session:
+            events.append("create")
+            return _Session()
+
+        def output_channel(self, source: PlaybackChannel) -> PlaybackChannel:
+            return source
+
+    class _Sink(_CollectingSink):
+        async def timeline_started(self, _clock: PlaybackClock) -> None:
+            events.append("timeline-start")
+
+        async def timeline_finished(self, _timestamp_ns: int) -> None:
+            events.append("timeline-finish")
+
+        async def publish(
+            self,
+            channel: PlaybackChannel,
+            timestamp_ns: int,
+            payload: bytes | memoryview,
+        ) -> None:
+            await super().publish(channel, timestamp_ns, payload)
+            if len(self.messages) == 4:
+                controller.set_looping(False)
+
+    sink = _Sink()
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            controller=controller,
+            transform_plan=_Plan(),
+        )
+    )
+
+    assert stats.loop_number == 2
+    assert events == [
+        "create",
+        "timeline-start",
+        "timeline-finish",
+        "restart",
+        "timeline-start",
+        "finish",
+        "timeline-finish",
+        "close",
+    ]
+
+
 def test_run_playback_controller_changes_speed_without_restarting(
     tmp_path: Path,
 ) -> None:
@@ -459,6 +562,7 @@ def test_run_playback_drops_stale_messages_before_slow_transform(
             (1_000_000_001, b"second"),
             (2_000_000_001, b"third"),
         ],
+        schema_name="sensor_msgs/msg/CompressedImage",
     )
     prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
     now = [0.0]
@@ -467,6 +571,15 @@ def test_run_playback_drops_stale_messages_before_slow_transform(
     monkeypatch.setattr(_playback, "_MAX_PLAYBACK_LAG_SECONDS", 0.005, raising=False)
 
     class _SlowTransformSession:
+        async def observe_congestion(
+            self,
+            _channel: PlaybackChannel,
+            *,
+            is_congested: bool,  # noqa: ARG002
+            now: float,  # noqa: ARG002
+        ) -> None:
+            return
+
         async def transform(
             self,
             channel: PlaybackChannel,
@@ -479,6 +592,9 @@ def test_run_playback_drops_stale_messages_before_slow_transform(
 
         async def finish(self) -> tuple[PlaybackOutput, ...]:
             return ()
+
+        async def restart(self) -> None:
+            return
 
         async def deactivate(self, _channel: PlaybackChannel) -> None:
             return
@@ -523,6 +639,7 @@ def test_run_playback_speed_reduction_skips_high_speed_backlog(
         path,
         "/camera",
         [(timestamp_ns, str(offset).encode()) for offset, timestamp_ns in enumerate(timestamps)],
+        schema_name="sensor_msgs/msg/CompressedImage",
     )
     prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
     controller = PlaybackController(speed=500)
@@ -566,6 +683,7 @@ def test_run_playback_speed_reduction_skips_high_speed_backlog(
 
 def test_transform_config_uses_standalone_defaults_and_rejects_wrong_mode() -> None:
     common = {
+        "adaptive_quality": None,
         "image_format": None,
         "codec": None,
         "quality": None,
@@ -586,17 +704,187 @@ def test_transform_config_uses_standalone_defaults_and_rejects_wrong_mode() -> N
         "pointcloud_sort_field": None,
     }
 
-    compress = resolve_playback_transform_config(transform="roscompress", **common)
+    compress = resolve_playback_transform_config(preset="compress", **common)
     assert compress == RoscompressConfig()
-    decompress = resolve_playback_transform_config(transform="rosdecompress", **common)
+    decompress = resolve_playback_transform_config(preset="decompress", **common)
     assert decompress == RosdecompressConfig()
 
-    with pytest.raises(ValueError, match="requires --transform"):
-        resolve_playback_transform_config(transform="none", **(common | {"codec": "h265"}))
-    with pytest.raises(ValueError, match="requires --transform rosdecompress"):
+    with pytest.raises(ValueError, match="requires --preset"):
+        resolve_playback_transform_config(preset=None, **(common | {"codec": "h265"}))
+    with pytest.raises(ValueError, match="requires --preset decompress"):
+        resolve_playback_transform_config(preset="compress", **(common | {"video_format": "raw"}))
+
+
+def test_transform_config_adaptive_quality_requires_roscompress_video() -> None:
+    common = {
+        "adaptive_quality": True,
+        "image_format": None,
+        "codec": None,
+        "quality": None,
+        "encoder": None,
+        "backend": None,
+        "scale": None,
+        "jpeg_quality": None,
+        "video": None,
+        "video_format": None,
+        "pointcloud": None,
+        "resolution": None,
+        "pc_format": None,
+        "pc_schema": None,
+        "pc_encoding": None,
+        "pc_compression": None,
+        "draco_compression_level": None,
+        "pointcloud_drop_invalid": None,
+        "pointcloud_sort_field": None,
+    }
+
+    config = resolve_playback_transform_config(preset="compress", **common)
+    assert config == RoscompressConfig(adaptive_quality=True)
+
+    with pytest.raises(ValueError, match="requires --image-format video"):
         resolve_playback_transform_config(
-            transform="roscompress", **(common | {"video_format": "raw"})
+            preset="compress",
+            **(common | {"image_format": "jpeg"}),
         )
+    with pytest.raises(ValueError, match="requires --preset compress"):
+        resolve_playback_transform_config(preset=None, **common)
+
+
+def test_adaptive_quality_controller_degrades_quickly_and_recovers_slowly() -> None:
+    controller = _playback_transforms._AdaptiveQualityController()
+
+    assert controller.observe(is_congested=False, now=0.0) == 0
+    assert controller.observe(is_congested=True, now=0.5) == 0
+    assert controller.observe(is_congested=True, now=1.0) == 0
+    assert controller.observe(is_congested=False, now=1.5) == 0
+    assert controller.observe(is_congested=True, now=2.0) == 1
+
+    assert controller.observe(is_congested=True, now=4.0) == 1
+    assert controller.observe(is_congested=True, now=5.0) == 2
+    assert controller.observe(is_congested=False, now=5.1) == 2
+    assert controller.observe(is_congested=False, now=35.0) == 2
+    assert controller.observe(is_congested=False, now=35.1) == 1
+
+
+def test_adaptive_quality_controller_reaches_top_rung_under_sustained_congestion() -> None:
+    controller = _playback_transforms._AdaptiveQualityController()
+    rung = 0
+    for step in range(40):
+        rung = controller.observe(is_congested=True, now=float(step))
+    assert rung == 3
+    assert controller.max_rung == 3
+
+
+def test_adaptive_quality_controller_holds_rung_while_clean() -> None:
+    controller = _playback_transforms._AdaptiveQualityController()
+    # Degrade once, then a long clean spell that is not yet long enough to
+    # recover must not degrade further just because a stale window elapses.
+    assert controller.observe(is_congested=True, now=0.0) == 0
+    assert controller.observe(is_congested=True, now=2.0) == 1
+    for step in range(3, 25):
+        assert controller.observe(is_congested=False, now=float(step)) == 1
+
+
+def test_adaptive_quality_rungs_step_by_six_capped_at_max() -> None:
+    assert _playback_transforms._adaptive_quality_rungs(28) == (28, 34, 40, 46)
+    assert _playback_transforms._adaptive_quality_rungs(40) == (40, 46)
+    assert _playback_transforms._adaptive_quality_rungs(50) == (50,)
+
+
+def test_adaptive_video_rungs_reduce_resolution_after_quality_is_exhausted() -> None:
+    rung = _playback_transforms._AdaptiveVideoRung
+    assert _playback_transforms._adaptive_video_rungs(28) == (
+        rung(28, 1.0),
+        rung(34, 1.0),
+        rung(40, 1.0),
+        rung(46, 1.0),
+        rung(46, 0.75),
+        rung(46, 0.5),
+        rung(46, 0.375),
+        rung(46, 0.25),
+    )
+
+
+def test_adaptive_resolution_is_relative_to_source_or_explicit_scale_ceiling() -> None:
+    max_dimension = _playback_transforms._adaptive_max_dimension
+    assert max_dimension(None, width=1920, height=1080, scale_factor=0.75) == 1440
+    assert max_dimension(960, width=1920, height=1080, scale_factor=0.75) == 720
+    assert max_dimension(960, width=640, height=480, scale_factor=0.75) == 480
+    assert max_dimension(480, width=1920, height=1080, scale_factor=1.0) == 480
+    assert max_dimension(None, width=1920, height=1080, scale_factor=1.0) is None
+
+
+def test_apply_preset_maps_image_format_and_scale() -> None:
+    apply_preset = _playback_transforms.apply_preset
+    assert apply_preset(None, image_format=None, scale=None) == (None, None)
+    assert apply_preset("compress", image_format=None, scale=None) == ("video", None)
+    assert apply_preset("decompress", image_format=None, scale=None) == (None, None)
+    assert apply_preset("fast", image_format=None, scale=None) == ("video", 960)
+    assert apply_preset("low", image_format=None, scale=None) == ("video", 480)
+
+
+def test_apply_preset_lets_explicit_flags_override_defaults() -> None:
+    apply_preset = _playback_transforms.apply_preset
+    assert apply_preset("compress", image_format="jpeg", scale=None) == ("jpeg", None)
+    assert apply_preset("fast", image_format=None, scale=720) == ("video", 720)
+
+
+def test_adaptive_quality_session_restarts_encoder_at_new_rung() -> None:
+    channel = PlaybackChannel("/camera", "raw", "example/Raw", "text", "bytes")
+    created: list[int] = []
+    closed: list[int] = []
+
+    class _Transform:
+        def __init__(self, rung: int) -> None:
+            self._rung = rung
+            created.append(rung)
+
+        def process(
+            self,
+            _payload: bytes | memoryview,
+            timestamp_ns: int,
+        ) -> tuple[PlaybackOutput, ...]:
+            return (PlaybackOutput(channel, timestamp_ns, bytes([self._rung])),)
+
+        def finish(self) -> tuple[PlaybackOutput, ...]:
+            return ()
+
+        def close(self) -> None:
+            closed.append(self._rung)
+
+    spec = _playback_transforms._ChannelTransformSpec(
+        source=channel,
+        output=channel,
+        factories=tuple(lambda rung=rung: _Transform(rung) for rung in range(3)),
+        video_rungs=tuple(
+            _playback_transforms._AdaptiveVideoRung(quality, 1.0) for quality in (28, 34, 40)
+        ),
+    )
+    session = _playback_transforms._JitPlaybackTransformSession((spec,))
+
+    async def run() -> tuple[PlaybackOutput, ...]:
+        first = await session.transform(channel, 1, b"first")
+        for now, is_congested in (
+            (0.0, False),
+            (0.5, True),
+            (1.0, True),
+            (1.5, False),
+            (2.0, True),
+        ):
+            await session.observe_congestion(
+                channel,
+                is_congested=is_congested,
+                now=now,
+            )
+        second = await session.transform(channel, 2, b"second")
+        await session.close()
+        return first + second
+
+    outputs = asyncio.run(run())
+
+    assert [bytes(output.payload) for output in outputs] == [b"\x00", b"\x01"]
+    assert created == [0, 1]
+    assert closed == [0, 1]
 
 
 def test_run_playback_roscompress_jpeg_is_jit_and_lossless(image_small_mcap: Path) -> None:
@@ -721,6 +1009,210 @@ def test_jit_video_compress_then_decompress_preserves_every_frame(
         timestamp for _, timestamp, _ in compressed_sink.messages
     ]
     assert decompress_plan.channels[0].schema_name == "sensor_msgs/msg/CompressedImage"
+
+
+def test_adaptive_video_encoder_restart_produces_decodable_segment(
+    image_small_mcap: Path,
+) -> None:
+    pytest.importorskip("av")
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    compress_plan = create_playback_transform_plan(
+        RoscompressConfig(
+            image_format="video",
+            encoder="libx264",
+            backend="pyav",
+            pointcloud=False,
+            adaptive_quality=True,
+        ),
+        prepared.channels,
+    )
+    assert compress_plan is not None
+    with open_playback_messages(prepared) as messages:
+        inputs = [(message.log_time, bytes(message.data)) for _, _, message in messages]
+    assert len(inputs) >= 2
+
+    async def compress_after_restart() -> tuple[PlaybackOutput, ...]:
+        session = compress_plan.create_session()
+        channel = prepared.channels[0]
+        try:
+            await session.transform(channel, *inputs[0])
+            for now, is_congested in (
+                (0.0, False),
+                (0.5, True),
+                (1.0, True),
+                (1.5, False),
+                (2.0, True),
+            ):
+                await session.observe_congestion(
+                    channel,
+                    is_congested=is_congested,
+                    now=now,
+                )
+            outputs = []
+            for timestamp_ns, payload in inputs[1:]:
+                outputs.extend(await session.transform(channel, timestamp_ns, payload))
+            outputs.extend(await session.finish())
+            return tuple(outputs)
+        finally:
+            await session.close()
+
+    restarted_segment = asyncio.run(compress_after_restart())
+    assert restarted_segment
+    decompress_plan = create_playback_transform_plan(
+        RosdecompressConfig(backend="pyav", pointcloud=False),
+        compress_plan.channels,
+    )
+    assert decompress_plan is not None
+
+    async def decompress_segment() -> tuple[PlaybackOutput, ...]:
+        session = decompress_plan.create_session()
+        outputs = []
+        try:
+            for output in restarted_segment:
+                outputs.extend(
+                    await session.transform(
+                        output.channel,
+                        output.timestamp_ns,
+                        output.payload,
+                    )
+                )
+            outputs.extend(await session.finish())
+            return tuple(outputs)
+        finally:
+            await session.close()
+
+    decoded = asyncio.run(decompress_segment())
+    assert len(decoded) == len(restarted_segment)
+
+
+def test_adaptive_video_resolution_switch_is_decodable_in_one_stream(
+    image_small_mcap: Path,
+) -> None:
+    av = pytest.importorskip("av")
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    compress_plan = create_playback_transform_plan(
+        RoscompressConfig(
+            image_format="video",
+            encoder="libx264",
+            backend="pyav",
+            pointcloud=False,
+            adaptive_quality=True,
+        ),
+        prepared.channels,
+    )
+    assert compress_plan is not None
+    with open_playback_messages(prepared) as messages:
+        inputs = [(message.log_time, bytes(message.data)) for _, _, message in messages]
+
+    async def compress_at_first_resolution_rung() -> tuple[PlaybackOutput, ...]:
+        session = compress_plan.create_session()
+        channel = prepared.channels[0]
+        try:
+            outputs: list[PlaybackOutput] = []
+            for timestamp_ns, payload in inputs[:2]:
+                outputs.extend(await session.transform(channel, timestamp_ns, payload))
+            for now in (0.0, 2.0, 5.0, 8.0, 11.0):
+                await session.observe_congestion(
+                    channel,
+                    is_congested=True,
+                    now=now,
+                )
+            for timestamp_ns, payload in inputs[2:]:
+                outputs.extend(await session.transform(channel, timestamp_ns, payload))
+            outputs.extend(await session.finish())
+            return tuple(outputs)
+        finally:
+            await session.close()
+
+    scaled_segment = asyncio.run(compress_at_first_resolution_rung())
+    assert scaled_segment
+    output_channel = compress_plan.channels[0]
+    schema = Schema(
+        id=1,
+        name=output_channel.schema_name,
+        encoding=output_channel.schema_encoding,
+        data=output_channel.schema_text.encode(),
+    )
+    decode_cdr = DecoderFactory().decoder_for(output_channel.message_encoding, schema)
+    assert decode_cdr is not None
+    decoder = av.CodecContext.create("h264", "r")
+    decoded_sizes = {
+        (frame.width, frame.height)
+        for output in scaled_segment
+        for frame in decoder.decode(av.Packet(bytes(decode_cdr(output.payload).data)))
+    }
+    assert decoded_sizes == {(160, 120), (120, 90)}
+
+
+def test_video_session_restart_starts_a_self_contained_segment(
+    image_small_mcap: Path,
+) -> None:
+    # At a loop boundary run_playback calls session.restart(); the video encoder
+    # must then open a fresh GOP whose first packet is a keyframe, so the
+    # post-restart frames decode on their own without the pre-restart stream.
+    # Otherwise Foxglove shows a red cross after every loop.
+    pytest.importorskip("av")
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    compress_plan = create_playback_transform_plan(
+        RoscompressConfig(
+            image_format="video",
+            encoder="libx264",
+            backend="pyav",
+            pointcloud=False,
+        ),
+        prepared.channels,
+    )
+    assert compress_plan is not None
+    with open_playback_messages(prepared) as messages:
+        inputs = [(message.log_time, bytes(message.data)) for _, _, message in messages]
+    assert len(inputs) >= 2
+
+    async def compress_second_pass() -> tuple[PlaybackOutput, ...]:
+        session = compress_plan.create_session()
+        channel = prepared.channels[0]
+        try:
+            for timestamp_ns, payload in inputs:
+                await session.transform(channel, timestamp_ns, payload)
+            # Discard the first pass' flush; restart mirrors the loop boundary.
+            await session.restart()
+            outputs: list[PlaybackOutput] = []
+            for timestamp_ns, payload in inputs:
+                outputs.extend(await session.transform(channel, timestamp_ns, payload))
+            outputs.extend(await session.finish())
+            return tuple(outputs)
+        finally:
+            await session.close()
+
+    second_pass = asyncio.run(compress_second_pass())
+    assert second_pass
+
+    decompress_plan = create_playback_transform_plan(
+        RosdecompressConfig(backend="pyav", pointcloud=False),
+        compress_plan.channels,
+    )
+    assert decompress_plan is not None
+
+    async def decompress_second_pass() -> tuple[PlaybackOutput, ...]:
+        session = decompress_plan.create_session()
+        outputs: list[PlaybackOutput] = []
+        try:
+            for output in second_pass:
+                outputs.extend(
+                    await session.transform(
+                        output.channel,
+                        output.timestamp_ns,
+                        output.payload,
+                    )
+                )
+            outputs.extend(await session.finish())
+            return tuple(outputs)
+        finally:
+            await session.close()
+
+    decoded = asyncio.run(decompress_second_pass())
+    # Every frame of the isolated post-restart segment decodes: the segment is
+    # self-contained, i.e. it began with a keyframe.
+    assert len(decoded) == len(inputs)
 
 
 def test_jit_pointcloud_compress_then_decompress_preserves_message(tmp_path: Path) -> None:
@@ -1163,3 +1655,157 @@ def test_bridge_server_sink_advertises_and_sends_jit_transform(
     decoder = DecoderFactory().decoder_for(channel_info["encoding"], schema)
     assert decoder is not None
     assert decoder(payload).format == "jpeg"
+
+
+class _CongestibleSink(_CollectingSink):
+    def __init__(self, congested_topics: set[str]) -> None:
+        super().__init__()
+        self.congested_topics = congested_topics
+
+    def is_channel_congested(self, channel: PlaybackChannel) -> bool:
+        return channel.topic in self.congested_topics
+
+
+def test_is_frame_channel_marks_standalone_sensor_frames() -> None:
+    def channel(schema_name: str) -> PlaybackChannel:
+        return PlaybackChannel(
+            topic="/x",
+            message_encoding="cdr",
+            schema_name=schema_name,
+            schema_encoding="ros2msg",
+            schema_text="",
+        )
+
+    assert _playback.is_frame_channel(channel("sensor_msgs/msg/CompressedImage"))
+    assert _playback.is_frame_channel(channel("sensor_msgs/msg/PointCloud2"))
+    assert _playback.is_frame_channel(channel("point_cloud_interfaces/msg/CompressedPointCloud2"))
+    assert not _playback.is_frame_channel(channel("foxglove_msgs/msg/CompressedVideo"))
+    assert not _playback.is_frame_channel(channel("tf2_msgs/msg/TFMessage"))
+
+
+def test_run_playback_skips_congested_frame_channels_but_keeps_small_topics(
+    tmp_path: Path,
+) -> None:
+    camera = tmp_path / "camera.mcap"
+    control = tmp_path / "control.mcap"
+    _write_mcap(
+        camera,
+        "/camera",
+        [(1, b"f1"), (2, b"f2"), (3, b"f3")],
+        schema_name="sensor_msgs/msg/CompressedImage",
+    )
+    _write_mcap(control, "/tf", [(1, b"t1"), (2, b"t2"), (3, b"t3")])
+    prepared = prepare_playback([str(camera), str(control)], MessageFilterOptions.from_args())
+    sink = _CongestibleSink({"/camera"})
+    stats = asyncio.run(
+        run_playback(prepared, sink, speed=1_000_000, loop=False, show_status=False)
+    )
+    topics = [topic for topic, _, _ in sink.messages]
+    assert topics == ["/tf", "/tf", "/tf"]
+    assert stats.dropped_messages == 3
+
+
+def test_run_playback_does_not_drop_reliable_channels_when_late(tmp_path: Path) -> None:
+    recording = tmp_path / "tf.mcap"
+    _write_mcap(recording, "/tf", [(i * 1_000_000, b"x") for i in range(1, 6)])
+    prepared = prepare_playback([str(recording)], MessageFilterOptions.from_args())
+
+    class _SlowSink(_CollectingSink):
+        async def publish(
+            self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
+        ) -> None:
+            if not self.messages:
+                await asyncio.sleep(0.3)
+            await super().publish(channel, timestamp_ns, payload)
+
+    sink = _SlowSink()
+    stats = asyncio.run(run_playback(prepared, sink, speed=1.0, loop=False, show_status=False))
+    assert [timestamp for _, timestamp, _ in sink.messages] == [i * 1_000_000 for i in range(1, 6)]
+    assert stats.dropped_messages == 0
+
+
+def test_run_playback_repeated_frame_stalls_drop_to_preserve_freshness(tmp_path: Path) -> None:
+    recording = tmp_path / "camera.mcap"
+    _write_mcap(
+        recording,
+        "/camera",
+        [(i * 40_000_000, b"x") for i in range(8)],
+        schema_name="sensor_msgs/msg/CompressedImage",
+    )
+    prepared = prepare_playback([str(recording)], MessageFilterOptions.from_args())
+
+    class _ConsistentlySlowSink(_CollectingSink):
+        async def publish(
+            self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
+        ) -> None:
+            await super().publish(channel, timestamp_ns, payload)
+            await asyncio.sleep(0.3)
+
+    sink = _ConsistentlySlowSink()
+    stats = asyncio.run(run_playback(prepared, sink, speed=1.0, loop=False, show_status=False))
+
+    assert len(sink.messages) < 5
+    assert stats.dropped_messages > 3
+
+
+def test_run_playback_stressed_frame_channels_drop_frames_older_than_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "stressed.mcap"
+    _write_mcap(
+        path,
+        "/camera",
+        [(1, b"a"), (2, b"b"), (3, b"c")],
+        schema_name="sensor_msgs/msg/CompressedImage",
+    )
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    now = [0.0]
+    monkeypatch.setattr(_playback.time, "monotonic", lambda: now[0])
+
+    class _LagInducingSink(_CollectingSink):
+        async def publish(
+            self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
+        ) -> None:
+            await super().publish(channel, timestamp_ns, payload)
+            if len(self.messages) == 1:
+                now[0] += 0.3  # the first publish leaves the loop 0.3s behind
+
+    sink = _LagInducingSink()
+    stats = asyncio.run(
+        run_playback(prepared, sink, speed=1_000_000, loop=False, show_status=False)
+    )
+    # First frame is on time; the remaining frames are already older than the
+    # stressed interval and must not be sent merely to preserve cadence.
+    assert [payload for _, _, payload in sink.messages] == [b"a"]
+    assert stats.dropped_messages == 2
+
+
+def test_jit_pointcloud_compress_handles_clouds_needing_no_cleanup(tmp_path: Path) -> None:
+    path = tmp_path / "radar.mcap"
+    # All points valid (like radar detections): the cleanup processor reports
+    # "no change", which must not count as a transform failure.
+    _write_pointcloud_mcap(path, points=[(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    plan = create_playback_transform_plan(RoscompressConfig(image_format="none"), prepared.channels)
+    assert plan is not None
+    sink = _TransformedCollectingSink()
+    asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            transform_plan=plan,
+        )
+    )
+    assert len(sink.messages) == 1
+    assert "CompressedPointCloud" in sink.messages[0][0].schema_name
+
+
+def test_bridge_server_sink_status_rows_report_network_drops() -> None:
+    endpoint = WebSocketBridgeEndpoint()
+    sink = BridgeServerPlaybackSink("127.0.0.1", 0, endpoint=endpoint, url="/ws")
+    rows = dict(sink.status_rows())
+    assert rows["Dropped (network)"] == "0"

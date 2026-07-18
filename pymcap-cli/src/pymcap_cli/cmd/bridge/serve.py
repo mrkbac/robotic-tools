@@ -39,10 +39,12 @@ from pymcap_cli.cmd.bridge._playback import (
     PlaybackClock,
     PlaybackError,
     PlaybackStats,
+    is_frame_channel,
     prepare_playback,
     run_playback,
 )
 from pymcap_cli.cmd.bridge._playback_transforms import (
+    OptionalAdaptiveQualityOption,
     OptionalDracoCompressionLevelOption,
     OptionalEncoderOption,
     OptionalImageFormatOption,
@@ -52,12 +54,13 @@ from pymcap_cli.cmd.bridge._playback_transforms import (
     OptionalPointCloudFormatOption,
     OptionalPointCloudOption,
     OptionalPointCloudSchemaOption,
+    OptionalPresetOption,
     OptionalQualityOption,
     OptionalResolutionOption,
     OptionalScaleOption,
     OptionalVideoFormatOption,
     OptionalVideoOption,
-    TransformModeOption,
+    apply_preset,
     create_playback_transform_plan,
     resolve_playback_transform_config,
 )
@@ -166,6 +169,7 @@ class BridgeServerPlaybackSink:
                     schema_name=channel.schema_name,
                     schema=channel.schema_text,
                     schema_encoding=channel.schema_encoding or None,
+                    delivery="latest" if is_frame_channel(channel) else "reliable",
                 )
             )
 
@@ -264,10 +268,12 @@ class BridgeServerPlaybackSink:
 
     def status_rows(self) -> tuple[tuple[str, str], ...]:
         connections = 0 if self.server is None else len(self.server.connections)
+        network_drops = 0 if self.server is None else self.server.dropped_frames
         return (
             ("Server", self.url),
             ("Clients", str(connections)),
             ("Subscriptions", str(len(self._subscriptions))),
+            ("Dropped (network)", str(network_drops)),
         )
 
     def is_channel_active(self, channel: PlaybackChannel) -> bool:
@@ -275,6 +281,12 @@ class BridgeServerPlaybackSink:
         return any(
             active_channel_id == channel_id for _, _, active_channel_id in self._subscriptions
         )
+
+    def is_channel_congested(self, channel: PlaybackChannel) -> bool:
+        server = self.server
+        if server is None:
+            return False
+        return server.are_all_subscribers_busy(self.channel_ids[channel])
 
     @property
     def has_subscriptions(self) -> bool:
@@ -314,10 +326,11 @@ def serve(
     *,
     host: ServerHostOption = "127.0.0.1",
     port: ServerPortOption = 8765,
-    transform: TransformModeOption = "none",
+    preset: OptionalPresetOption = None,
     image_format: OptionalImageFormatOption = None,
     codec: OptionalCodecOption = None,
     quality: OptionalQualityOption = None,
+    adaptive_quality: OptionalAdaptiveQualityOption = None,
     encoder: OptionalEncoderOption = None,
     backend: OptionalBackendOption = None,
     scale: OptionalScaleOption = None,
@@ -354,6 +367,7 @@ def serve(
     --------
     ```
     pymcap-cli bridge serve recording.mcap
+    pymcap-cli bridge serve recording.mcap --preset fast
     pymcap-cli bridge serve part1.mcap part2.mcap --speed 2 --loop
     pymcap-cli bridge serve /data/recordings --port 9090
     pymcap-cli bridge serve recording.mcap --host 0.0.0.0 --port 8765
@@ -363,8 +377,21 @@ def serve(
         ERR.print("[red]Error:[/] --port must be in [1, 65535]")
         return 1
     try:
+        image_format, scale = apply_preset(
+            preset,
+            image_format=image_format,
+            scale=scale,
+        )
+        resolved_adaptive_quality = adaptive_quality
+        if (
+            resolved_adaptive_quality is None
+            and preset in {"compress", "fast", "low"}
+            and image_format in {None, "video"}
+        ):
+            resolved_adaptive_quality = True
         transform_config = resolve_playback_transform_config(
-            transform=transform,
+            preset=preset,
+            adaptive_quality=resolved_adaptive_quality,
             image_format=image_format,
             codec=codec,
             quality=quality,
@@ -435,6 +462,7 @@ def serve(
                 prepared.channels if transform_plan is None else transform_plan.channels
             )
             await sink.start(output_channels)
+            console.print(f"[dim]Open in Foxglove:[/] {_foxglove_url(host, port)}")
             if not no_browser:
                 _launch_url(_foxglove_url(host, port))
             return await run_playback(

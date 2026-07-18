@@ -5,9 +5,11 @@ import json
 import logging
 import struct
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import cast, overload
+from typing import Literal, cast, overload
 
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
@@ -65,9 +67,22 @@ def install_invalid_handshake_log_filter() -> None:
     logging.getLogger("websockets.server").addFilter(_INVALID_HANDSHAKE_LOG_FILTER)
 
 
+DeliveryPolicy = Literal["reliable", "latest"]
+OfferResult = Literal["queued", "replaced", "overflow"]
+
+_OUTBOX_SOFT_LIMIT_BYTES = 256 << 10
+_OUTBOX_HARD_LIMIT_BYTES = 1 << 20
+_TIME_OUTBOX_KEY = -1
+
+
 @dataclass(frozen=True, slots=True)
 class Channel:
-    """Description of a server channel."""
+    """Description of a server channel.
+
+    ``delivery`` controls how frames queue for slow clients: ``"reliable"``
+    delivers every published frame in order, ``"latest"`` keeps only the
+    newest pending frame per channel (older unsent frames are replaced).
+    """
 
     id: int
     topic: str
@@ -75,6 +90,7 @@ class Channel:
     schema_name: str
     schema: str
     schema_encoding: str | None = None
+    delivery: DeliveryPolicy = "reliable"
 
     def as_channel_info(self) -> ChannelInfo:
         payload: ChannelInfo = {
@@ -89,12 +105,142 @@ class Channel:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class OutboxFrame:
+    """One queued frame and the subscription key that owns it."""
+
+    key: int
+    payload: bytes
+
+
+class ConnectionOutbox:
+    """Bounded per-connection send queue that never blocks publishers.
+
+    Frames for ``"latest"`` channels replace any unsent frame with the same
+    key, so a slow client always receives the newest data. ``"reliable"``
+    frames keep FIFO order; once ``hard_limit_bytes`` of frames are pending,
+    overflow is reported so the endpoint can reset the slow connection.
+    """
+
+    def __init__(
+        self,
+        *,
+        soft_limit_bytes: int = _OUTBOX_SOFT_LIMIT_BYTES,
+        hard_limit_bytes: int = _OUTBOX_HARD_LIMIT_BYTES,
+    ) -> None:
+        self._soft_limit_bytes = soft_limit_bytes
+        self._hard_limit_bytes = hard_limit_bytes
+        self._reliable: deque[OutboxFrame] = deque()
+        self._latest: dict[int, OutboxFrame] = {}
+        self._in_flight: set[int] = set()
+        self._has_frames = asyncio.Event()
+        self._take_latest_next = False
+        self.pending_bytes = 0
+        self.dropped_frames = 0
+
+    @property
+    def is_congested(self) -> bool:
+        """True while more bytes are pending than the soft limit allows."""
+        return self.pending_bytes > self._soft_limit_bytes
+
+    def offer(self, key: int, frame: bytes, *, delivery: DeliveryPolicy) -> OfferResult:
+        """Queue one frame; replaces the pending frame for ``latest`` keys."""
+        queued = OutboxFrame(key, frame)
+        if delivery == "latest":
+            previous = self._latest.get(key)
+            if previous is not None:
+                self.pending_bytes -= len(previous.payload)
+                if key != _TIME_OUTBOX_KEY:
+                    self.dropped_frames += 1
+            self._latest[key] = queued
+            result: OfferResult = "replaced" if previous is not None else "queued"
+        else:
+            if self.pending_bytes + len(frame) > self._hard_limit_bytes:
+                self.dropped_frames += 1
+                return "overflow"
+            self._reliable.append(queued)
+            result = "queued"
+        self.pending_bytes += len(frame)
+        self._has_frames.set()
+        return result
+
+    def discard(self, key: int) -> None:
+        """Discard every pending frame owned by a subscription key."""
+        removed = self._latest.pop(key, None)
+        if removed is not None:
+            self.pending_bytes -= len(removed.payload)
+            self.dropped_frames += 1
+        if not self._reliable:
+            return
+        remaining: deque[OutboxFrame] = deque()
+        while self._reliable:
+            frame = self._reliable.popleft()
+            if frame.key == key:
+                self.pending_bytes -= len(frame.payload)
+                self.dropped_frames += 1
+            else:
+                remaining.append(frame)
+        self._reliable = remaining
+
+    def clear(self) -> None:
+        """Drop every queued frame; in-flight sends are unaffected.
+
+        Used on a hard seek to discard stale pre-seek frames. These are not
+        counted as congestion drops because the caller is deliberately
+        replacing the stream, not losing data to a slow client.
+        """
+        self._reliable.clear()
+        self._latest.clear()
+        self.pending_bytes = 0
+
+    def is_key_busy(self, key: int) -> bool:
+        """True while a subscription has an in-flight or pending frame."""
+        return (
+            key in self._in_flight
+            or key in self._latest
+            or any(frame.key == key for frame in self._reliable)
+        )
+
+    def complete(self, key: int) -> None:
+        """Mark an in-flight frame as sent."""
+        self._in_flight.discard(key)
+
+    async def next_frame(self) -> OutboxFrame:
+        """Wait for and remove the next frame to send."""
+        while True:
+            frame = self._pop()
+            if frame is not None:
+                self._in_flight.add(frame.key)
+                return frame
+            self._has_frames.clear()
+            await self._has_frames.wait()
+
+    def _pop(self) -> OutboxFrame | None:
+        if not self._reliable and not self._latest:
+            return None
+        time_frame = self._latest.pop(_TIME_OUTBOX_KEY, None)
+        if time_frame is not None:
+            self.pending_bytes -= len(time_frame.payload)
+            return time_frame
+        take_latest = self._latest and (self._take_latest_next or not self._reliable)
+        self._take_latest_next = not self._take_latest_next
+        if take_latest:
+            key = next(iter(self._latest))
+            frame = self._latest.pop(key)
+        else:
+            frame = self._reliable.popleft()
+        self.pending_bytes -= len(frame.payload)
+        return frame
+
+
 @dataclass(slots=True)
 class ConnectionState:
     """Mutable state for a connected client."""
 
     websocket: ServerConnection
     subscriptions: dict[int, int] = field(default_factory=dict)
+    outbox: ConnectionOutbox = field(default_factory=ConnectionOutbox)
+    close_task: asyncio.Task[None] | None = None
 
 
 JsonHandler = Callable[[ConnectionState, JsonDict], Awaitable[None] | None]
@@ -136,6 +282,7 @@ class WebSocketBridgeEndpoint:
         self._on_unsubscribe: list[SubscriptionHandler] = []
 
         self._state_lock = asyncio.Lock()
+        self._disconnected_dropped_frames = 0
 
     async def close_connections(self) -> None:
         """Close every client currently attached to this endpoint."""
@@ -256,35 +403,88 @@ class WebSocketBridgeEndpoint:
         *,
         timestamp_ns: int | None = None,
     ) -> None:
-        """Send a binary message to all subscribers of a specific channel."""
+        """Queue a binary message for all subscribers of a specific channel.
+
+        Never blocks on slow clients: frames go through each connection's
+        outbox and a per-connection sender task delivers them.
+        """
         timestamp = timestamp_ns if timestamp_ns is not None else time.time_ns()
         frame_prefix = bytearray(1 + 4 + 8)
         frame_prefix[0] = int(BinaryOpCodes.MESSAGE_DATA)
         struct.pack_into("<Q", frame_prefix, 5, timestamp)
+        channel = self._channels.get(channel_id)
+        delivery: DeliveryPolicy = "reliable" if channel is None else channel.delivery
 
-        for state in self._connections.values():
-            subscription_ids = [
-                subscription_id
-                for subscription_id, subscribed_channel in state.subscriptions.items()
-                if subscribed_channel == channel_id
-            ]
-            if not subscription_ids:
-                continue
-            for subscription_id in subscription_ids:
+        for state in list(self._connections.values()):
+            for subscription_id, subscribed_channel in state.subscriptions.items():
+                if subscribed_channel != channel_id:
+                    continue
                 struct.pack_into("<I", frame_prefix, 1, subscription_id)
-                try:
-                    await state.websocket.send(bytes(frame_prefix) + payload)
-                except ConnectionClosed:
-                    Logger.debug("Skipping closed connection during publish")
+                result = state.outbox.offer(
+                    subscription_id, bytes(frame_prefix) + payload, delivery=delivery
+                )
+                if result == "overflow" and state.close_task is None:
+                    state.close_task = asyncio.create_task(
+                        state.websocket.close(
+                            code=1013,
+                            reason="Reliable playback queue overflow",
+                        )
+                    )
 
     async def publish_time(self, timestamp_ns: int) -> None:
         """Broadcast the current server time to every connected client."""
         frame = struct.pack("<BQ", int(BinaryOpCodes.TIME), timestamp_ns)
         for state in list(self._connections.values()):
-            try:
-                await state.websocket.send(frame)
-            except ConnectionClosed:
-                Logger.debug("Skipping closed connection while publishing time")
+            state.outbox.offer(_TIME_OUTBOX_KEY, frame, delivery="latest")
+
+    def clear_pending_frames(self) -> None:
+        """Drop every connection's queued frames, e.g. before a hard seek.
+
+        Stale frames buffered for slow clients would otherwise arrive after the
+        new stream restarts, making the client jump back to pre-seek data.
+        """
+        for state in self._connections.values():
+            state.outbox.clear()
+
+    def has_congested_subscriber(self, channel_id: int) -> bool:
+        """True when a subscriber of the channel has a backed-up outbox."""
+        for state in self._connections.values():
+            if state.outbox.is_congested and channel_id in state.subscriptions.values():
+                return True
+        return False
+
+    def are_all_subscribers_busy(self, channel_id: int) -> bool:
+        """True when every subscription for a channel already has queued work."""
+        subscriptions = [
+            (state, subscription_id)
+            for state in self._connections.values()
+            for subscription_id, subscribed_channel in state.subscriptions.items()
+            if subscribed_channel == channel_id
+        ]
+        return bool(subscriptions) and all(
+            state.outbox.is_key_busy(subscription_id) for state, subscription_id in subscriptions
+        )
+
+    @property
+    def dropped_frames(self) -> int:
+        """Frames dropped or replaced across current and closed connections."""
+        return self._disconnected_dropped_frames + sum(
+            state.outbox.dropped_frames for state in self._connections.values()
+        )
+
+    async def _run_sender(self, state: ConnectionState) -> None:
+        try:
+            while True:
+                frame = await state.outbox.next_frame()
+                try:
+                    await state.websocket.send(frame.payload)
+                finally:
+                    state.outbox.complete(frame.key)
+        except ConnectionClosed:
+            Logger.debug("Client disconnected; stopping outbox sender")
+        except (OSError, RuntimeError):
+            Logger.exception("Outbox sender failed; closing client connection")
+            await state.websocket.close(code=1011, reason="Playback sender failed")
 
     async def send_message_to_subscription(
         self,
@@ -348,6 +548,7 @@ class WebSocketBridgeEndpoint:
         state = ConnectionState(websocket=websocket)
         async with self._state_lock:
             self._connections[websocket] = state
+        sender = asyncio.create_task(self._run_sender(state))
         try:
             await self._send_server_info(state)
             await self.advertise_all()
@@ -361,8 +562,15 @@ class WebSocketBridgeEndpoint:
         except ConnectionClosed:
             Logger.debug("Connection closed for subprotocol %s", websocket.subprotocol)
         finally:
+            sender.cancel()
+            with suppress(asyncio.CancelledError):
+                await sender
+            if state.close_task is not None:
+                with suppress(asyncio.CancelledError, ConnectionClosed):
+                    await state.close_task
             async with self._state_lock:
                 self._connections.pop(websocket, None)
+                self._disconnected_dropped_frames += state.outbox.dropped_frames
             for handler in self._on_disconnect:
                 await _ensure_awaitable(handler(state))
 
@@ -413,6 +621,11 @@ class WebSocketBridgeEndpoint:
         for entry in subscriptions:
             sub_id = entry["id"]
             channel_id = entry["channelId"]
+            previous_channel_id = state.subscriptions.get(sub_id)
+            if previous_channel_id is not None:
+                state.outbox.discard(sub_id)
+                for handler in self._on_unsubscribe:
+                    await _ensure_awaitable(handler(state, sub_id, previous_channel_id))
             state.subscriptions[sub_id] = channel_id
             for handler in self._on_subscribe:
                 await _ensure_awaitable(handler(state, sub_id, channel_id))
@@ -425,6 +638,7 @@ class WebSocketBridgeEndpoint:
             channel_id = state.subscriptions.pop(sub_id, None)
             if channel_id is None:
                 continue
+            state.outbox.discard(sub_id)
             for handler in self._on_unsubscribe:
                 await _ensure_awaitable(handler(state, sub_id, channel_id))
 

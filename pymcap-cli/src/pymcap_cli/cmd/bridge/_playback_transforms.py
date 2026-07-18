@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 
@@ -31,9 +33,20 @@ if TYPE_CHECKING:
         MessageTransformProcessor,
         TransformOutput,
     )
+    from pymcap_cli.core.processors.video_compress import VideoEncoderSession
+
+logger = logging.getLogger(__name__)
+
+_ADAPTIVE_WINDOW_SECONDS = 2.0
+_ADAPTIVE_CONGESTION_RATIO = 0.25
+_ADAPTIVE_HOLD_SECONDS = 3.0
+_ADAPTIVE_RECOVERY_SECONDS = 30.0
+_ADAPTIVE_QUALITY_STEP = 6
+_MAX_USEFUL_VIDEO_QUALITY = 46
+_ADAPTIVE_SCALE_FACTORS = (0.75, 0.5, 0.375, 0.25)
 
 TRANSFORM_GROUP = Group("ROS Transform")
-TransformMode = Literal["none", "roscompress", "rosdecompress"]
+Preset = Literal["compress", "decompress", "fast", "low"]
 BackendName = Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
 ImageFormat = Literal["video", "jpeg", "png", "none"]
 VideoFormat = Literal["compressed", "raw"]
@@ -42,12 +55,16 @@ PointCloudSchema = Literal["auto", "pointcloud2", "foxglove"]
 PointCloudEncoding = Literal["lossy", "lossless", "none"]
 PointCloudCompression = Literal["zstd", "lz4", "none"]
 
-TransformModeOption = Annotated[
-    TransformMode,
+OptionalPresetOption = Annotated[
+    Preset | None,
     Parameter(
-        name=["--transform"],
+        name=["--preset"],
         group=TRANSFORM_GROUP,
-        help="JIT ROS payload preset applied during playback.",
+        help=(
+            "JIT ROS payload preset: compress (full-resolution video), "
+            "decompress, fast (960px video), low (480px video). "
+            "Explicit encoding flags override the preset's defaults."
+        ),
     ),
 ]
 OptionalImageFormatOption = Annotated[
@@ -61,6 +78,18 @@ OptionalImageFormatOption = Annotated[
 OptionalQualityOption = Annotated[
     int | None,
     Parameter(name=["-q", "--quality"], group=ENCODING_GROUP, help="Preset default: 28."),
+]
+OptionalAdaptiveQualityOption = Annotated[
+    bool | None,
+    Parameter(
+        name=["--adaptive-quality"],
+        negative="--no-adaptive-quality",
+        group=ENCODING_GROUP,
+        help=(
+            "Adapt video quality, then resolution, when subscribers fall behind. "
+            "Serve default: enabled."
+        ),
+    ),
 ]
 OptionalEncoderOption = Annotated[
     str | None,
@@ -135,6 +164,7 @@ class RoscompressConfig:
     image_format: ImageFormat = "video"
     codec: Literal["h264", "h265", "vp9", "av1"] = "h264"
     quality: int = 28
+    adaptive_quality: bool = False
     encoder: str | None = None
     backend: BackendName = "auto"
     scale: int | None = None
@@ -162,9 +192,44 @@ class RosdecompressConfig:
 PlaybackTransformConfig = RoscompressConfig | RosdecompressConfig | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PresetSpec:
+    image_format: ImageFormat | None
+    scale: int | None
+
+
+_PRESETS: dict[Preset, _PresetSpec] = {
+    "compress": _PresetSpec("video", None),
+    "decompress": _PresetSpec(None, None),
+    "fast": _PresetSpec("video", 960),
+    "low": _PresetSpec("video", 480),
+}
+
+
+def apply_preset(
+    preset: Preset | None,
+    *,
+    image_format: ImageFormat | None,
+    scale: int | None,
+) -> tuple[ImageFormat | None, int | None]:
+    """Apply a preset's image format and scale defaults.
+
+    Explicitly supplied encoding flags win over the preset's defaults. Without a
+    preset no transform is applied and playback streams the raw payloads.
+    """
+    if preset is None:
+        return image_format, scale
+    spec = _PRESETS[preset]
+    return (
+        spec.image_format if image_format is None else image_format,
+        spec.scale if scale is None else scale,
+    )
+
+
 def resolve_playback_transform_config(
     *,
-    transform: TransformMode,
+    preset: Preset | None,
+    adaptive_quality: bool | None,
     image_format: ImageFormat | None,
     codec: Literal["h264", "h265", "vp9", "av1"] | None,
     quality: int | None,
@@ -185,6 +250,7 @@ def resolve_playback_transform_config(
     pointcloud_sort_field: str | None,
 ) -> PlaybackTransformConfig:
     compression_options = {
+        "--adaptive-quality": adaptive_quality,
         "--image-format": image_format,
         "--codec": codec,
         "--quality": quality,
@@ -206,25 +272,26 @@ def resolve_playback_transform_config(
         "--pointcloud": pointcloud,
     }
 
-    if transform == "none":
+    if preset is None:
         supplied = _supplied_options(compression_options)
         if supplied:
-            raise ValueError(f"{supplied[0]} requires --transform roscompress")
+            raise ValueError(f"{supplied[0]} requires --preset compress, fast, or low")
         supplied = _supplied_options(decompression_options)
         if supplied:
-            raise ValueError(f"{supplied[0]} requires --transform rosdecompress")
+            raise ValueError(f"{supplied[0]} requires --preset decompress")
         supplied = _supplied_options(shared_options)
         if supplied:
-            raise ValueError(f"{supplied[0]} requires --transform roscompress or rosdecompress")
+            raise ValueError(f"{supplied[0]} requires a --preset")
         return None
-    if transform == "roscompress":
+    if preset != "decompress":
         supplied = _supplied_options(decompression_options)
         if supplied:
-            raise ValueError(f"{supplied[0]} requires --transform rosdecompress")
+            raise ValueError(f"{supplied[0]} requires --preset decompress")
         config = RoscompressConfig(
             image_format=image_format or "video",
             codec=codec or "h264",
             quality=28 if quality is None else quality,
+            adaptive_quality=False if adaptive_quality is None else adaptive_quality,
             encoder=encoder,
             backend=backend or "auto",
             scale=scale,
@@ -246,11 +313,13 @@ def resolve_playback_transform_config(
             raise ValueError("--draco-compression-level must be in [0, 10]")
         if config.scale is not None and config.scale <= 0:
             raise ValueError("--scale must be positive")
+        if config.adaptive_quality and config.image_format != "video":
+            raise ValueError("--adaptive-quality requires --image-format video")
         return config
 
     supplied = _supplied_options(compression_options)
     if supplied:
-        raise ValueError(f"{supplied[0]} requires --transform roscompress")
+        raise ValueError(f"{supplied[0]} requires --preset compress, fast, or low")
     config = RosdecompressConfig(
         video=True if video is None else video,
         video_format=video_format or "compressed",
@@ -288,7 +357,75 @@ TransformFactory = Callable[[], _SyncChannelTransform]
 class _ChannelTransformSpec:
     source: PlaybackChannel
     output: PlaybackChannel
-    factory: TransformFactory
+    factories: tuple[TransformFactory, ...]
+    video_rungs: tuple[_AdaptiveVideoRung, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _AdaptiveVideoRung:
+    quality: int
+    scale_factor: float
+
+
+@dataclass(slots=True)
+class _AdaptiveQualityController:
+    max_rung: int = 3
+    rung: int = 0
+    _window_started: float | None = None
+    _observations: int = 0
+    _congested_observations: int = 0
+    _last_change: float = -math.inf
+    _clean_since: float | None = None
+
+    def observe(self, *, is_congested: bool, now: float) -> int:
+        if is_congested:
+            self._clean_since = None
+        elif self._clean_since is None:
+            self._clean_since = now
+
+        if (
+            self.rung > 0
+            and self._clean_since is not None
+            and now - self._clean_since >= _ADAPTIVE_RECOVERY_SECONDS
+            and now - self._last_change >= _ADAPTIVE_HOLD_SECONDS
+        ):
+            self.rung -= 1
+            self._last_change = now
+            self._clean_since = now
+            self._reset_window(now, is_congested)
+            return self.rung
+
+        if self._window_started is None:
+            self._reset_window(now, is_congested)
+            return self.rung
+
+        self._observations += 1
+        self._congested_observations += int(is_congested)
+        if now - self._window_started < _ADAPTIVE_WINDOW_SECONDS:
+            return self.rung
+
+        congestion_ratio = self._congested_observations / self._observations
+        # Only degrade while congestion is still present: a stale window whose
+        # single congested sample is seconds old must not keep stepping quality
+        # down during an otherwise clean period.
+        if (
+            is_congested
+            and congestion_ratio >= _ADAPTIVE_CONGESTION_RATIO
+            and self.rung < self.max_rung
+        ):
+            if now - self._last_change >= _ADAPTIVE_HOLD_SECONDS:
+                self.rung += 1
+                self._last_change = now
+                self._reset_window(now, is_congested)
+            return self.rung
+
+        self._reset_window(now, is_congested)
+        return self.rung
+
+    def _reset_window(self, now: float, is_congested: bool) -> None:
+        self._window_started = now
+        self._observations = 1
+        self._congested_observations = int(is_congested)
 
 
 class JitPlaybackTransformPlan(PlaybackTransformPlan):
@@ -315,15 +452,52 @@ class JitPlaybackTransformPlan(PlaybackTransformPlan):
 
 class _JitPlaybackTransformSession(PlaybackTransformSession):
     def __init__(self, specs: tuple[_ChannelTransformSpec, ...]) -> None:
-        self._factories = {spec.source: spec.factory for spec in specs}
+        self._factories = {spec.source: spec.factories for spec in specs}
+        self._video_rungs = {spec.source: spec.video_rungs for spec in specs}
+        self._active_rungs = {spec.source: 0 for spec in specs}
+        self._controllers = {
+            spec.source: _AdaptiveQualityController(max_rung=len(spec.factories) - 1)
+            for spec in specs
+            if len(spec.factories) > 1
+        }
         self._transforms: dict[PlaybackChannel, _SyncChannelTransform] = {}
+
+    async def observe_congestion(
+        self,
+        channel: PlaybackChannel,
+        *,
+        is_congested: bool,
+        now: float,
+    ) -> None:
+        controller = self._controllers.get(channel)
+        if controller is None:
+            return
+        previous_rung = self._active_rungs[channel]
+        new_rung = controller.observe(is_congested=is_congested, now=now)
+        if new_rung == previous_rung:
+            return
+        transform = self._transforms.pop(channel, None)
+        if transform is not None:
+            await asyncio.to_thread(transform.close)
+        self._active_rungs[channel] = new_rung
+        rungs = self._video_rungs[channel]
+        previous = rungs[previous_rung]
+        current = rungs[new_rung]
+        logger.info(
+            "Adaptive video for %s: q%d @ %.1f%% -> q%d @ %.1f%%",
+            channel.topic,
+            previous.quality,
+            previous.scale_factor * 100,
+            current.quality,
+            current.scale_factor * 100,
+        )
 
     async def transform(
         self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
     ) -> tuple[PlaybackOutput, ...]:
         transform = self._transforms.get(channel)
         if transform is None:
-            transform = self._factories[channel]()
+            transform = self._factories[channel][self._active_rungs[channel]]()
             self._transforms[channel] = transform
         try:
             return await asyncio.to_thread(transform.process, payload, timestamp_ns)
@@ -347,6 +521,16 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
     async def deactivate(self, channel: PlaybackChannel) -> None:
         transform = self._transforms.pop(channel, None)
         if transform is not None:
+            await asyncio.to_thread(transform.close)
+
+    async def restart(self) -> None:
+        # Close every live transform so the next message rebuilds it. Video
+        # encoders then open a fresh GOP whose first packet is a keyframe,
+        # which the client needs to decode after a timeline restart (loop or
+        # seek). The learned adaptive rungs are kept so quality does not reset.
+        transforms = tuple(self._transforms.values())
+        self._transforms.clear()
+        for transform in transforms:
             await asyncio.to_thread(transform.close)
 
     async def close(self) -> None:
@@ -400,11 +584,12 @@ def _create_roscompress_plan(
         schema_name = normalize_schema_name(source.schema_name)
         output = source
         factory: TransformFactory = partial(_PassthroughTransform, source)
-        if (
+        is_video = (
             _is_ros_channel(source)
             and config.image_format == "video"
             and schema_name in IMAGE_SCHEMAS
-        ):
+        )
+        if is_video:
             output = PlaybackChannel(
                 topic=source.topic,
                 message_encoding="cdr",
@@ -412,7 +597,21 @@ def _create_roscompress_plan(
                 schema_encoding="ros2msg",
                 schema_text=FOXGLOVE_COMPRESSED_VIDEO,
             )
-            factory = partial(_VideoCompressTransform, source, output, config)
+            video_rungs = (
+                _adaptive_video_rungs(config.quality)
+                if config.adaptive_quality
+                else (_AdaptiveVideoRung(config.quality, 1.0),)
+            )
+            factories = tuple(
+                partial(
+                    _VideoCompressTransform,
+                    source,
+                    output,
+                    replace(config, quality=rung.quality, adaptive_quality=False),
+                    scale_factor=rung.scale_factor,
+                )
+                for rung in video_rungs
+            )
         elif (
             _is_ros_channel(source)
             and config.image_format in {"jpeg", "png"}
@@ -451,7 +650,10 @@ def _create_roscompress_plan(
             factory = partial(
                 _create_pointcloud_processor_transform, source, output, config, cleanup
             )
-        specs.append(_ChannelTransformSpec(source, output, factory))
+        if is_video:
+            specs.append(_ChannelTransformSpec(source, output, factories, video_rungs))
+        else:
+            specs.append(_ChannelTransformSpec(source, output, (factory,)))
     plan = JitPlaybackTransformPlan("roscompress", tuple(specs))
     _probe_factories(specs)
     return plan
@@ -512,7 +714,7 @@ def _create_rosdecompress_plan(
                 schema_text=POINTCLOUD2,
             )
             factory = partial(_PointcloudDecompressTransform, source, output)
-        specs.append(_ChannelTransformSpec(source, output, factory))
+        specs.append(_ChannelTransformSpec(source, output, (factory,)))
     plan = JitPlaybackTransformPlan("rosdecompress", tuple(specs))
     _probe_factories(specs)
     return plan
@@ -520,8 +722,47 @@ def _create_rosdecompress_plan(
 
 def _probe_factories(specs: Iterable[_ChannelTransformSpec]) -> None:
     for spec in specs:
-        transform = spec.factory()
+        transform = spec.factories[0]()
         transform.close()
+
+
+def _adaptive_quality_rungs(quality: int) -> tuple[int, ...]:
+    # Stop small quality-only steps at q46 so sustained congestion reaches the
+    # much higher-impact resolution rungs promptly. Preserve an explicit
+    # starting quality above q46.
+    max_quality = max(quality, _MAX_USEFUL_VIDEO_QUALITY)
+    return tuple(
+        dict.fromkeys(
+            min(max_quality, quality + rung * _ADAPTIVE_QUALITY_STEP) for rung in range(4)
+        )
+    )
+
+
+def _adaptive_video_rungs(quality: int) -> tuple[_AdaptiveVideoRung, ...]:
+    qualities = _adaptive_quality_rungs(quality)
+    most_compressed = qualities[-1]
+    return tuple(_AdaptiveVideoRung(value, 1.0) for value in qualities) + tuple(
+        _AdaptiveVideoRung(most_compressed, scale_factor)
+        for scale_factor in _ADAPTIVE_SCALE_FACTORS
+    )
+
+
+def _adaptive_max_dimension(
+    configured_scale: int | None,
+    *,
+    width: int,
+    height: int,
+    scale_factor: float,
+) -> int | None:
+    if scale_factor == 1.0:
+        return configured_scale
+    source_max_dimension = max(width, height)
+    base_max_dimension = (
+        source_max_dimension
+        if configured_scale is None
+        else min(source_max_dimension, configured_scale)
+    )
+    return max(2, round(base_max_dimension * scale_factor))
 
 
 def _is_ros_channel(channel: PlaybackChannel) -> bool:
@@ -582,6 +823,7 @@ class _ProcessorChannelTransform:
         if encoder is None:
             raise PlaybackError(f"No CDR encoder for {output.schema_name!r}")
         self._encoder: Callable[[object], bytes | memoryview] = encoder
+        self._warned_unconvertible = False
 
     def process(self, payload: bytes | memoryview, timestamp_ns: int) -> tuple[PlaybackOutput, ...]:
         current = self._decoder(payload)
@@ -592,7 +834,9 @@ class _ProcessorChannelTransform:
                 continue
             output = _single_processor_output(processor.transform(channel, schema, current))
             if output is None:
-                raise PlaybackError(f"Transform failed for {self._source.topic!r}")
+                # The processor left the message unchanged (e.g. nothing to
+                # clean, or compression bailed and kept the raw payload).
+                continue
             current = output.data
             schema = Schema(
                 id=2,
@@ -612,7 +856,16 @@ class _ProcessorChannelTransform:
             or schema.encoding != self._output.schema_encoding
             or schema.data != self._output.schema_text.encode()
         ):
-            raise PlaybackError(f"Transform output schema changed for {self._source.topic!r}")
+            # The advertised channel promises the transformed schema; a message
+            # the chain could not convert cannot be delivered on it.
+            if not self._warned_unconvertible:
+                self._warned_unconvertible = True
+                logger.warning(
+                    "Dropping %s messages the JIT transform could not convert to %s",
+                    self._source.topic,
+                    self._output.schema_name,
+                )
+            return ()
         return (PlaybackOutput(self._output, timestamp_ns, self._encoder(current)),)
 
     def finish(self) -> tuple[PlaybackOutput, ...]:
@@ -752,6 +1005,8 @@ class _VideoCompressTransform:
         source: PlaybackChannel,
         output: PlaybackChannel,
         config: RoscompressConfig,
+        *,
+        scale_factor: float = 1.0,
     ) -> None:
         from mcap_codec_support.video import EncoderMode  # noqa: PLC0415
         from mcap_ros2_support_fast.decoder import DecoderFactory  # noqa: PLC0415
@@ -789,14 +1044,11 @@ class _VideoCompressTransform:
             encoder=config.encoder,
             backend=EncoderMode(config.backend),
         )
-        self._session = VideoEncoderSession(
-            backend=resolved.backend,
-            encoder_name=resolved.encoder_name,
-            codec=config.codec,
-            quality=config.quality,
-            topic=source.topic,
-            scale=config.scale,
-        )
+        self._backend = resolved.backend
+        self._encoder_name = resolved.encoder_name
+        self._session_type = VideoEncoderSession
+        self._session: VideoEncoderSession | None = None
+        self._scale_factor = scale_factor
         self._build_payload = build_compressed_video_payload
         self._pending: deque[_VideoMeta] = deque()
 
@@ -811,10 +1063,26 @@ class _VideoCompressTransform:
                 header.frame_id,
             )
         )
-        frame, width, height = self._session.decode_image(
+        frame, width, height = self._backend.decode_image(
             _ImageMessage(decoded, self._channel), self._normalized_schema_name
         )
-        outcome = self._session.encode_with_fallback(frame, width, height)
+        session = self._session
+        if session is None:
+            session = self._session_type(
+                backend=self._backend,
+                encoder_name=self._encoder_name,
+                codec=self._config.codec,
+                quality=self._config.quality,
+                topic=self._source.topic,
+                scale=_adaptive_max_dimension(
+                    self._config.scale,
+                    width=width,
+                    height=height,
+                    scale_factor=self._scale_factor,
+                ),
+            )
+            self._session = session
+        outcome = session.encode_with_fallback(frame, width, height)
         if outcome.failed:
             raise PlaybackError(f"Video encoding failed for {self._source.topic!r}")
         if outcome.swapped and len(self._pending) > 1:
@@ -826,7 +1094,8 @@ class _VideoCompressTransform:
         return (self._output_for(self._pending.popleft(), outcome.data),)
 
     def finish(self) -> tuple[PlaybackOutput, ...]:
-        encoder = self._session.encoder
+        session = self._session
+        encoder = None if session is None else session.encoder
         packets = [] if encoder is None else encoder.flush_packets()
         outputs = [self._output_for(self._pending.popleft(), packet) for packet in packets]
         if self._pending:
@@ -848,7 +1117,8 @@ class _VideoCompressTransform:
         return PlaybackOutput(self._output, meta.timestamp_ns, encoded)
 
     def close(self) -> None:
-        self._session.close()
+        if self._session is not None:
+            self._session.close()
 
 
 class _VideoDecompressTransform:

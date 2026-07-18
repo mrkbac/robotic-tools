@@ -31,6 +31,27 @@ if TYPE_CHECKING:
 
 _SETTLE_SECONDS = 1.0
 _MAX_PLAYBACK_LAG_SECONDS = 0.1
+_STRESSED_FRAME_INTERVAL_SECONDS = 0.25
+# Schemas whose messages stand alone: dropping a late or superseded frame is
+# safe because the next message fully replaces it. Video streams are absent on
+# purpose — every encoded packet must reach the decoder.
+_FRAME_SCHEMAS = frozenset(
+    {
+        "sensor_msgs/Image",
+        "sensor_msgs/msg/Image",
+        "sensor_msgs/CompressedImage",
+        "sensor_msgs/msg/CompressedImage",
+        "sensor_msgs/PointCloud2",
+        "sensor_msgs/msg/PointCloud2",
+        "sensor_msgs/LaserScan",
+        "sensor_msgs/msg/LaserScan",
+        "point_cloud_interfaces/msg/CompressedPointCloud2",
+        "foxglove_msgs/msg/CompressedPointCloud",
+        "foxglove.RawImage",
+        "foxglove.CompressedImage",
+        "foxglove.PointCloud",
+    }
+)
 PlaybackControllerState: TypeAlias = Literal["Paused", "Playing", "Stopped"]
 PlaybackState: TypeAlias = Literal[
     "Preparing",
@@ -45,6 +66,11 @@ PlaybackState: TypeAlias = Literal[
 
 class PlaybackError(RuntimeError):
     """Playback configuration, input, or transport failure."""
+
+
+def is_frame_channel(channel: PlaybackChannel) -> bool:
+    """True when each message on the channel stands alone and may be dropped."""
+    return channel.schema_name in _FRAME_SCHEMAS
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +226,8 @@ class PlaybackSink(Protocol):
 
     def is_channel_active(self, channel: PlaybackChannel) -> bool: ...
 
+    def is_channel_congested(self, channel: PlaybackChannel) -> bool: ...
+
     async def wait_until_active(self) -> float: ...
 
 
@@ -211,11 +239,21 @@ class PlaybackOutput:
 
 
 class PlaybackTransformSession(Protocol):
+    async def observe_congestion(
+        self,
+        channel: PlaybackChannel,
+        *,
+        is_congested: bool,
+        now: float,
+    ) -> None: ...
+
     async def transform(
         self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
     ) -> tuple[PlaybackOutput, ...]: ...
 
     async def finish(self) -> tuple[PlaybackOutput, ...]: ...
+
+    async def restart(self) -> None: ...
 
     async def deactivate(self, channel: PlaybackChannel) -> None: ...
 
@@ -436,7 +474,9 @@ async def run_playback(
     done = asyncio.Event()
     live: Live | None = None
     status_task: asyncio.Task[None] | None = None
+    transform_session: PlaybackTransformSession | None = None
     channel_cache: dict[tuple[int, int], PlaybackChannel] = {}
+    last_frame_sent: dict[PlaybackChannel, float] = {}
     selected_channels = {channel.topic: channel for channel in prepared.channels}
     transform_mode = "none" if transform_plan is None else transform_plan.mode
 
@@ -479,6 +519,8 @@ async def run_playback(
             live = Live(console=console, refresh_per_second=4)
             live.start()
             status_task = asyncio.create_task(refresh_status())
+        if transform_plan is not None:
+            transform_session = transform_plan.create_session()
 
         while True:
             stats.state = "Playing"
@@ -486,125 +528,157 @@ async def run_playback(
             last_input_time_ns: int | None = None
             last_time_ns: int | None = None
             clock: PlaybackClock | None = None
-            transform_session = None if transform_plan is None else transform_plan.create_session()
 
-            async def publish_output(output: PlaybackOutput, playback_clock: PlaybackClock) -> None:
+            async def publish_output(
+                output: PlaybackOutput,
+                playback_clock: PlaybackClock,
+                *,
+                deadline_cap_ns: int | None = None,
+            ) -> None:
                 nonlocal last_time_ns
-                deadline, _ = await wait_for_deadline(playback_clock, output.timestamp_ns)
+                deadline_timestamp_ns = (
+                    output.timestamp_ns
+                    if deadline_cap_ns is None
+                    else min(output.timestamp_ns, deadline_cap_ns)
+                )
+                deadline, _ = await wait_for_deadline(playback_clock, deadline_timestamp_ns)
                 await sink.publish(output.channel, output.timestamp_ns, output.payload)
                 lag = max(0.0, time.monotonic() - deadline)
                 stats.current_lag = lag
                 stats.max_lag = max(stats.max_lag, lag)
                 stats.messages += 1
                 stats.payload_bytes += len(output.payload)
-                stats.playhead_ns = output.timestamp_ns
+                stats.playhead_ns = deadline_timestamp_ns
                 last_time_ns = (
                     output.timestamp_ns
                     if last_time_ns is None
                     else max(last_time_ns, output.timestamp_ns)
                 )
 
-            try:
-                with open_playback_messages(
-                    prepared,
-                    start_time_ns=start_time_ns,
-                ) as messages:
-                    while True:
-                        activity_delay = await sink.wait_until_active()
-                        if clock is not None:
-                            clock.delay(activity_delay)
-                        try:
-                            schema, channel, message = next(messages)
-                        except StopIteration:
-                            break
-                        if (
-                            prepared.resolved_filter.early_bail
-                            and message.log_time >= prepared.resolved_filter.end_time_ns
-                        ):
-                            break
-                        if first_time_ns is None:
-                            first_time_ns = message.log_time
-                            playback_speed = (
-                                speed
-                                if controller is None or controller.speed is None
-                                else controller.speed
-                            )
-                            clock = PlaybackClock(
-                                record_origin_ns=first_time_ns,
-                                wall_origin=time.monotonic(),
-                                speed=playback_speed,
-                                recording_end_ns=prepared.recording_end_ns,
-                            )
-                            await sink.timeline_started(clock)
-                        assert clock is not None
-                        last_input_time_ns = message.log_time
-                        clock.delay(await sink.wait_until_active())
-                        cache_key = (0 if schema is None else schema.id, channel.id)
-                        playback_channel = channel_cache.get(cache_key)
-                        if playback_channel is None:
-                            playback_channel = _playback_channel(schema, channel)
-                            channel_cache[cache_key] = playback_channel
-                        selected_channel = selected_channels.get(playback_channel.topic)
-                        if selected_channel is None or not _channel_definitions_are_compatible(
-                            playback_channel,
-                            selected_channel,
-                        ):
-                            raise PlaybackError(
-                                f"Topic {playback_channel.topic!r} changed to an "
-                                "incompatible channel definition during playback"
-                            )
-                        playback_channel = selected_channel
-                        advertised_channel = (
-                            playback_channel
-                            if transform_plan is None
-                            else transform_plan.output_channel(playback_channel)
+            with open_playback_messages(
+                prepared,
+                start_time_ns=start_time_ns,
+            ) as messages:
+                while True:
+                    activity_delay = await sink.wait_until_active()
+                    if clock is not None:
+                        clock.delay(activity_delay)
+                    try:
+                        schema, channel, message = next(messages)
+                    except StopIteration:
+                        break
+                    if (
+                        prepared.resolved_filter.early_bail
+                        and message.log_time >= prepared.resolved_filter.end_time_ns
+                    ):
+                        break
+                    if first_time_ns is None:
+                        first_time_ns = message.log_time
+                        playback_speed = (
+                            speed
+                            if controller is None or controller.speed is None
+                            else controller.speed
                         )
-                        if not sink.is_channel_active(advertised_channel):
-                            if transform_session is not None:
-                                await transform_session.deactivate(playback_channel)
-                            continue
-                        _, lag = await wait_for_deadline(clock, message.log_time)
-                        if lag > _MAX_PLAYBACK_LAG_SECONDS:
+                        clock = PlaybackClock(
+                            record_origin_ns=first_time_ns,
+                            wall_origin=time.monotonic(),
+                            speed=playback_speed,
+                            recording_end_ns=prepared.recording_end_ns,
+                        )
+                        await sink.timeline_started(clock)
+                    assert clock is not None
+                    last_input_time_ns = message.log_time
+                    clock.delay(await sink.wait_until_active())
+                    cache_key = (0 if schema is None else schema.id, channel.id)
+                    playback_channel = channel_cache.get(cache_key)
+                    if playback_channel is None:
+                        playback_channel = _playback_channel(schema, channel)
+                        channel_cache[cache_key] = playback_channel
+                    selected_channel = selected_channels.get(playback_channel.topic)
+                    if selected_channel is None or not _channel_definitions_are_compatible(
+                        playback_channel,
+                        selected_channel,
+                    ):
+                        raise PlaybackError(
+                            f"Topic {playback_channel.topic!r} changed to an "
+                            "incompatible channel definition during playback"
+                        )
+                    playback_channel = selected_channel
+                    advertised_channel = (
+                        playback_channel
+                        if transform_plan is None
+                        else transform_plan.output_channel(playback_channel)
+                    )
+                    if not sink.is_channel_active(advertised_channel):
+                        if transform_session is not None:
+                            await transform_session.deactivate(playback_channel)
+                        continue
+                    deadline, lag = await wait_for_deadline(clock, message.log_time)
+                    # wait_for_deadline returned at wall time deadline + lag.
+                    processing_started = deadline + lag
+                    if is_frame_channel(playback_channel):
+                        now = processing_started
+                        last_sent = last_frame_sent.get(advertised_channel, -math.inf)
+                        is_congested = sink.is_channel_congested(advertised_channel)
+                        if transform_session is not None:
+                            await transform_session.observe_congestion(
+                                playback_channel,
+                                is_congested=is_congested,
+                                now=now,
+                            )
+                        # When behind, keep every frame channel alive at a
+                        # reduced rate without sending frames that are
+                        # already older than the stressed interval.
+                        is_too_stale = lag > _STRESSED_FRAME_INTERVAL_SECONDS
+                        is_rate_limited = (
+                            lag > _MAX_PLAYBACK_LAG_SECONDS
+                            and now - last_sent < _STRESSED_FRAME_INTERVAL_SECONDS
+                        )
+                        if is_too_stale or is_rate_limited or is_congested:
                             record_drop(message.log_time, lag)
                             continue
-                        if transform_session is None:
-                            outputs = (
-                                PlaybackOutput(
-                                    playback_channel,
-                                    message.log_time,
-                                    message.data,
-                                ),
-                            )
-                        else:
-                            outputs = await transform_session.transform(
+                        last_frame_sent[advertised_channel] = now
+                    if transform_session is None:
+                        outputs = (
+                            PlaybackOutput(
                                 playback_channel,
                                 message.log_time,
                                 message.data,
-                            )
-                        for output in outputs:
-                            await publish_output(output, clock)
-                if transform_session is not None:
-                    for output in await transform_session.finish():
-                        assert clock is not None
-                        await publish_output(output, clock)
-            finally:
-                if transform_session is not None:
-                    await transform_session.close()
+                            ),
+                        )
+                    else:
+                        outputs = await transform_session.transform(
+                            playback_channel,
+                            message.log_time,
+                            message.data,
+                        )
+                    for output in outputs:
+                        await publish_output(
+                            output,
+                            clock,
+                            deadline_cap_ns=message.log_time,
+                        )
 
             if first_time_ns is None or last_input_time_ns is None:
                 raise PlaybackError("Filters selected no messages")
-            await sink.timeline_finished(
-                last_input_time_ns if last_time_ns is None else last_time_ns
-            )
             is_looping = (
                 loop
                 if controller is None or controller.is_looping is None
                 else controller.is_looping
             )
+            if transform_session is not None and not is_looping:
+                for output in await transform_session.finish():
+                    assert clock is not None
+                    await publish_output(output, clock)
+            await sink.timeline_finished(
+                last_input_time_ns if last_time_ns is None else last_time_ns
+            )
             if not is_looping:
                 break
             if last_input_time_ns == first_time_ns:
                 raise PlaybackError("Cannot loop a zero-duration selection")
+            if transform_session is not None:
+                await transform_session.restart()
             stats.loop_number += 1
 
     except _PlaybackStoppedError:
@@ -620,4 +694,8 @@ async def run_playback(
         if live is not None:
             live.update(_build_status(prepared, sink, stats, speed, transform_mode))
             live.stop()
-        await sink.close()
+        try:
+            if transform_session is not None:
+                await transform_session.close()
+        finally:
+            await sink.close()
