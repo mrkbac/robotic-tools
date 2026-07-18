@@ -293,6 +293,9 @@ clock instead, such as
 
 Checks may reference `$log_time_ns`, `$publish_time_ns`,
 `$recording_start_ns`, and `$recording_end_ns` as evaluation variables.
+On files without summary statistics (e.g. torn, in-progress recordings) the
+recording end is unknown while messages stream by, so rules referencing
+`$recording_end_ns` report an evaluation error instead of a guessed value.
 
 The repository includes a complete contract for its nuScenes fixture. From the
 workspace root, run:

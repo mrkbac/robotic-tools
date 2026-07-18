@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from rich.console import Console
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities, ServerInfoMessage, ServiceInfo
-from small_mcap import Schema
+from small_mcap import DecoderFactoryProtocol, Schema
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -43,6 +43,45 @@ def channel_to_schema(channel: ChannelInfo) -> Schema:
         encoding=channel.get("schemaEncoding", ""),
         data=channel.get("schema", "").encode("utf-8"),
     )
+
+
+class ChannelDecoderCache:
+    """Per-channel message decoder lookup with negative caching.
+
+    A factory that raises on a malformed schema (mcap_ros2_support_fast parses
+    ros2msg eagerly) counts as "no decoder" for that channel and is not retried.
+    """
+
+    def __init__(self, factories: Iterable[DecoderFactoryProtocol]) -> None:
+        self._factories = tuple(factories)
+        self._decoders: dict[int, Callable[[bytes | memoryview], object] | None] = {}
+        self._schemas: dict[int, Schema] = {}
+
+    def decoder_for(self, channel: ChannelInfo) -> Callable[[bytes | memoryview], object] | None:
+        channel_id = channel["id"]
+        if channel_id in self._decoders:
+            return self._decoders[channel_id]
+        schema = channel_to_schema(channel)
+        decoder: Callable[[bytes | memoryview], object] | None = None
+        for factory in self._factories:
+            try:
+                decoder = factory.decoder_for(channel["encoding"], schema)
+            except Exception:
+                logger.exception(
+                    f"Decoder construction failed for {channel['topic']} "
+                    f"(schema={schema.name!r}, encoding={channel['encoding']!r})"
+                )
+                decoder = None
+            if decoder is not None:
+                break
+        self._decoders[channel_id] = decoder
+        if decoder is not None:
+            self._schemas[channel_id] = schema
+        return decoder
+
+    def schema_for(self, channel_id: int) -> Schema | None:
+        """Schema for a channel that resolved a decoder, else None."""
+        return self._schemas.get(channel_id)
 
 
 class ChannelSubscriptionManager:

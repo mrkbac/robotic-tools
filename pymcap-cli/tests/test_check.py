@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import struct
 from typing import TYPE_CHECKING
 
 import pytest
@@ -740,6 +741,65 @@ topics:
 
     assert check_cmd.check(str(path), spec=spec_path, num_workers=0) == 0
     assert "WARN" in output.getvalue()
+
+
+def _strip_summary(path: Path) -> None:
+    """Drop the summary section and footer, keeping every message."""
+    data = path.read_bytes()
+    summary_start = struct.unpack_from("<Q", data, len(data) - 28)[0]
+    assert summary_start != 0
+    path.write_bytes(data[:summary_start])
+
+
+def test_check_frequency_max_violation_detected_without_summary(tmp_path: Path) -> None:
+    events = [("/imu", int(seconds * NS), "{}") for seconds in (0.0, 2.0, 2.1, 2.2, 5.0)]
+    spec = _spec(
+        """
+version: 1
+topics:
+  imu:
+    topic: /imu
+    frequency:
+      max: 2.5
+      window: 1s
+"""
+    )
+    full = tmp_path / "full.mcap"
+    _write_json_mcap(full, events)
+    torn = tmp_path / "torn.mcap"
+    _write_json_mcap(torn, events)
+    _strip_summary(torn)
+
+    full_result = _result(check_mcap(str(full), spec, num_workers=0), "imu:/imu/frequency")
+    torn_result = _result(check_mcap(str(torn), spec, num_workers=0), "imu:/imu/frequency")
+
+    assert full_result.level == ERROR
+    assert torn_result.level == ERROR
+    assert torn_result.values["maximum_hz"] == full_result.values["maximum_hz"]
+
+
+def test_check_recording_end_variable_errors_without_summary(tmp_path: Path) -> None:
+    events = [("/imu", index * NS, f'{{"stamp": {index * NS}}}') for index in range(3)]
+    spec = _spec(
+        """
+version: 1
+topics:
+  imu:
+    topic: /imu
+    values:
+      - '.stamp{<=$recording_end_ns}'
+"""
+    )
+    full = tmp_path / "full.mcap"
+    _write_json_mcap(full, events)
+    torn = tmp_path / "torn.mcap"
+    _write_json_mcap(torn, events)
+    _strip_summary(torn)
+
+    assert _result(check_mcap(str(full), spec, num_workers=0), "imu:/imu/value[0]").level == OK
+    torn_result = _result(check_mcap(str(torn), spec, num_workers=0), "imu:/imu/value[0]")
+    assert torn_result.level == ERROR
+    assert "recording_end_ns" in torn_result.summary
 
 
 def test_check_works_on_in_progress_recording_without_summary(tmp_path: Path) -> None:

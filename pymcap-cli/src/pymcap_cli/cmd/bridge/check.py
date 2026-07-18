@@ -5,12 +5,11 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypeAlias, cast
+from functools import partial
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities
-from ros_parser.message_path import MessagePathError
 from small_mcap import Channel, JSONDecoderFactory, Schema
 
 from pymcap_cli.check import (
@@ -22,12 +21,11 @@ from pymcap_cli.check import (
     CheckSpecError,
     EndpointRule,
     LiveNodeRule,
+    MessageRuleEvaluator,
     ObservationValue,
+    TopicObservation,
     TopicRule,
-    _build_results,
-    _create_runtime,
-    _TopicObservation,
-    _TopicRuntime,
+    build_results,
     load_check_spec,
 )
 from pymcap_cli.cmd._cli_options import (
@@ -39,22 +37,40 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd.bridge._shared import (
     BridgeFetchError,
+    ChannelDecoderCache,
     ChannelSubscriptionManager,
+    channel_to_schema,
     collect_graph_nodes,
     to_ws_url,
 )
 from pymcap_cli.cmd.check_cmd import print_check_report
-from pymcap_cli.display.cat_helpers import SchemaCache
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
 
-
-class DecodedPayload(Protocol):
-    """Marker protocol for dynamically decoded JSON and ROS messages."""
+_UNSET = object()
 
 
-Decoder: TypeAlias = Callable[[bytes | memoryview], DecodedPayload]
+class _DecodeOnce:
+    """Decode a payload at most once per message across overlapping rules."""
+
+    __slots__ = ("_decode", "_error", "_value")
+
+    def __init__(self, decode: Callable[[], object]) -> None:
+        self._decode = decode
+        self._value: object = _UNSET
+        self._error: Exception | None = None
+
+    def __call__(self) -> object:
+        if self._error is not None:
+            raise self._error
+        if self._value is _UNSET:
+            try:
+                self._value = self._decode()
+            except Exception as exc:
+                self._error = exc
+                raise
+        return self._value
 
 
 @dataclass(slots=True)
@@ -62,18 +78,18 @@ class _LiveEvaluator:
     spec: CheckSpec
     start_ns: int
     end_ns: int
-    observations: dict[int, dict[str, _TopicObservation]] = field(init=False)
-    runtimes: dict[tuple[int, str], _TopicRuntime] = field(default_factory=dict)
+    observations: dict[int, dict[str, TopicObservation]] = field(init=False)
+    rules: MessageRuleEvaluator = field(init=False)
     _predicates: list[Callable[[Channel, Schema | None], bool]] = field(init=False)
     _records: dict[int, tuple[Channel, Schema | None]] = field(default_factory=dict)
     _matched_indexes: dict[int, tuple[int, ...]] = field(default_factory=dict)
-    _decoders: dict[int, Decoder | None] = field(default_factory=dict)
-    _validated_paths: set[tuple[int, int]] = field(default_factory=set)
-    _schema_cache: SchemaCache = field(default_factory=SchemaCache)
+    _decoders: ChannelDecoderCache = field(init=False)
 
     def __post_init__(self) -> None:
         self.observations = {index: {} for index in range(len(self.spec.topics))}
+        self.rules = MessageRuleEvaluator(self.spec)
         self._predicates = [rule.selector.create_channel_predicate() for rule in self.spec.topics]
+        self._decoders = ChannelDecoderCache([JSONDecoderFactory(), DecoderFactory()])
 
     def add_channel(self, info: ChannelInfo) -> None:
         channel, schema = _channel_records(info)
@@ -83,7 +99,7 @@ class _LiveEvaluator:
         )
         self._matched_indexes[channel.id] = matched
         for index in matched:
-            observation = self.observations[index].setdefault(channel.topic, _TopicObservation())
+            observation = self.observations[index].setdefault(channel.topic, TopicObservation())
             if channel.id not in observation.channels:
                 observation.add_channel(channel, schema, 0)
 
@@ -104,107 +120,41 @@ class _LiveEvaluator:
         if info["id"] not in self._records:
             self.add_channel(info)
         channel, schema = self._records[info["id"]]
-        matched = self._matched_indexes[info["id"]]
-        decoded: DecodedPayload | None = None
-        decode_attempted = False
-        decode_error: str | None = None
-
-        for index in matched:
+        variables = {
+            "log_time_ns": timestamp_ns,
+            "publish_time_ns": timestamp_ns if publish_time_ns is None else publish_time_ns,
+            "recording_start_ns": self.start_ns,
+            "recording_end_ns": self.end_ns,
+        }
+        decoded_supplier = _DecodeOnce(partial(self._decode, info, payload))
+        for index in self._matched_indexes[info["id"]]:
             rule = self.spec.topics[index]
             self.observations[index][channel.topic].message_count += 1
             if not rule.expected or not rule.needs_messages:
                 continue
-
-            runtime = self.runtimes.get((index, channel.topic))
-            if runtime is None:
-                runtime = _create_runtime(rule)
-                self.runtimes[index, channel.topic] = runtime
-            runtime.observe_timestamp(timestamp_ns, self.start_ns, self.end_ns)
-            if not rule.values:
-                continue
-
-            self._validate_paths(index, runtime, channel, schema)
-            active = [tracker for tracker in runtime.values if tracker.evaluation_error is None]
-            if not active:
-                continue
-            if not decode_attempted:
-                decode_attempted = True
-                try:
-                    decoded = self._decode(info, schema, payload)
-                except Exception as exc:  # noqa: BLE001 - decoder plugins have no common exception
-                    decode_error = f"payload decode failed: {exc}"
-            if decode_error is not None:
-                for tracker in active:
-                    tracker.evaluation_error = decode_error
-                continue
-            for tracker in active:
-                try:
-                    tracker.evaluate(
-                        decoded,
-                        timestamp_ns,
-                        {
-                            "log_time_ns": timestamp_ns,
-                            "publish_time_ns": (
-                                timestamp_ns if publish_time_ns is None else publish_time_ns
-                            ),
-                            "recording_start_ns": self.start_ns,
-                            "recording_end_ns": self.end_ns,
-                        },
-                    )
-                except (MessagePathError, TypeError, ValueError) as exc:
-                    tracker.evaluation_error = f"MessagePath evaluation failed: {exc}"
+            self.rules.observe(
+                index,
+                channel,
+                schema,
+                timestamp_ns,
+                self.start_ns,
+                variables,
+                decoded_supplier,
+            )
 
     def report(self, url: str, graph: ConnectionGraph | None) -> CheckReport:
-        results = _build_results(
+        results = build_results(
             self.spec,
             self.observations,
-            self.runtimes,
+            self.rules.runtimes,
             self.start_ns,
             self.end_ns,
         )
         results.extend(_graph_results(self.spec, self.observations, graph))
         return CheckReport(path=url, results=results)
 
-    def _validate_paths(
-        self,
-        index: int,
-        runtime: _TopicRuntime,
-        channel: Channel,
-        schema: Schema | None,
-    ) -> None:
-        if schema is None or schema.encoding not in ("ros1msg", "ros2msg"):
-            return
-        key = (index, schema.id)
-        if key in self._validated_paths:
-            return
-        self._validated_paths.add(key)
-        for value_index, tracker in enumerate(runtime.values):
-            if not self._schema_cache.validate_query(
-                tracker.rule.path,
-                schema,
-                channel.topic,
-                query_repr=tracker.rule.path_source,
-            ):
-                tracker.evaluation_error = (
-                    f"value[{value_index}] path is incompatible with schema {schema.name!r}"
-                )
-
-    def _decode(
-        self,
-        info: ChannelInfo,
-        schema: Schema | None,
-        payload: bytes,
-    ) -> DecodedPayload:
-        channel_id = info["id"]
-        if channel_id not in self._decoders:
-            decoder: Decoder | None = None
-            for factory in (JSONDecoderFactory(), DecoderFactory()):
-                candidate = factory.decoder_for(info["encoding"], schema)
-                if candidate is not None:
-                    decoder = cast("Decoder", candidate)
-                    break
-            self._decoders[channel_id] = decoder
-        decoder = self._decoders[channel_id]
+    def _decode(self, info: ChannelInfo, payload: bytes) -> object:
+        decoder = self._decoders.decoder_for(info)
         if decoder is None:
             raise ValueError(
                 f"no decoder for encoding {info['encoding']!r} and "
@@ -215,22 +165,16 @@ class _LiveEvaluator:
 
 def _channel_records(info: ChannelInfo) -> tuple[Channel, Schema | None]:
     has_schema = bool(info.get("schemaName") or info.get("schemaEncoding") or info.get("schema"))
-    schema_id = info["id"] if has_schema else 0
     channel = Channel(
         id=info["id"],
-        schema_id=schema_id,
+        schema_id=info["id"] if has_schema else 0,
         topic=info["topic"],
         message_encoding=info["encoding"],
         metadata={},
     )
     if not has_schema:
         return channel, None
-    return channel, Schema(
-        id=schema_id,
-        name=info.get("schemaName", ""),
-        encoding=info.get("schemaEncoding", ""),
-        data=info.get("schema", "").encode(),
-    )
+    return channel, channel_to_schema(info)
 
 
 def _endpoint_result(
@@ -281,7 +225,7 @@ def _node_result(rule: LiveNodeRule, node_ids: set[str]) -> CheckResult:
 
 def _graph_results(
     spec: CheckSpec,
-    observations: dict[int, dict[str, _TopicObservation]],
+    observations: dict[int, dict[str, TopicObservation]],
     graph: ConnectionGraph | None,
 ) -> list[CheckResult]:
     if not spec.has_live_rules:

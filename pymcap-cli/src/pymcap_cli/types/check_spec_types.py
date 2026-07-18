@@ -27,6 +27,7 @@ class CheckSpecInput(TypedDict, total=False):
     Topic rules keyed by a human-readable rule name.
 
     propertyNames:
+      __type__: string
       minLength: 1
 
     Required property
@@ -185,6 +186,7 @@ class LiveRootSpec(TypedDict, total=False):
 
     minProperties: 1
     propertyNames:
+      __type__: string
       minLength: 1
 
     Required property

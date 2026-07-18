@@ -5,7 +5,6 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Callable
 from typing import Any
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -19,7 +18,7 @@ from ros_parser.message_path import (
     MessagePathEvaluator,
     MessagePathVariables,
 )
-from small_mcap import JSONDecoderFactory, Schema
+from small_mcap import JSONDecoderFactory
 
 from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
@@ -38,8 +37,8 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.cmd.bridge._shared import (
+    ChannelDecoderCache,
     ChannelSubscriptionManager,
-    channel_to_schema,
     console,
     to_ws_url,
 )
@@ -110,10 +109,7 @@ async def _cat_async(
         return 1
 
     is_tty = sys.stdout.isatty()
-    factories = [JSONDecoderFactory(), DecoderFactory()]
-
-    decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-    schemas_by_channel: dict[int, Schema] = {}
+    decoder_cache = ChannelDecoderCache([JSONDecoderFactory(), DecoderFactory()])
     schema_cache = SchemaCache()
     previous_by_topic: dict[str, Any] = {}
     validated_topics: set[str] = set()
@@ -126,32 +122,6 @@ async def _cat_async(
     def _topic_matches(topic: str) -> bool:
         query_matches = not parsed_queries or topic in parsed_queries
         return query_matches and message_filter.matches_topic(topic)
-
-    def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
-        cid = channel["id"]
-        if cid in decoders:
-            return decoders[cid]
-        schema = channel_to_schema(channel)
-        message_encoding = channel["encoding"]
-        decoder: Callable[[bytes | memoryview], Any] | None = None
-        for factory in factories:
-            try:
-                decoder = factory.decoder_for(message_encoding, schema)
-            except Exception:
-                # `mcap_ros2_support_fast.DecoderFactory` parses ROS2 schemas eagerly
-                # and raises on malformed ros2msg. Treat as "no decoder" so a single
-                # bad schema doesn't take down the whole cat session.
-                logger.exception(
-                    f"Decoder construction failed for {channel['topic']} "
-                    f"(schema={schema.name!r}, encoding={message_encoding!r})"
-                )
-                decoder = None
-            if decoder is not None:
-                break
-        decoders[cid] = decoder
-        if decoder is not None:
-            schemas_by_channel[cid] = schema
-        return decoder
 
     def _emit_jsonl(channel: ChannelInfo, log_time_ns: int, data: Any) -> None:
         entry: dict[str, Any] = {
@@ -174,7 +144,7 @@ async def _cat_async(
         header.append(" [", style="dim")
         header.append(schema_name, style="yellow")
         header.append("]", style="dim")
-        schema = schemas_by_channel.get(channel["id"])
+        schema = decoder_cache.schema_for(channel["id"])
         root_plan = schema_cache.enum_plan(schema) if schema is not None else None
         query_for_topic = parsed_queries.get(channel["topic"])
         parsed_query = query_for_topic.path if query_for_topic is not None else None
@@ -235,7 +205,7 @@ async def _cat_async(
         nonlocal total, return_code
         if done.is_set():
             return
-        decoder = _decoder_for(channel)
+        decoder = decoder_cache.decoder_for(channel)
         if decoder is None:
             cid = channel["id"]
             if cid not in warned_channels:
@@ -257,7 +227,7 @@ async def _cat_async(
         parsed_query = query_for_topic.path if query_for_topic is not None else None
         if query_for_topic is not None and topic not in validated_topics:
             validated_topics.add(topic)
-            schema = schemas_by_channel.get(channel["id"])
+            schema = decoder_cache.schema_for(channel["id"])
             if schema is not None and not schema_cache.validate_query(
                 query_for_topic.path,
                 schema,
@@ -303,7 +273,9 @@ async def _cat_async(
 
     subscriber = ChannelSubscriptionManager(
         client,
-        lambda channel: _topic_matches(channel["topic"]) and _decoder_for(channel) is not None,
+        lambda channel: (
+            _topic_matches(channel["topic"]) and decoder_cache.decoder_for(channel) is not None
+        ),
     )
     subscriber.install()
     client.on_message(_on_message)

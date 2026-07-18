@@ -13,6 +13,7 @@
       "type": "object",
       "description": "Topic rules keyed by a human-readable rule name.",
       "propertyNames": {
+        "type": "string",
         "minLength": 1
       },
       "additionalProperties": {
@@ -281,6 +282,7 @@
           "minProperties": 1,
           "description": "Live node rules keyed by a human-readable rule name.",
           "propertyNames": {
+            "type": "string",
             "minLength": 1
           },
           "additionalProperties": {

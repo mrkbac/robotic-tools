@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from functools import partial
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 import yaml
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -22,11 +23,23 @@ from small_mcap import JSONDecoderFactory, get_summary, read_message_decoded
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.display.cat_helpers import SchemaCache, query_result_is_empty
+from pymcap_cli.types.check_spec_types import (
+    CheckSpecInput,
+    ComparableValue,
+    EndpointRuleSpec,
+    LiveNodeRuleSpec,
+    LiveRootSpec,
+    LiveTopicRuleSpec,
+    SchemaRuleSpec,
+    Severity,
+    TopicRuleSpec,
+    ValueRuleMappingSpec,
+)
 from pymcap_cli.types.duration import parse_duration_ns
 from pymcap_cli.utils import ProgressTrackingIO, file_progress
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
     from typing import IO
 
@@ -34,9 +47,7 @@ if TYPE_CHECKING:
 
 YamlScalar: TypeAlias = None | bool | int | float | str
 YamlValue: TypeAlias = YamlScalar | list["YamlValue"] | dict[str, "YamlValue"]
-ComparableValue: TypeAlias = bool | int | float | str
 ObservationValue: TypeAlias = int | float | str
-Severity: TypeAlias = Literal["warn", "error"]
 
 OK = 0
 WARN = 1
@@ -178,7 +189,7 @@ def parse_check_spec(text: str, *, source: str = "<spec>") -> CheckSpec:
     except yaml.YAMLError as exc:
         raise CheckSpecError(f"{source}: invalid YAML: {exc}") from exc
 
-    root = _mapping(loaded, source, {"version", "topics", "live"})
+    root = _mapping(loaded, source, set(CheckSpecInput.__annotations__))
     version = _integer(root.get("version"), f"{source}.version")
     if version != 1:
         raise CheckSpecError(f"{source}: version must be 1, got {version}")
@@ -263,21 +274,7 @@ def _duration(value: YamlValue, path: str) -> int:
 def _parse_topic_rule(name: str, value: YamlValue, path: str) -> TopicRule:
     if not isinstance(name, str) or not name:
         raise CheckSpecError(f"{path}: topic rule names must be non-empty strings")
-    mapping = _mapping(
-        value,
-        path,
-        {
-            "topic",
-            "expected",
-            "severity",
-            "schema",
-            "message_encoding",
-            "frequency",
-            "timeout",
-            "values",
-            "live",
-        },
-    )
+    mapping = _mapping(value, path, set(TopicRuleSpec.__annotations__))
     topic = _string(mapping.get("topic"), f"{path}.topic")
     try:
         selector = MessageFilterOptions.from_args(topic=[topic])
@@ -330,7 +327,7 @@ def _parse_topic_rule(name: str, value: YamlValue, path: str) -> TopicRule:
 
 
 def _parse_live_topic(value: YamlValue, path: str) -> LiveTopicRule:
-    mapping = _mapping(value, path, {"publishers", "subscribers"})
+    mapping = _mapping(value, path, set(LiveTopicRuleSpec.__annotations__))
     publishers = (
         _parse_endpoint_rule(mapping["publishers"], f"{path}.publishers")
         if "publishers" in mapping
@@ -347,7 +344,7 @@ def _parse_live_topic(value: YamlValue, path: str) -> LiveTopicRule:
 
 
 def _parse_endpoint_rule(value: YamlValue, path: str) -> EndpointRule:
-    mapping = _mapping(value, path, {"min", "max", "node"})
+    mapping = _mapping(value, path, set(EndpointRuleSpec.__annotations__))
     minimum = _optional_non_negative_integer(mapping, "min", path)
     maximum = _optional_non_negative_integer(mapping, "max", path)
     if minimum is not None and maximum is not None and minimum > maximum:
@@ -371,7 +368,7 @@ def _optional_non_negative_integer(
 
 
 def _parse_live_root(value: YamlValue, path: str) -> tuple[LiveNodeRule, ...]:
-    mapping = _mapping(value, path, {"nodes"})
+    mapping = _mapping(value, path, set(LiveRootSpec.__annotations__))
     nodes_value = mapping.get("nodes")
     if not isinstance(nodes_value, dict) or not nodes_value:
         raise CheckSpecError(f"{path}.nodes must be a non-empty mapping")
@@ -384,7 +381,7 @@ def _parse_live_root(value: YamlValue, path: str) -> tuple[LiveNodeRule, ...]:
 def _parse_live_node(name: str, value: YamlValue, path: str) -> LiveNodeRule:
     if not isinstance(name, str) or not name:
         raise CheckSpecError(f"{path}: live node rule names must be non-empty strings")
-    mapping = _mapping(value, path, {"node", "expected", "severity"})
+    mapping = _mapping(value, path, set(LiveNodeRuleSpec.__annotations__))
     node = _string(mapping.get("node"), f"{path}.node")
     expected = _boolean(mapping.get("expected", True), f"{path}.expected")
     severity = _string(mapping.get("severity", "error"), f"{path}.severity")
@@ -407,7 +404,7 @@ def _selector(pattern: str, path: str) -> MessageFilterOptions:
 
 
 def _parse_schema(value: YamlValue, path: str) -> SchemaRule:
-    mapping = _mapping(value, path, {"name", "encoding"})
+    mapping = _mapping(value, path, set(SchemaRuleSpec.__annotations__))
     name = _string(mapping["name"], f"{path}.name") if "name" in mapping else None
     encoding = _string(mapping["encoding"], f"{path}.encoding") if "encoding" in mapping else None
     if name is None and encoding is None:
@@ -447,7 +444,7 @@ def _parse_value_rule(value: YamlValue, path: str) -> ValueRule:
         mapping: dict[str, YamlValue] = {}
         path_source = value
     else:
-        mapping = _mapping(value, path, {"path", "min", "max", "equals", "one_of"})
+        mapping = _mapping(value, path, set(ValueRuleMappingSpec.__annotations__))
         path_source = _string(mapping.get("path"), f"{path}.path")
     if not path_source.startswith((".", "{")):
         raise CheckSpecError(f"{path}.path must be relative and start with '.' or '{{'")
@@ -497,7 +494,7 @@ def _comparable(value: YamlValue, path: str) -> ComparableValue:
 
 
 @dataclass(slots=True)
-class _TopicObservation:
+class TopicObservation:
     message_count: int = 0
     channels: dict[int, tuple[Channel, Schema | None]] = field(default_factory=dict)
 
@@ -516,10 +513,14 @@ class _RateTracker:
     maximum_start_ns: int = 0
     first_window_recorded: bool = False
     last_timestamp_ns: int | None = None
+    pending_records: list[tuple[int, int]] = field(default_factory=list)
 
-    def observe(self, timestamp_ns: int, recording_start_ns: int, recording_end_ns: int) -> None:
+    def observe(self, timestamp_ns: int, recording_start_ns: int) -> None:
         window_ns = self.rule.window_ns
         first_end_ns = recording_start_ns + window_ns
+
+        if self.last_timestamp_ns is not None and timestamp_ns > self.last_timestamp_ns:
+            self._flush_pending()
 
         if not self.first_window_recorded and timestamp_ns >= first_end_ns:
             self._discard_before(recording_start_ns)
@@ -534,13 +535,18 @@ class _RateTracker:
                 self.timestamps.popleft()
 
         self.timestamps.append(timestamp_ns)
-        if timestamp_ns >= first_end_ns and timestamp_ns < recording_end_ns:
-            self._record(len(self.timestamps), timestamp_ns - window_ns + 1)
+        if timestamp_ns >= first_end_ns:
+            # The window ending at this message only counts if the recording
+            # extends past it; a later message or finish() decides.
+            self.pending_records.append((len(self.timestamps), timestamp_ns - window_ns + 1))
         self.last_timestamp_ns = timestamp_ns
 
     def finish(self, recording_start_ns: int, recording_end_ns: int) -> bool:
         if recording_end_ns - recording_start_ns < self.rule.window_ns:
             return False
+        if self.last_timestamp_ns is not None and self.last_timestamp_ns < recording_end_ns:
+            self._flush_pending()
+        self.pending_records.clear()
         first_end_ns = recording_start_ns + self.rule.window_ns
         if not self.first_window_recorded:
             count = sum(timestamp < first_end_ns for timestamp in self.timestamps)
@@ -552,6 +558,11 @@ class _RateTracker:
             count = sum(timestamp < recording_end_ns for timestamp in self.timestamps)
             self._record(count, window_start_ns)
         return True
+
+    def _flush_pending(self) -> None:
+        for count, start_ns in self.pending_records:
+            self._record(count, start_ns)
+        self.pending_records.clear()
 
     def _discard_before(self, timestamp_ns: int) -> None:
         while self.timestamps and self.timestamps[0] < timestamp_ns:
@@ -664,12 +675,7 @@ class _TopicRuntime:
     last_timestamp_ns: int | None = None
     maximum_internal_gap_ns: int = 0
 
-    def observe_timestamp(
-        self,
-        timestamp_ns: int,
-        recording_start_ns: int,
-        recording_end_ns: int,
-    ) -> None:
+    def observe_timestamp(self, timestamp_ns: int, recording_start_ns: int) -> None:
         if self.last_timestamp_ns is not None:
             self.maximum_internal_gap_ns = max(
                 self.maximum_internal_gap_ns,
@@ -679,7 +685,7 @@ class _TopicRuntime:
             self.first_timestamp_ns = timestamp_ns
         self.last_timestamp_ns = timestamp_ns
         if self.rate is not None:
-            self.rate.observe(timestamp_ns, recording_start_ns, recording_end_ns)
+            self.rate.observe(timestamp_ns, recording_start_ns)
 
 
 def _decoded_payload(message: DecodedMessage) -> object:
@@ -736,7 +742,7 @@ def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckRepo
                     num_workers,
                 )
 
-    results = _build_results(
+    results = build_results(
         spec,
         observations,
         runtimes,
@@ -749,7 +755,7 @@ def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckRepo
 def _summary_observations(
     summary: Summary | None,
     spec: CheckSpec,
-) -> tuple[dict[int, dict[str, _TopicObservation]], bool]:
+) -> tuple[dict[int, dict[str, TopicObservation]], bool]:
     observations = {index: {} for index in range(len(spec.topics))}
     if summary is None or summary.statistics is None:
         return observations, False
@@ -765,7 +771,7 @@ def _summary_observations(
         schema = summary.schemas.get(channel.schema_id)
         for index, predicate in enumerate(predicates):
             if predicate(channel, schema):
-                observation = observations[index].setdefault(channel.topic, _TopicObservation())
+                observation = observations[index].setdefault(channel.topic, TopicObservation())
                 observation.add_channel(channel, schema, count)
     return observations, True
 
@@ -780,7 +786,7 @@ def _summary_time_bounds(summary: Summary | None) -> tuple[int | None, int | Non
 def _scan_messages(
     stream: IO[bytes],
     spec: CheckSpec,
-    observations: dict[int, dict[str, _TopicObservation]],
+    observations: dict[int, dict[str, TopicObservation]],
     runtimes: dict[tuple[int, str], _TopicRuntime],
     scan_rule_indexes: set[int],
     has_complete_summary: bool,
@@ -802,8 +808,11 @@ def _scan_messages(
 
     matched_by_channel: dict[int, tuple[int, ...]] = {}
     known_channels: set[tuple[int, int]] = set()
-    validated_paths: set[tuple[int, int]] = set()
-    schema_cache = SchemaCache()
+    evaluator = MessageRuleEvaluator(spec, runtimes)
+    # Without summary statistics the recording end is unknown until the scan
+    # completes; rules referencing $recording_end_ns then fail explicitly
+    # instead of comparing against a bogus per-message value.
+    known_end_ns = recording_end_ns
 
     for message in read_message_decoded(
         stream,
@@ -814,7 +823,7 @@ def _scan_messages(
         timestamp_ns = message.message.log_time
         if recording_start_ns is None:
             recording_start_ns = timestamp_ns
-        if recording_end_ns is None or not has_complete_summary:
+        if known_end_ns is None and (recording_end_ns is None or timestamp_ns > recording_end_ns):
             recording_end_ns = timestamp_ns
 
         channel = message.channel
@@ -826,10 +835,11 @@ def _scan_messages(
             )
             matched_by_channel[channel.id] = matched_indexes
 
+        variables: dict[str, int] | None = None
         for index in matched_indexes:
             rule = spec.topics[index]
             if not has_complete_summary:
-                observation = observations[index].setdefault(channel.topic, _TopicObservation())
+                observation = observations[index].setdefault(channel.topic, TopicObservation())
                 channel_key = (index, channel.id)
                 if channel_key not in known_channels:
                     observation.add_channel(channel, schema, 0)
@@ -838,57 +848,23 @@ def _scan_messages(
             if index not in scan_rule_indexes or not rule.expected:
                 continue
 
-            if recording_start_ns is None or recording_end_ns is None:
-                continue
-            runtime = runtimes.get((index, channel.topic))
-            if runtime is None:
-                runtime = _create_runtime(rule)
-                runtimes[index, channel.topic] = runtime
-            runtime.observe_timestamp(timestamp_ns, recording_start_ns, recording_end_ns)
-
-            if not rule.values:
-                continue
-            if schema is not None and schema.encoding in ("ros1msg", "ros2msg"):
-                validation_key = (index, schema.id)
-                if validation_key not in validated_paths:
-                    validated_paths.add(validation_key)
-                    for value_index, value_tracker in enumerate(runtime.values):
-                        if not schema_cache.validate_query(
-                            value_tracker.rule.path,
-                            schema,
-                            channel.topic,
-                            query_repr=value_tracker.rule.path_source,
-                        ):
-                            value_tracker.evaluation_error = (
-                                f"value[{value_index}] path is incompatible with "
-                                f"schema {schema.name!r}"
-                            )
-
-            active_values = [
-                tracker for tracker in runtime.values if tracker.evaluation_error is None
-            ]
-            if not active_values:
-                continue
-            try:
-                decoded = _decoded_payload(message)
-            except Exception as exc:  # noqa: BLE001 - decoder plugins have no common exception
-                for tracker in active_values:
-                    tracker.evaluation_error = f"payload decode failed: {exc}"
-                continue
-            for tracker in active_values:
-                try:
-                    variables = {
-                        "log_time_ns": message.message.log_time,
-                        "publish_time_ns": message.message.publish_time,
-                    }
-                    if recording_start_ns is not None:
-                        variables["recording_start_ns"] = recording_start_ns
-                    if recording_end_ns is not None:
-                        variables["recording_end_ns"] = recording_end_ns
-                    tracker.evaluate(decoded, timestamp_ns, variables)
-                except (MessagePathError, TypeError, ValueError) as exc:
-                    tracker.evaluation_error = f"MessagePath evaluation failed: {exc}"
-                    continue
+            if variables is None:
+                variables = {
+                    "log_time_ns": message.message.log_time,
+                    "publish_time_ns": message.message.publish_time,
+                    "recording_start_ns": recording_start_ns,
+                }
+                if known_end_ns is not None:
+                    variables["recording_end_ns"] = known_end_ns
+            evaluator.observe(
+                index,
+                channel,
+                schema,
+                timestamp_ns,
+                recording_start_ns,
+                variables,
+                partial(_decoded_payload, message),
+            )
 
     return recording_start_ns, recording_end_ns
 
@@ -900,9 +876,79 @@ def _create_runtime(rule: TopicRule) -> _TopicRuntime:
     )
 
 
-def _build_results(
+@dataclass(slots=True)
+class MessageRuleEvaluator:
+    """Per-message rule evaluation shared by the MCAP scan and the live bridge check."""
+
+    spec: CheckSpec
+    runtimes: dict[tuple[int, str], _TopicRuntime] = field(default_factory=dict)
+    _validated_paths: set[tuple[int, int]] = field(default_factory=set)
+    _schema_cache: SchemaCache = field(default_factory=SchemaCache)
+
+    def observe(
+        self,
+        index: int,
+        channel: Channel,
+        schema: Schema | None,
+        timestamp_ns: int,
+        recording_start_ns: int,
+        variables: dict[str, int],
+        decoded_supplier: Callable[[], object],
+    ) -> None:
+        """Feed one matched message into the rule's frequency and value trackers."""
+        rule = self.spec.topics[index]
+        runtime = self.runtimes.get((index, channel.topic))
+        if runtime is None:
+            runtime = _create_runtime(rule)
+            self.runtimes[index, channel.topic] = runtime
+        runtime.observe_timestamp(timestamp_ns, recording_start_ns)
+
+        if not rule.values:
+            return
+        self._validate_paths(index, runtime, channel, schema)
+        active_values = [tracker for tracker in runtime.values if tracker.evaluation_error is None]
+        if not active_values:
+            return
+        try:
+            decoded = decoded_supplier()
+        except Exception as exc:  # noqa: BLE001 - decoder plugins have no common exception
+            for tracker in active_values:
+                tracker.evaluation_error = f"payload decode failed: {exc}"
+            return
+        for tracker in active_values:
+            try:
+                tracker.evaluate(decoded, timestamp_ns, variables)
+            except (MessagePathError, TypeError, ValueError) as exc:
+                tracker.evaluation_error = f"MessagePath evaluation failed: {exc}"
+
+    def _validate_paths(
+        self,
+        index: int,
+        runtime: _TopicRuntime,
+        channel: Channel,
+        schema: Schema | None,
+    ) -> None:
+        if schema is None or schema.encoding not in ("ros1msg", "ros2msg"):
+            return
+        key = (index, schema.id)
+        if key in self._validated_paths:
+            return
+        self._validated_paths.add(key)
+        for value_index, tracker in enumerate(runtime.values):
+            if not self._schema_cache.validate_query(
+                tracker.rule.path,
+                schema,
+                channel.topic,
+                query_repr=tracker.rule.path_source,
+            ):
+                tracker.evaluation_error = (
+                    f"value[{value_index}] path is incompatible with schema {schema.name!r}"
+                )
+
+
+def build_results(
     spec: CheckSpec,
-    observations: dict[int, dict[str, _TopicObservation]],
+    observations: dict[int, dict[str, TopicObservation]],
     runtimes: dict[tuple[int, str], _TopicRuntime],
     recording_start_ns: int | None,
     recording_end_ns: int | None,
@@ -973,7 +1019,7 @@ def _build_results(
 def _schema_result(
     rule: TopicRule,
     topic: str,
-    observation: _TopicObservation,
+    observation: TopicObservation,
 ) -> CheckResult:
     mismatches: list[str] = []
     for channel, schema in observation.channels.values():
