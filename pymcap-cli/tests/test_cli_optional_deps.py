@@ -81,6 +81,19 @@ def test_serve_extra_reuses_xxhash_extra() -> None:
     assert any(requirement.startswith("pymcap-cli[xxhash]") for requirement in serve_requirements)
 
 
+def test_ros_parser_dependency_requires_stream_modifier_api() -> None:
+    requirements = metadata.requires("pymcap-cli") or []
+
+    assert "ros-parser>=0.8.0" in requirements
+
+
+def test_bridge_dependency_requires_server_endpoint_api() -> None:
+    requirements = metadata.requires("pymcap-cli") or []
+
+    assert "robo-ws-bridge>=0.7.0 ; extra == 'bridge'" in requirements
+    assert "robo-ws-bridge>=0.7.0 ; extra == 'bridge-proxy'" in requirements
+
+
 def test_unavailable_command_accepts_command_args(capsys) -> None:
     app = App(default_parameter=Parameter(negative_iterable=""))
     app.command(name="video")(

@@ -39,7 +39,7 @@ dependencies = [
     "small-mcap[compression]",
     "mcap-ros2-support-fast",
     "cyclopts>=4",
-    "ros-parser",
+    "ros-parser>=0.8.0",
     "platformdirs>=4.0.0",
     "pyyaml>=6.0",
     "typing-extensions>=4.15.0",
@@ -48,8 +48,8 @@ dependencies = [
 [project.optional-dependencies]
 all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco,bridge,xxhash,serve]"]
 lite = ["pymcap-cli[image,draco,bridge,xxhash]"]
-bridge = ["robo-ws-bridge"]
-bridge-proxy = ["robo-ws-bridge", "mcap-codec-support[video,pointcloud]"]
+bridge = ["robo-ws-bridge>=0.7.0"]
+bridge-proxy = ["robo-ws-bridge>=0.7.0", "mcap-codec-support[video,pointcloud]"]
 draco = ["mcap-codec-support[draco]"]
 image = ["pillow>=10.0"]
 parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]

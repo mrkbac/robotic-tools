@@ -47,27 +47,24 @@ def _requirement(wheel: Path, extra: str | None = None) -> str:
     return f"{name} @ {wheel.resolve().as_uri()}"
 
 
-def _run(wheel: Path, scenario: Scenario) -> None:
+def _run(wheel: Path, dependency_wheels: tuple[Path, ...], scenario: Scenario) -> None:
     requirement = _requirement(wheel, scenario.extra)
-    command = [
-        "uv",
-        "run",
-        "--isolated",
-        "--no-project",
-        "--with",
-        requirement,
-        *scenario.command,
-    ]
+    command = ["uv", "run", "--isolated", "--no-project", "--with", requirement]
+    for dependency_wheel in dependency_wheels:
+        command.extend(("--with", dependency_wheel.resolve().as_uri()))
+    command.extend(scenario.command)
     label = scenario.extra or "base"
     print(f"checking {label}: {' '.join(scenario.command)}", flush=True)
     subprocess.run(command, check=True)
 
 
-def _run_base_compress(wheel: Path, directory: Path) -> None:
+def _run_base_compress(wheel: Path, dependency_wheels: tuple[Path, ...], directory: Path) -> None:
     requirement = _requirement(wheel)
     source = directory / "input.mcap"
     output = directory / "compressed.mcap"
     prefix = ["uv", "run", "--isolated", "--no-project", "--with", requirement]
+    for dependency_wheel in dependency_wheels:
+        prefix.extend(("--with", dependency_wheel.resolve().as_uri()))
 
     subprocess.run([*prefix, "python", "-c", CREATE_MCAP, str(source)], check=True)
     subprocess.run(
@@ -81,6 +78,7 @@ def _run_base_compress(wheel: Path, directory: Path) -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("wheel", type=Path)
+    parser.add_argument("dependency_wheels", nargs="*", type=Path)
     return parser.parse_args()
 
 
@@ -89,11 +87,15 @@ def main() -> None:
     wheel: Path = args.wheel
     if not wheel.is_file():
         raise FileNotFoundError(wheel)
+    dependency_wheels = tuple(args.dependency_wheels)
+    for dependency_wheel in dependency_wheels:
+        if not dependency_wheel.is_file():
+            raise FileNotFoundError(dependency_wheel)
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        _run_base_compress(wheel, Path(temp_dir))
+        _run_base_compress(wheel, dependency_wheels, Path(temp_dir))
     for scenario in SCENARIOS:
-        _run(wheel, scenario)
+        _run(wheel, dependency_wheels, scenario)
 
 
 if __name__ == "__main__":

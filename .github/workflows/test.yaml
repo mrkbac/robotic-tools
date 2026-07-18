@@ -28,6 +28,8 @@ jobs:
         run: |
           uv build --package pymcap-cli --out-dir dist/optional-dependencies
           uv build --package mcap-codec-support --out-dir dist/optional-dependencies
+          uv build --package robo-ws-bridge --out-dir dist/optional-dependencies
+          uv build --package ros-parser --out-dir dist/optional-dependencies
           uv build --package small-mcap --out-dir dist/optional-dependencies
 
       - name: Test base install and each extra independently
@@ -35,6 +37,8 @@ jobs:
           uv run --no-project --python 3.13 python
           pymcap-cli/tests/check_optional_dependencies.py
           dist/optional-dependencies/pymcap_cli-*.whl
+          dist/optional-dependencies/robo_ws_bridge-*.whl
+          dist/optional-dependencies/ros_parser-*.whl
 
       - name: Test codec-support base install and each extra independently
         run: >-
