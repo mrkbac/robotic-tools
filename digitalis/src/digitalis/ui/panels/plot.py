@@ -36,6 +36,19 @@ def _to_full_path(field_path: str) -> str:
     return f"/dummy{field_path}"
 
 
+def parse_plot_path(field_path: str) -> tuple[MessagePath, MessagePathEvaluator]:
+    """Parse one field path into a plottable path plus its evaluator.
+
+    Raises LarkError or MessagePathError for invalid or unplottable paths.
+    """
+    parsed = parse_message_path(_to_full_path(field_path))
+    if parsed.has_stream_reducer:
+        raise MessagePathError(
+            "Stream reducers (@@count, @@max, ...) produce a single value and cannot be plotted"
+        )
+    return parsed, MessagePathEvaluator(parsed)
+
+
 class ChartDisplay(Static):
     """Widget that displays the braille chart."""
 
@@ -53,7 +66,7 @@ class PlotPathValidator(Validator):
             if not stripped:
                 continue
             try:
-                parse_message_path(_to_full_path(stripped))
+                parse_plot_path(stripped)
             except (LarkError, MessagePathError) as e:
                 errors.append(f"{stripped}: {e}")
 
@@ -138,10 +151,10 @@ class Plot(BasePanel[MessageEvent]):
             stripped = raw_part.strip()
             if not stripped:
                 continue
-            parsed = parse_message_path(_to_full_path(stripped))
+            parsed, evaluator = parse_plot_path(stripped)
             self._paths.append(parsed)
             self._buffers.append(TimeSeriesBuffer())
-            self._evaluators.append(MessagePathEvaluator(parsed))
+            self._evaluators.append(evaluator)
             self._series_names.append(stripped)
 
     def watch_data(self, _data: MessageEvent | None) -> None:
