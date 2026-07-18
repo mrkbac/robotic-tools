@@ -9,7 +9,7 @@ from .client import (
     ServiceCallResponse,
     WebSocketBridgeClient,
 )
-from .server import ConnectionState, WebSocketBridgeServer
+from .server import ConnectionState, WebSocketBridgeEndpoint, WebSocketBridgeServer
 
 __all__ = [
     "ConnectionGraph",
@@ -19,5 +19,6 @@ __all__ = [
     "ServiceCallError",
     "ServiceCallResponse",
     "WebSocketBridgeClient",
+    "WebSocketBridgeEndpoint",
     "WebSocketBridgeServer",
 ]

@@ -6,16 +6,20 @@ import asyncio
 import json
 import socket
 import struct
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 from mcap_codec_support.pointcloud import POINTCLOUD2
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
+from pymcap_cli.cmd.bridge import _playback
 from pymcap_cli.cmd.bridge._playback import (
     PlaybackChannel,
     PlaybackClock,
+    PlaybackController,
     PlaybackError,
+    PlaybackOutput,
     open_playback_messages,
     prepare_playback,
     run_playback,
@@ -52,12 +56,14 @@ def _write_mcap(
     *,
     schema_name: str = "example/Raw",
     schema_data: bytes = b"bytes data",
+    schema_encoding: str = "text",
+    message_encoding: str = "raw",
 ) -> None:
     with path.open("wb") as stream:
         writer = McapWriter(stream)
         writer.start()
-        writer.add_schema(1, schema_name, "text", schema_data)
-        writer.add_channel(1, topic, "raw", 1)
+        writer.add_schema(1, schema_name, schema_encoding, schema_data)
+        writer.add_channel(1, topic, message_encoding, 1)
         for timestamp_ns, payload in messages:
             writer.add_message(1, timestamp_ns, payload, publish_time=timestamp_ns)
         writer.finish()
@@ -163,6 +169,49 @@ def test_prepare_playback_rejects_incompatible_same_topic(tmp_path: Path) -> Non
         prepare_playback([str(first), str(second)], MessageFilterOptions.from_args())
 
 
+def test_prepare_playback_accepts_structurally_equal_ros2_schemas_and_uses_last(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    first_schema = b"int32 value # old comment\n"
+    second_schema = b"# newer documentation\nint32 value\n"
+    for path, timestamp, schema_data in (
+        (first, 1, first_schema),
+        (second, 2, second_schema),
+    ):
+        _write_mcap(
+            path,
+            "/same",
+            [(timestamp, b"payload")],
+            schema_name="example_msgs/msg/Value",
+            schema_data=schema_data,
+            schema_encoding="ros2msg",
+            message_encoding="cdr",
+        )
+
+    prepared = prepare_playback(
+        [str(first), str(second)],
+        MessageFilterOptions.from_args(),
+    )
+
+    assert prepared.channels[0].schema_text == second_schema.decode()
+    with open_playback_messages(prepared) as messages:
+        assert [message.log_time for _, _, message in messages] == [1, 2]
+    sink = _TransformedCollectingSink()
+    asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+        )
+    )
+    assert [timestamp for _, timestamp, _ in sink.messages] == [1, 2]
+    assert {channel.schema_text for channel, _, _ in sink.messages} == {second_schema.decode()}
+
+
 class _CollectingSink:
     def __init__(self) -> None:
         self.messages: list[tuple[str, int, bytes]] = []
@@ -251,6 +300,268 @@ def test_run_playback_preserves_merged_order_and_closes(tmp_path: Path) -> None:
     ]
     assert sink.was_closed
     assert stats.messages == 3
+
+
+def test_run_playback_can_start_from_seek_time(tmp_path: Path) -> None:
+    path = tmp_path / "seek.mcap"
+    _write_mcap(path, "/seek", [(1, b"a"), (2, b"b"), (3, b"c")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    sink = _CollectingSink()
+
+    asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            start_time_ns=2,
+        )
+    )
+
+    assert sink.messages == [
+        ("/seek", 2, b"b"),
+        ("/seek", 3, b"c"),
+    ]
+
+
+def test_run_playback_waits_while_controller_is_paused(tmp_path: Path) -> None:
+    path = tmp_path / "paused.mcap"
+    _write_mcap(path, "/paused", [(1, b"payload")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    sink = _CollectingSink()
+    controller = PlaybackController(start_paused=True)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            run_playback(
+                prepared,
+                sink,
+                speed=1_000_000,
+                loop=False,
+                show_status=False,
+                controller=controller,
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert sink.messages == []
+        controller.play()
+        await task
+
+    asyncio.run(run())
+    assert sink.messages == [("/paused", 1, b"payload")]
+
+
+def test_run_playback_stop_returns_stopped_without_messages(tmp_path: Path) -> None:
+    path = tmp_path / "stopped.mcap"
+    _write_mcap(path, "/stopped", [(1, b"payload")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    sink = _CollectingSink()
+    controller = PlaybackController(start_paused=True)
+    controller.stop()
+
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1,
+            loop=False,
+            show_status=False,
+            controller=controller,
+        )
+    )
+
+    assert stats.state == "Stopped"
+    assert sink.messages == []
+
+
+def test_run_playback_controller_can_disable_loop_after_current_pass(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "loop.mcap"
+    _write_mcap(path, "/loop", [(1, b"first"), (2, b"second")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    controller = PlaybackController(is_looping=True)
+
+    class _LoopDisablingSink(_CollectingSink):
+        async def publish(
+            self,
+            channel: PlaybackChannel,
+            timestamp_ns: int,
+            payload: bytes | memoryview,
+        ) -> None:
+            await super().publish(channel, timestamp_ns, payload)
+            if len(self.messages) == 2:
+                controller.set_looping(False)
+
+    sink = _LoopDisablingSink()
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1_000_000,
+            loop=False,
+            show_status=False,
+            controller=controller,
+        )
+    )
+
+    assert [payload for _, _, payload in sink.messages] == [b"first", b"second"]
+    assert stats.loop_number == 1
+
+
+def test_run_playback_controller_changes_speed_without_restarting(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "speed.mcap"
+    _write_mcap(path, "/speed", [(1, b"first"), (1_000_000_001, b"second")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    controller = PlaybackController(speed=1)
+
+    class _SpeedChangingSink(_CollectingSink):
+        async def publish(
+            self,
+            channel: PlaybackChannel,
+            timestamp_ns: int,
+            payload: bytes | memoryview,
+        ) -> None:
+            await super().publish(channel, timestamp_ns, payload)
+            if len(self.messages) == 1:
+                controller.set_speed(1_000)
+
+    sink = _SpeedChangingSink()
+    started = time.monotonic()
+    asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=1,
+            loop=False,
+            show_status=False,
+            controller=controller,
+        )
+    )
+
+    assert time.monotonic() - started < 0.2
+    assert [payload for _, _, payload in sink.messages] == [b"first", b"second"]
+
+
+def test_run_playback_drops_stale_messages_before_slow_transform(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "slow-transform.mcap"
+    _write_mcap(
+        path,
+        "/camera",
+        [
+            (1, b"first"),
+            (1_000_000_001, b"second"),
+            (2_000_000_001, b"third"),
+        ],
+    )
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    now = [0.0]
+    transformed: list[int] = []
+    monkeypatch.setattr(_playback.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_playback, "_MAX_PLAYBACK_LAG_SECONDS", 0.005, raising=False)
+
+    class _SlowTransformSession:
+        async def transform(
+            self,
+            channel: PlaybackChannel,
+            timestamp_ns: int,
+            payload: bytes | memoryview,
+        ) -> tuple[PlaybackOutput, ...]:
+            transformed.append(timestamp_ns)
+            now[0] += 0.02
+            return (PlaybackOutput(channel, timestamp_ns, payload),)
+
+        async def finish(self) -> tuple[PlaybackOutput, ...]:
+            return ()
+
+        async def deactivate(self, _channel: PlaybackChannel) -> None:
+            return
+
+        async def close(self) -> None:
+            return
+
+    class _SlowTransformPlan:
+        mode = "test"
+        channels = prepared.channels
+
+        def create_session(self) -> _SlowTransformSession:
+            return _SlowTransformSession()
+
+        def output_channel(self, source: PlaybackChannel) -> PlaybackChannel:
+            return source
+
+    sink = _CollectingSink()
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=500,
+            loop=False,
+            show_status=False,
+            transform_plan=_SlowTransformPlan(),
+        )
+    )
+
+    assert transformed == [1]
+    assert sink.messages == [("/camera", 1, b"first")]
+    assert stats.dropped_messages == 2
+
+
+def test_run_playback_speed_reduction_skips_high_speed_backlog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "speed-recovery.mcap"
+    timestamps = [1 + offset * 1_000_000_000 for offset in range(12)]
+    _write_mcap(
+        path,
+        "/camera",
+        [(timestamp_ns, str(offset).encode()) for offset, timestamp_ns in enumerate(timestamps)],
+    )
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    controller = PlaybackController(speed=500)
+    now = [0.0]
+    monkeypatch.setattr(_playback.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_playback, "_MAX_PLAYBACK_LAG_SECONDS", 0.005, raising=False)
+
+    class _SpeedReducingSink(_CollectingSink):
+        async def publish(
+            self,
+            channel: PlaybackChannel,
+            timestamp_ns: int,
+            payload: bytes | memoryview,
+        ) -> None:
+            await super().publish(channel, timestamp_ns, payload)
+            if len(self.messages) == 1:
+                now[0] = 0.02
+                controller.set_speed(1)
+            elif timestamp_ns == timestamps[10]:
+                controller.stop()
+
+    sink = _SpeedReducingSink()
+    stats = asyncio.run(
+        run_playback(
+            prepared,
+            sink,
+            speed=500,
+            loop=False,
+            show_status=False,
+            controller=controller,
+        )
+    )
+
+    assert [timestamp_ns for _, timestamp_ns, _ in sink.messages] == [
+        timestamps[0],
+        timestamps[10],
+    ]
+    assert stats.dropped_messages == 9
+    assert stats.state == "Stopped"
 
 
 def test_transform_config_uses_standalone_defaults_and_rejects_wrong_mode() -> None:
@@ -478,6 +789,9 @@ def test_playback_clock_uses_absolute_speed_scaled_deadlines() -> None:
     clock.delay(2.0)
     assert clock.deadline(3_000_000_000) == 13.0
     assert clock.current_time_ns(now=12.5) == 2_000_000_000
+    clock.set_speed(4.0, now=12.5)
+    assert clock.current_time_ns(now=12.5) == 2_000_000_000
+    assert clock.deadline(3_000_000_000) == 12.75
 
 
 def test_bridge_client_sink_publishes_to_existing_server(
@@ -719,6 +1033,74 @@ def test_bridge_server_sink_sends_recorded_timestamp_and_time(
     assert timestamp == 123
     assert payload == b"payload"
     assert 123 in times
+
+
+def test_bridge_server_sink_stops_clock_without_subscriptions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "input.mcap"
+    _write_mcap(path, "/raw", [(1, b"first"), (1_000_000_001, b"second")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    port = _free_port()
+
+    async def run() -> None:
+        sink = BridgeServerPlaybackSink("127.0.0.1", port)
+        became_inactive = asyncio.Event()
+
+        def activity_changed(is_active: bool) -> None:
+            if not is_active:
+                became_inactive.set()
+
+        sink.on_activity_change(activity_changed)
+        task = asyncio.create_task(
+            run_playback(
+                prepared,
+                sink,
+                speed=1,
+                loop=True,
+                show_status=False,
+            )
+        )
+        await sink.started.wait()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{port}",
+                subprotocols=["foxglove.websocket.v1"],
+            ) as websocket:
+                await websocket.recv()
+                advertise = json.loads(await websocket.recv())
+                channel_id = advertise["channels"][0]["id"]
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "op": "subscribe",
+                            "subscriptions": [{"id": 7, "channelId": channel_id}],
+                        }
+                    )
+                )
+                while True:
+                    frame = await websocket.recv()
+                    if isinstance(frame, bytes) and frame[0] == int(BinaryOpCodes.MESSAGE_DATA):
+                        break
+
+                await websocket.send(json.dumps({"op": "unsubscribe", "subscriptionIds": [7]}))
+                await asyncio.wait_for(became_inactive.wait(), timeout=1)
+
+                while True:
+                    try:
+                        await asyncio.wait_for(websocket.recv(), timeout=0.01)
+                    except asyncio.TimeoutError:
+                        break
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(websocket.recv(), timeout=0.08)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
+    asyncio.run(run())
 
 
 def test_bridge_server_sink_advertises_and_sends_jit_transform(

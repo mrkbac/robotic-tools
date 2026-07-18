@@ -76,29 +76,21 @@ def _ensure_awaitable(result: Awaitable[None] | None) -> Awaitable[None]:
     return result
 
 
-class WebSocketBridgeServer:
-    """Asynchronous WebSocket server that speaks the Foxglove bridge protocol."""
+class WebSocketBridgeEndpoint:
+    """Foxglove WebSocket protocol state independent of a TCP listener."""
 
     def __init__(
         self,
         *,
-        host: str = "127.0.0.1",
-        port: int = 8765,
         name: str = "websocket-bridge",
-        subprotocol: str = "foxglove.websocket.v1",
         capabilities: Iterable[str] = (),
         metadata: dict[str, str] | None = None,
         supported_encodings: Iterable[str] | None = None,
-        max_message_size: int | None = None,
     ) -> None:
-        self._host = host
-        self._port = port
         self._name = name
-        self._subprotocol = subprotocol
         self._capabilities = list(capabilities)
         self._metadata = dict(metadata or {})
         self._supported_encodings = list(supported_encodings or [])
-        self._max_message_size = max_message_size
 
         self._channels: dict[int, Channel] = {}
         self._connections: dict[ServerConnection, ConnectionState] = {}
@@ -110,38 +102,13 @@ class WebSocketBridgeServer:
         self._on_subscribe: list[SubscriptionHandler] = []
         self._on_unsubscribe: list[SubscriptionHandler] = []
 
-        self._server: Server | None = None
         self._state_lock = asyncio.Lock()
 
-    async def start(self) -> None:
-        """Start listening for client connections."""
-        if self._server is not None:
-            raise RuntimeError("server already running")
-
-        Logger.info("Starting WebSocket bridge server on %s:%d", self._host, self._port)
-        self._server = await serve(
-            self._handle_connection,
-            self._host,
-            self._port,
-            subprotocols=[Subprotocol(self._subprotocol)],
-            max_size=self._max_message_size,
-        )
-
-    async def stop(self) -> None:
-        """Stop accepting new connections and close existing ones."""
-        if self._server is None:
-            return
-
-        Logger.info("Stopping WebSocket bridge server")
-
-        # Close all active connections first
+    async def close_connections(self) -> None:
+        """Close every client currently attached to this endpoint."""
         to_close = list(self._connections.values())
         for state in to_close:
             await state.websocket.close()
-
-        self._server.close()
-        await self._server.wait_closed()
-        self._server = None
 
     def register_channel(self, channel: Channel) -> None:
         """Register or replace a channel that should be advertised to clients."""
@@ -343,7 +310,7 @@ class WebSocketBridgeServer:
             except ConnectionClosed:
                 Logger.debug("Failed broadcast to closed connection")
 
-    async def _handle_connection(self, websocket: ServerConnection) -> None:
+    async def handle_connection(self, websocket: ServerConnection) -> None:
         """Handle the lifetime of a single client connection."""
         state = ConnectionState(websocket=websocket)
         async with self._state_lock:
@@ -442,3 +409,56 @@ class WebSocketBridgeServer:
         if websocket is None:
             return self.connections
         return self._connections.get(websocket)
+
+
+class WebSocketBridgeServer(WebSocketBridgeEndpoint):
+    """Foxglove protocol endpoint with its own WebSocket TCP listener."""
+
+    def __init__(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        name: str = "websocket-bridge",
+        subprotocol: str = "foxglove.websocket.v1",
+        capabilities: Iterable[str] = (),
+        metadata: dict[str, str] | None = None,
+        supported_encodings: Iterable[str] | None = None,
+        max_message_size: int | None = None,
+    ) -> None:
+        super().__init__(
+            name=name,
+            capabilities=capabilities,
+            metadata=metadata,
+            supported_encodings=supported_encodings,
+        )
+        self._host = host
+        self._port = port
+        self._subprotocol = subprotocol
+        self._max_message_size = max_message_size
+        self._server: Server | None = None
+
+    async def start(self) -> None:
+        """Start listening for client connections."""
+        if self._server is not None:
+            raise RuntimeError("server already running")
+
+        Logger.info("Starting WebSocket bridge server on %s:%d", self._host, self._port)
+        self._server = await serve(
+            self.handle_connection,
+            self._host,
+            self._port,
+            subprotocols=[Subprotocol(self._subprotocol)],
+            max_size=self._max_message_size,
+        )
+
+    async def stop(self) -> None:
+        """Stop accepting new connections and close existing ones."""
+        if self._server is None:
+            return
+
+        Logger.info("Stopping WebSocket bridge server")
+        await self.close_connections()
+        self._server.close()
+        await self._server.wait_closed()
+        self._server = None
