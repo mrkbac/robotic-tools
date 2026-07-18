@@ -1,6 +1,6 @@
 [project]
 name = "robo-ws-bridge"
-version = "0.6.0"
+version = "0.7.0"
 description = "Python library implementing the Foxglove WebSocket protocol for streaming robotics data"
 readme = "README.md"
 requires-python = ">=3.10"

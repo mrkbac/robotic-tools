@@ -698,7 +698,7 @@ wheels = [
 
 [[package]]
 name = "digitalis"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "digitalis" }
 dependencies = [
     { name = "lark" },
@@ -2558,7 +2558,7 @@ wheels = [
 
 [[package]]
 name = "pymcap-cli"
-version = "0.22.0"
+version = "0.23.0"
 source = { editable = "pymcap-cli" }
 dependencies = [
     { name = "cyclopts" },
@@ -2872,7 +2872,7 @@ wheels = [
 
 [[package]]
 name = "robo-ws-bridge"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "robo-ws-bridge" }
 dependencies = [
     { name = "typing-extensions" },
@@ -2922,7 +2922,7 @@ dev = [
 
 [[package]]
 name = "ros-parser"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "ros-parser" }
 
 [package.dev-dependencies]
