@@ -23,6 +23,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          cache-suffix: optional-dependencies
 
       - name: Build pymcap-cli wheel
         run: |
@@ -102,6 +103,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           activate-environment: true
           enable-cache: true
+          cache-suffix: test-${{ matrix.package.dir }}
 
       - name: Install dependencies
         run: uv sync --frozen --all-groups --all-extras --all-packages

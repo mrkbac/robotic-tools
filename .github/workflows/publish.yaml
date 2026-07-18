@@ -97,6 +97,8 @@ jobs:
       - name: Install uv
         if: steps.check.outputs.skip != 'true'
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
 
       - name: Build package
         if: steps.check.outputs.skip != 'true'
