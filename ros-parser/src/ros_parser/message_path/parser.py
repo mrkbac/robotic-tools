@@ -5,6 +5,9 @@ from typing import Any
 from .._lark_standalone_runtime import Token, Transformer
 from ._standalone_parser import Lark_StandAlone
 from .models import (
+    _MODIFIERS,
+    _STREAM_REDUCERS,
+    _STREAM_TRANSFORMS,
     ArrayIndex,
     ArraySlice,
     Comparison,
@@ -21,11 +24,23 @@ from .models import (
     InExpression,
     MathModifier,
     MessagePath,
+    MessagePathError,
     ModifierArgument,
     ModifierFieldRef,
     StreamModifier,
     Variable,
 )
+
+
+def _check_math_operation(operation: str) -> None:
+    if operation in _MODIFIERS:
+        return
+    if operation in _STREAM_TRANSFORMS or operation in _STREAM_REDUCERS:
+        raise MessagePathError(
+            f"Unknown math modifier '{operation}'; "
+            f"cross-message operations use '@@' (e.g. '.@@{operation}')"
+        )
+    raise MessagePathError(f"Unknown math modifier '{operation}'")
 
 
 class MessagePathTransformer(Transformer[Token, MessagePath]):
@@ -141,6 +156,7 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
     def math_modifier_with_args(self, items: list[Any]) -> MathModifier:
         """Build MathModifier with arguments from parsed tokens."""
         operation = str(items[0])  # IDENTIFIER token
+        _check_math_operation(operation)
         # items[1] is the list of arguments from modifier_args
         arguments = items[1] if len(items) > 1 else []
         return MathModifier(operation=operation, arguments=arguments)
@@ -148,11 +164,15 @@ class MessagePathTransformer(Transformer[Token, MessagePath]):
     def math_modifier_no_args(self, items: list[Any]) -> MathModifier:
         """Build MathModifier without arguments from parsed tokens."""
         operation = str(items[0])  # IDENTIFIER token
+        _check_math_operation(operation)
         return MathModifier(operation=operation, arguments=[])
 
     def stream_modifier(self, items: list[Any]) -> StreamModifier:
         """Build a cross-message stream modifier."""
-        return StreamModifier(operation=str(items[0]))
+        operation = str(items[0])
+        if operation not in _STREAM_TRANSFORMS and operation not in _STREAM_REDUCERS:
+            raise MessagePathError(f"Unknown stream modifier '{operation}'")
+        return StreamModifier(operation=operation)
 
     def modifier_args(self, items: list[ModifierArgument]) -> list[ModifierArgument]:
         """Collect all modifier arguments into a flat list."""
@@ -213,5 +233,6 @@ def parse_message_path(path: str) -> MessagePath:
 
     Raises:
         LarkError: If the path syntax is invalid
+        MessagePathError: If a modifier name is unknown
     """
     return _parser.parse(path)

@@ -297,6 +297,12 @@ paths reusable across topics and threads.
 /camera.header.stamp.@to_nsec.@@unchanged_for
 ```
 
+A backward jump in timestamps (e.g. a playback seek or a restarted stream)
+re-baselines the transform from the current message: the out-of-order sample
+produces no output (`@@unchanged_for` restarts at `0.0`) and evaluation
+resumes from there. `@@derivative` also skips samples whose timestamp equals
+the previous one.
+
 #### Cross-Message Aggregates
 
 Stream reducers consume the scalar emitted for each message and produce one

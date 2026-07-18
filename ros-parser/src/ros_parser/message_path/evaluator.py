@@ -130,15 +130,10 @@ class MessagePathEvaluator:
         return self._suffix.apply(value, variables)
 
     def _transform(self, operation: str, value: Any, timestamp_ns: int, index: int) -> Any:
+        # Backward time means the stream restarted (e.g. a playback seek):
+        # re-baseline from the current message instead of erroring.
         state = self._transform_states[index]
         if operation == "unchanged_for":
-            if (
-                state.previous_timestamp_ns is not None
-                and timestamp_ns < state.previous_timestamp_ns
-            ):
-                raise MessagePathError(
-                    "Stream modifier 'unchanged_for' requires non-decreasing timestamps"
-                )
             if type(value) not in (bool, int, float, str):
                 raise MessagePathError(
                     "Stream modifier 'unchanged_for' requires a primitive scalar"
@@ -147,8 +142,16 @@ class MessagePathEvaluator:
                 raise MessagePathError(
                     "Stream modifier 'unchanged_for' received a non-finite value"
                 )
+            went_backward = (
+                state.previous_timestamp_ns is not None
+                and timestamp_ns < state.previous_timestamp_ns
+            )
             state.previous_timestamp_ns = timestamp_ns
-            if state.unchanged_value is NO_OUTPUT or value != state.unchanged_value:
+            if (
+                went_backward
+                or state.unchanged_value is NO_OUTPUT
+                or value != state.unchanged_value
+            ):
                 state.unchanged_value = value
                 state.unchanged_since_ns = timestamp_ns
                 return 0.0
@@ -156,14 +159,9 @@ class MessagePathEvaluator:
             return (timestamp_ns - state.unchanged_since_ns) / 1_000_000_000
         if operation == "timedelta":
             previous_timestamp_ns = state.previous_timestamp_ns
-            if previous_timestamp_ns is None:
-                state.previous_timestamp_ns = timestamp_ns
-                return NO_OUTPUT
-            if timestamp_ns < previous_timestamp_ns:
-                raise MessagePathError(
-                    "Stream modifier 'timedelta' requires non-decreasing timestamps"
-                )
             state.previous_timestamp_ns = timestamp_ns
+            if previous_timestamp_ns is None or timestamp_ns < previous_timestamp_ns:
+                return NO_OUTPUT
             return (timestamp_ns - previous_timestamp_ns) / 1_000_000_000
         if type(value) not in (int, float) or not math.isfinite(value):
             raise MessagePathError(
@@ -172,21 +170,15 @@ class MessagePathEvaluator:
         current = float(value)
         previous_value = state.previous_value
         previous_timestamp_ns = state.previous_timestamp_ns
+        state.previous_value = current
+        state.previous_timestamp_ns = timestamp_ns
         if previous_value is None or previous_timestamp_ns is None:
-            state.previous_value = current
-            state.previous_timestamp_ns = timestamp_ns
             return NO_OUTPUT
         if operation == "delta":
-            state.previous_value = current
-            state.previous_timestamp_ns = timestamp_ns
             return current - previous_value
         elapsed = (timestamp_ns - previous_timestamp_ns) / 1_000_000_000
         if elapsed <= 0:
-            raise MessagePathError(
-                "Stream modifier 'derivative' requires strictly increasing timestamps"
-            )
-        state.previous_value = current
-        state.previous_timestamp_ns = timestamp_ns
+            return NO_OUTPUT
         return (current - previous_value) / elapsed
 
     def _reduce(self, operation: str, value: Any) -> None:

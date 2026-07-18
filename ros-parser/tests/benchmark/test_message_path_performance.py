@@ -7,7 +7,10 @@ Run with:
 
 from __future__ import annotations
 
+import pytest
 from ros_parser.message_path import MessagePathEvaluator, parse_message_path
+
+pytestmark = pytest.mark.benchmark
 
 
 def test_benchmark_message_path_parse_complex(benchmark) -> None:

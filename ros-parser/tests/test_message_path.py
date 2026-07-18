@@ -896,6 +896,19 @@ class TestErrorCases:
         with pytest.raises(LarkError):
             parse_message_path("/topic{field}")  # Missing operator and value
 
+    def test_unknown_math_modifier_rejected_at_parse_time(self):
+        with pytest.raises(MessagePathError, match="Unknown math modifier 'bogus'"):
+            parse_message_path("/topic.value.@bogus")
+
+    @pytest.mark.parametrize("operation", ["delta", "derivative", "timedelta", "unchanged_for"])
+    def test_legacy_single_at_stream_operation_suggests_stream_syntax(self, operation: str):
+        with pytest.raises(MessagePathError, match=f"@@{operation}"):
+            parse_message_path(f"/topic.value.@{operation}")
+
+    def test_unknown_stream_modifier_rejected_at_parse_time(self):
+        with pytest.raises(MessagePathError, match="Unknown stream modifier 'bogus'"):
+            parse_message_path("/topic.value.@@bogus")
+
 
 # Test data structures for apply() tests
 @dataclass
@@ -1663,19 +1676,35 @@ class TestMessagePathEvaluator:
         with pytest.raises(MessagePathError, match="finite numeric values"):
             evaluator.observe({"value": math.inf}, 0)
 
-    def test_stream_derivative_rejects_non_increasing_time(self):
+    def test_stream_derivative_resets_on_equal_timestamp(self):
         evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@derivative"))
         evaluator.observe({"value": 1}, 5)
 
-        with pytest.raises(MessagePathError, match="increasing timestamps"):
-            evaluator.observe({"value": 2}, 5)
+        assert evaluator.observe({"value": 2}, 5) is NO_OUTPUT
+        assert evaluator.observe({"value": 4}, 1_000_000_005) == pytest.approx(2.0)
 
-    def test_stream_timedelta_rejects_decreasing_time(self):
+    def test_stream_derivative_resets_on_backward_timestamp(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@derivative"))
+        evaluator.observe({"value": 1}, 1_000_000_000)
+        assert evaluator.observe({"value": 2}, 2_000_000_000) == pytest.approx(1.0)
+
+        assert evaluator.observe({"value": 5}, 500_000_000) is NO_OUTPUT
+        assert evaluator.observe({"value": 7}, 1_500_000_000) == pytest.approx(2.0)
+
+    def test_stream_timedelta_resets_on_backward_timestamp(self):
         evaluator = MessagePathEvaluator(parse_message_path("/topic.@@timedelta"))
-        evaluator.observe({}, 5)
+        evaluator.observe({}, 5_000_000_000)
 
-        with pytest.raises(MessagePathError, match="non-decreasing timestamps"):
-            evaluator.observe({}, 4)
+        assert evaluator.observe({}, 4_000_000_000) is NO_OUTPUT
+        assert evaluator.observe({}, 6_000_000_000) == pytest.approx(2.0)
+
+    def test_stream_unchanged_for_resets_on_backward_timestamp(self):
+        evaluator = MessagePathEvaluator(parse_message_path("/topic.value.@@unchanged_for"))
+        assert evaluator.observe({"value": 1}, 1_000_000_000) == 0.0
+        assert evaluator.observe({"value": 1}, 2_000_000_000) == pytest.approx(1.0)
+
+        assert evaluator.observe({"value": 1}, 0) == 0.0
+        assert evaluator.observe({"value": 1}, 1_000_000_000) == pytest.approx(1.0)
 
 
 class TestMathModifierApply:
