@@ -3,6 +3,7 @@
 import io
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, cast
 from urllib.parse import ParseResult, urlparse
@@ -10,7 +11,13 @@ from urllib.parse import ParseResult, urlparse
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.http_utils import open_http_stream
 
-_debug_io_default = False
+
+@dataclass(slots=True)
+class _InputConfig:
+    is_debug_io_enabled: bool = False
+
+
+_input_config = _InputConfig()
 
 
 def set_debug_io_default(enabled: bool) -> None:
@@ -19,8 +26,7 @@ def set_debug_io_default(enabled: bool) -> None:
     Set by the CLI's global ``--debug-io`` flag; individual call sites can still
     opt in explicitly via ``open_input(..., debug=True)``.
     """
-    global _debug_io_default
-    _debug_io_default = enabled
+    _input_config.is_debug_io_enabled = enabled
 
 
 def resolve_mcap_path(path: str) -> str:
@@ -81,7 +87,7 @@ def open_input(
         original_stream, size = opener(result)
 
         # Optionally wrap in debug wrapper (cast since DebugStreamWrapper implements interface)
-        if debug or _debug_io_default:
+        if debug or _input_config.is_debug_io_enabled:
             debug_wrapper = DebugStreamWrapper(original_stream)
             base_stream = debug_wrapper
         else:

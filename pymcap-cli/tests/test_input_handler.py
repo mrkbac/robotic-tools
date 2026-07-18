@@ -80,7 +80,7 @@ def test_open_input_debug_io_default_prints_stats(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(input_handler, "_debug_io_default", True)
+    monkeypatch.setattr(input_handler._input_config, "is_debug_io_enabled", True)
 
     with open_input(str(simple_mcap)) as (stream, _size):
         stream.read(16)
@@ -97,7 +97,7 @@ def test_cli_debug_io_flag_applies_to_any_command(
 ) -> None:
     from pymcap_cli.cli import app  # noqa: PLC0415
 
-    monkeypatch.setattr(input_handler, "_debug_io_default", False)
+    monkeypatch.setattr(input_handler._input_config, "is_debug_io_enabled", False)
 
     with pytest.raises(SystemExit) as exc_info:
         app.meta(["--debug-io", "du", str(simple_mcap)])
