@@ -68,9 +68,18 @@ class PlaybackError(RuntimeError):
     """Playback configuration, input, or transport failure."""
 
 
+def is_frame_schema(schema_name: str) -> bool:
+    """True when messages of this schema stand alone and may be dropped.
+
+    Video streams are absent from the set on purpose: an encoded packet only
+    decodes in the context of its GOP, so it must never be dropped in transit.
+    """
+    return schema_name in _FRAME_SCHEMAS
+
+
 def is_frame_channel(channel: PlaybackChannel) -> bool:
     """True when each message on the channel stands alone and may be dropped."""
-    return channel.schema_name in _FRAME_SCHEMAS
+    return is_frame_schema(channel.schema_name)
 
 
 @dataclass(frozen=True, slots=True)

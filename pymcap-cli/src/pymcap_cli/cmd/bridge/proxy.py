@@ -45,12 +45,18 @@ from pymcap_cli.cmd._cli_options import (
     ServerPortOption,
 )
 from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
+from pymcap_cli.cmd.bridge._adaptive import (
+    AdaptiveQualityGovernor,
+    RungTransition,
+    adaptive_video_rungs,
+)
+from pymcap_cli.cmd.bridge._playback import is_frame_schema
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     MESSAGE_ENCODING,
     IncomingMessage,
+    LiveTransformer,
     OutboundMessage,
     ProxyMetrics,
-    SendManager,
     TransformWorker,
     schema_from_channel,
 )
@@ -59,6 +65,7 @@ from pymcap_cli.cmd.bridge._proxy_transforms import (
     ImageConfig,
     PointCloudConfig,
     ProxyConfig,
+    VideoTransformer,
     build_transform_rules,
     create_transformer,
     is_video_keyframe,
@@ -68,8 +75,6 @@ from pymcap_cli.log_setup import ERR
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from pymcap_cli.cmd.bridge._proxy_runtime import LiveTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +93,8 @@ class _ChannelState:
     downstream_id: int
     worker: TransformWorker | None
     throttle_hz: float
+    transformer: LiveTransformer | None = None
+    is_adaptive_video: bool = False
     last_sent_time: float | None = None
 
 
@@ -99,6 +106,7 @@ class ProxySnapshot:
     upstream_channels: int
     transformed_channels: int
     client_count: int
+    downgraded_channels: int
 
 
 class BridgeProxy:
@@ -131,13 +139,13 @@ class BridgeProxy:
             max_message_size=config.max_message_size,
         )
         self._transform_rules = build_transform_rules(config)
-        self._send_manager = SendManager(
-            self.downstream_server, self.metrics, queue_size=config.send_queue_size
-        )
+        # Downstream delivery, backpressure, and slow-client drops are owned by
+        # the transport's per-connection outbox; the governor keys adaptive
+        # video rungs by downstream channel id.
+        self._governor: AdaptiveQualityGovernor[int] = AdaptiveQualityGovernor()
         self._shutdown_event = asyncio.Event()
         self._channels: dict[int, _ChannelState] = {}
         self._downstream_to_upstream: dict[int, int] = {}
-        self._channel_subscribers: dict[int, set[tuple[ServerConnection, int]]] = {}
         self._client_subscriptions: dict[ServerConnection, dict[int, tuple[int, int]]] = {}
         self._upstream_subscriptions: dict[int, tuple[int, int]] = {}
         self._next_channel_id = 10000
@@ -173,7 +181,6 @@ class BridgeProxy:
             if state.worker is not None:
                 await state.worker.close()
         self._channels.clear()
-        await self._send_manager.close()
         await asyncio.gather(
             self.upstream_client.disconnect(),
             self.downstream_server.stop(),
@@ -208,16 +215,32 @@ class BridgeProxy:
                 metrics=self.metrics,
             )
 
+        is_adaptive_video = (
+            self.config.image.adaptive_quality
+            and isinstance(transformer, VideoTransformer)
+            and downstream_channel.get("schemaName", "") == COMPRESSED_VIDEO_SCHEMA
+        )
+        if is_adaptive_video:
+            self._governor.register(downstream_id, adaptive_video_rungs(self.config.image.quality))
+
         state = _ChannelState(
             upstream_info=channel,
             downstream_info=downstream_channel,
             downstream_id=downstream_id,
             worker=worker,
             throttle_hz=self.config.throttle_hz,
+            transformer=transformer,
+            is_adaptive_video=is_adaptive_video,
         )
         self._channels[upstream_id] = state
         self._downstream_to_upstream[downstream_id] = upstream_id
         self._refresh_transform_count()
+        # Standalone frames (raw images, point clouds) may be dropped for a slow
+        # client; encoded video must not, so it queues reliably and instead
+        # sheds bitrate through adaptive quality.
+        delivery = (
+            "latest" if is_frame_schema(downstream_channel.get("schemaName", "")) else "reliable"
+        )
         await self.downstream_server.advertise_channel(
             Channel(
                 id=downstream_id,
@@ -226,6 +249,7 @@ class BridgeProxy:
                 schema_name=downstream_channel.get("schemaName", ""),
                 schema=downstream_channel.get("schema", ""),
                 schema_encoding=downstream_channel.get("schemaEncoding"),
+                delivery=delivery,
             )
         )
 
@@ -236,6 +260,7 @@ class BridgeProxy:
             return
         if state.worker is not None:
             await state.worker.close()
+        self._governor.unregister(state.downstream_id)
         self._downstream_to_upstream.pop(state.downstream_id, None)
         self._refresh_transform_count()
         await self.downstream_server.unadvertise([state.downstream_id])
@@ -247,10 +272,46 @@ class BridgeProxy:
         state = self._channels.get(channel["id"])
         if state is None or self._should_throttle(state):
             return
+        if state.is_adaptive_video and self._adaptive_should_drop(state):
+            return
         if state.worker is not None:
             state.worker.enqueue(IncomingMessage(timestamp_ns=timestamp, payload=payload))
             return
-        self._send_outbound(self._build_passthrough_outbound(state, timestamp, payload))
+        await self._send_outbound(self._build_passthrough_outbound(state, timestamp, payload))
+
+    def _adaptive_should_drop(self, state: _ChannelState) -> bool:
+        """Update the adaptive rung for a video channel and apply its frame-rate cap.
+
+        Congestion is inferred from the transport outbox: when every subscriber
+        of the channel already has queued work, the encoder steps down a rung.
+        """
+        now = asyncio.get_running_loop().time()
+        is_congested = self.downstream_server.are_all_subscribers_busy(state.downstream_id)
+        transition = self._governor.observe(state.downstream_id, is_congested=is_congested, now=now)
+        if transition is not None:
+            self._apply_rung(state, transition)
+        if self._governor.should_drop_frame(state.downstream_id, now=now):
+            self.metrics.adaptive_frames_dropped += 1
+            return True
+        return False
+
+    def _apply_rung(self, state: _ChannelState, transition: RungTransition) -> None:
+        previous = transition.previous
+        current = transition.current
+        if previous.scale_factor != current.scale_factor and isinstance(
+            state.transformer, VideoTransformer
+        ):
+            state.transformer.request_scale_factor(current.scale_factor)
+        logger.info(
+            "Adaptive video for %s: q%d @ %.1f%% / %s fps -> q%d @ %.1f%% / %s fps",
+            state.downstream_info.get("topic", ""),
+            previous.quality,
+            previous.scale_factor * 100,
+            "source" if previous.max_fps is None else f"{previous.max_fps:g}",
+            current.quality,
+            current.scale_factor * 100,
+            "source" if current.max_fps is None else f"{current.max_fps:g}",
+        )
 
     async def handle_upstream_disconnected(self) -> None:
         self._upstream_subscriptions.clear()
@@ -305,7 +366,6 @@ class BridgeProxy:
             self._upstream_subscriptions[upstream_id] = (upstream_sub_id, 1)
             await self._subscribe_upstream_if_connected(upstream_sub_id, upstream_id)
         self._client_subscriptions[websocket][subscription_id] = (channel_id, upstream_sub_id)
-        self._channel_subscribers.setdefault(channel_id, set()).add((websocket, subscription_id))
 
     async def handle_client_unsubscribe(
         self, websocket: ServerConnection, subscription_id: int
@@ -315,12 +375,6 @@ class BridgeProxy:
         if info is None:
             return
         channel_id, _upstream_sub_id = info
-        subscribers = self._channel_subscribers.get(channel_id)
-        if subscribers is not None:
-            subscribers.discard((websocket, subscription_id))
-            if not subscribers:
-                self._channel_subscribers.pop(channel_id, None)
-        await self._send_manager.remove(websocket, subscription_id)
         upstream_id = self._downstream_to_upstream.get(channel_id, channel_id)
         existing = self._upstream_subscriptions.get(upstream_id)
         if existing is None:
@@ -337,14 +391,14 @@ class BridgeProxy:
         for subscription_id in subscriptions:
             await self.handle_client_unsubscribe(websocket, subscription_id)
         self._client_subscriptions.pop(websocket, None)
-        await self._send_manager.remove_websocket(websocket)
 
-    def _send_outbound(self, message: OutboundMessage) -> None:
-        subscribers = self._channel_subscribers.get(message.channel_id)
-        if not subscribers:
-            return
-        for websocket, subscription_id in list(subscribers):
-            self._send_manager.enqueue(websocket, subscription_id, message)
+    async def _send_outbound(self, message: OutboundMessage) -> None:
+        # Fan out to every subscriber of the channel through the transport
+        # outbox, which applies the channel's delivery policy and never blocks
+        # on a slow client.
+        await self.downstream_server.publish_message(
+            message.channel_id, message.payload, timestamp_ns=message.timestamp_ns
+        )
 
     async def _subscribe_upstream_if_connected(
         self, upstream_sub_id: int, upstream_id: int
@@ -419,6 +473,7 @@ class BridgeProxy:
             upstream_channels=len(self._channels),
             transformed_channels=self.metrics.transformed_channel_count,
             client_count=len(self._client_subscriptions),
+            downgraded_channels=self._governor.downgraded_count(),
         )
 
     def _create_transformer(self, channel: ChannelInfo) -> "LiveTransformer | None":
@@ -479,10 +534,19 @@ def proxy(
     ] = 7,
     pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
     pointcloud_sort_field: PointCloudSortFieldOption = None,
-    send_queue_size: Annotated[
-        int,
-        Parameter(name=["--send-queue-size"], group=LATENCY_GROUP),
-    ] = 1,
+    adaptive_quality: Annotated[
+        bool | None,
+        Parameter(
+            name=["--adaptive-quality"],
+            negative="--no-adaptive-quality",
+            group=ENCODING_GROUP,
+            help=(
+                "Shed video bitrate when a client's link is congested: cap frame "
+                "rate first, then resolution, keeping the requested quality. "
+                "Requires --image-format video. Default: enabled for video."
+            ),
+        ),
+    ] = None,
     transform_queue_size: Annotated[
         int,
         Parameter(name=["--transform-queue-size"], group=LATENCY_GROUP),
@@ -504,12 +568,18 @@ def proxy(
     if port <= 0:
         ERR.print("[red]Error:[/] --port must be positive")
         return 1
-    if send_queue_size <= 0 or transform_queue_size <= 0:
-        ERR.print("[red]Error:[/] queue sizes must be positive")
+    if transform_queue_size <= 0:
+        ERR.print("[red]Error:[/] --transform-queue-size must be positive")
         return 1
     if throttle_hz < 0:
         ERR.print("[red]Error:[/] --throttle-hz must not be negative")
         return 1
+    if adaptive_quality and image_format != "video":
+        ERR.print("[red]Error:[/] --adaptive-quality requires --image-format video")
+        return 1
+    resolved_adaptive_quality = (
+        image_format == "video" if adaptive_quality is None else adaptive_quality
+    )
     try:
         cleanup = resolve_pointcloud_cleanup(
             pointcloud_compression_enabled=pointcloud,
@@ -528,6 +598,7 @@ def proxy(
             backend=backend,
             scale=scale,
             jpeg_quality=jpeg_quality,
+            adaptive_quality=resolved_adaptive_quality,
         ),
         pointcloud=PointCloudConfig(
             enabled=pointcloud,
@@ -541,7 +612,6 @@ def proxy(
             sort_field=cleanup.sort_field,
         ),
         transform_queue_size=transform_queue_size,
-        send_queue_size=send_queue_size,
         throttle_hz=throttle_hz,
         max_message_size=max_message_size if max_message_size > 0 else None,
     )

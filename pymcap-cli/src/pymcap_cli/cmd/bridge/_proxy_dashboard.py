@@ -37,8 +37,9 @@ class ProxyDashboard:
             if snap.upstream_connected
             else Text("● disconnected", style="red")
         )
-        dropped = metrics.transform_queue_drops + metrics.send_queue_drops
-        errors = metrics.transform_errors + metrics.send_errors
+        send_drops = self._bridge.downstream_server.dropped_frames
+        dropped = metrics.transform_queue_drops + metrics.adaptive_frames_dropped + send_drops
+        errors = metrics.transform_errors
 
         grid = Table.grid(padding=(0, 2))
         grid.add_column(justify="right", style="bold cyan")
@@ -55,10 +56,10 @@ class ProxyDashboard:
         grid.add_row(
             "Dropped",
             f"{dropped:,} (transform {metrics.transform_queue_drops:,} · "
-            f"send {metrics.send_queue_drops:,})",
+            f"adaptive {metrics.adaptive_frames_dropped:,} · send {send_drops:,})",
         )
         grid.add_row("Errors", Text(f"{errors:,}", style="red" if errors else "dim"))
-        grid.add_row("Awaiting keyframe", f"{metrics.video_packets_waiting_for_keyframe:,}")
+        grid.add_row("Adaptive downgraded", f"{snap.downgraded_channels:,}")
         return Panel(grid, title="pymcap-cli bridge proxy", border_style="cyan", padding=(1, 2))
 
     async def run(self) -> None:

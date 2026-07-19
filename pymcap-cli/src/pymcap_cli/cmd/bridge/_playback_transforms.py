@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -19,6 +18,13 @@ from pymcap_cli.cmd._cli_options import (
     POINTCLOUD_GROUP,
 )
 from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
+from pymcap_cli.cmd.bridge._adaptive import (
+    MAX_VIDEO_FPS,
+    AdaptiveQualityGovernor,
+    AdaptiveVideoRung,
+    adaptive_max_dimension,
+    adaptive_video_rungs,
+)
 from pymcap_cli.cmd.bridge._playback import (
     PlaybackChannel,
     PlaybackError,
@@ -36,14 +42,6 @@ if TYPE_CHECKING:
     from pymcap_cli.core.processors.video_compress import VideoEncoderSession
 
 logger = logging.getLogger(__name__)
-
-_ADAPTIVE_WINDOW_SECONDS = 2.0
-_ADAPTIVE_CONGESTION_RATIO = 0.25
-_ADAPTIVE_HOLD_SECONDS = 3.0
-_ADAPTIVE_RECOVERY_SECONDS = 30.0
-_MAX_VIDEO_FPS = 30.0
-_ADAPTIVE_SCALE_FACTORS = (0.75, 0.5, 0.375)
-_ADAPTIVE_FRAME_RATES = (20.0, 10.0, 5.0, 2.0)
 
 TRANSFORM_GROUP = Group("ROS Transform")
 Preset = Literal["compress", "decompress", "fast", "low"]
@@ -359,75 +357,7 @@ class _ChannelTransformSpec:
     source: PlaybackChannel
     output: PlaybackChannel
     factories: tuple[TransformFactory, ...]
-    video_rungs: tuple[_AdaptiveVideoRung, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class _AdaptiveVideoRung:
-    quality: int
-    scale_factor: float
-    max_fps: float | None = None
-
-
-@dataclass(slots=True)
-class _AdaptiveVideoController:
-    max_rung: int = 3
-    rung: int = 0
-    _window_started: float | None = None
-    _observations: int = 0
-    _congested_observations: int = 0
-    _last_change: float = -math.inf
-    _clean_since: float | None = None
-
-    def observe(self, *, is_congested: bool, now: float) -> int:
-        if is_congested:
-            self._clean_since = None
-        elif self._clean_since is None:
-            self._clean_since = now
-
-        if (
-            self.rung > 0
-            and self._clean_since is not None
-            and now - self._clean_since >= _ADAPTIVE_RECOVERY_SECONDS
-            and now - self._last_change >= _ADAPTIVE_HOLD_SECONDS
-        ):
-            self.rung -= 1
-            self._last_change = now
-            self._clean_since = now
-            self._reset_window(now, is_congested)
-            return self.rung
-
-        if self._window_started is None:
-            self._reset_window(now, is_congested)
-            return self.rung
-
-        self._observations += 1
-        self._congested_observations += int(is_congested)
-        if now - self._window_started < _ADAPTIVE_WINDOW_SECONDS:
-            return self.rung
-
-        congestion_ratio = self._congested_observations / self._observations
-        # Only degrade while congestion is still present: a stale window whose
-        # single congested sample is seconds old must not keep stepping quality
-        # down during an otherwise clean period.
-        if (
-            is_congested
-            and congestion_ratio >= _ADAPTIVE_CONGESTION_RATIO
-            and self.rung < self.max_rung
-        ):
-            if now - self._last_change >= _ADAPTIVE_HOLD_SECONDS:
-                self.rung += 1
-                self._last_change = now
-                self._reset_window(now, is_congested)
-            return self.rung
-
-        self._reset_window(now, is_congested)
-        return self.rung
-
-    def _reset_window(self, now: float, is_congested: bool) -> None:
-        self._window_started = now
-        self._observations = 1
-        self._congested_observations = int(is_congested)
+    video_rungs: tuple[AdaptiveVideoRung, ...] = ()
 
 
 class JitPlaybackTransformPlan(PlaybackTransformPlan):
@@ -455,14 +385,9 @@ class JitPlaybackTransformPlan(PlaybackTransformPlan):
 class _JitPlaybackTransformSession(PlaybackTransformSession):
     def __init__(self, specs: tuple[_ChannelTransformSpec, ...]) -> None:
         self._factories = {spec.source: spec.factories for spec in specs}
-        self._video_rungs = {spec.source: spec.video_rungs for spec in specs}
-        self._active_rungs = {spec.source: 0 for spec in specs}
-        self._last_video_frame: dict[PlaybackChannel, float] = {}
-        self._controllers = {
-            spec.source: _AdaptiveVideoController(max_rung=len(spec.factories) - 1)
-            for spec in specs
-            if len(spec.factories) > 1
-        }
+        self._governor: AdaptiveQualityGovernor[PlaybackChannel] = AdaptiveQualityGovernor()
+        for spec in specs:
+            self._governor.register(spec.source, spec.video_rungs)
         self._transforms: dict[PlaybackChannel, _SyncChannelTransform] = {}
 
     async def observe_congestion(
@@ -472,21 +397,15 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         is_congested: bool,
         now: float,
     ) -> None:
-        controller = self._controllers.get(channel)
-        if controller is None:
+        transition = self._governor.observe(channel, is_congested=is_congested, now=now)
+        if transition is None:
             return
-        previous_rung = self._active_rungs[channel]
-        new_rung = controller.observe(is_congested=is_congested, now=now)
-        if new_rung == previous_rung:
-            return
-        rungs = self._video_rungs[channel]
-        previous = rungs[previous_rung]
-        current = rungs[new_rung]
+        previous = transition.previous
+        current = transition.current
         if previous.quality != current.quality or previous.scale_factor != current.scale_factor:
             transform = self._transforms.pop(channel, None)
             if transform is not None:
                 await asyncio.to_thread(transform.close)
-        self._active_rungs[channel] = new_rung
         logger.info(
             "Adaptive video for %s: q%d @ %.1f%% / %s fps -> q%d @ %.1f%% / %s fps",
             channel.topic,
@@ -499,24 +418,14 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         )
 
     def should_drop_frame(self, channel: PlaybackChannel, *, now: float) -> bool:
-        rungs = self._video_rungs.get(channel)
-        if not rungs:
-            return False
-        max_fps = rungs[self._active_rungs[channel]].max_fps
-        if max_fps is None:
-            return False
-        last_frame = self._last_video_frame.get(channel)
-        if last_frame is not None and now - last_frame < 1 / max_fps:
-            return True
-        self._last_video_frame[channel] = now
-        return False
+        return self._governor.should_drop_frame(channel, now=now)
 
     async def transform(
         self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
     ) -> tuple[PlaybackOutput, ...]:
         transform = self._transforms.get(channel)
         if transform is None:
-            transform = self._factories[channel][self._active_rungs[channel]]()
+            transform = self._factories[channel][self._governor.active_index(channel)]()
             self._transforms[channel] = transform
         try:
             return await asyncio.to_thread(transform.process, payload, timestamp_ns)
@@ -538,7 +447,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         return tuple(outputs)
 
     async def deactivate(self, channel: PlaybackChannel) -> None:
-        self._last_video_frame.pop(channel, None)
+        self._governor.clear_frame_timing(channel)
         transform = self._transforms.pop(channel, None)
         if transform is not None:
             await asyncio.to_thread(transform.close)
@@ -550,7 +459,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         # seek). Keep the learned adaptive rung across timeline restarts.
         transforms = tuple(self._transforms.values())
         self._transforms.clear()
-        self._last_video_frame.clear()
+        self._governor.reset_all_frame_timing()
         for transform in transforms:
             await asyncio.to_thread(transform.close)
 
@@ -619,9 +528,9 @@ def _create_roscompress_plan(
                 schema_text=FOXGLOVE_COMPRESSED_VIDEO,
             )
             video_rungs = (
-                _adaptive_video_rungs(config.quality)
+                adaptive_video_rungs(config.quality)
                 if config.adaptive_quality
-                else (_AdaptiveVideoRung(config.quality, 1.0, _MAX_VIDEO_FPS),)
+                else (AdaptiveVideoRung(config.quality, 1.0, MAX_VIDEO_FPS),)
             )
             factories = tuple(
                 partial(
@@ -745,37 +654,6 @@ def _probe_factories(specs: Iterable[_ChannelTransformSpec]) -> None:
     for spec in specs:
         transform = spec.factories[0]()
         transform.close()
-
-
-def _adaptive_video_rungs(quality: int) -> tuple[_AdaptiveVideoRung, ...]:
-    frame_rate_rungs = tuple(
-        _AdaptiveVideoRung(quality, 1.0, max_fps)
-        for max_fps in (_MAX_VIDEO_FPS, *_ADAPTIVE_FRAME_RATES)
-    )
-    minimum_fps = _ADAPTIVE_FRAME_RATES[-1]
-    resolution_rungs = tuple(
-        _AdaptiveVideoRung(quality, scale_factor, minimum_fps)
-        for scale_factor in _ADAPTIVE_SCALE_FACTORS
-    )
-    return frame_rate_rungs + resolution_rungs
-
-
-def _adaptive_max_dimension(
-    configured_scale: int | None,
-    *,
-    width: int,
-    height: int,
-    scale_factor: float,
-) -> int | None:
-    if scale_factor == 1.0:
-        return configured_scale
-    source_max_dimension = max(width, height)
-    base_max_dimension = (
-        source_max_dimension
-        if configured_scale is None
-        else min(source_max_dimension, configured_scale)
-    )
-    return max(2, round(base_max_dimension * scale_factor))
 
 
 def _is_ros_channel(channel: PlaybackChannel) -> bool:
@@ -1087,7 +965,7 @@ class _VideoCompressTransform:
                 codec=self._config.codec,
                 quality=self._config.quality,
                 topic=self._source.topic,
-                scale=_adaptive_max_dimension(
+                scale=adaptive_max_dimension(
                     self._config.scale,
                     width=width,
                     height=height,

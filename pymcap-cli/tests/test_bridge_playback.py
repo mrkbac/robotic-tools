@@ -14,6 +14,7 @@ from mcap_codec_support.pointcloud import POINTCLOUD2
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.bridge import _playback, _playback_transforms
+from pymcap_cli.cmd.bridge._adaptive import AdaptiveVideoRung
 from pymcap_cli.cmd.bridge._playback import (
     PlaybackChannel,
     PlaybackClock,
@@ -753,55 +754,6 @@ def test_transform_config_adaptive_quality_requires_roscompress_video() -> None:
         resolve_playback_transform_config(preset=None, **common)
 
 
-def test_adaptive_video_controller_degrades_quickly_and_recovers_slowly() -> None:
-    controller = _playback_transforms._AdaptiveVideoController()
-
-    assert controller.observe(is_congested=False, now=0.0) == 0
-    assert controller.observe(is_congested=True, now=0.5) == 0
-    assert controller.observe(is_congested=True, now=1.0) == 0
-    assert controller.observe(is_congested=False, now=1.5) == 0
-    assert controller.observe(is_congested=True, now=2.0) == 1
-
-    assert controller.observe(is_congested=True, now=4.0) == 1
-    assert controller.observe(is_congested=True, now=5.0) == 2
-    assert controller.observe(is_congested=False, now=5.1) == 2
-    assert controller.observe(is_congested=False, now=35.0) == 2
-    assert controller.observe(is_congested=False, now=35.1) == 1
-
-
-def test_adaptive_video_controller_reaches_top_rung_under_sustained_congestion() -> None:
-    controller = _playback_transforms._AdaptiveVideoController()
-    rung = 0
-    for step in range(40):
-        rung = controller.observe(is_congested=True, now=float(step))
-    assert rung == 3
-    assert controller.max_rung == 3
-
-
-def test_adaptive_video_controller_holds_rung_while_clean() -> None:
-    controller = _playback_transforms._AdaptiveVideoController()
-    # Degrade once, then a long clean spell that is not yet long enough to
-    # recover must not degrade further just because a stale window elapses.
-    assert controller.observe(is_congested=True, now=0.0) == 0
-    assert controller.observe(is_congested=True, now=2.0) == 1
-    for step in range(3, 25):
-        assert controller.observe(is_congested=False, now=float(step)) == 1
-
-
-def test_adaptive_video_rungs_reduce_fps_then_resolution_without_reducing_quality() -> None:
-    rung = _playback_transforms._AdaptiveVideoRung
-    assert _playback_transforms._adaptive_video_rungs(28) == (
-        rung(28, 1.0, 30.0),
-        rung(28, 1.0, 20.0),
-        rung(28, 1.0, 10.0),
-        rung(28, 1.0, 5.0),
-        rung(28, 1.0, 2.0),
-        rung(28, 0.75, 2.0),
-        rung(28, 0.5, 2.0),
-        rung(28, 0.375, 2.0),
-    )
-
-
 def test_roscompress_video_has_general_wall_clock_fps_cap(image_small_mcap: Path) -> None:
     prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
     plan = create_playback_transform_plan(
@@ -818,15 +770,6 @@ def test_roscompress_video_has_general_wall_clock_fps_cap(image_small_mcap: Path
         assert not session.should_drop_frame(channel, now=0.034)
     finally:
         asyncio.run(session.close())
-
-
-def test_adaptive_resolution_is_relative_to_source_or_explicit_scale_ceiling() -> None:
-    max_dimension = _playback_transforms._adaptive_max_dimension
-    assert max_dimension(None, width=1920, height=1080, scale_factor=0.75) == 1440
-    assert max_dimension(960, width=1920, height=1080, scale_factor=0.75) == 720
-    assert max_dimension(960, width=640, height=480, scale_factor=0.75) == 480
-    assert max_dimension(480, width=1920, height=1080, scale_factor=1.0) == 480
-    assert max_dimension(None, width=1920, height=1080, scale_factor=1.0) is None
 
 
 def test_apply_preset_maps_image_format_and_scale() -> None:
@@ -871,9 +814,7 @@ def test_adaptive_quality_session_restarts_encoder_at_new_rung() -> None:
         source=channel,
         output=channel,
         factories=tuple(lambda rung=rung: _Transform(rung) for rung in range(3)),
-        video_rungs=tuple(
-            _playback_transforms._AdaptiveVideoRung(quality, 1.0) for quality in (28, 34, 40)
-        ),
+        video_rungs=tuple(AdaptiveVideoRung(quality, 1.0) for quality in (28, 34, 40)),
     )
     session = _playback_transforms._JitPlaybackTransformSession((spec,))
 
@@ -904,7 +845,7 @@ def test_adaptive_quality_session_restarts_encoder_at_new_rung() -> None:
 
 def test_adaptive_video_frame_rate_rung_drops_frames_before_transform() -> None:
     channel = PlaybackChannel("/camera", "raw", "example/Raw", "text", "bytes")
-    rung = _playback_transforms._AdaptiveVideoRung
+    rung = AdaptiveVideoRung
     spec = _playback_transforms._ChannelTransformSpec(
         source=channel,
         output=channel,
@@ -951,7 +892,7 @@ def test_adaptive_video_frame_rate_change_reuses_encoder() -> None:
             nonlocal closed
             closed += 1
 
-    rung = _playback_transforms._AdaptiveVideoRung
+    rung = AdaptiveVideoRung
     spec = _playback_transforms._ChannelTransformSpec(
         source=channel,
         output=channel,

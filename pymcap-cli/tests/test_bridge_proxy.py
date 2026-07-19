@@ -13,16 +13,21 @@ import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
 from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
 from mcap_codec_support.video.common import EncoderConfig
+from pymcap_cli.cmd.bridge._adaptive import (
+    AdaptiveVideoRung,
+    RungTransition,
+    adaptive_video_rungs,
+)
 from pymcap_cli.cmd.bridge._proxy_dashboard import ProxyDashboard
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     IncomingMessage,
     OutboundMessage,
     ProxyMetrics,
-    SendManager,
     TransformResult,
     TransformWorker,
 )
 from pymcap_cli.cmd.bridge._proxy_transforms import (
+    COMPRESSED_VIDEO_SCHEMA,
     ImageConfig,
     PointCloudConfig,
     ProcessorRule,
@@ -32,20 +37,19 @@ from pymcap_cli.cmd.bridge._proxy_transforms import (
     create_transformer,
     is_video_keyframe,
 )
-from pymcap_cli.cmd.bridge.proxy import BridgeProxy
+from pymcap_cli.cmd.bridge.proxy import BridgeProxy, _ChannelState
 from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,
     TransformOutput,
 )
 from pymcap_cli.core.processors.video_compress import ResolvedVideoCompressionBackend
 from rich.console import Console
-from robo_ws_bridge.server import Channel as ServerChannel
-from robo_ws_bridge.server import WebSocketBridgeServer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mcap_codec_support.video import EncoderMode
+    from robo_ws_bridge.server import Channel as ServerChannel
     from robo_ws_bridge.ws_types import ChannelInfo
 
 
@@ -78,7 +82,6 @@ def _proxy_config() -> ProxyConfig:
             draco_compression_level=7,
         ),
         transform_queue_size=1,
-        send_queue_size=1,
         throttle_hz=0,
         max_message_size=None,
     )
@@ -109,102 +112,6 @@ def test_av1_keyframe_detection() -> None:
     frame_obu = b"\x32\x01\x00"  # type=6, has_size=1, size=1
     assert is_video_keyframe(seq_header_obu, "av1")
     assert not is_video_keyframe(frame_obu, "av1")
-
-
-def test_send_manager_latest_only_drops_stale_messages(monkeypatch) -> None:
-    async def run() -> None:
-        server = WebSocketBridgeServer()
-        metrics = ProxyMetrics()
-        manager = SendManager(server, metrics, queue_size=1)
-        sent: list[bytes] = []
-        release = asyncio.Event()
-        websocket = object()
-
-        async def fake_send(
-            _websocket: object,
-            _subscription_id: int,
-            payload: bytes,
-            *,
-            timestamp_ns: int | None = None,
-        ) -> None:
-            del timestamp_ns
-            sent.append(payload)
-            if payload == b"slow":
-                await release.wait()
-
-        monkeypatch.setattr(server, "send_message_to_subscription", fake_send)
-
-        manager.enqueue(websocket, 1, OutboundMessage(1, 1, b"slow"))
-        await _wait_for(lambda: sent == [b"slow"])
-
-        manager.enqueue(websocket, 1, OutboundMessage(1, 2, b"stale"))
-        manager.enqueue(websocket, 1, OutboundMessage(1, 3, b"latest"))
-
-        release.set()
-        await _wait_for(lambda: sent == [b"slow", b"latest"])
-        await manager.close()
-
-        assert metrics.send_queue_drops == 1
-
-    asyncio.run(run())
-
-
-def test_send_manager_waits_for_keyframe_after_video_drop(monkeypatch) -> None:
-    async def run() -> None:
-        server = WebSocketBridgeServer()
-        metrics = ProxyMetrics()
-        manager = SendManager(server, metrics, queue_size=1)
-        sent: list[bytes] = []
-        release = asyncio.Event()
-        websocket = object()
-
-        async def fake_send(
-            _websocket: object,
-            _subscription_id: int,
-            payload: bytes,
-            *,
-            timestamp_ns: int | None = None,
-        ) -> None:
-            del timestamp_ns
-            sent.append(payload)
-            if payload == b"first-key":
-                await release.wait()
-
-        monkeypatch.setattr(server, "send_message_to_subscription", fake_send)
-
-        manager.enqueue(
-            websocket,
-            1,
-            OutboundMessage(1, 1, b"first-key", is_compressed_video=True, is_keyframe=True),
-        )
-        await _wait_for(lambda: sent == [b"first-key"])
-
-        manager.enqueue(
-            websocket,
-            1,
-            OutboundMessage(1, 2, b"stale-delta", is_compressed_video=True, is_keyframe=False),
-        )
-        manager.enqueue(
-            websocket,
-            1,
-            OutboundMessage(1, 3, b"latest-delta", is_compressed_video=True, is_keyframe=False),
-        )
-
-        release.set()
-        await _wait_for(lambda: metrics.video_packets_waiting_for_keyframe == 1)
-        assert sent == [b"first-key"]
-
-        manager.enqueue(
-            websocket,
-            1,
-            OutboundMessage(1, 4, b"next-key", is_compressed_video=True, is_keyframe=True),
-        )
-        await _wait_for(lambda: sent == [b"first-key", b"next-key"])
-        await manager.close()
-
-        assert metrics.send_queue_drops == 1
-
-    asyncio.run(run())
 
 
 def test_bridge_proxy_advertises_transformed_channel(monkeypatch) -> None:
@@ -489,6 +396,10 @@ def test_transform_worker_uses_transformer_worker_count(monkeypatch: pytest.Monk
         )
         transformer = ConcurrentTransformer()
         emitted: list[OutboundMessage] = []
+
+        async def emit(message: OutboundMessage) -> None:
+            emitted.append(message)
+
         worker = TransformWorker(
             channel={
                 "id": 3,
@@ -501,7 +412,7 @@ def test_transform_worker_uses_transformer_worker_count(monkeypatch: pytest.Monk
             downstream_id=10,
             transformer=transformer,
             queue_size=1,
-            emit=emitted.append,
+            emit=emit,
             metrics=ProxyMetrics(),
         )
         try:
@@ -553,6 +464,10 @@ def test_transform_worker_drops_stale_parallel_completion(
         transformer = OutOfOrderTransformer()
         metrics = ProxyMetrics()
         emitted: list[OutboundMessage] = []
+
+        async def emit(message: OutboundMessage) -> None:
+            emitted.append(message)
+
         worker = TransformWorker(
             channel={
                 "id": 3,
@@ -565,7 +480,7 @@ def test_transform_worker_drops_stale_parallel_completion(
             downstream_id=10,
             transformer=transformer,
             queue_size=1,
-            emit=emitted.append,
+            emit=emit,
             metrics=metrics,
         )
         try:
@@ -658,3 +573,240 @@ def test_video_transformer_uses_roscompress_backend_resolver(
 
     assert calls == [("h264", None, backend)]
     assert transformer._session._encoder_name == "selected_encoder"
+
+
+def test_bridge_proxy_send_outbound_publishes_via_outbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        bridge = BridgeProxy(
+            upstream_url="ws://upstream:8765",
+            listen_host="127.0.0.1",
+            listen_port=8766,
+            config=_proxy_config(),
+        )
+        published: list[tuple[int, bytes, int | None]] = []
+
+        async def fake_publish(
+            channel_id: int, payload: bytes, *, timestamp_ns: int | None = None
+        ) -> None:
+            published.append((channel_id, payload, timestamp_ns))
+
+        monkeypatch.setattr(bridge.downstream_server, "publish_message", fake_publish)
+        try:
+            await bridge._send_outbound(OutboundMessage(42, 7, b"data"))
+            assert published == [(42, b"data", 7)]
+        finally:
+            await bridge.stop()
+
+    asyncio.run(run())
+
+
+def test_bridge_proxy_delivery_policy_follows_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        bridge = BridgeProxy(
+            upstream_url="ws://upstream:8765",
+            listen_host="127.0.0.1",
+            listen_port=8766,
+            config=_proxy_config(),
+        )
+        captured: dict[str, str] = {}
+
+        async def fake_advertise(channel: ServerChannel, *, update_registry: bool = True) -> None:
+            del update_registry
+            captured[channel.schema_name] = channel.delivery
+
+        monkeypatch.setattr(bridge.downstream_server, "advertise_channel", fake_advertise)
+        try:
+            # Standalone frames may be dropped for a slow client (latest-wins).
+            await bridge.handle_upstream_advertise(
+                {
+                    "id": 1,
+                    "topic": "/cam",
+                    "encoding": "cdr",
+                    "schemaName": "sensor_msgs/msg/Image",
+                    "schema": "image",
+                    "schemaEncoding": "ros2msg",
+                }
+            )
+            # Encoded video must never be dropped mid-GOP (reliable).
+            await bridge.handle_upstream_advertise(
+                {
+                    "id": 2,
+                    "topic": "/cam/video",
+                    "encoding": "cdr",
+                    "schemaName": COMPRESSED_VIDEO_SCHEMA,
+                    "schema": "video",
+                    "schemaEncoding": "ros2msg",
+                }
+            )
+            # Non-frame data is reliable by default.
+            await bridge.handle_upstream_advertise(
+                {
+                    "id": 3,
+                    "topic": "/chatter",
+                    "encoding": "cdr",
+                    "schemaName": "std_msgs/msg/String",
+                    "schema": "string data",
+                    "schemaEncoding": "ros2msg",
+                }
+            )
+            assert captured["sensor_msgs/msg/Image"] == "latest"
+            assert captured[COMPRESSED_VIDEO_SCHEMA] == "reliable"
+            assert captured["std_msgs/msg/String"] == "reliable"
+        finally:
+            await bridge.stop()
+
+    asyncio.run(run())
+
+
+class _FakeVideoTransformer(VideoTransformer):
+    """A VideoTransformer that records reconfigure requests without a real encoder."""
+
+    output_schema_name = COMPRESSED_VIDEO_SCHEMA
+    output_schema_text = "video"
+    output_schema_encoding = "ros2msg"
+    output_message_encoding = "cdr"
+    worker_count = 1
+
+    def __init__(self) -> None:
+        self.scale_requests: list[float] = []
+
+    def request_scale_factor(self, scale_factor: float) -> None:
+        self.scale_requests.append(scale_factor)
+
+
+def _adaptive_state(downstream_id: int, transformer: VideoTransformer | None) -> _ChannelState:
+    info: ChannelInfo = {
+        "id": downstream_id,
+        "topic": "/cam/video",
+        "encoding": "cdr",
+        "schemaName": COMPRESSED_VIDEO_SCHEMA,
+        "schema": "video",
+        "schemaEncoding": "ros2msg",
+    }
+    return _ChannelState(
+        upstream_info=info,
+        downstream_info=info,
+        downstream_id=downstream_id,
+        worker=None,
+        throttle_hz=0.0,
+        transformer=transformer,
+        is_adaptive_video=True,
+    )
+
+
+def test_bridge_proxy_apply_rung_reconfigures_only_on_scale_change() -> None:
+    async def run() -> None:
+        bridge = BridgeProxy(
+            upstream_url="ws://upstream:8765",
+            listen_host="127.0.0.1",
+            listen_port=8766,
+            config=_proxy_config(),
+        )
+        transformer = _FakeVideoTransformer()
+        state = _adaptive_state(500, transformer)
+        try:
+            # A frame-rate-only step keeps the encoder (no resolution change).
+            bridge._apply_rung(
+                state,
+                RungTransition(AdaptiveVideoRung(28, 1.0, 30.0), AdaptiveVideoRung(28, 1.0, 20.0)),
+            )
+            assert transformer.scale_requests == []
+            # A resolution step reconfigures the encoder.
+            bridge._apply_rung(
+                state,
+                RungTransition(AdaptiveVideoRung(28, 1.0, 2.0), AdaptiveVideoRung(28, 0.5, 2.0)),
+            )
+            assert transformer.scale_requests == [0.5]
+        finally:
+            await bridge.stop()
+
+    asyncio.run(run())
+
+
+def test_bridge_proxy_adaptive_enforces_frame_rate_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        bridge = BridgeProxy(
+            upstream_url="ws://upstream:8765",
+            listen_host="127.0.0.1",
+            listen_port=8766,
+            config=_proxy_config(),
+        )
+        state = _adaptive_state(500, None)
+        bridge._governor.register(500, adaptive_video_rungs(28))
+        monkeypatch.setattr(
+            bridge.downstream_server, "are_all_subscribers_busy", lambda _channel_id: False
+        )
+        try:
+            # The top rung still caps at 30 fps, so a rapid second frame is dropped.
+            assert not bridge._adaptive_should_drop(state)
+            assert bridge._adaptive_should_drop(state)
+            assert bridge.metrics.adaptive_frames_dropped == 1
+        finally:
+            await bridge.stop()
+
+    asyncio.run(run())
+
+
+def test_video_transformer_rebuilds_session_on_scale_factor_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_resolve_video_compression_backend(
+        *, codec: str, encoder: str | None, backend: EncoderMode
+    ) -> ResolvedVideoCompressionBackend:
+        del codec, encoder, backend
+        return ResolvedVideoCompressionBackend(_FakeVideoBackend(), "selected_encoder")
+
+    monkeypatch.setattr(
+        video_compress,
+        "resolve_video_compression_backend",
+        fake_resolve_video_compression_backend,
+    )
+
+    class _FakeSession:
+        def __init__(self, scale_factor: float) -> None:
+            self.scale_factor = scale_factor
+
+        def decode_image(self, _live: object, _schema: str) -> tuple[bytes, int, int]:
+            return b"frame", 640, 480
+
+        def encode_with_fallback(self, _frame: bytes, _w: int, _h: int) -> SimpleNamespace:
+            return SimpleNamespace(failed=False, data=b"\x00\x00\x00\x01\x65")
+
+        def close(self) -> None:
+            return
+
+    class _FakeImage:
+        _type = "sensor_msgs/msg/Image"
+
+        def __init__(self) -> None:
+            self.header = SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=2), frame_id="cam")
+
+    transformer = VideoTransformer(
+        ImageConfig(
+            image_format="video",
+            codec="h264",
+            quality=28,
+            encoder=None,
+            backend="auto",
+            scale=None,
+            jpeg_quality=90,
+        ),
+        "/cam",
+    )
+    built: list[tuple[float, int, int]] = []
+
+    def fake_build(*, scale_factor: float, width: int, height: int) -> _FakeSession:
+        built.append((scale_factor, width, height))
+        return _FakeSession(scale_factor)
+
+    monkeypatch.setattr(transformer, "_session", _FakeSession(1.0))
+    monkeypatch.setattr(transformer, "_build_session", fake_build)
+
+    decoded = _FakeImage()
+    assert transformer.transform(decoded, 0) is not None
+    assert built == []  # no rung change yet
+
+    transformer.request_scale_factor(0.5)
+    assert transformer.transform(decoded, 0) is not None
+    assert built == [(0.5, 640, 480)]
+    assert transformer._applied_scale_factor == 0.5

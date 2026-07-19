@@ -1,16 +1,22 @@
-"""Low-latency queueing and transform runtime for live bridge proxying."""
+"""Low-latency transform runtime for live bridge proxying.
+
+Downstream delivery is owned by the transport's per-connection outbox
+(:class:`robo_ws_bridge.server.ConnectionOutbox`): the proxy publishes each
+transformed message with :meth:`WebSocketBridgeServer.publish_message` and the
+outbox handles slow-client backpressure, latest-wins replacement, and drop
+counting. This module only decodes, transforms, and re-encodes upstream
+messages on a thread pool before handing them off.
+"""
 
 import asyncio
-import contextlib
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
-from robo_ws_bridge import ServerConnection, WebSocketBridgeServer
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import Schema
 
@@ -63,111 +69,7 @@ class ProxyMetrics:
     transform_queue_drops: int = 0
     transform_stale_drops: int = 0
     transform_errors: int = 0
-    send_queue_drops: int = 0
-    send_errors: int = 0
-    video_packets_waiting_for_keyframe: int = 0
-
-
-@dataclass(slots=True)
-class SendSlot:
-    websocket: ServerConnection
-    subscription_id: int
-    server: WebSocketBridgeServer
-    metrics: ProxyMetrics
-    queue_size: int
-    queue: asyncio.Queue[OutboundMessage] = field(init=False)
-    task: asyncio.Task[None] = field(init=False)
-    needs_keyframe: bool = False
-
-    def __post_init__(self) -> None:
-        self.queue = asyncio.Queue(maxsize=max(1, self.queue_size))
-        self.task = asyncio.create_task(self._run())
-
-    def enqueue(self, message: OutboundMessage) -> None:
-        while self.queue.full():
-            dropped = self.queue.get_nowait()
-            self.queue.task_done()
-            self.metrics.send_queue_drops += 1
-            if dropped.is_compressed_video:
-                self.needs_keyframe = True
-        self.queue.put_nowait(message)
-
-    async def close(self) -> None:
-        self.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self.task
-
-    async def _run(self) -> None:
-        while True:
-            message = await self.queue.get()
-            try:
-                if message.is_compressed_video and self.needs_keyframe and not message.is_keyframe:
-                    self.metrics.video_packets_waiting_for_keyframe += 1
-                    continue
-                if message.is_compressed_video and message.is_keyframe:
-                    self.needs_keyframe = False
-                try:
-                    await self.server.send_message_to_subscription(
-                        self.websocket,
-                        self.subscription_id,
-                        message.payload,
-                        timestamp_ns=message.timestamp_ns,
-                    )
-                except Exception:
-                    self.metrics.send_errors += 1
-                    logger.exception("Failed to send proxied message")
-            finally:
-                self.queue.task_done()
-
-
-class SendManager:
-    def __init__(
-        self,
-        server: WebSocketBridgeServer,
-        metrics: ProxyMetrics,
-        *,
-        queue_size: int,
-    ) -> None:
-        self._server = server
-        self._metrics = metrics
-        self._queue_size = max(1, queue_size)
-        self._slots: dict[tuple[ServerConnection, int], SendSlot] = {}
-
-    def enqueue(
-        self,
-        websocket: ServerConnection,
-        subscription_id: int,
-        message: OutboundMessage,
-    ) -> None:
-        key = (websocket, subscription_id)
-        slot = self._slots.get(key)
-        if slot is None:
-            slot = SendSlot(
-                websocket=websocket,
-                subscription_id=subscription_id,
-                server=self._server,
-                metrics=self._metrics,
-                queue_size=self._queue_size,
-            )
-            self._slots[key] = slot
-        slot.enqueue(message)
-
-    async def remove(self, websocket: ServerConnection, subscription_id: int) -> None:
-        slot = self._slots.pop((websocket, subscription_id), None)
-        if slot is not None:
-            await slot.close()
-
-    async def remove_websocket(self, websocket: ServerConnection) -> None:
-        keys = [key for key in self._slots if key[0] is websocket]
-        for key in keys:
-            slot = self._slots.pop(key)
-            await slot.close()
-
-    async def close(self) -> None:
-        slots = list(self._slots.values())
-        self._slots.clear()
-        for slot in slots:
-            await slot.close()
+    adaptive_frames_dropped: int = 0
 
 
 class TransformWorker:
@@ -178,7 +80,7 @@ class TransformWorker:
         downstream_id: int,
         transformer: LiveTransformer,
         queue_size: int,
-        emit: Callable[[OutboundMessage], None],
+        emit: Callable[[OutboundMessage], Awaitable[None]],
         metrics: ProxyMetrics,
     ) -> None:
         self._channel = channel
@@ -230,7 +132,7 @@ class TransformWorker:
                         self._metrics.transform_stale_drops += 1
                         continue
                     self._latest_emitted_index = message.arrival_index
-                    self._emit(outbound)
+                    await self._emit(outbound)
             finally:
                 self._queue.task_done()
 

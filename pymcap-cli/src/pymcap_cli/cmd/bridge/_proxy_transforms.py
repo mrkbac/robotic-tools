@@ -3,12 +3,13 @@
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import Channel, Schema
 
 from pymcap_cli.cmd._pointcloud_cleanup import pointcloud_worker_count
+from pymcap_cli.cmd.bridge._adaptive import adaptive_max_dimension
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     MESSAGE_ENCODING,
     SCHEMA_ENCODING,
@@ -20,6 +21,9 @@ from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,
     TransformOutput,
 )
+
+if TYPE_CHECKING:
+    from pymcap_cli.core.processors.video_compress import VideoEncoderSession
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,7 @@ class ImageConfig:
     backend: Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
     scale: int | None
     jpeg_quality: int
+    adaptive_quality: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +85,6 @@ class ProxyConfig:
     image: ImageConfig
     pointcloud: PointCloudConfig
     transform_queue_size: int
-    send_queue_size: int
     throttle_hz: float
     max_message_size: int | None
 
@@ -234,25 +238,49 @@ class VideoTransformer:
         self._config = config
         self._topic = topic
         self._build_payload = build_compressed_video_payload
+        self._session_type = VideoEncoderSession
         resolved = resolve_video_compression_backend(
             codec=config.codec,
             encoder=config.encoder,
             backend=EncoderMode(config.backend),
         )
-        self._session = VideoEncoderSession(
-            backend=resolved.backend,
-            encoder_name=resolved.encoder_name,
-            codec=config.codec,
-            quality=config.quality,
-            topic=topic,
-            scale=config.scale,
+        self._backend = resolved.backend
+        self._encoder_name = resolved.encoder_name
+        # ``_target_scale_factor`` is set from the event loop by the adaptive
+        # governor; ``_applied_scale_factor`` is owned by the worker thread and
+        # rebuilds the encoder (opening a fresh keyframe) on the next frame.
+        self._target_scale_factor = 1.0
+        self._applied_scale_factor = 1.0
+        self._session = self._build_session(scale_factor=1.0, width=0, height=0)
+
+    def _build_session(
+        self, *, scale_factor: float, width: int, height: int
+    ) -> "VideoEncoderSession":
+        return self._session_type(
+            backend=self._backend,
+            encoder_name=self._encoder_name,
+            codec=self._config.codec,
+            quality=self._config.quality,
+            topic=self._topic,
+            scale=adaptive_max_dimension(
+                self._config.scale, width=width, height=height, scale_factor=scale_factor
+            ),
         )
+
+    def request_scale_factor(self, scale_factor: float) -> None:
+        """Ask the worker thread to re-encode at ``scale_factor`` of the source resolution."""
+        self._target_scale_factor = scale_factor
 
     def transform(self, decoded: object, timestamp_ns: int) -> TransformResult | None:
         del timestamp_ns
         schema_name = _normalize_schema_name(_message_type(decoded))
         live = _LiveDecodedMessage(decoded_message=decoded, channel=_LiveChannel(self._topic))
         frame, width, height = self._session.decode_image(live, schema_name)
+        target = self._target_scale_factor
+        if target != self._applied_scale_factor:
+            self._session.close()
+            self._session = self._build_session(scale_factor=target, width=width, height=height)
+            self._applied_scale_factor = target
         outcome = self._session.encode_with_fallback(frame, width, height)
         if outcome.failed or outcome.data is None:
             return None
