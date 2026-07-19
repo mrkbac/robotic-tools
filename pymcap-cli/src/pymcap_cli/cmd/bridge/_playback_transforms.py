@@ -43,7 +43,9 @@ _ADAPTIVE_HOLD_SECONDS = 3.0
 _ADAPTIVE_RECOVERY_SECONDS = 30.0
 _ADAPTIVE_QUALITY_STEP = 6
 _MAX_USEFUL_VIDEO_QUALITY = 46
-_ADAPTIVE_SCALE_FACTORS = (0.75, 0.5, 0.375, 0.25)
+_MAX_VIDEO_FPS = 30.0
+_ADAPTIVE_SCALE_FACTORS = (0.75, 0.5, 0.375)
+_ADAPTIVE_FRAME_RATES = (10.0, 5.0, 2.0)
 
 TRANSFORM_GROUP = Group("ROS Transform")
 Preset = Literal["compress", "decompress", "fast", "low"]
@@ -86,8 +88,8 @@ OptionalAdaptiveQualityOption = Annotated[
         negative="--no-adaptive-quality",
         group=ENCODING_GROUP,
         help=(
-            "Adapt video quality, then resolution, when subscribers fall behind. "
-            "Serve default: enabled."
+            "Cap compressed video at 30 FPS, then adapt quality, resolution, and "
+            "frame rate when subscribers fall behind. Serve default: enabled."
         ),
     ),
 ]
@@ -365,6 +367,7 @@ class _ChannelTransformSpec:
 class _AdaptiveVideoRung:
     quality: int
     scale_factor: float
+    max_fps: float | None = None
 
 
 @dataclass(slots=True)
@@ -455,6 +458,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         self._factories = {spec.source: spec.factories for spec in specs}
         self._video_rungs = {spec.source: spec.video_rungs for spec in specs}
         self._active_rungs = {spec.source: 0 for spec in specs}
+        self._last_video_frame: dict[PlaybackChannel, float] = {}
         self._controllers = {
             spec.source: _AdaptiveQualityController(max_rung=len(spec.factories) - 1)
             for spec in specs
@@ -484,13 +488,28 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         previous = rungs[previous_rung]
         current = rungs[new_rung]
         logger.info(
-            "Adaptive video for %s: q%d @ %.1f%% -> q%d @ %.1f%%",
+            "Adaptive video for %s: q%d @ %.1f%% / %s fps -> q%d @ %.1f%% / %s fps",
             channel.topic,
             previous.quality,
             previous.scale_factor * 100,
+            "source" if previous.max_fps is None else f"{previous.max_fps:g}",
             current.quality,
             current.scale_factor * 100,
+            "source" if current.max_fps is None else f"{current.max_fps:g}",
         )
+
+    def should_drop_frame(self, channel: PlaybackChannel, *, now: float) -> bool:
+        rungs = self._video_rungs.get(channel)
+        if not rungs:
+            return False
+        max_fps = rungs[self._active_rungs[channel]].max_fps
+        if max_fps is None:
+            return False
+        last_frame = self._last_video_frame.get(channel)
+        if last_frame is not None and now - last_frame < 1 / max_fps:
+            return True
+        self._last_video_frame[channel] = now
+        return False
 
     async def transform(
         self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
@@ -519,6 +538,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         return tuple(outputs)
 
     async def deactivate(self, channel: PlaybackChannel) -> None:
+        self._last_video_frame.pop(channel, None)
         transform = self._transforms.pop(channel, None)
         if transform is not None:
             await asyncio.to_thread(transform.close)
@@ -530,6 +550,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         # seek). The learned adaptive rungs are kept so quality does not reset.
         transforms = tuple(self._transforms.values())
         self._transforms.clear()
+        self._last_video_frame.clear()
         for transform in transforms:
             await asyncio.to_thread(transform.close)
 
@@ -600,7 +621,7 @@ def _create_roscompress_plan(
             video_rungs = (
                 _adaptive_video_rungs(config.quality)
                 if config.adaptive_quality
-                else (_AdaptiveVideoRung(config.quality, 1.0),)
+                else (_AdaptiveVideoRung(config.quality, 1.0, _MAX_VIDEO_FPS),)
             )
             factories = tuple(
                 partial(
@@ -741,9 +762,22 @@ def _adaptive_quality_rungs(quality: int) -> tuple[int, ...]:
 def _adaptive_video_rungs(quality: int) -> tuple[_AdaptiveVideoRung, ...]:
     qualities = _adaptive_quality_rungs(quality)
     most_compressed = qualities[-1]
-    return tuple(_AdaptiveVideoRung(value, 1.0) for value in qualities) + tuple(
-        _AdaptiveVideoRung(most_compressed, scale_factor)
+    resolution_rungs = tuple(
+        _AdaptiveVideoRung(most_compressed, scale_factor, _MAX_VIDEO_FPS)
         for scale_factor in _ADAPTIVE_SCALE_FACTORS
+    )
+    frame_rate_rungs = tuple(
+        _AdaptiveVideoRung(
+            most_compressed,
+            _ADAPTIVE_SCALE_FACTORS[-1],
+            max_fps,
+        )
+        for max_fps in _ADAPTIVE_FRAME_RATES
+    )
+    return (
+        tuple(_AdaptiveVideoRung(value, 1.0, _MAX_VIDEO_FPS) for value in qualities)
+        + resolution_rungs
+        + frame_rate_rungs
     )
 
 

@@ -590,6 +590,9 @@ def test_run_playback_drops_stale_messages_before_slow_transform(
             now[0] += 0.02
             return (PlaybackOutput(channel, timestamp_ns, payload),)
 
+        def should_drop_frame(self, _channel: PlaybackChannel, *, now: float) -> bool:  # noqa: ARG002
+            return False
+
         async def finish(self) -> tuple[PlaybackOutput, ...]:
             return ()
 
@@ -794,15 +797,35 @@ def test_adaptive_quality_rungs_step_by_six_capped_at_max() -> None:
 def test_adaptive_video_rungs_reduce_resolution_after_quality_is_exhausted() -> None:
     rung = _playback_transforms._AdaptiveVideoRung
     assert _playback_transforms._adaptive_video_rungs(28) == (
-        rung(28, 1.0),
-        rung(34, 1.0),
-        rung(40, 1.0),
-        rung(46, 1.0),
-        rung(46, 0.75),
-        rung(46, 0.5),
-        rung(46, 0.375),
-        rung(46, 0.25),
+        rung(28, 1.0, 30.0),
+        rung(34, 1.0, 30.0),
+        rung(40, 1.0, 30.0),
+        rung(46, 1.0, 30.0),
+        rung(46, 0.75, 30.0),
+        rung(46, 0.5, 30.0),
+        rung(46, 0.375, 30.0),
+        rung(46, 0.375, 10.0),
+        rung(46, 0.375, 5.0),
+        rung(46, 0.375, 2.0),
     )
+
+
+def test_roscompress_video_has_general_wall_clock_fps_cap(image_small_mcap: Path) -> None:
+    prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
+    plan = create_playback_transform_plan(
+        RoscompressConfig(pointcloud=False),
+        prepared.channels,
+    )
+    assert plan is not None
+    session = plan.create_session()
+    channel = prepared.channels[0]
+
+    try:
+        assert not session.should_drop_frame(channel, now=0.0)
+        assert session.should_drop_frame(channel, now=0.01)
+        assert not session.should_drop_frame(channel, now=0.034)
+    finally:
+        asyncio.run(session.close())
 
 
 def test_adaptive_resolution_is_relative_to_source_or_explicit_scale_ceiling() -> None:
@@ -885,6 +908,31 @@ def test_adaptive_quality_session_restarts_encoder_at_new_rung() -> None:
     assert [bytes(output.payload) for output in outputs] == [b"\x00", b"\x01"]
     assert created == [0, 1]
     assert closed == [0, 1]
+
+
+def test_adaptive_video_frame_rate_rung_drops_frames_before_transform() -> None:
+    channel = PlaybackChannel("/camera", "raw", "example/Raw", "text", "bytes")
+    rung = _playback_transforms._AdaptiveVideoRung
+    spec = _playback_transforms._ChannelTransformSpec(
+        source=channel,
+        output=channel,
+        factories=(
+            lambda: _playback_transforms._PassthroughTransform(channel),
+            lambda: _playback_transforms._PassthroughTransform(channel),
+        ),
+        video_rungs=(rung(46, 0.375, None), rung(46, 0.375, 5.0)),
+    )
+    session = _playback_transforms._JitPlaybackTransformSession((spec,))
+
+    async def enter_frame_rate_rung() -> None:
+        await session.observe_congestion(channel, is_congested=True, now=0.0)
+        await session.observe_congestion(channel, is_congested=True, now=2.0)
+
+    asyncio.run(enter_frame_rate_rung())
+
+    assert not session.should_drop_frame(channel, now=2.0)
+    assert session.should_drop_frame(channel, now=2.1)
+    assert not session.should_drop_frame(channel, now=2.2)
 
 
 def test_run_playback_roscompress_jpeg_is_jit_and_lossless(image_small_mcap: Path) -> None:

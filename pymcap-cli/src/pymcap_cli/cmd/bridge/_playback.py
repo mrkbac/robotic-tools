@@ -251,6 +251,8 @@ class PlaybackTransformSession(Protocol):
         self, channel: PlaybackChannel, timestamp_ns: int, payload: bytes | memoryview
     ) -> tuple[PlaybackOutput, ...]: ...
 
+    def should_drop_frame(self, channel: PlaybackChannel, *, now: float) -> bool: ...
+
     async def finish(self) -> tuple[PlaybackOutput, ...]: ...
 
     async def restart(self) -> None: ...
@@ -634,7 +636,17 @@ async def run_playback(
                             lag > _MAX_PLAYBACK_LAG_SECONDS
                             and now - last_sent < _STRESSED_FRAME_INTERVAL_SECONDS
                         )
-                        if is_too_stale or is_rate_limited or is_congested:
+                        should_drop = is_too_stale or is_rate_limited or is_congested
+                        if (
+                            not should_drop
+                            and transform_session is not None
+                            and transform_session.should_drop_frame(
+                                playback_channel,
+                                now=now,
+                            )
+                        ):
+                            should_drop = True
+                        if should_drop:
                             record_drop(message.log_time, lag)
                             continue
                         last_frame_sent[advertised_channel] = now

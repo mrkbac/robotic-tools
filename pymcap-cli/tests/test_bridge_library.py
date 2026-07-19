@@ -87,6 +87,16 @@ def test_library_ui_navigates_to_control_view_without_popup() -> None:
     assert "const foxgloveUrl" in _APP_JS
 
 
+def test_library_ui_launches_foxglove_and_navigates_in_one_click() -> None:
+    open_session = _APP_JS[
+        _APP_JS.index("const openSession") : _APP_JS.index("const updateButtons")
+    ]
+    # One click both dispatches the foxglove:// deep link and redirects the page.
+    assert "foxgloveUrl(files)" in open_session
+    assert "controllerUrl(files).toString()" in open_session
+    assert "window.open" not in open_session
+
+
 def test_control_ui_has_speed_presets_and_stable_play_pause_width() -> None:
     for preset in ("1", "5", "10"):
         assert f'data-speed="{preset}"' in _CONTROL_HTML
@@ -692,7 +702,18 @@ def test_library_server_lists_active_sessions(tmp_path: Path) -> None:
     session = populated_sessions[0]
     assert isinstance(session, dict)
     assert session["files"] == ["first.mcap"]
+    # Request-able relative paths let the UI link straight to the controller.
+    assert session["paths"] == ["first.mcap"]
     assert "state" in session
+
+
+def test_active_session_links_to_controller_without_foxglove() -> None:
+    refresh = _APP_JS[_APP_JS.index("const refreshSessions") : _APP_JS.index("playPause.onclick")]
+    # The active-session row navigates to the controller using the session's
+    # request paths and does not launch Foxglove.
+    assert "controllerUrl(session.paths)" in refresh
+    assert "openSession" not in refresh
+    assert "foxgloveUrl" not in refresh
 
 
 def test_recording_session_close_retrieves_keyboard_interrupt(tmp_path: Path) -> None:

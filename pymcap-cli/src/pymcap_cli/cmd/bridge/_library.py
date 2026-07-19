@@ -219,9 +219,12 @@ button:disabled { opacity: .45; cursor: default; }
   background: var(--card);
 }
 .session .files {
+  color: var(--fg);
   font: 13px/1.4 ui-monospace, monospace;
   overflow-wrap: anywhere;
+  text-decoration: none;
 }
+.session .files:hover { color: var(--accent); text-decoration: underline; }
 .session .meta { color: var(--muted); white-space: nowrap; }
 """
 
@@ -263,7 +266,17 @@ _APP_JS = """\
   };
 
   const openSession = (files) => {
-    window.location.href = controllerUrl(files).toString();
+    // Launch the Foxglove desktop deep link, then move this tab to the
+    // in-page controller — one click does both. A hidden iframe dispatches
+    // the foxglove:// handler without consuming the page navigation, and a
+    // short delay lets the OS pick it up before we redirect to /control.
+    const launcher = document.createElement("iframe");
+    launcher.hidden = true;
+    launcher.src = foxgloveUrl(files).toString();
+    document.body.append(launcher);
+    setTimeout(() => {
+      window.location.href = controllerUrl(files).toString();
+    }, 400);
   };
 
   const updateButtons = () => {
@@ -329,9 +342,15 @@ _APP_JS = """\
       for (const session of value.sessions) {
         const row = document.createElement("div");
         row.className = "session";
-        const files = document.createElement("span");
+        // Open the running session's controller without re-launching Foxglove.
+        const files = document.createElement("a");
         files.className = "files";
         files.textContent = session.files.join(" + ");
+        files.href = controllerUrl(session.paths);
+        files.onclick = (event) => {
+          event.preventDefault();
+          window.location.href = controllerUrl(session.paths).toString();
+        };
         const viewers = session.viewers === 1 ? "1 viewer" : `${session.viewers} viewers`;
         const meta = document.createElement("span");
         meta.className = "meta";
@@ -840,8 +859,8 @@ class RecordingSessionManager:
     def get(self, files: tuple[Path, ...]) -> RecordingSession | None:
         return self._sessions.get(files)
 
-    def active_sessions(self) -> tuple[dict[str, JsonValue], ...]:
-        return tuple(session.status() for session in self._sessions.values())
+    def sessions(self) -> tuple[RecordingSession, ...]:
+        return tuple(self._sessions.values())
 
     def _activity_changed(
         self,
@@ -996,10 +1015,14 @@ class RecordingLibraryServer:
                 ]
                 return _json_response(200, {"recordings": recordings})
             if parsed.path == "/api/sessions":
-                return _json_response(
-                    200,
-                    {"sessions": list(self.manager.active_sessions())},
-                )
+                sessions: list[JsonValue] = []
+                for session in self.manager.sessions():
+                    status = session.status()
+                    status["paths"] = [
+                        path.relative_to(self.library.root).as_posix() for path in session.files
+                    ]
+                    sessions.append(status)
+                return _json_response(200, {"sessions": sessions})
             if parsed.path == "/api/session":
                 files = self._resolve_query(parsed.query)
                 session = self.manager.get(files)

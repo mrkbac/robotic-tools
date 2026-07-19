@@ -233,3 +233,50 @@ def test_serve_direct_file_always_prints_foxglove_link(monkeypatch, capsys) -> N
     assert serve_module.serve(["input.mcap"], port=9090, no_browser=True) == 0
     output = capsys.readouterr().out
     assert "foxglove://open?ds=foxglove-websocket" in output
+
+
+def test_host_helpers_bind_and_display_all_interfaces() -> None:
+    assert serve_module._bind_host("") == "0.0.0.0"  # noqa: S104
+    assert serve_module._bind_host("127.0.0.1") == "127.0.0.1"
+    assert serve_module._binds_all_interfaces("")
+    assert serve_module._binds_all_interfaces("0.0.0.0")  # noqa: S104
+    assert serve_module._binds_all_interfaces("::")
+    assert not serve_module._binds_all_interfaces("127.0.0.1")
+
+    assert serve_module._display_hosts("127.0.0.1") == ["127.0.0.1"]
+    all_hosts = serve_module._display_hosts("")
+    assert all_hosts[0] == "localhost"
+    assert "0.0.0.0" not in all_hosts  # noqa: S104
+    assert all(not host.startswith("127.") for host in all_hosts)
+    # IPv4 only: no bracketed/colon IPv6 addresses are advertised.
+    assert all(":" not in host for host in all_hosts)
+
+
+def test_serve_empty_host_binds_all_and_lists_reachable_urls(monkeypatch, capsys) -> None:
+    async def run_playback(*_args, **_kwargs) -> PlaybackStats:
+        return PlaybackStats()
+
+    sink = _Sink()
+    sink_args: list[tuple[object, ...]] = []
+
+    def make_sink(*args: object) -> _Sink:
+        sink_args.append(args)
+        return sink
+
+    monkeypatch.setattr(serve_module, "resolve_playback_transform_config", lambda **_kw: None)
+    monkeypatch.setattr(serve_module, "prepare_playback", lambda *_args: _Prepared())
+    monkeypatch.setattr(
+        serve_module, "create_playback_transform_plan", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", make_sink)
+    monkeypatch.setattr(serve_module, "run_playback", run_playback)
+    monkeypatch.setattr(serve_module, "_launch_url", lambda _url: None)
+    monkeypatch.setattr(serve_module, "_lan_ip_addresses", lambda: ["192.168.1.50"])
+
+    assert serve_module.serve(["input.mcap"], host="", port=9090, no_browser=True) == 0
+    output = capsys.readouterr().out
+    # Empty --host binds every interface.
+    assert sink_args[0][0] == "0.0.0.0"  # noqa: S104
+    # And advertises a reachable Foxglove link for localhost and each LAN IP.
+    assert "localhost" in output
+    assert "192.168.1.50" in output

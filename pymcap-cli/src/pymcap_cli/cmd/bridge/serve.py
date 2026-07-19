@@ -2,13 +2,17 @@
 
 import asyncio
 import os
+import socket
 import sys
 import threading
 import webbrowser
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlencode
 
+from cyclopts import Parameter
 from robo_ws_bridge import (
     ConnectionState,
     ServerConnection,
@@ -18,6 +22,7 @@ from robo_ws_bridge import (
 from robo_ws_bridge.server import Channel as ServerChannel
 
 from pymcap_cli.cmd._cli_options import (
+    SERVER_GROUP,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
@@ -27,7 +32,6 @@ from pymcap_cli.cmd._cli_options import (
     OptionalPointCloudDropInvalidOption,
     OptionalPointCloudSortFieldOption,
     ProgressOption,
-    ServerHostOption,
     ServerPortOption,
     StartTimeOption,
     TopicOption,
@@ -71,6 +75,33 @@ from pymcap_cli.log_setup import ERR
 
 _CLOCK_INTERVAL_SECONDS = 1 / 30
 
+# A list-valued ``--host`` so the flag may be given bare (``--host`` -> bind all
+# interfaces, like ``vite --host``), with a value (``--host 0.0.0.0``), or omitted.
+ServeHostOption = Annotated[
+    list[str] | None,
+    Parameter(
+        name=["--host"],
+        consume_multiple=True,
+        group=SERVER_GROUP,
+        help=(
+            "Interface to bind. Bare --host (or 0.0.0.0) binds every interface "
+            "and lists each reachable URL. Default: 127.0.0.1."
+        ),
+    ),
+]
+
+
+def _resolve_host(host: str | list[str] | None) -> str:
+    if host is None:
+        return "127.0.0.1"
+    if isinstance(host, str):
+        return host  # direct callers may pass a plain host string
+    if not host:
+        return ""  # bare --host binds all interfaces
+    if len(host) == 1:
+        return host[0]
+    raise ValueError("--host accepts at most one address")
+
 
 def _library_root(files: list[str]) -> Path | None:
     if len(files) != 1:
@@ -81,11 +112,61 @@ def _library_root(files: list[str]) -> Path | None:
     return candidate
 
 
+def _bind_host(host: str) -> str:
+    """An empty ``--host`` binds every interface, like ``vite --host``."""
+    return "0.0.0.0" if host == "" else host  # noqa: S104
+
+
+def _binds_all_interfaces(host: str) -> bool:
+    return host in {"", "0.0.0.0", "::"}  # noqa: S104
+
+
 def _url_host(host: str) -> str:
     client_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host  # noqa: S104
     if ":" in client_host and not client_host.startswith("["):
         return f"[{client_host}]"
     return client_host
+
+
+def _probe_route(family: socket.AddressFamily, target: tuple[str, int]) -> str | None:
+    """Primary source address for reaching ``target`` (no packets are sent)."""
+    with suppress(OSError), socket.socket(family, socket.SOCK_DGRAM) as probe:
+        probe.connect(target)
+        address = probe.getsockname()[0]
+        if isinstance(address, str):
+            return address
+    return None
+
+
+def _lan_ip_addresses() -> list[str]:
+    """Best-effort routable IPv4 addresses of this host, loopback aside.
+
+    Dependency-free: probes the default IPv4 route and the Tailscale/CGNAT
+    range (100.64.0.0/10, reached via Tailscale's 100.100.100.100), then
+    resolves the hostname. A machine on Tailscale (or any 100.64/10 CGNAT
+    address) is picked up; hosts without a route there just re-probe the
+    default route and dedupe. Interfaces on none of those may be missed —
+    pass their address to ``--host`` explicitly.
+    """
+    addresses: set[str] = set()
+    # Targets are never sent to; connect() only selects the source interface.
+    for target in (("192.0.2.0", 9), ("100.100.100.100", 9)):
+        address = _probe_route(socket.AF_INET, target)
+        if address is not None:
+            addresses.add(address)
+    with suppress(OSError):
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            address = info[4][0]
+            if isinstance(address, str):
+                addresses.add(address)
+    return sorted(ip for ip in addresses if not ip.startswith("127."))
+
+
+def _display_hosts(host: str) -> list[str]:
+    """Client-reachable hostnames to advertise for a bound ``--host``."""
+    if not _binds_all_interfaces(host):
+        return [_url_host(host)]
+    return ["localhost", *_lan_ip_addresses()]
 
 
 def _foxglove_url(host: str, port: int) -> str:
@@ -324,7 +405,7 @@ class BridgeServerPlaybackSink:
 def serve(
     files: list[str],
     *,
-    host: ServerHostOption = "127.0.0.1",
+    host: ServeHostOption = None,
     port: ServerPortOption = 8765,
     preset: OptionalPresetOption = None,
     image_format: OptionalImageFormatOption = None,
@@ -377,6 +458,7 @@ def serve(
         ERR.print("[red]Error:[/] --port must be in [1, 65535]")
         return 1
     try:
+        resolved_host = _resolve_host(host)
         image_format, scale = apply_preset(
             preset,
             image_format=image_format,
@@ -427,7 +509,7 @@ def serve(
 
             library_server = RecordingLibraryServer(
                 RecordingLibrary(library_root),
-                host=host,
+                host=_bind_host(resolved_host),
                 port=port,
                 message_filter=message_filter,
                 transform_config=transform_config,
@@ -437,15 +519,18 @@ def serve(
 
             async def run_library() -> None:
                 await library_server.start()
-                url = f"http://{_url_host(host)}:{library_server.port}/"
-                console.print(f"[green]Serving recording library at[/] [bold]{url}[/]")
-                if host not in {"127.0.0.1", "::1", "localhost"}:
+                hosts = _display_hosts(resolved_host)
+                urls = [f"http://{h}:{library_server.port}/" for h in hosts]
+                console.print("[green]Serving recording library at[/]")
+                for url in urls:
+                    console.print(f"  [bold]{url}[/]")
+                if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
                     console.print(
                         "[yellow]Warning:[/] playback controls have no authentication; "
                         "protect remote access with a trusted network or reverse proxy."
                     )
                 if not no_browser:
-                    _launch_url(url)
+                    _launch_url(urls[0])
                 try:
                     await library_server.serve_forever()
                 finally:
@@ -455,16 +540,18 @@ def serve(
             return 0
         prepared = prepare_playback(files, message_filter)
         transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
-        sink = BridgeServerPlaybackSink(host, port)
+        sink = BridgeServerPlaybackSink(_bind_host(resolved_host), port)
 
         async def run_direct() -> PlaybackStats:
             output_channels = (
                 prepared.channels if transform_plan is None else transform_plan.channels
             )
             await sink.start(output_channels)
-            console.print(f"[dim]Open in Foxglove:[/] {_foxglove_url(host, port)}")
+            foxglove_urls = [_foxglove_url(h, port) for h in _display_hosts(resolved_host)]
+            for foxglove_url in foxglove_urls:
+                console.print(f"[dim]Open in Foxglove:[/] {foxglove_url}")
             if not no_browser:
-                _launch_url(_foxglove_url(host, port))
+                _launch_url(foxglove_urls[0])
             return await run_playback(
                 prepared,
                 sink,
