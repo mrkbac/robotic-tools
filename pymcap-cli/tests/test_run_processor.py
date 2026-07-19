@@ -30,10 +30,6 @@ def test_resolve_overwrite_policy_returns_error_for_no_clobber():
     assert resolve_overwrite_policy(force=False, no_clobber=True) == OverwriteCollisionPolicy.ERROR
 
 
-def test_resolve_overwrite_policy_rejects_conflicting_flags():
-    assert resolve_overwrite_policy(force=True, no_clobber=True) is None
-
-
 def test_open_output_stream_prompts_in_ask_mode(tmp_path: Path, monkeypatch):
     output = tmp_path / "output.mcap"
     output.write_bytes(b"existing")

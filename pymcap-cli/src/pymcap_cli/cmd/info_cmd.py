@@ -21,7 +21,10 @@ from rich.text import Text
 from small_mcap import McapError, RebuildInfo, rebuild_summary
 from small_mcap.records import Summary
 
+from pymcap_cli.cmd._arg_constraints import conflicts, constraint_group, requires
+from pymcap_cli.cmd._cli_options import DISPLAY_GROUP as CLI_DISPLAY_GROUP
 from pymcap_cli.cmd._cli_options import (
+    WATCH_CONSTRAINT,
     CompressJsonOption,
     DebugOption,
     ExactSizesOption,
@@ -51,6 +54,13 @@ console = Console()
 
 # Parameter groups
 DISPLAY_GROUP = CycloptsGroup("Display Options")
+
+# --compress only makes sense as JSON; --watch and --link each rule out the other output modes.
+_INFO_MODE_CONSTRAINT = constraint_group(
+    requires("--compress", "--json"),
+    conflicts("--watch", "--json", "--compress"),
+    conflicts("--link", "--json", "--compress", "--watch"),
+)
 
 
 class SortChoice(str, Enum):
@@ -433,8 +443,12 @@ def info(
     rebuild: RebuildSummaryOption = False,
     exact_sizes: ExactSizesOption = False,
     debug: DebugOption = False,
-    json_output: JsonOutputOption = False,
-    compress: CompressJsonOption = False,
+    json_output: Annotated[
+        JsonOutputOption, Parameter(group=[CLI_DISPLAY_GROUP, _INFO_MODE_CONSTRAINT])
+    ] = False,
+    compress: Annotated[
+        CompressJsonOption, Parameter(group=[CLI_DISPLAY_GROUP, _INFO_MODE_CONSTRAINT])
+    ] = False,
     sort: Annotated[
         SortChoice,
         Parameter(
@@ -472,13 +486,15 @@ def info(
             group=DISPLAY_GROUP,
         ),
     ] = False,
-    watch: WatchOption = False,
+    watch: Annotated[
+        WatchOption, Parameter(group=[CLI_DISPLAY_GROUP, WATCH_CONSTRAINT, _INFO_MODE_CONSTRAINT])
+    ] = False,
     watch_interval: WatchIntervalOption = 0.5,
     link: Annotated[
         bool,
         Parameter(
             name=["-l", "--link"],
-            group=DISPLAY_GROUP,
+            group=[DISPLAY_GROUP, _INFO_MODE_CONSTRAINT],
         ),
     ] = False,
 ) -> int:
@@ -568,28 +584,7 @@ def info(
             logger.error("At least one file must be specified")
         return 1
 
-    if compress and not json_output:
-        logger.error("--compress requires --json")
-        return 1
-
-    if link:
-        if json_output:
-            logger.error("--link is incompatible with --json")
-            return 1
-        if compress:
-            logger.error("--link is incompatible with --compress")
-            return 1
-        if watch:
-            logger.error("--link is incompatible with --watch")
-            return 1
-
     if watch:
-        if json_output:
-            logger.error("--watch is incompatible with --json")
-            return 1
-        if compress:
-            logger.error("--watch is incompatible with --compress")
-            return 1
         if len(files) != 1:
             logger.error("--watch requires exactly one file")
             return 1

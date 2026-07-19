@@ -8,7 +8,9 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
+from pymcap_cli.cmd._arg_constraints import at_least_one, constraint_group, each_requires
 from pymcap_cli.cmd._cli_options import (
+    MESSAGE_PATH_GROUP,
     ChunkSizeOption,
     CompressionOption,
     DeleteSourceOption,
@@ -19,6 +21,7 @@ from pymcap_cli.cmd._cli_options import (
     NoClobberOption,
     SplitAtOption,
 )
+from pymcap_cli.cmd._cli_options import SPLIT_GROUP as CLI_SPLIT_GROUP
 from pymcap_cli.cmd._message_path_options import (
     create_message_path_variables,
     output_template_uses_field,
@@ -51,6 +54,20 @@ SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
 EXPRESSION_GROUP = Group("Expression Options")
 
+# At least one split trigger must be given; the expression-only knobs need --expression.
+_SPLIT_MODE_CONSTRAINT = constraint_group(at_least_one)
+_EXPRESSION_ONLY_CONSTRAINT = constraint_group(
+    each_requires(
+        "--expression",
+        "--var",
+        "--hysteresis",
+        "--hysteresis-count",
+        "--keep-trailing-context",
+        "--keep-trailing-count",
+        "--skip-value",
+    )
+)
+
 
 def _coerce_duration_ns(value: int | str | None) -> int | None:
     if isinstance(value, str):
@@ -65,16 +82,18 @@ def split(
         str | None,
         Parameter(
             name=["--duration"],
-            group=SPLIT_GROUP,
+            group=[SPLIT_GROUP, _SPLIT_MODE_CONSTRAINT],
             help="Split every N time units (e.g. 60s, 1.5m, 1h); bare numbers are seconds",
         ),
     ] = None,
-    split_at: SplitAtOption = None,
+    split_at: Annotated[
+        SplitAtOption, Parameter(group=[CLI_SPLIT_GROUP, _SPLIT_MODE_CONSTRAINT])
+    ] = None,
     expression: Annotated[
         str | None,
         Parameter(
             name=["-E", "--expression"],
-            group=SPLIT_GROUP,
+            group=[SPLIT_GROUP, _SPLIT_MODE_CONSTRAINT, _EXPRESSION_ONLY_CONSTRAINT],
             help=(
                 "Split whenever a ros-parser message path changes value, e.g. "
                 "'/gps/fix.status.status' (value-change trigger) or "
@@ -87,12 +106,15 @@ def split(
             ),
         ),
     ] = None,
-    var: MessagePathVariablesOption = None,
+    var: Annotated[
+        MessagePathVariablesOption,
+        Parameter(group=[MESSAGE_PATH_GROUP, _EXPRESSION_ONLY_CONSTRAINT]),
+    ] = None,
     max_size: Annotated[
         str | None,
         Parameter(
             name=["--max-size"],
-            group=SPLIT_GROUP,
+            group=[SPLIT_GROUP, _SPLIT_MODE_CONSTRAINT],
             help=(
                 "Split when accumulated message bytes exceed N (e.g. '1G', "
                 "'500MB', '2GiB'). Segment count is dynamic. Output file "
@@ -117,7 +139,7 @@ def split(
         int | None,
         Parameter(
             name=["--hysteresis"],
-            group=EXPRESSION_GROUP,
+            group=[EXPRESSION_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
@@ -131,7 +153,7 @@ def split(
         int | None,
         Parameter(
             name=["--hysteresis-count"],
-            group=EXPRESSION_GROUP,
+            group=[EXPRESSION_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             validator=validators.Number(gt=0),
             help=(
                 "Count hysteresis for --expression: a new value must appear "
@@ -144,7 +166,7 @@ def split(
         int | None,
         Parameter(
             name=["--keep-trailing-context"],
-            group=EXPRESSION_GROUP,
+            group=[EXPRESSION_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
@@ -158,7 +180,7 @@ def split(
         int | None,
         Parameter(
             name=["--keep-trailing-count"],
-            group=EXPRESSION_GROUP,
+            group=[EXPRESSION_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             validator=validators.Number(gt=0),
             help=(
                 "After a transition, also write up to this many "
@@ -171,7 +193,7 @@ def split(
         list[str] | None,
         Parameter(
             name=["--skip-value"],
-            group=EXPRESSION_GROUP,
+            group=[EXPRESSION_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             help=(
                 "Expression value to omit from the output (repeatable). Values use JSON "
                 "scalars when possible; negative values use --skip-value=-1."
@@ -248,17 +270,7 @@ def split(
     pymcap-cli split input.mcap --max-size 1G -t 'shard_{index:03d}.mcap'
     ```
     """
-    if not duration and not split_at and not expression and not max_size:
-        logger.error(
-            "Specify --duration, --split-at, --expression, and/or --max-size to define "
-            "split points."
-        )
-        return 1
-
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
 
     # Parse split-at timestamps. Relative anchors are not supported here.
     split_points: list[int] = []
@@ -338,18 +350,8 @@ def split(
             logger.exception("Invalid expression split option")
             return 1
         logger.info(f"Expression split: {expression}")
-    elif (
-        hysteresis
-        or hysteresis_count is not None
-        or keep_trailing_context
-        or keep_trailing_count is not None
-        or skip_value
-        or template_uses_value
-    ):
-        logger.error(
-            "--hysteresis, --hysteresis-count, --keep-trailing-context and "
-            "--keep-trailing-count, --skip-value and {value} require --expression."
-        )
+    elif template_uses_value:
+        logger.error("{value} in --output-template requires --expression.")
         return 1
 
     # Display split mode

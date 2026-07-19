@@ -34,7 +34,6 @@ from pymcap_cli.exporters.video_exporter import VideoExporter
 logger = logging.getLogger(__name__)
 console = Console()
 
-OUTPUT_GROUP = Group("Output Options")
 ENCODING_GROUP = Group("Encoding Options")
 
 

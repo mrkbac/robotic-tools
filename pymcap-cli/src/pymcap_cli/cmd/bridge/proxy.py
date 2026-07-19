@@ -19,8 +19,11 @@ from robo_ws_bridge import (
 from robo_ws_bridge.server import Channel
 from robo_ws_bridge.ws_types import ChannelInfo
 
+from pymcap_cli.cmd._arg_constraints import constraint_group, requires_value
 from pymcap_cli.cmd._cli_options import (
     CONNECTION_GROUP,
+    ENCODING_GROUP,
+    POINTCLOUD_GROUP,
     BackendOption,
     BridgeTarget,
     CodecOption,
@@ -71,6 +74,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 LATENCY_GROUP = CycloptsGroup("Low Latency")
+
+# Image-codec knobs only apply to --image-format video; still-image path uses --jpeg-quality;
+# point-cloud knobs only apply when --pointcloud is enabled (Draco level needs --pc-format draco).
+_MODE_CONSTRAINT = constraint_group(
+    requires_value("--quality", "--image-format", "video", hint="--image-format video"),
+    requires_value("--codec", "--image-format", "video", hint="--image-format video"),
+    requires_value("--encoder", "--image-format", "video", hint="--image-format video"),
+    requires_value("--backend", "--image-format", "video", hint="--image-format video"),
+    requires_value(
+        "--scale", "--image-format", "video", "jpeg", "png", hint="a non-none --image-format"
+    ),
+    requires_value(
+        "--jpeg-quality", "--image-format", "jpeg", "png", hint="--image-format jpeg or png"
+    ),
+    requires_value("--resolution", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-format", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-schema", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-encoding", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-compression", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--draco-compression-level", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--draco-compression-level", "--pc-format", "draco", hint="--pc-format draco"),
+)
 
 
 class _CompressedVideoMessageLike(Protocol):
@@ -427,20 +452,38 @@ def proxy(
     *,
     port: ServerPortOption = 8766,
     host: ServerHostOption = "0.0.0.0",  # noqa: S104
-    image_format: ImageFormatOption = "video",
-    codec: CodecOption = "h264",
-    quality: QualityOption = 28,
-    encoder: EncoderOption = None,
-    backend: BackendOption = "auto",
-    scale: ScaleOption = None,
-    jpeg_quality: JpegQualityOption = 90,
-    pointcloud: PointCloudOption = True,
-    pc_format: PointCloudFormatOption = "cloudini",
-    pc_schema: PointCloudSchemaOption = "auto",
-    pc_encoding: PointCloudEncodingOption = "lossy",
-    pc_compression: PointCloudCompressionOption = "zstd",
-    resolution: ResolutionOption = 0.01,
-    draco_compression_level: DracoCompressionLevelOption = 7,
+    image_format: Annotated[
+        ImageFormatOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])
+    ] = "video",
+    codec: Annotated[CodecOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = "h264",
+    quality: Annotated[QualityOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = 28,
+    encoder: Annotated[EncoderOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = None,
+    backend: Annotated[BackendOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = "auto",
+    scale: Annotated[ScaleOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = None,
+    jpeg_quality: Annotated[
+        JpegQualityOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])
+    ] = 90,
+    pointcloud: Annotated[
+        PointCloudOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = True,
+    pc_format: Annotated[
+        PointCloudFormatOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "cloudini",
+    pc_schema: Annotated[
+        PointCloudSchemaOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "auto",
+    pc_encoding: Annotated[
+        PointCloudEncodingOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "lossy",
+    pc_compression: Annotated[
+        PointCloudCompressionOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "zstd",
+    resolution: Annotated[
+        ResolutionOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = 0.01,
+    draco_compression_level: Annotated[
+        DracoCompressionLevelOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = 7,
     pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
     pointcloud_sort_field: PointCloudSortFieldOption = None,
     send_queue_size: Annotated[
@@ -473,12 +516,6 @@ def proxy(
         return 1
     if throttle_hz < 0:
         ERR.print("[red]Error:[/] --throttle-hz must not be negative")
-        return 1
-    if not 1 <= jpeg_quality <= 100:
-        ERR.print("[red]Error:[/] --jpeg-quality must be in [1, 100]")
-        return 1
-    if not 0 <= draco_compression_level <= 10:
-        ERR.print("[red]Error:[/] --draco-compression-level must be in [0, 10]")
         return 1
     try:
         cleanup = resolve_pointcloud_cleanup(

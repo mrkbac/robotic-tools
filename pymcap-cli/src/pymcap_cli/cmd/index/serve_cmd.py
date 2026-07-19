@@ -15,8 +15,6 @@ import tempfile
 from contextlib import ExitStack
 from pathlib import Path
 
-from cyclopts import Group
-
 from pymcap_cli.cmd._cli_options import (
     IndexDbOption,
     NoBrowserOption,
@@ -26,8 +24,6 @@ from pymcap_cli.cmd._cli_options import (
 from pymcap_cli.cmd.index._helpers import _print_db_needs_migration, _resolve_db
 from pymcap_cli.index.db import IndexDbNeedsMigrationError, connect
 from pymcap_cli.log_setup import ERR
-
-INDEX_SERVE_OPTIONS_GROUP = Group("Index Serve Options")
 
 
 def _build_datasette_argv(

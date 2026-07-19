@@ -18,8 +18,10 @@ from rich.tree import Tree
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities, ServiceInfo
 
+from pymcap_cli.cmd._arg_constraints import conflicts, constraint_group, requires
 from pymcap_cli.cmd._cli_options import (
     DISPLAY_GROUP,
+    WATCH_CONSTRAINT,
     BridgeTarget,
     CompressJsonOption,
     ConnectTimeoutOption,
@@ -54,6 +56,12 @@ from pymcap_cli.display.display_utils import _format_parts_with_colors, _format_
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
+
+# --compress only applies to JSON output; --watch is a live view that JSON can't represent.
+_INFO_MODE_CONSTRAINT = constraint_group(
+    requires("--compress", "--json"),
+    conflicts("--watch", "--json"),
+)
 
 
 def _output_json(info: BridgeInfo, compress: bool) -> None:
@@ -319,8 +327,12 @@ def _watch(
 def info(
     target: BridgeTarget,
     *,
-    json_output: JsonOutputOption = False,
-    compress: CompressJsonOption = False,
+    json_output: Annotated[
+        JsonOutputOption, Parameter(group=[DISPLAY_GROUP, _INFO_MODE_CONSTRAINT])
+    ] = False,
+    compress: Annotated[
+        CompressJsonOption, Parameter(group=[DISPLAY_GROUP, _INFO_MODE_CONSTRAINT])
+    ] = False,
     sort: Annotated[
         SortChoice,
         Parameter(name=["-s", "--sort"], group=DISPLAY_GROUP),
@@ -330,7 +342,9 @@ def info(
         bool,
         Parameter(name=["-g", "--graph"], group=DISPLAY_GROUP),
     ] = False,
-    watch: WatchOption = False,
+    watch: Annotated[
+        WatchOption, Parameter(group=[DISPLAY_GROUP, WATCH_CONSTRAINT, _INFO_MODE_CONSTRAINT])
+    ] = False,
     watch_interval: WatchIntervalOption = 0.5,
     connect_timeout: ConnectTimeoutOption = 5.0,
     discover_seconds: DiscoverSecondsOption = 1.5,
@@ -379,13 +393,6 @@ def info(
     pymcap-cli bridge info ws://localhost:8765 --watch
     ```
     """
-    if compress and not json_output:
-        logger.error("--compress requires --json")
-        return 1
-    if watch and json_output:
-        logger.error("--watch is incompatible with --json")
-        return 1
-
     url = to_ws_url(target)
 
     if watch:

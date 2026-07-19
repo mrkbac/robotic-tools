@@ -161,6 +161,9 @@ def pub(
     if rate < 0:
         ERR.print("[red]Error:[/] --rate must not be negative")
         return 1
+    if rate > 0 and count <= 1:
+        ERR.print("[red]Error:[/] --rate has no effect unless --count is greater than 1")
+        return 1
 
     try:
         message = parse_field_args(fields)

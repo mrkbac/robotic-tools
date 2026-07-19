@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
-from cyclopts import Group, Parameter
+from cyclopts import Group, Parameter, validators
 from rich.console import Console
 
 from pymcap_cli.cmd._cli_options import (
@@ -77,6 +77,7 @@ def rechunk(
         Parameter(
             name=["--max-groups", "--rechunk-max-groups"],
             group=STRATEGY_GROUP,
+            validator=validators.Number(gte=1),
             help=(
                 "Cap on concurrent chunk groups per output segment. When the "
                 "cap is hit, further channels share the most-recently-created "
@@ -168,8 +169,8 @@ def rechunk(
     if strategy == RechunkStrategy.PATTERN and not pattern and not schema_pattern:
         logger.error("--strategy=pattern requires at least one --pattern or --schema-pattern.")
         return 1
-    if max_groups is not None and max_groups < 1:
-        logger.error("--max-groups must be >= 1.")
+    if strategy != RechunkStrategy.PATTERN and (pattern or schema_pattern):
+        logger.error("--pattern and --schema-pattern require --strategy=pattern.")
         return 1
 
     max_memory_bytes: int | None = None
@@ -184,9 +185,6 @@ def rechunk(
             return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
 
     output_file = Path(output)
 

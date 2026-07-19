@@ -169,10 +169,12 @@ class ProcessorResult:
     processor: McapProcessor
 
 
-def resolve_overwrite_policy(*, force: bool, no_clobber: bool) -> OverwriteCollisionPolicy | None:
-    """Map CLI overwrite flags to the processor overwrite policy."""
-    if force and no_clobber:
-        return None
+def resolve_overwrite_policy(*, force: bool, no_clobber: bool) -> OverwriteCollisionPolicy:
+    """Map CLI overwrite flags to the processor overwrite policy.
+
+    ``--force`` and ``--no-clobber`` are mutually exclusive at the CLI layer (enforced by
+    the shared ``OVERWRITE_CONSTRAINT`` group validator), so both are never true here.
+    """
     if force:
         return OverwriteCollisionPolicy.OVERWRITE
     if no_clobber:

@@ -122,9 +122,6 @@ def compress(
             )
             return 1
         policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-        if policy is None:
-            logger.error("--force and --no-clobber cannot be used together.")
-            return 1
         overwrite_policy = policy
 
     logger.info(f"Compressing '{file}' to '{output}'")

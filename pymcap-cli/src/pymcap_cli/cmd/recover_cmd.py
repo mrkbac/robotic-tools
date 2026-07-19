@@ -70,9 +70,6 @@ def recover(
     ```
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
 
     recovered = False
     try:

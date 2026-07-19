@@ -188,13 +188,20 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--start",
         "--var",
     }
+    # Sanctioned overrides: commands that deliberately redeclare a shared name with different
+    # semantics the central scalar alias cannot express. `bridge serve` uses a list-valued
+    # `--host` so the flag may be given bare to bind every interface (vite-style).
+    allowed_overrides = {"--host": {Path("bridge/serve.py")}}
     declarations: dict[str, list[Path]] = {name: [] for name in shared_names}
 
     for path in CMD_DIR.rglob("*.py"):
         if path.name == "_cli_options.py":
             continue
+        relative = path.relative_to(CMD_DIR)
         for name in _parameter_names(path) & shared_names:
-            declarations[name].append(path.relative_to(CMD_DIR))
+            if relative in allowed_overrides.get(name, set()):
+                continue
+            declarations[name].append(relative)
 
     assert {name: paths for name, paths in declarations.items() if paths} == {}
     assert not list((CMD_DIR / "_options").glob("*.py"))

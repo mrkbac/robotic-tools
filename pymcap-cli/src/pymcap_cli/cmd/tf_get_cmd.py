@@ -3,7 +3,6 @@
 import logging
 import math
 
-from cyclopts import Group
 from rich.console import Console
 from rich.table import Table
 
@@ -34,8 +33,6 @@ from pymcap_cli.utils import parse_time_arg
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-SELECTION_GROUP = Group("Selection")
 
 
 def tf_get(

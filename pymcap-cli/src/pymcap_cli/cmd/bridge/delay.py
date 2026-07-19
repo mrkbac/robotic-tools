@@ -20,7 +20,9 @@ from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities
 from small_mcap import JSONDecoderFactory
 
+from pymcap_cli.cmd._arg_constraints import constraint_group, requires
 from pymcap_cli.cmd._cli_options import (
+    TOPIC_FILTERING_GROUP,
     BridgeTarget,
     ConnectTimeoutOption,
     JsonOutputOption,
@@ -43,6 +45,9 @@ from pymcap_cli.types.to_plain import to_plain
 logger = logging.getLogger(__name__)
 
 FILTER_GROUP = CycloptsGroup("Filtering")
+
+# --against only affects header-age mode, which is only entered when topics are supplied.
+_AGAINST_CONSTRAINT = constraint_group(requires("--against", "--topic"))
 
 
 class DelayReference(str, Enum):
@@ -463,12 +468,14 @@ def _build_display(report: DelayReport) -> RenderableType:
 def delay(
     target: BridgeTarget,
     *,
-    topic: TopicOption = None,
+    topic: Annotated[
+        TopicOption, Parameter(group=[TOPIC_FILTERING_GROUP, _AGAINST_CONSTRAINT])
+    ] = None,
     against: Annotated[
         DelayReference,
         Parameter(
             name=["--against"],
-            group=FILTER_GROUP,
+            group=[FILTER_GROUP, _AGAINST_CONSTRAINT],
             help="Reference time for header.stamp age when topics are supplied.",
         ),
     ] = DelayReference.LOCAL,

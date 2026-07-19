@@ -5,7 +5,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
+from cyclopts import Parameter
 from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.table import Table
@@ -14,7 +16,13 @@ from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import McapWriter
 
+from pymcap_cli.cmd._arg_constraints import (
+    MutuallyExclusive,
+    at_least_one,
+    constraint_group,
+)
 from pymcap_cli.cmd._cli_options import (
+    TOPIC_FILTERING_GROUP,
     AllTopicsOption,
     BridgeTarget,
     ChunkSizeOption,
@@ -46,6 +54,9 @@ from pymcap_cli.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Exactly one topic selector: --all or one-or-more --topic, but not both and not neither.
+_TOPIC_SELECTION_CONSTRAINT = constraint_group(at_least_one, MutuallyExclusive())
 
 
 @dataclass(frozen=True)
@@ -294,8 +305,12 @@ def record(
     target: BridgeTarget,
     *,
     output: OutputPathOption,
-    topic: TopicOption = None,
-    all_topics: AllTopicsOption = False,
+    topic: Annotated[
+        TopicOption, Parameter(group=[TOPIC_FILTERING_GROUP, _TOPIC_SELECTION_CONSTRAINT])
+    ] = None,
+    all_topics: Annotated[
+        AllTopicsOption, Parameter(group=[TOPIC_FILTERING_GROUP, _TOPIC_SELECTION_CONSTRAINT])
+    ] = False,
     exclude_topic: ExcludeTopicOption = None,
     duration: LiveDurationOption = None,
     limit: MessageLimitOption = None,
@@ -353,9 +368,6 @@ def record(
         return 1
     if limit is not None and limit <= 0:
         ERR.print("[red]Error:[/] --limit must be positive")
-        return 1
-    if not all_topics and not topic:
-        ERR.print("[red]Error:[/] specify --topic or --all.")
         return 1
 
     output_path = Path(output)

@@ -3,8 +3,13 @@
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import Group, Parameter
+from cyclopts import Group, Parameter, validators
 
+from pymcap_cli.cmd._arg_constraints import (
+    MutuallyExclusive,
+    constraint_group,
+    requires,
+)
 from pymcap_cli.core.msg_resolver import ROS2Distro
 from pymcap_cli.display.message_render import SMART_BYTES_INLINE_LIMIT, BytesMode
 from pymcap_cli.types.types_manual import CompressionName
@@ -28,6 +33,11 @@ SERVER_GROUP = Group("Server")
 SPLIT_GROUP = Group("Split")
 TIME_FILTERING_GROUP = Group("Time Filtering")
 TOPIC_FILTERING_GROUP = Group("Topic Filtering")
+
+# Hidden constraint groups shared by every command that reuses the aliases below.
+OVERWRITE_CONSTRAINT = constraint_group(MutuallyExclusive())
+GREP_CONSTRAINT = constraint_group(requires("--grep-ignore-case", "--grep"))
+WATCH_CONSTRAINT = constraint_group(requires("--watch-interval", "--watch"))
 
 BRIDGE_TARGET_ENV = "PYMCAP_BRIDGE"
 IndexOutputFormat = Literal["table", "json", "paths-only"]
@@ -136,11 +146,11 @@ OutputPathOption = Annotated[
 ]
 ForceOverwriteOption = Annotated[
     bool,
-    Parameter(name=["-f", "--force"], group=OUTPUT_OPTIONS_GROUP),
+    Parameter(name=["-f", "--force"], group=[OUTPUT_OPTIONS_GROUP, OVERWRITE_CONSTRAINT]),
 ]
 NoClobberOption = Annotated[
     bool,
-    Parameter(name=["--no-clobber"], group=OUTPUT_OPTIONS_GROUP),
+    Parameter(name=["--no-clobber"], group=[OUTPUT_OPTIONS_GROUP, OVERWRITE_CONSTRAINT]),
 ]
 DeleteSourceOption = Annotated[
     bool,
@@ -301,7 +311,7 @@ GrepOption = Annotated[
     str | None,
     Parameter(
         name=["-g", "--grep"],
-        group=FILTERING_GROUP,
+        group=[FILTERING_GROUP, GREP_CONSTRAINT],
         help=(
             "Regex applied to every scalar value in the decoded message. "
             "Messages with no match are skipped. Bytes-like fields are not searched. "
@@ -311,7 +321,7 @@ GrepOption = Annotated[
 ]
 GrepIgnoreCaseOption = Annotated[
     bool,
-    Parameter(name=["-i", "--grep-ignore-case"], group=FILTERING_GROUP),
+    Parameter(name=["-i", "--grep-ignore-case"], group=[FILTERING_GROUP, GREP_CONSTRAINT]),
 ]
 BytesModeOption = Annotated[
     BytesMode,
@@ -384,11 +394,11 @@ ReverseOption = Annotated[
 ]
 WatchOption = Annotated[
     bool,
-    Parameter(name=["-w", "--watch"], group=DISPLAY_GROUP),
+    Parameter(name=["-w", "--watch"], group=[DISPLAY_GROUP, WATCH_CONSTRAINT]),
 ]
 WatchIntervalOption = Annotated[
     float,
-    Parameter(name=["--watch-interval"], group=DISPLAY_GROUP),
+    Parameter(name=["--watch-interval"], group=[DISPLAY_GROUP, WATCH_CONSTRAINT]),
 ]
 StaticOnlyOption = Annotated[
     bool,
@@ -433,7 +443,9 @@ ImageFormatOption = Annotated[
 ]
 JpegQualityOption = Annotated[
     int,
-    Parameter(name=["--jpeg-quality"], group=ENCODING_GROUP),
+    Parameter(
+        name=["--jpeg-quality"], group=ENCODING_GROUP, validator=validators.Number(gte=1, lte=100)
+    ),
 ]
 PointCloudOption = Annotated[
     bool,
@@ -461,7 +473,11 @@ PointCloudCompressionOption = Annotated[
 ]
 DracoCompressionLevelOption = Annotated[
     int,
-    Parameter(name=["--draco-compression-level"], group=POINTCLOUD_GROUP),
+    Parameter(
+        name=["--draco-compression-level"],
+        group=POINTCLOUD_GROUP,
+        validator=validators.Number(gte=0, lte=10),
+    ),
 ]
 PointCloudDropInvalidOption = Annotated[
     bool | None,

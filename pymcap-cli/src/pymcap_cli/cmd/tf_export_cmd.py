@@ -167,6 +167,10 @@ def tf_export(
     file
         Path to MCAP file (local file or HTTP/HTTPS URL).
     """
+    if robot_name is not None and format_ == "json":
+        ERR.print("[red]Error:[/red] --robot-name has no effect with --format json.")
+        return 1
+
     snapshot_ns: int | None = None
     include_dynamic = False
     if include_dynamic_at is not None:

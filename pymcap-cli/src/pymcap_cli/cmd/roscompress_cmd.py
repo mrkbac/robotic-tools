@@ -11,12 +11,16 @@ and composes with everything else. The heavy lifting lives in the processors
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
+from cyclopts import Parameter
 from mcap_codec_support.video import EncoderMode, VideoEncoderError
 from rich.console import Console
 
+from pymcap_cli.cmd._arg_constraints import constraint_group, requires_value
 from pymcap_cli.cmd._cli_options import (
+    ENCODING_GROUP,
+    POINTCLOUD_GROUP,
     BackendOption,
     CodecOption,
     DracoCompressionLevelOption,
@@ -69,26 +73,66 @@ _COMPRESSED_OUTPUT_PATTERN = re.compile(r"Compressed(Image|Video|PointCloud)")
 _INPUT_BUFFER_BYTES = 8 * 1024 * 1024
 _ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
 
+# Image-codec knobs only apply to --image-format video; the still-image path uses --jpeg-quality;
+# point-cloud knobs only apply when --pointcloud is enabled (Draco level needs --pc-format draco).
+_MODE_CONSTRAINT = constraint_group(
+    requires_value("--quality", "--image-format", "video", hint="--image-format video"),
+    requires_value("--codec", "--image-format", "video", hint="--image-format video"),
+    requires_value("--encoder", "--image-format", "video", hint="--image-format video"),
+    requires_value("--backend", "--image-format", "video", hint="--image-format video"),
+    requires_value(
+        "--scale", "--image-format", "video", "jpeg", "png", hint="a non-none --image-format"
+    ),
+    requires_value(
+        "--jpeg-quality", "--image-format", "jpeg", "png", hint="--image-format jpeg or png"
+    ),
+    requires_value("--resolution", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-format", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-schema", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-encoding", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-compression", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--draco-compression-level", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--draco-compression-level", "--pc-format", "draco", hint="--pc-format draco"),
+)
+
 
 def roscompress(
     file: str,
     output: OutputPathOption,
     *,
     force: ForceOverwriteOption = False,
-    quality: QualityOption = 28,
-    codec: CodecOption = "h264",
-    encoder: EncoderOption = None,
-    resolution: ResolutionOption = 0.01,
-    pc_format: PointCloudFormatOption = "cloudini",
-    pc_schema: PointCloudSchemaOption = "auto",
-    pc_encoding: PointCloudEncodingOption = "lossy",
-    pc_compression: PointCloudCompressionOption = "zstd",
-    draco_compression_level: DracoCompressionLevelOption = 7,
-    scale: ScaleOption = None,
-    image_format: ImageFormatOption = "video",
-    jpeg_quality: JpegQualityOption = 90,
-    backend: BackendOption = "auto",
-    pointcloud: PointCloudOption = True,
+    quality: Annotated[QualityOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = 28,
+    codec: Annotated[CodecOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = "h264",
+    encoder: Annotated[EncoderOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = None,
+    resolution: Annotated[
+        ResolutionOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = 0.01,
+    pc_format: Annotated[
+        PointCloudFormatOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "cloudini",
+    pc_schema: Annotated[
+        PointCloudSchemaOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "auto",
+    pc_encoding: Annotated[
+        PointCloudEncodingOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "lossy",
+    pc_compression: Annotated[
+        PointCloudCompressionOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = "zstd",
+    draco_compression_level: Annotated[
+        DracoCompressionLevelOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = 7,
+    scale: Annotated[ScaleOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = None,
+    image_format: Annotated[
+        ImageFormatOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])
+    ] = "video",
+    jpeg_quality: Annotated[
+        JpegQualityOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])
+    ] = 90,
+    backend: Annotated[BackendOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = "auto",
+    pointcloud: Annotated[
+        PointCloudOption, Parameter(group=[POINTCLOUD_GROUP, _MODE_CONSTRAINT])
+    ] = True,
     pointcloud_drop_invalid: PointCloudDropInvalidOption = None,
     pointcloud_sort_field: PointCloudSortFieldOption = None,
     topic: TopicOption = None,
@@ -155,13 +199,6 @@ def roscompress(
     """
     if output_overwrites_input(file, output):
         logger.error("Output path is the same file as the input; choose a different output file.")
-        return 1
-
-    if not 1 <= jpeg_quality <= 100:
-        logger.error(f"--jpeg-quality must be in [1, 100], got {jpeg_quality}")
-        return 1
-    if not 0 <= draco_compression_level <= 10:
-        logger.error(f"--draco-compression-level must be in [0, 10], got {draco_compression_level}")
         return 1
 
     try:

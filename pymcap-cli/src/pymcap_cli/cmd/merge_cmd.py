@@ -92,9 +92,6 @@ def merge(
         return 1
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
 
     if any(output_overwrites_input(f, output) for f in files):
         logger.error("Output path is the same file as an input; choose a different output file.")

@@ -9,7 +9,9 @@ from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
+from pymcap_cli.cmd._arg_constraints import constraint_group, each_requires
 from pymcap_cli.cmd._cli_options import (
+    MESSAGE_PATH_GROUP,
     AlwaysDecodeChunkOption,
     AttachmentsModeOption,
     ChunkSizeOption,
@@ -92,6 +94,19 @@ COMPRESS_GROUP = Group("Message Compression")
 ROS2_COMPATIBILITY_GROUP = Group("ROS 2 Compatibility")
 SPLIT_GROUP = Group("Splitting (multi-output)")
 SPLIT_EXPR_GROUP = Group("Splitting — Expression Options")
+
+# The expression-only split knobs (and --var) only apply under --split-expression.
+_EXPRESSION_ONLY_CONSTRAINT = constraint_group(
+    each_requires(
+        "--split-expression",
+        "--var",
+        "--split-hysteresis",
+        "--split-hysteresis-count",
+        "--split-keep-trailing-context",
+        "--split-keep-trailing-count",
+        "--split-skip-value",
+    )
+)
 
 T = TypeVar("T")
 
@@ -351,6 +366,7 @@ def process(
         Parameter(
             name=["--rechunk-max-groups"],
             group=RECHUNK_GROUP,
+            validator=validators.Number(gte=1),
             help=(
                 "Hard cap on concurrent chunk groups per output segment. "
                 "Overflow channels share the last-created group."
@@ -384,7 +400,7 @@ def process(
         str | None,
         Parameter(
             name=["--split-expression"],
-            group=SPLIT_GROUP,
+            group=[SPLIT_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             help=(
                 "Split whenever a ros-parser message path changes value, "
                 "e.g. '/gps/fix.status.status'. Extractors must resolve to a primitive; "
@@ -392,7 +408,10 @@ def process(
             ),
         ),
     ] = None,
-    var: MessagePathVariablesOption = None,
+    var: Annotated[
+        MessagePathVariablesOption,
+        Parameter(group=[MESSAGE_PATH_GROUP, _EXPRESSION_ONLY_CONSTRAINT]),
+    ] = None,
     split_max_size: Annotated[
         str | None,
         Parameter(
@@ -405,7 +424,7 @@ def process(
         int | None,
         Parameter(
             name=["--split-hysteresis"],
-            group=SPLIT_EXPR_GROUP,
+            group=[SPLIT_EXPR_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
@@ -419,7 +438,7 @@ def process(
         int | None,
         Parameter(
             name=["--split-hysteresis-count"],
-            group=SPLIT_EXPR_GROUP,
+            group=[SPLIT_EXPR_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             validator=validators.Number(gt=0),
             help=(
                 "Count hysteresis for --split-expression: a new value must "
@@ -431,7 +450,7 @@ def process(
         int | None,
         Parameter(
             name=["--split-keep-trailing-context"],
-            group=SPLIT_EXPR_GROUP,
+            group=[SPLIT_EXPR_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             converter=duration_ns_token_converter,
             validator=validators.Number(gt=0),
             help=(
@@ -444,7 +463,7 @@ def process(
         int | None,
         Parameter(
             name=["--split-keep-trailing-count"],
-            group=SPLIT_EXPR_GROUP,
+            group=[SPLIT_EXPR_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             validator=validators.Number(gt=0),
             help=(
                 "After a transition, also write up to this many target-topic "
@@ -456,7 +475,7 @@ def process(
         list[str] | None,
         Parameter(
             name=["--split-skip-value"],
-            group=SPLIT_EXPR_GROUP,
+            group=[SPLIT_EXPR_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
             help=(
                 "Expression value to omit from split output (repeatable). Values use JSON "
                 "scalars when possible; negative values use --split-skip-value=-1."
@@ -564,9 +583,6 @@ def process(
     ```
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
 
     # --- Validate output / split mode coupling ---------------------------------
     any_split = bool(split_duration or split_at or split_expression or split_max_size)
@@ -577,21 +593,8 @@ def process(
         logger.exception(f"Invalid output template {output_template!r}")
         return 1
 
-    expr_only = (
-        split_hysteresis is not None
-        or split_hysteresis_count is not None
-        or split_keep_trailing_context is not None
-        or split_keep_trailing_count is not None
-        or bool(split_skip_value)
-        or template_uses_value
-    )
-    if expr_only and not split_expression:
-        logger.error(
-            "--split-hysteresis, --split-hysteresis-count, "
-            "--split-keep-trailing-context, --split-keep-trailing-count, "
-            "--split-skip-value and {value} "
-            "require --split-expression."
-        )
+    if template_uses_value and not split_expression:
+        logger.error("{value} in --output-template requires --split-expression.")
         return 1
 
     if any_split and output is not None:
@@ -612,8 +615,10 @@ def process(
             "--rechunk-pattern or --rechunk-schema-pattern."
         )
         return 1
-    if rechunk_max_groups is not None and rechunk_max_groups < 1:
-        logger.error("--rechunk-max-groups must be >= 1.")
+    if rechunk_strategy != RechunkStrategy.PATTERN and (rechunk_pattern or rechunk_schema_pattern):
+        logger.error(
+            "--rechunk-pattern and --rechunk-schema-pattern require --rechunk-strategy=pattern."
+        )
         return 1
 
     rechunk_max_memory_bytes: int | None = None

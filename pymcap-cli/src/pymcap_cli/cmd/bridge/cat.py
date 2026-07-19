@@ -5,8 +5,9 @@ import json
 import logging
 import re
 import sys
-from typing import Any
+from typing import Annotated, Any
 
+from cyclopts import Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.panel import Panel
 from rich.text import Text
@@ -20,7 +21,10 @@ from ros_parser.message_path import (
 )
 from small_mcap import JSONDecoderFactory
 
+from pymcap_cli.cmd._arg_constraints import constraint_group, requires
 from pymcap_cli.cmd._cli_options import (
+    FILTERING_GROUP,
+    MESSAGE_PATH_GROUP,
     BridgeTarget,
     BytesModeOption,
     ChangedOption,
@@ -61,6 +65,9 @@ from pymcap_cli.display.message_render import (
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
+
+# --var only feeds MessagePath evaluation, which the bridge stream only runs under --query.
+_VAR_CONSTRAINT = constraint_group(requires("--var", "--query"))
 
 
 async def _cat_async(
@@ -320,8 +327,10 @@ def cat(
     *,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
-    query: QueryOption = None,
-    var: MessagePathVariablesOption = None,
+    query: Annotated[QueryOption, Parameter(group=[FILTERING_GROUP, _VAR_CONSTRAINT])] = None,
+    var: Annotated[
+        MessagePathVariablesOption, Parameter(group=[MESSAGE_PATH_GROUP, _VAR_CONSTRAINT])
+    ] = None,
     grep: GrepOption = None,
     grep_ignore_case: GrepIgnoreCaseOption = False,
     limit: MessageLimitOption = None,

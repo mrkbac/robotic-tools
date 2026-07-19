@@ -9,6 +9,7 @@ from robo_ws_bridge import WebSocketBridgeClient
 from robo_ws_bridge.ws_types import Parameter as BridgeParameter
 from robo_ws_bridge.ws_types import ServerCapabilities
 
+from pymcap_cli.cmd._arg_constraints import MutuallyExclusive, constraint_group
 from pymcap_cli.cmd._cli_options import (
     BridgeTarget,
     CallTimeoutOption,
@@ -24,6 +25,9 @@ from pymcap_cli.display.param_render import build_parameters_table
 from pymcap_cli.log_setup import ERR
 
 logger = logging.getLogger(__name__)
+
+# Fetching named parameters and setting values are separate modes; don't accept both.
+_MODE_CONSTRAINT = constraint_group(MutuallyExclusive())
 
 
 async def _params_async(
@@ -64,9 +68,9 @@ async def _params_async(
 
 def params(
     target: BridgeTarget,
-    names: list[str] = [],  # noqa: B006
+    names: Annotated[list[str], Parameter(group=_MODE_CONSTRAINT)] = [],  # noqa: B006
     *,
-    set_values: Annotated[list[str], Parameter(name=["-s", "--set"])] = [],  # noqa: B006
+    set_values: Annotated[list[str], Parameter(name=["-s", "--set"], group=_MODE_CONSTRAINT)] = [],  # noqa: B006
     connect_timeout: ConnectTimeoutOption = 5.0,
     call_timeout: CallTimeoutOption = 5.0,
 ) -> int:
@@ -85,7 +89,7 @@ def params(
         Parameter names to fetch; empty fetches all.
     set_values
         ``name:=value`` assignments to set; each value is parsed as JSON with a string
-        fallback. When given, ``names`` is ignored.
+        fallback. Mutually exclusive with positional ``names``.
     connect_timeout
         Seconds to wait for the bridge's serverInfo before giving up (default: 5.0).
     call_timeout

@@ -6,6 +6,7 @@ from typing import Annotated
 from cyclopts import Parameter
 from rich.console import Console
 
+from pymcap_cli.cmd._arg_constraints import MutuallyExclusive, constraint_group
 from pymcap_cli.cmd._cli_options import (
     TIME_FILTERING_GROUP,
     TOPIC_FILTERING_GROUP,
@@ -44,6 +45,9 @@ from pymcap_cli.utils import (
 logger = logging.getLogger(__name__)
 console = Console()
 
+# --early-bail assumes a forward scan to --end; inverting the window contradicts it.
+_TIME_MODE_CONSTRAINT = constraint_group(MutuallyExclusive())
+
 
 def filter_cmd(
     file: str,
@@ -65,11 +69,13 @@ def filter_cmd(
         bool,
         Parameter(
             name=["--invert-time"],
-            group=TIME_FILTERING_GROUP,
+            group=[TIME_FILTERING_GROUP, _TIME_MODE_CONSTRAINT],
             help="Invert the time-window decision (drop messages INSIDE [start, end]).",
         ),
     ] = False,
-    early_bail: EarlyBailOption = False,
+    early_bail: Annotated[
+        EarlyBailOption, Parameter(group=[TIME_FILTERING_GROUP, _TIME_MODE_CONSTRAINT])
+    ] = False,
     latch: LatchOption = None,
     latch_from_metadata: LatchFromMetadataOption = False,
     metadata_mode: MetadataModeOption = MetadataMode.EXCLUDE,
@@ -126,12 +132,6 @@ def filter_cmd(
     ```
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
-    if overwrite_policy is None:
-        logger.error("--force and --no-clobber cannot be used together.")
-        return 1
-    if early_bail and invert_time:
-        logger.error("--early-bail cannot be combined with --invert-time")
-        return 1
 
     try:
         message_filter = create_message_filter(

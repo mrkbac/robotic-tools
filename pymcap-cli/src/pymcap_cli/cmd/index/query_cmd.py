@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from cyclopts import Parameter
 from rich.table import Table
 
+from pymcap_cli.cmd._arg_constraints import conflicts, constraint_group
 from pymcap_cli.cmd._cli_options import (
     AtTimeOption,
     IndexDbOption,
@@ -33,6 +34,9 @@ from pymcap_cli.cmd.index._helpers import (
 from pymcap_cli.display.display_utils import _format_parts_with_colors
 from pymcap_cli.index import SANE_EPOCH_NS
 from pymcap_cli.index.db import IndexDbNeedsMigrationError, open_db
+
+# --at pins a single instant; --since/--until define a range. Supplying both is contradictory.
+_AT_WINDOW_CONSTRAINT = constraint_group(conflicts("--at", "--since", "--until"))
 
 
 def query_cmd(
@@ -67,9 +71,9 @@ def query_cmd(
         str | None,
         Parameter(name=["--fingerprint"], help="Match by summary fingerprint (e.g. 's1:…')."),
     ] = None,
-    at: AtTimeOption = None,
-    since: IndexSinceOption = None,
-    until: IndexUntilOption = None,
+    at: Annotated[AtTimeOption, Parameter(group=_AT_WINDOW_CONSTRAINT)] = None,
+    since: Annotated[IndexSinceOption, Parameter(group=_AT_WINDOW_CONSTRAINT)] = None,
+    until: Annotated[IndexUntilOption, Parameter(group=_AT_WINDOW_CONSTRAINT)] = None,
     limit: IndexLimitOption = 50,
     format: IndexTableJsonPathsFormatOption = "table",
     db: IndexDbOption = None,

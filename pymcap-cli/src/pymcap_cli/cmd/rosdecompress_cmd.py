@@ -10,11 +10,17 @@ import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import Group, Parameter
+from cyclopts import Group, Parameter, validators
 from mcap_codec_support.video import EncoderMode
 from rich.console import Console
 
-from pymcap_cli.cmd._cli_options import BackendOption, ForceOverwriteOption, OutputPathOption
+from pymcap_cli.cmd._arg_constraints import constraint_group, requires_value
+from pymcap_cli.cmd._cli_options import (
+    ENCODING_GROUP,
+    BackendOption,
+    ForceOverwriteOption,
+    OutputPathOption,
+)
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
@@ -26,6 +32,16 @@ console = Console()
 VIDEO_GROUP = Group("Video")
 POINTCLOUD_GROUP = Group("Point Cloud")
 
+# The video knobs only apply under --video, and --jpeg-quality only to --video-format compressed.
+_MODE_CONSTRAINT = constraint_group(
+    requires_value("--video-format", "--video", True, hint="--video enabled"),
+    requires_value("--jpeg-quality", "--video", True, hint="--video enabled"),
+    requires_value("--backend", "--video", True, hint="--video enabled"),
+    requires_value(
+        "--jpeg-quality", "--video-format", "compressed", hint="--video-format compressed"
+    ),
+)
+
 
 def rosdecompress(
     file: str,
@@ -36,24 +52,25 @@ def rosdecompress(
         bool,
         Parameter(
             name=["--video"],
-            group=VIDEO_GROUP,
+            group=[VIDEO_GROUP, _MODE_CONSTRAINT],
         ),
     ] = True,
     video_format: Annotated[
         Literal["compressed", "raw"],
         Parameter(
             name=["--video-format"],
-            group=VIDEO_GROUP,
+            group=[VIDEO_GROUP, _MODE_CONSTRAINT],
         ),
     ] = "compressed",
     jpeg_quality: Annotated[
         int,
         Parameter(
             name=["--jpeg-quality"],
-            group=VIDEO_GROUP,
+            group=[VIDEO_GROUP, _MODE_CONSTRAINT],
+            validator=validators.Number(gte=1, lte=100),
         ),
     ] = 90,
-    backend: BackendOption = "auto",
+    backend: Annotated[BackendOption, Parameter(group=[ENCODING_GROUP, _MODE_CONSTRAINT])] = "auto",
     pointcloud: Annotated[
         bool,
         Parameter(
