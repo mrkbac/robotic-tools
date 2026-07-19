@@ -21,7 +21,8 @@ def _fake_run_processor(seen: list[OverwriteCollisionPolicy]):
         _ = files, input_options
         assert output == Path("out.mcap")
         seen.append(output_options.overwrite_policy)
-        return empty_processor_result()
+        # A successful run wrote at least one message; recover exits 0 only when it did.
+        return empty_processor_result(message_count=1)
 
     return fake_run_processor
 

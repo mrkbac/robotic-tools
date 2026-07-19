@@ -14,6 +14,7 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
+    processing_had_errors,
     resolve_overwrite_policy,
     run_processor,
 )
@@ -41,6 +42,10 @@ def recover(
     """Recover data from a potentially corrupt MCAP file.
 
     This command reads a potentially corrupt MCAP file and copies data to a new file.
+
+    The exit code signals how much was recovered: ``0`` when the whole input was read
+    cleanly, ``3`` when output was produced but the input was truncated or corrupt so
+    some data was lost, and ``1`` when nothing could be recovered.
 
     Parameters
     ----------
@@ -72,6 +77,7 @@ def recover(
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
 
     recovered = False
+    lossy = False
     try:
         result = run_processor(
             files=[file],
@@ -83,9 +89,15 @@ def recover(
                 overwrite_policy=overwrite_policy,
             ),
         )
-        logger.info("[green]✓ Recovery completed successfully![/green]")
+        recovered = result.stats.writer_statistics.message_count > 0
+        lossy = processing_had_errors(result.stats)
+        if not recovered:
+            logger.warning("No valid MCAP data found to recover")
+        elif lossy:
+            logger.warning("Recovery completed with data loss — input was truncated or corrupt")
+        else:
+            logger.info("[green]✓ Recovery completed successfully![/green]")
         console.print(result.stats)
-        recovered = True
     except WriterNotStartedError:
         logger.warning("File appears to be empty or severely corrupted")
         logger.warning("No valid MCAP data found to recover")
@@ -99,9 +111,12 @@ def recover(
         logger.exception("Error during recovery")
         return 1
 
-    if delete_source and recovered:
-        return finalize_delete_source(sources=[file], outputs=[output])
-    if delete_source:
-        logger.warning("Skipping source deletion: recovery did not produce a valid output")
+    if not recovered:
+        return 1
 
-    return 0
+    if delete_source:
+        delete_code = finalize_delete_source(sources=[file], outputs=[output])
+        if delete_code != 0:
+            return delete_code
+
+    return 3 if lossy else 0

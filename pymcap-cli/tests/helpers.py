@@ -71,13 +71,19 @@ def pipeline_context(summaries=()) -> PipelineContext:
 
 def empty_processor_result(
     segments: dict[int, SimpleNamespace] | None = None,
+    *,
+    message_count: int = 0,
+    errors_encountered: int = 0,
+    validation_errors: int = 0,
 ) -> SimpleNamespace:
     output_segments = segments if segments is not None else {0: SimpleNamespace(chunk_groups=[])}
     return SimpleNamespace(
         stats=SimpleNamespace(
-            messages_processed=0,
+            messages_processed=message_count,
+            errors_encountered=errors_encountered,
+            validation_errors=validation_errors,
             writer_statistics=SimpleNamespace(
-                message_count=0,
+                message_count=message_count,
                 message_start_time=0,
                 message_end_time=0,
             ),
