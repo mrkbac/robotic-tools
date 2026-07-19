@@ -5,11 +5,12 @@ import logging
 import re
 import sys
 from contextlib import ExitStack
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from small_mcap import DecodedMessage
 
+from cyclopts import Parameter
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
@@ -19,6 +20,9 @@ from ros_parser.message_path import NO_OUTPUT, MessagePathError, MessagePathEval
 from small_mcap import Channel, JSONDecoderFactory, get_summary, read_message_decoded
 
 from pymcap_cli.cmd._cli_options import (
+    FILTERING_GROUP,
+    MESSAGE_PATH_GROUP,
+    VAR_REQUIRES_QUERY,
     BytesModeOption,
     ChangedOption,
     EarlyBailOption,
@@ -63,8 +67,10 @@ def cat(
     *,
     topic: TopicOption = None,
     exclude_topic: ExcludeTopicOption = None,
-    query: QueryOption = None,
-    var: MessagePathVariablesOption = None,
+    query: Annotated[QueryOption, Parameter(group=[FILTERING_GROUP, VAR_REQUIRES_QUERY])] = None,
+    var: Annotated[
+        MessagePathVariablesOption, Parameter(group=[MESSAGE_PATH_GROUP, VAR_REQUIRES_QUERY])
+    ] = None,
     grep: GrepOption = None,
     grep_ignore_case: GrepIgnoreCaseOption = False,
     start: StartTimeOption = "",

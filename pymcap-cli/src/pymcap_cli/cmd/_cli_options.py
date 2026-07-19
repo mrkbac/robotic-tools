@@ -9,6 +9,7 @@ from pymcap_cli.cmd._arg_constraints import (
     MutuallyExclusive,
     constraint_group,
     requires,
+    requires_value,
 )
 from pymcap_cli.core.msg_resolver import ROS2Distro
 from pymcap_cli.display.message_render import SMART_BYTES_INLINE_LIMIT, BytesMode
@@ -38,6 +39,32 @@ TOPIC_FILTERING_GROUP = Group("Topic Filtering")
 OVERWRITE_CONSTRAINT = constraint_group(MutuallyExclusive())
 GREP_CONSTRAINT = constraint_group(requires("--grep-ignore-case", "--grep"))
 WATCH_CONSTRAINT = constraint_group(requires("--watch-interval", "--watch"))
+# `--var` is only consumed by MessagePath evaluation, which needs a controller. The controller
+# differs per command family, so these groups are attached at the call site (not on the alias).
+VAR_REQUIRES_QUERY = constraint_group(requires("--var", "--query"))
+VAR_REQUIRES_SELECT = constraint_group(requires("--var", "--select"))
+# Shared image/point-cloud transcode mode gates (roscompress + bridge proxy). Image-codec knobs
+# only apply to --image-format video; the still-image path uses --jpeg-quality; point-cloud knobs
+# only apply when --pointcloud is enabled (the Draco level additionally needs --pc-format draco).
+IMAGE_POINTCLOUD_MODE_CONSTRAINT = constraint_group(
+    requires_value("--quality", "--image-format", "video", hint="--image-format video"),
+    requires_value("--codec", "--image-format", "video", hint="--image-format video"),
+    requires_value("--encoder", "--image-format", "video", hint="--image-format video"),
+    requires_value("--backend", "--image-format", "video", hint="--image-format video"),
+    requires_value(
+        "--scale", "--image-format", "video", "jpeg", "png", hint="a non-none --image-format"
+    ),
+    requires_value(
+        "--jpeg-quality", "--image-format", "jpeg", "png", hint="--image-format jpeg or png"
+    ),
+    requires_value("--resolution", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-format", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-schema", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-encoding", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pc-compression", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--draco-compression-level", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--draco-compression-level", "--pc-format", "draco", hint="--pc-format draco"),
+)
 
 BRIDGE_TARGET_ENV = "PYMCAP_BRIDGE"
 IndexOutputFormat = Literal["table", "json", "paths-only"]

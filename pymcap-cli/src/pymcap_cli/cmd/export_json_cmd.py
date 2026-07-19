@@ -6,6 +6,8 @@ from typing import Annotated
 from cyclopts import Parameter
 
 from pymcap_cli.cmd._cli_options import (
+    MESSAGE_PATH_GROUP,
+    VAR_REQUIRES_SELECT,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
@@ -39,8 +41,10 @@ def export_json(
     include_blobs: IncludeBlobsOption = False,
     per_message: Annotated[bool, Parameter(name=["--per-message"])] = False,
     num_workers: NumWorkersOption = 8,
-    select: SelectColumnsOption = None,
-    var: MessagePathVariablesOption = None,
+    select: Annotated[SelectColumnsOption, Parameter(group=VAR_REQUIRES_SELECT)] = None,
+    var: Annotated[
+        MessagePathVariablesOption, Parameter(group=[MESSAGE_PATH_GROUP, VAR_REQUIRES_SELECT])
+    ] = None,
 ) -> int:
     """Export an MCAP file to NDJSON (one line per message) or per-message JSON files.
 

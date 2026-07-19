@@ -1,8 +1,13 @@
 """Export an MCAP file to a directory of CSV files (one per topic)."""
 
 import logging
+from typing import Annotated
+
+from cyclopts import Parameter
 
 from pymcap_cli.cmd._cli_options import (
+    MESSAGE_PATH_GROUP,
+    VAR_REQUIRES_SELECT,
     EarlyBailOption,
     EndTimeOption,
     ExcludeTopicOption,
@@ -35,8 +40,10 @@ def export_csv(
     early_bail: EarlyBailOption = False,
     include_blobs: IncludeBlobsOption = False,
     num_workers: NumWorkersOption = 8,
-    select: SelectColumnsOption = None,
-    var: MessagePathVariablesOption = None,
+    select: Annotated[SelectColumnsOption, Parameter(group=VAR_REQUIRES_SELECT)] = None,
+    var: Annotated[
+        MessagePathVariablesOption, Parameter(group=[MESSAGE_PATH_GROUP, VAR_REQUIRES_SELECT])
+    ] = None,
 ) -> int:
     """Export an MCAP file to a directory of CSV files (one per topic).
 

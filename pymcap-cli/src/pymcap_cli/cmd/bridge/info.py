@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # --compress only applies to JSON output; --watch is a live view that JSON can't represent.
 _INFO_MODE_CONSTRAINT = constraint_group(
     requires("--compress", "--json"),
-    conflicts("--watch", "--json"),
+    conflicts("--watch", "--json", "--compress"),
 )
 
 
