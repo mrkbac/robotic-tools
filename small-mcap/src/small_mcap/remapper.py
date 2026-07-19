@@ -173,6 +173,18 @@ class Remapper:
         return self._channel_lookup_fast.get((stream_id, original_id))
 
     # Messages
+    def channel_id_map(self, stream_id: int) -> dict[int, int]:
+        """Input→output channel-id mapping for one stream (empty until channels are seen).
+
+        Lets bulk consumers apply the same remap as :meth:`remap_message` without a per-message
+        call — e.g. re-serializing a whole chunk's messages under their output channel ids.
+        """
+        return {
+            in_id: channel.id
+            for (sid, in_id), channel in self._channel_lookup_fast.items()
+            if sid == stream_id
+        }
+
     def remap_message(self, stream_id: int, message: Message) -> Message:
         """Remap a message's channel ID based on the remapped channel."""
         # Use try/except - faster than .get() when key exists (common case)

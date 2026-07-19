@@ -227,21 +227,27 @@ def _reencode_chunk(
     compression: CompressionType,
     zstd_level: int | None,
     enable_crcs: bool,
+    remap: dict[int, int],
 ) -> ReencodedChunk | list[McapRecord]:
     """Worker-side: decode + validate every record, then re-serialize the messages into a
     fresh chunk and compress it.
 
     This does the full decode-and-re-encode work of the per-message path, but on a worker
-    thread instead of the serial main thread. Falls back to returning the decoded record
-    list when the chunk embeds Schema/Channel records, which the main thread must register
-    in order.
+    thread instead of the serial main thread. ``remap`` (input→output channel id) applies the
+    same mapping ``Remapper.remap_message`` would — identity for a single input, real ids for
+    a multi-input merge — so both go through one path. Falls back to returning the decoded
+    record list when the chunk embeds Schema/Channel records, or references a channel absent
+    from ``remap`` — cases the main thread must handle in order.
     """
     records = list(breakup_chunk(chunk, validate_crc=True))
     builder = _ChunkBuilder(compression, enable_crcs, zstd_level=zstd_level)
     for record in records:
         if type(record) is not Message:
             return records
-        builder.add(record)
+        out_id = remap.get(record.channel_id)
+        if out_id is None:
+            return records
+        builder.add_raw(out_id, record.log_time, record.data, record.publish_time, record.sequence)
     extracted = builder.extract()
     if extracted is None:
         return records
@@ -269,10 +275,11 @@ def _read_reencode_chunk(
     compression: CompressionType,
     zstd_level: int | None,
     enable_crcs: bool,
+    remap: dict[int, int],
 ) -> ReencodedChunk | list[McapRecord]:
     """Worker-side: read a Chunk record body by absolute offset, then decode + re-encode it."""
     chunk = Chunk.read(_pread_exact(fd, body_length, body_offset))
-    return _reencode_chunk(chunk, compression, zstd_level, enable_crcs)
+    return _reencode_chunk(chunk, compression, zstd_level, enable_crcs, remap)
 
 
 # Worker results the chunk pipeline drains: decoded records, a recompressed chunk, or a
@@ -2154,11 +2161,11 @@ class McapProcessor:
         process N+1..N+W in parallel. For fast-copy and skip chunks the queue
         entry has no future and is handled directly.
 
-        The inflight limit is kept modest (≤8): zstd/lz4 work is CPU-bound and
-        more than ~8 workers on a typical MCAP saturates memory bandwidth
-        rather than helping throughput.
+        The work is CPU-bound (zstd/lz4, plus per-record re-encode when a chunk is
+        rebuilt), so the inflight limit scales with cores. It is capped at 16 to bound
+        peak memory (each in-flight chunk holds its decompressed + recompressed buffers).
         """
-        max_inflight = min(8, os.cpu_count() or 1)
+        max_inflight = min(16, os.cpu_count() or 1)
         queue: deque[tuple[PendingChunk, ChunkDecision, _ChunkFuture | None]] = deque()
 
         # Per-stream input fd for offloaded chunk reads (regular files only).
@@ -2251,6 +2258,7 @@ class McapProcessor:
                                 target_compression,
                                 target_zstd_level,
                                 self.options.output_options.enable_crcs,
+                                self.remapper.channel_id_map(pending.stream_id),
                             )
                         else:
                             future = pool.submit(
@@ -2289,6 +2297,7 @@ class McapProcessor:
                             target_compression,
                             target_zstd_level,
                             self.options.output_options.enable_crcs,
+                            self.remapper.channel_id_map(pending.stream_id),
                         )
                     else:
                         future = pool.submit(_decode_chunk_records, materialized)
@@ -2357,9 +2366,23 @@ class McapProcessor:
                 self.stats.errors_encountered += 1
                 return
             if isinstance(result, ReencodedChunk):
-                # Worker re-encoded the whole chunk; write it and account its messages.
-                for _route_key, target_writer, _indices in self._prepare_chunk_writes(pending):
-                    target_writer.add_chunk(result.chunk, result.indices)
+                # Worker re-encoded the whole chunk. Its message indexes are keyed by *output*
+                # channel id (post-remap), so register those channels — not the input ids in
+                # pending.indexes — and write the finished chunk.
+                assert self.output_manager is not None
+                for route_key in self._get_chunk_routes(
+                    pending.stream_id, pending.chunk, pending.indexes
+                ):
+                    self._replay_segment_open(
+                        route_key,
+                        pending.stream_id,
+                        observed_time=pending.chunk.message_start_time,
+                    )
+                    for output_channel_id in result.indices:
+                        self.output_manager.ensure_channel_written(output_channel_id, route_key)
+                    self.output_manager.get_writer(route_key).add_chunk(
+                        result.chunk, result.indices
+                    )
                 self.stats.chunks_decoded += 1
                 self.stats.messages_processed += sum(
                     idx.num_entries for idx in result.indices.values()
@@ -2490,15 +2513,15 @@ class McapProcessor:
     def _can_reencode_chunk(self, pending: PendingChunk) -> bool:
         """True when a decoded chunk can be re-encoded whole on a worker.
 
-        Requires a pure passthrough: one input (no id remap), no output routers or chunk
+        Requires that no message needs individual handling: no output routers or chunk
         grouping (a single default segment), no topic/time filtering, and no processor that
-        transforms any message in the chunk. Then re-serializing the decoded messages into a
-        fresh chunk is equivalent to the per-message re-emit, but runs off the main thread.
+        transforms or drops messages in the chunk. Channel-id remap is handled in the worker,
+        so multi-input merges qualify too. MCAP permits unsorted/overlapping chunks, so a whole
+        re-encoded chunk can be emitted without interleaving against other inputs.
         """
         output_options = self.options.output_options
         return (
-            len(self.options.inputs) == 1
-            and not output_options.routers
+            not output_options.routers
             and not output_options.has_chunk_grouping
             and not self._has_payload_skipping_filters[pending.stream_id]
             and self._chain_channels_for_chunk(pending.stream_id, pending) == frozenset()

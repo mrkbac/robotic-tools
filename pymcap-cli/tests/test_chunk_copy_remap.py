@@ -23,7 +23,15 @@ from pymcap_cli.core.mcap_processor import (
     _chunk_records_match_writer_view,
 )
 from pymcap_cli.core.processors.base import ChunkDecision
-from small_mcap import Channel, CompressionType, McapWriter, Message, Schema, get_summary
+from small_mcap import (
+    Channel,
+    CompressionType,
+    McapWriter,
+    Message,
+    Schema,
+    get_summary,
+    read_message,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,6 +106,44 @@ def _run_merge(inputs: list[Path], output: Path):
     finally:
         for s in open_streams:
             s.close()
+
+
+def _messages(path: Path) -> list[tuple[str, int, int, bytes]]:
+    with path.open("rb") as stream:
+        return sorted(
+            (channel.topic, message.log_time, message.publish_time, bytes(message.data))
+            for _schema, channel, message in read_message(stream)
+        )
+
+
+def test_multi_input_merge_reencodes_remapped_chunks(tmp_path: Path) -> None:
+    """Two inputs reuse channel id 1 on different topics, so merging remaps one stream and
+    forces DECODE of its chunks. The worker re-encodes those whole chunks under the output
+    ids; the merged output must contain every message from both inputs, correctly remapped."""
+    chunk_size = 4 * 1024
+    a = tmp_path / "a.mcap"
+    _write_mcap(
+        a,
+        schemas=[(1, "S", b'{"k":"v"}')],
+        channels=[(1, "/a", 1)],
+        messages=[(1, i, b'{"a":%d}' % i) for i in range(300)],
+        chunk_size=chunk_size,
+    )
+    b = tmp_path / "b.mcap"
+    _write_mcap(
+        b,
+        schemas=[(1, "S", b'{"k":"v"}')],
+        channels=[(1, "/b", 1)],
+        messages=[(1, i, b'{"b":%d}' % i) for i in range(300)],
+        chunk_size=chunk_size,
+    )
+
+    out = tmp_path / "out.mcap"
+    stats = _run_merge([a, b], out)
+
+    assert stats.errors_encountered == 0
+    assert stats.chunks_decoded > 0  # B's remapped chunks took the re-encode path
+    assert _messages(out) == sorted(_messages(a) + _messages(b))
 
 
 def test_single_file_passthrough_still_fast_copies(tmp_path: Path) -> None:
