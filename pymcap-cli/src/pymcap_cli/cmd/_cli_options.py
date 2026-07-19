@@ -13,7 +13,7 @@ from pymcap_cli.cmd._arg_constraints import (
 )
 from pymcap_cli.core.msg_resolver import ROS2Distro
 from pymcap_cli.display.message_render import SMART_BYTES_INLINE_LIMIT, BytesMode
-from pymcap_cli.types.types_manual import CompressionName
+from pymcap_cli.types.types_manual import CompressionName, OrderName
 from pymcap_cli.utils import AttachmentsMode, MetadataMode
 
 CONNECTION_GROUP = Group("Connection")
@@ -167,6 +167,36 @@ FastCompressionOption = Annotated[
     bool,
     Parameter(name=["--fast"], group=OUTPUT_OPTIONS_GROUP),
 ]
+OrderOption = Annotated[
+    OrderName,
+    Parameter(
+        name=["--order"],
+        group=OUTPUT_OPTIONS_GROUP,
+        help=(
+            "Message ordering in the output: 'preserve' keeps stored order, "
+            "'log_time' sorts by log time, 'topic' groups by topic then log time. "
+            "Non-preserve orders buffer all messages in memory."
+        ),
+    ),
+]
+NoCrcOption = Annotated[
+    bool,
+    Parameter(
+        name=["--no-crc"],
+        negative="",
+        group=OUTPUT_OPTIONS_GROUP,
+        help="Do not write CRC checksums in the output.",
+    ),
+]
+NoChunksOption = Annotated[
+    bool,
+    Parameter(
+        name=["--no-chunks"],
+        negative="",
+        group=OUTPUT_OPTIONS_GROUP,
+        help="Write messages unchunked (no Chunk records) in the output.",
+    ),
+]
 OutputPathOption = Annotated[
     Path,
     Parameter(name=["-o", "--output"], group=OUTPUT_OPTIONS_GROUP),
@@ -194,6 +224,24 @@ MetadataModeOption = Annotated[
 AttachmentsModeOption = Annotated[
     AttachmentsMode,
     Parameter(name=["--attachments"], group=CONTENT_FILTERING_GROUP),
+]
+ExcludeMetadataOption = Annotated[
+    bool,
+    Parameter(
+        name=["--exclude-metadata"],
+        negative="",
+        group=CONTENT_FILTERING_GROUP,
+        help="Drop metadata records from the output (default: keep them).",
+    ),
+]
+ExcludeAttachmentsOption = Annotated[
+    bool,
+    Parameter(
+        name=["--exclude-attachments"],
+        negative="",
+        group=CONTENT_FILTERING_GROUP,
+        help="Drop attachment records from the output (default: keep them).",
+    ),
 ]
 DedupIdenticalOption = Annotated[
     bool,

@@ -166,6 +166,8 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--distro",
         "--early-bail",
         "--end",
+        "--exclude-attachments",
+        "--exclude-metadata",
         "--exclude-topic",
         "--extra-path",
         "--flat",
@@ -178,7 +180,10 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--latch-from-metadata",
         "--metadata",
         "--no-browser",
+        "--no-chunks",
+        "--no-crc",
         "--num-workers",
+        "--order",
         "--pointcloud-drop-invalid",
         "--pointcloud-sort-field",
         "--query",
@@ -205,6 +210,21 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
 
     assert {name: paths for name, paths in declarations.items() if paths} == {}
     assert not list((CMD_DIR / "_options").glob("*.py"))
+
+
+@pytest.mark.parametrize("command", ["filter", "sort"])
+def test_negative_output_flags_do_not_expose_double_negative_aliases(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = _help(capsys, command)
+
+    assert "--no-crc" in output
+    assert "--no-chunks" in output
+    assert "--no-no-crc" not in output
+    assert "--no-no-chunks" not in output
+    if command == "filter":
+        assert "--no-exclude-metadata" not in output
+        assert "--no-exclude-attachments" not in output
 
 
 def test_file_and_bridge_check_share_spec_option(

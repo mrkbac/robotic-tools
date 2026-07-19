@@ -8,6 +8,8 @@ from small_mcap import CompressionType as SmallMcapCompressionType
 
 CompressionName = Literal["zstd", "lz4", "none"]
 
+OrderName = Literal["preserve", "log_time", "topic"]
+
 
 def str_to_compression_type(compression: str) -> SmallMcapCompressionType:
     """Convert compression string to small_mcap CompressionType enum."""

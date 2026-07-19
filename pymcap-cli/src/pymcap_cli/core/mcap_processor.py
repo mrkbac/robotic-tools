@@ -2521,7 +2521,10 @@ class McapProcessor:
         """
         output_options = self.options.output_options
         return (
-            not output_options.routers
+            # Unchunked output must write messages individually; re-emitting a whole
+            # chunk via add_chunk would ignore use_chunking=False.
+            output_options.use_chunking
+            and not output_options.routers
             and not output_options.has_chunk_grouping
             and not self._has_payload_skipping_filters[pending.stream_id]
             and self._chain_channels_for_chunk(pending.stream_id, pending) == frozenset()

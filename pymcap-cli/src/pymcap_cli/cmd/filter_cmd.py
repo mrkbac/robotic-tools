@@ -16,12 +16,17 @@ from pymcap_cli.cmd._cli_options import (
     DeleteSourceOption,
     EarlyBailOption,
     EndTimeOption,
+    ExcludeAttachmentsOption,
+    ExcludeMetadataOption,
     ExcludeTopicOption,
     ForceOverwriteOption,
     LatchFromMetadataOption,
     LatchOption,
     MetadataModeOption,
+    NoChunksOption,
     NoClobberOption,
+    NoCrcOption,
+    OrderOption,
     OutputPathOption,
     StartTimeOption,
     TopicOption,
@@ -37,6 +42,7 @@ from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
 )
+from pymcap_cli.core.ordered_rewrite import reorder_output
 from pymcap_cli.utils import (
     AttachmentsMode,
     MetadataMode,
@@ -78,10 +84,15 @@ def filter_cmd(
     ] = False,
     latch: LatchOption = None,
     latch_from_metadata: LatchFromMetadataOption = False,
-    metadata_mode: MetadataModeOption = MetadataMode.EXCLUDE,
-    attachments_mode: AttachmentsModeOption = AttachmentsMode.EXCLUDE,
+    metadata_mode: MetadataModeOption = MetadataMode.INCLUDE,
+    attachments_mode: AttachmentsModeOption = AttachmentsMode.INCLUDE,
+    exclude_metadata: ExcludeMetadataOption = False,
+    exclude_attachments: ExcludeAttachmentsOption = False,
+    order: OrderOption = "preserve",
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    no_crc: NoCrcOption = False,
+    no_chunks: NoChunksOption = False,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -110,13 +121,25 @@ def filter_cmd(
         Stop scanning at the first message at or after --end. Requires monotonic
         input log_time ordering for correctness.
     metadata_mode
-        Metadata handling: include or exclude metadata records.
+        Metadata handling: include or exclude metadata records. Defaults to include
+        (filtering is lossless by default).
     attachments_mode
-        Attachments handling: include or exclude attachment records.
+        Attachments handling: include or exclude attachment records. Defaults to
+        include (filtering is lossless by default).
+    exclude_metadata
+        Drop metadata records. Shorthand for ``--metadata exclude``.
+    exclude_attachments
+        Drop attachment records. Shorthand for ``--attachments exclude``.
+    order
+        Message ordering in the output: preserve (default), log_time, or topic.
     chunk_size
         Chunk size of output file in bytes.
     compression
         Compression algorithm for output file.
+    no_crc
+        Do not write CRC checksums in the output.
+    no_chunks
+        Write messages unchunked (no Chunk records) in the output.
     force
         Force overwrite of output file without confirmation.
     no_clobber
@@ -133,6 +156,9 @@ def filter_cmd(
     """
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=no_clobber)
 
+    include_metadata = metadata_mode == MetadataMode.INCLUDE and not exclude_metadata
+    include_attachments = attachments_mode == AttachmentsMode.INCLUDE and not exclude_attachments
+
     try:
         message_filter = create_message_filter(
             topic=topic,
@@ -143,8 +169,12 @@ def filter_cmd(
         )
         input_options = InputOptions.from_message_filter(
             message_filter,
-            include_metadata=metadata_mode == MetadataMode.INCLUDE,
-            include_attachments=attachments_mode == AttachmentsMode.INCLUDE,
+            # The fast chunk-copy path re-emits stored chunk bytes verbatim, which
+            # would bypass --no-chunks / --no-crc. Force per-message decode so the
+            # writer's chunking and CRC settings actually take effect.
+            always_decode_chunk=no_chunks or no_crc,
+            include_metadata=include_metadata,
+            include_attachments=include_attachments,
             latch_topics=latch,
             latch_from_metadata=latch_from_metadata,
             invert_topics=invert_topics,
@@ -162,6 +192,8 @@ def filter_cmd(
             output_options=OutputOptions(
                 compression=compression,
                 chunk_size=chunk_size,
+                enable_crcs=not no_crc,
+                use_chunking=not no_chunks,
                 overwrite_policy=overwrite_policy,
             ),
         )
@@ -170,6 +202,20 @@ def filter_cmd(
     except Exception:
         logger.exception("Error during filtering")
         return 1
+
+    if order != "preserve":
+        try:
+            reorder_output(
+                output,
+                order=order,
+                compression=compression,
+                chunk_size=chunk_size,
+                enable_crcs=not no_crc,
+                use_chunking=not no_chunks,
+            )
+        except Exception:
+            logger.exception("Error while reordering output")
+            return 1
 
     if delete_source:
         return finalize_delete_source(sources=[file], outputs=[output])

@@ -10,6 +10,7 @@
 ## Commands
 
 - Setup: `uv sync --all-groups --all-extras --all-packages`. Web: `bun install` inside `mcap-web-inspector/`.
+- Repo-wide fast tests: `uv run --frozen --all-groups --all-extras --all-packages bash scripts/pytest_fast.sh`.
 - Python tests: `uv run pytest <package>/tests -m "not benchmark" --no-cov -q`.
 - Single test file / test: `uv run pytest -s <package>/tests/test_x.py[::test_name]`.
 - Lint/format only via pre-commit: `pre-commit run --files <paths>` or focused hooks (`ruff-check`, `ruff-format`, `typos`, `ty-check`, `pytest-fast`).
@@ -20,8 +21,40 @@
 
 - Use `uv` for all Python deps and execution; no `pip`, `pipenv`, Poetry, or manual venv activation.
 - `uv add` / `uv remove` for deps; `uvx` for one-off tools; run `pytest` through `uv run`.
+- Never show `pip install` in user-facing docs, help, or errors. For one-off CLI use, prefer
+  `uvx 'pymcap-cli[extra]' ...`; use `uv add` only when adding a dependency to a project.
 - Use `bun` for `mcap-web-inspector/`, not `npm` / `node`.
 - Search sibling packages for an existing helper before writing a non-trivial primitive.
+
+## Dependencies And Import Boundaries
+
+- Keep the base install useful and importable. A dependency belongs in `[project.dependencies]` only
+  when ordinary package use needs it; feature-specific, large, or platform-sensitive dependencies
+  belong in `[project.optional-dependencies]`.
+- Compose extras instead of repeating a requirement and its version constraint. For example, an extra
+  that needs hashing should depend on `pymcap-cli[xxhash]`, not declare another `xxhash>=...` entry.
+- Package roots and base command help must import without unrelated extras installed. CLI annotation
+  modules must use stdlib types such as `Literal` rather than enums imported from optional packages.
+- Put optional imports at the feature execution boundary. Prefer an explicit function in a dedicated
+  feature module with local imports over module-level lazy-export tricks such as `__getattr__`.
+- Keep `pyproject.toml` import-linter contracts synchronized with intended ownership. New cross-package
+  or optional-dependency imports require a narrow allowed edge; do not weaken an entire contract.
+- For optional-dependency changes, update all three layers where applicable: package extras, import-linter
+  ownership, and tests. Test blocked imports in the normal test suite and test the built wheel's base
+  install plus each extra independently in `.github/workflows/test.yaml`.
+
+## CLI And Schema Contracts
+
+- Reuse canonical Cyclopts annotations from `pymcap_cli.cmd._cli_options`; shared message filtering and
+  MessagePath construction belong in their existing shared modules. Do not redeclare shared option
+  names, aliases, groups, environment variables, or help text in individual commands.
+- When a shared CLI option changes, test rendered help and cross-command parity in
+  `pymcap-cli/tests/test_shared_cli_options.py`. Add an end-to-end or smoke test when parsing alone does
+  not prove the user-visible behavior.
+- `pymcap-cli/schemas/mcap_info.json` is the source of truth for MCAP info output. Do not hand-edit the
+  generated Python or TypeScript types; change the schema and run the configured pre-commit generators.
+- Schema-changing transforms must register and advertise the output schema before writing or publishing
+  messages. Test schema names, channel reuse or replacement, and decoding of the resulting payload.
 
 ## Python Rules
 
@@ -62,10 +95,29 @@
 
 - `foo.py` → `test_foo.py`. Plain pytest functions, named `test_<func>_<case>` or `test_<class>_<method>_<case>`.
 - Tests must be fast and self-contained; mark slow / e2e / conformance / compat / benchmark with existing markers.
+- Keep `@pytest.mark.benchmark` on benchmark tests for explicit selection and reporting. The fast suite's
+  `--benchmark-skip` also excludes tests that use the benchmark fixture without a marker.
 - Add smoke tests for CLI entry points.
 - For any reported bug or issue, first write a failing test that reproduces it before changing code. The red test verifies the diagnosis and locks in regression coverage.
+- Every behavior-changing source commit must add or update tests in the same change. Pure documentation,
+  generated output, version-only metadata, and deliberate code removal do not need artificial tests.
+- Match coverage to the contract: unit tests for core logic, rendered-help tests for CLI schemas,
+  end-to-end MCAP tests for file behavior, subprocess tests for import boundaries, and isolated built-wheel
+  tests for packaging and extras.
+- Prefer public nuScenes dataset topic names in tests, fixtures, documentation, and examples to avoid
+  leaking project-specific identifiers; use neutral names when nuScenes has no suitable equivalent.
 - Test oracles must not come from the function under test — hand-write, take from a spec, or use a separate implementation.
 - Don't delete existing tests unless behavior is intentionally changing.
+
+## Releases
+
+- Package source, README, and packaging metadata are releasable changes; package-local `tests/**` alone
+  are not. In `pyproject.toml`, ignore only the `[project]` version line when comparing with the latest tag.
+- If the current package version is newer than its latest `package@version` tag, treat it as an already
+  prepared release and do not bump it again.
+- Use `scripts/bump.sh` from a clean tree. Keep its selection behavior covered by
+  `pymcap-cli/tests/test_bump_script.py`; dependency, extras, README, and non-version metadata changes
+  must select the package, while test-only and version-only changes must not.
 
 ## Comments And Scope
 

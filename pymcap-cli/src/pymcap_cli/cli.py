@@ -9,11 +9,13 @@ from cyclopts import App, Group, Parameter
 from rich.markup import escape
 
 from pymcap_cli.cmd import (
+    add_cmd,
     bag2mcap_cmd,
     cat_cmd,
     check_cmd,
     compress_cmd,
     convert_cmd,
+    decompress_cmd,
     diag_cmd,
     diff_cmd,
     doctor_cmd,
@@ -33,6 +35,7 @@ from pymcap_cli.cmd import (
     records_cmd,
     recover_cmd,
     recover_inplace_cmd,
+    sort_cmd,
     split_cmd,
     tf_export_cmd,
     tf_get_cmd,
@@ -244,13 +247,17 @@ app.command(name="tftree", group=inspect_group)(tftree_cmd.tftree)
 app.command(name="topic-chunks", group=inspect_group)(topic_chunks_cmd.topic_chunks)
 
 # Transform commands — convert, filter, or produce new files
+add_cmd.add_app.group = (transform_group,)
+app.command(add_cmd.add_app, name="add")
 app.command(name="bag2mcap", group=transform_group)(bag2mcap_cmd.bag2mcap)
 app.command(name="compress", group=transform_group)(compress_cmd.compress)
 app.command(name="convert", group=transform_group)(convert_cmd.convert)
+app.command(name="decompress", group=transform_group)(decompress_cmd.decompress)
 app.command(name="filter", group=transform_group)(filter_cmd.filter_cmd)
 app.command(name="merge", group=transform_group)(merge_cmd.merge)
 app.command(name="process", group=transform_group)(process_cmd.process)
 app.command(name="rechunk", group=transform_group)(rechunk_cmd.rechunk)
+app.command(name="sort", group=transform_group)(sort_cmd.sort)
 app.command(name="split", group=transform_group)(split_cmd.split)
 app.command(name="recover", group=transform_group)(recover_cmd.recover)
 app.command(name="recover-inplace", group=transform_group)(recover_inplace_cmd.recover_inplace)
