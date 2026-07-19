@@ -214,6 +214,74 @@ def _read_and_decode_chunk_records(fd: int, body_offset: int, body_length: int) 
     return _decode_chunk_records(chunk)
 
 
+@dataclass(frozen=True, slots=True)
+class ReencodedChunk:
+    """A chunk fully decoded and re-serialized+compressed by a worker, ready to write."""
+
+    chunk: Chunk
+    indices: dict[int, MessageIndex]
+
+
+def _reencode_chunk(
+    chunk: Chunk,
+    compression: CompressionType,
+    zstd_level: int | None,
+    enable_crcs: bool,
+) -> ReencodedChunk | list[McapRecord]:
+    """Worker-side: decode + validate every record, then re-serialize the messages into a
+    fresh chunk and compress it.
+
+    This does the full decode-and-re-encode work of the per-message path, but on a worker
+    thread instead of the serial main thread. Falls back to returning the decoded record
+    list when the chunk embeds Schema/Channel records, which the main thread must register
+    in order.
+    """
+    records = list(breakup_chunk(chunk, validate_crc=True))
+    builder = _ChunkBuilder(compression, enable_crcs, zstd_level=zstd_level)
+    for record in records:
+        if type(record) is not Message:
+            return records
+        builder.add(record)
+    extracted = builder.extract()
+    if extracted is None:
+        return records
+    chunk_data, uncompressed_crc, uncompressed_size, start_time, end_time, indices = extracted
+    compressed_data, compression_used = _compress_chunk_data(
+        chunk_data, compression, zstd_level=zstd_level
+    )
+    return ReencodedChunk(
+        chunk=Chunk(
+            message_start_time=start_time,
+            message_end_time=end_time,
+            uncompressed_size=uncompressed_size,
+            uncompressed_crc=uncompressed_crc,
+            compression=compression_used,
+            data=compressed_data,
+        ),
+        indices=indices,
+    )
+
+
+def _read_reencode_chunk(
+    fd: int,
+    body_offset: int,
+    body_length: int,
+    compression: CompressionType,
+    zstd_level: int | None,
+    enable_crcs: bool,
+) -> ReencodedChunk | list[McapRecord]:
+    """Worker-side: read a Chunk record body by absolute offset, then decode + re-encode it."""
+    chunk = Chunk.read(_pread_exact(fd, body_length, body_offset))
+    return _reencode_chunk(chunk, compression, zstd_level, enable_crcs)
+
+
+# Worker results the chunk pipeline drains: decoded records, a recompressed chunk, or a
+# fully re-encoded chunk (which may fall back to a record list on the worker).
+_ChunkFuture = (
+    Future[list[McapRecord]] | Future[Chunk] | Future["ReencodedChunk | list[McapRecord]"]
+)
+
+
 @dataclass(slots=True)
 class PendingChunk:
     chunk: Chunk | LazyChunk
@@ -2091,9 +2159,7 @@ class McapProcessor:
         rather than helping throughput.
         """
         max_inflight = min(8, os.cpu_count() or 1)
-        queue: deque[
-            tuple[PendingChunk, ChunkDecision, Future[list[McapRecord]] | Future[Chunk] | None]
-        ] = deque()
+        queue: deque[tuple[PendingChunk, ChunkDecision, _ChunkFuture | None]] = deque()
 
         # Per-stream input fd for offloaded chunk reads (regular files only).
         # None means "not a seekable regular file" — fall back to main-thread reads.
@@ -2123,7 +2189,7 @@ class McapProcessor:
                 decision = self._should_decode_chunk(
                     pending.chunk, pending.indexes, pending.stream_id
                 )
-                future: Future[list[McapRecord]] | Future[Chunk] | None = None
+                future: _ChunkFuture | None = None
 
                 # Fast path: recompressing a still-lazy chunk from a regular
                 # file. Offload the (large) data read to the worker via os.pread
@@ -2176,12 +2242,23 @@ class McapProcessor:
                         body_offset = record_start + 9
                         if isinstance(pending.stream, ProgressTrackingIO):
                             pending.stream.mark_read_to(body_offset + record_length)
-                        future = pool.submit(
-                            _read_and_decode_chunk_records,
-                            fd,
-                            body_offset,
-                            record_length,
-                        )
+                        if self._can_reencode_chunk(pending):
+                            future = pool.submit(
+                                _read_reencode_chunk,
+                                fd,
+                                body_offset,
+                                record_length,
+                                target_compression,
+                                target_zstd_level,
+                                self.options.output_options.enable_crcs,
+                            )
+                        else:
+                            future = pool.submit(
+                                _read_and_decode_chunk_records,
+                                fd,
+                                body_offset,
+                                record_length,
+                            )
                         queue.append((pending, decision, future))
                         return True
 
@@ -2204,6 +2281,14 @@ class McapProcessor:
                     if decision == ChunkDecision.RECOMPRESS:
                         future = pool.submit(
                             _recompress_chunk, materialized, target_compression, target_zstd_level
+                        )
+                    elif decision == ChunkDecision.DECODE and self._can_reencode_chunk(pending):
+                        future = pool.submit(
+                            _reencode_chunk,
+                            materialized,
+                            target_compression,
+                            target_zstd_level,
+                            self.options.output_options.enable_crcs,
                         )
                     else:
                         future = pool.submit(_decode_chunk_records, materialized)
@@ -2252,7 +2337,7 @@ class McapProcessor:
         self,
         pending: PendingChunk,
         decision: ChunkDecision,
-        future: Future[list[McapRecord]] | Future[Chunk] | None,
+        future: _ChunkFuture | None,
     ) -> None:
         """Dispatch one pre-classified chunk."""
         assert self.output_manager is not None
@@ -2263,7 +2348,7 @@ class McapProcessor:
         if decision == ChunkDecision.DECODE:
             assert future is not None
             try:
-                records = cast("Future[list[McapRecord]]", future).result()
+                result = cast("Future[ReencodedChunk | list[McapRecord]]", future).result()
             except (EOFError, McapError) as e:
                 console.print(
                     f"[yellow]Warning (stream {pending.stream_id}): "
@@ -2271,8 +2356,17 @@ class McapProcessor:
                 )
                 self.stats.errors_encountered += 1
                 return
+            if isinstance(result, ReencodedChunk):
+                # Worker re-encoded the whole chunk; write it and account its messages.
+                for _route_key, target_writer, _indices in self._prepare_chunk_writes(pending):
+                    target_writer.add_chunk(result.chunk, result.indices)
+                self.stats.chunks_decoded += 1
+                self.stats.messages_processed += sum(
+                    idx.num_entries for idx in result.indices.values()
+                )
+                return
             self._process_decoded_records(
-                records,
+                result,
                 pending.stream_id,
                 self._chain_channels_for_chunk(pending.stream_id, pending),
             )
@@ -2392,6 +2486,23 @@ class McapProcessor:
             if scope.kind is MessageScopeKind.CHANNELS:
                 wanted.update(scope.channel_ids)
         return frozenset(wanted)
+
+    def _can_reencode_chunk(self, pending: PendingChunk) -> bool:
+        """True when a decoded chunk can be re-encoded whole on a worker.
+
+        Requires a pure passthrough: one input (no id remap), no output routers or chunk
+        grouping (a single default segment), no topic/time filtering, and no processor that
+        transforms any message in the chunk. Then re-serializing the decoded messages into a
+        fresh chunk is equivalent to the per-message re-emit, but runs off the main thread.
+        """
+        output_options = self.options.output_options
+        return (
+            len(self.options.inputs) == 1
+            and not output_options.routers
+            and not output_options.has_chunk_grouping
+            and not self._has_payload_skipping_filters[pending.stream_id]
+            and self._chain_channels_for_chunk(pending.stream_id, pending) == frozenset()
+        )
 
     def _resolve_output_header(self) -> Header:
         """Choose output header metadata from readable inputs.
