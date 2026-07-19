@@ -11,6 +11,7 @@ from pymcap_cli.core.processors.base import (
     MessageContext,
     MessageHeader,
     MessageHeaderDecision,
+    MessageScope,
 )
 
 if TYPE_CHECKING:
@@ -19,6 +20,14 @@ if TYPE_CHECKING:
 
 class AlwaysDecodeProcessor(InputProcessor):
     """Forces all chunks to be decoded."""
+
+    @override
+    def message_scope(self, context: ChunkContext) -> MessageScope:
+        # This processor only forces chunk decoding (via on_chunk); it never inspects
+        # or transforms messages, so no message needs to traverse the processor chain.
+        # Declaring an empty scope lets every decoded message skip the per-message chain
+        # machinery and route straight to the writer.
+        return MessageScope.none()
 
     @override
     def on_chunk(
