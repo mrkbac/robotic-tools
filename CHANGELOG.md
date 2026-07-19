@@ -8,6 +8,67 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.24.0, small-mcap 0.12.0, robo-ws-bridge 0.8.0
+
+Headline: new lossless `add`, `sort`, and `decompress` commands complete
+Foxglove `mcap` parity, `filter` now keeps attachments and metadata by default,
+bridge streaming shares one adaptive video-quality policy across `serve` and
+`proxy` and degrades gracefully on slow or headless links, and multi-input
+merges re-encode chunks in parallel across cores.
+
+### pymcap-cli 0.24.0
+
+- New `add` attaches an attachment or metadata record to a recording as a
+  lossless copy-and-append, `sort` rewrites a recording with its messages
+  reordered by a stable sort, and `decompress` writes an uncompressed copy.
+  With these the CLI covers the full set of Foxglove `mcap` utility commands.
+- `filter` now includes attachments and metadata by default (previously
+  excluded), adds `--exclude-attachments` and `--exclude-metadata`, and gains
+  the lossless-rewrite knobs `--order`, `--no-chunks`, and `--no-crc`.
+- `recover`'s exit code now reflects how much was salvaged: `0` for a full
+  recovery, `3` when output was produced but the input was truncated or corrupt
+  so data was lost, and `1` when nothing was recoverable. Recovery behavior,
+  `--delete-source` guards, and output are otherwise unchanged.
+- `bridge serve` and `bridge proxy` share a single transport-agnostic adaptive
+  video-quality policy. Under congestion, video steps down — capping the frame
+  rate first, then rebuilding the encoder at a lower resolution with a fresh
+  keyframe. `--adaptive-quality` is on by default for `--image-format video`.
+  Proxy downstream sends now route through the bridge outbox with per-schema
+  delivery (encoded video reliable, standalone frames latest); the obsolete
+  `--send-queue-size` is removed.
+- `bridge serve`: a bare `--host` binds all interfaces and advertises every
+  reachable URL (localhost, LAN, Tailscale/CGNAT), Vite-style, while a single
+  host value and the `127.0.0.1` default are preserved. Video restarts with a
+  keyframe at each loop and seek boundary so Foxglove no longer shows a red
+  cross on repeat. The library UI launches Foxglove in one click and links
+  active sessions straight to the in-page controller, which gains 1x/5x/10x
+  speed presets. Ctrl+C shuts down cleanly.
+- `bridge serve` stays quiet on headless hosts: it skips the automatic browser
+  launch when there is no graphical session, instead of falling back to a
+  terminal browser that hijacks the terminal and cannot open `foxglove://`
+  links.
+- Cross-argument CLI constraints are enforced at parse time through cyclopts
+  validators, so invalid flag combinations fail consistently instead of
+  erroring inconsistently or being silently ignored. `--help` is unchanged.
+- Multi-input merges re-encode remapped chunks whole on worker processes
+  instead of the serial per-message path, and the in-flight worker pool scales
+  to available cores. Merge and recover throughput improve accordingly and the
+  output remains an exact multiset of the inputs.
+
+### small-mcap 0.12.0
+
+- The chunk re-encoder accepts an input→output channel remap (from
+  `Remapper.channel_id_map`), so a merge's remapped chunks can be re-serialized
+  whole on a worker rather than message by message.
+
+### robo-ws-bridge 0.8.0
+
+- Playback delivery adapts to slow links: the server drops stale inputs and
+  paces sends so a congested connection degrades gracefully instead of building
+  an unbounded backlog.
+
+---
+
 ## pymcap-cli 0.23.0, digitalis 0.11.0, robo-ws-bridge 0.7.0, ros-parser 0.8.0
 
 Headline: MCAP validation becomes spec-driven and works against both recordings
