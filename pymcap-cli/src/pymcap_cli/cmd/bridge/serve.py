@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import webbrowser
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated
@@ -67,6 +68,7 @@ from pymcap_cli.log_setup import ERR
 
 _CLOCK_INTERVAL_SECONDS = 1 / 30
 _CLIENT_SETTLE_SECONDS = 0.05
+TimelineStartedHandler = Callable[[], Awaitable[None] | None]
 
 # A list-valued ``--host`` so the flag may be given bare (``--host`` -> bind all
 # interfaces, like ``vite --host``), with a value (``--host 0.0.0.0``), or omitted.
@@ -202,6 +204,11 @@ class BridgeServerPlaybackSink:
         self._clock_done = asyncio.Event()
         self._clock: PlaybackClock | None = None
         self._clock_task: asyncio.Task[None] | None = None
+        self._timeline_started_handlers: list[TimelineStartedHandler] = []
+
+    def on_timeline_started(self, handler: TimelineStartedHandler) -> None:
+        """Attach a handler for the moment recorded time begins advancing."""
+        self._timeline_started_handlers.append(handler)
 
     async def start(self, channels: tuple[PlaybackChannel, ...]) -> None:
         if self._is_started:
@@ -286,6 +293,10 @@ class BridgeServerPlaybackSink:
         self._clock = clock
         self._clock_done.clear()
         await server.publish_time(clock.record_origin_ns)
+        for handler in self._timeline_started_handlers:
+            result = handler()
+            if result is not None:
+                await result
 
         async def publish_clock() -> None:
             while not self._clock_done.is_set():

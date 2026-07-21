@@ -19,6 +19,7 @@ from robo_ws_bridge import (
     PlaybackCommand,
     PlaybackControlRequest,
     PlaybackStatus,
+    StatusLevel,
     WebSocketBridgeEndpoint,
     install_invalid_handshake_log_filter,
 )
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from pymcap_cli.core.message_filter import MessageFilterOptions
 
 _MAX_FILES_PER_SESSION = 32
+_PLAYBACK_STATUS_ID = "playback"
 JsonValue: TypeAlias = (
     str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 )
@@ -469,6 +471,7 @@ class RecordingSession:
         self._task: asyncio.Task[None] | None = None
         self._control_lock = asyncio.Lock()
         self.endpoint.on_playback_control(self.handle_playback_control)
+        self.sink.on_timeline_started(self._handle_timeline_started)
 
         output_channels = prepared.channels if transform_plan is None else transform_plan.channels
         topics_by_channel_id = {
@@ -573,7 +576,6 @@ class RecordingSession:
             return
         self.controller = PlaybackController(is_looping=self.loop, speed=self.speed)
         self.stats = PlaybackStats(playhead_ns=self._start_time_ns)
-        self.error = None
         self._task = asyncio.create_task(self._run())
 
     def pause(self) -> None:
@@ -583,6 +585,10 @@ class RecordingSession:
     def broadcast_playback_state(self) -> None:
         """Notify Foxglove after a playback state change outside a client request."""
         self.endpoint.broadcast_playback_state(self._foxglove_playback_state(did_seek=False))
+
+    def _handle_timeline_started(self) -> None:
+        self.stats.state = "Playing"
+        self.broadcast_playback_state()
 
     def set_speed(self, speed: float) -> None:
         if not math.isfinite(speed) or speed <= 0:
@@ -618,6 +624,8 @@ class RecordingSession:
             status = PlaybackStatus.PAUSED
         elif self.stats.state == "Finished":
             status = PlaybackStatus.ENDED
+        elif self.stats.state in {"Preparing", "Waiting"}:
+            status = PlaybackStatus.BUFFERING
         elif self.controller.state == "Playing":
             status = PlaybackStatus.PLAYING
         else:
@@ -647,7 +655,6 @@ class RecordingSession:
             state="Preparing" if should_play else "Paused",
             playhead_ns=self._start_time_ns,
         )
-        self.error = None
         self._snapshot_time_ns = timestamp_ns - 1 if should_play else timestamp_ns
         self._task = asyncio.create_task(self._run())
 
@@ -686,6 +693,9 @@ class RecordingSession:
 
     async def _run(self) -> None:
         try:
+            if self.error is not None:
+                await self.endpoint.remove_status((_PLAYBACK_STATUS_ID,))
+                self.error = None
             snapshot_time_ns = self._snapshot_time_ns
             self._snapshot_time_ns = None
             if snapshot_time_ns is not None:
@@ -714,6 +724,13 @@ class RecordingSession:
         except Exception as exc:  # noqa: BLE001 - expose background failures in session status
             self.error = str(exc)
             self.stats.state = "Error"
+            self.controller.pause()
+            await self.endpoint.send_status(
+                StatusLevel.ERROR,
+                f"Playback failed: {self.error}",
+                status_id=_PLAYBACK_STATUS_ID,
+            )
+            self.broadcast_playback_state()
         else:
             self.broadcast_playback_state()
 

@@ -24,11 +24,24 @@ from pymcap_cli.cmd.bridge._library import (
     RecordingSession,
     _session_transform_config,
 )
-from pymcap_cli.cmd.bridge._playback import PlaybackClock
+from pymcap_cli.cmd.bridge._playback import (
+    PlaybackClock,
+    PlaybackController,
+    PlaybackSink,
+    PlaybackStats,
+    PlaybackTransformPlan,
+    PreparedPlayback,
+)
 from pymcap_cli.cmd.bridge._playback_transforms import RoscompressConfig, RosdecompressConfig
 from pymcap_cli.cmd.bridge.serve import _library_root
 from pymcap_cli.core.message_filter import MessageFilterOptions
-from robo_ws_bridge import PlaybackCommand, PlaybackControlRequest, PlaybackState, PlaybackStatus
+from robo_ws_bridge import (
+    PlaybackCommand,
+    PlaybackControlRequest,
+    PlaybackState,
+    PlaybackStatus,
+    StatusLevel,
+)
 from robo_ws_bridge.ws_types import BinaryOpCodes, ServerInfoMessage
 from small_mcap import McapFile, McapWriter
 from websockets.asyncio.client import ClientConnection, connect
@@ -130,6 +143,7 @@ def test_library_websocket_accepts_foxglove_playback_control(
         tuple[PlaybackStatus, int, float, bool, str],
         tuple[PlaybackStatus, int, float, bool, str],
         tuple[PlaybackStatus, int, float, bool, str],
+        tuple[PlaybackStatus, int, float, bool, str],
     ]:
         await server.start()
         try:
@@ -142,6 +156,7 @@ def test_library_websocket_accepts_foxglove_playback_control(
                 await websocket.recv()  # channel advertisement
                 initial_frame = await websocket.recv()
                 assert isinstance(initial_frame, bytes)
+                started_state = await _receive_playback_state(websocket, "")
 
                 await websocket.send(
                     _playback_request(
@@ -166,20 +181,26 @@ def test_library_websocket_accepts_foxglove_playback_control(
                 return (
                     server_info,
                     _playback_state(initial_frame),
+                    started_state,
                     paused_state,
                     playing_state,
                 )
         finally:
             await server.stop()
 
-    server_info, initial, paused, playing = asyncio.run(run())
+    server_info, initial, started, paused, playing = asyncio.run(run())
     assert server_info["capabilities"] == ["time", "playbackControl"]
     assert server_info["dataStartTime"] == {"sec": 1, "nsec": 1}
     assert server_info["dataEndTime"] == {"sec": 3, "nsec": 1}
-    assert initial == (PlaybackStatus.PLAYING, start_time, 1.0, False, "")
-    assert paused == (PlaybackStatus.PAUSED, start_time, 1.0, False, "pause-1")
+    assert initial == (PlaybackStatus.BUFFERING, start_time, 1.0, False, "")
+    assert started[0] is PlaybackStatus.PLAYING
+    assert start_time <= started[1] <= end_time
+    assert started[2:] == (1.0, False, "")
+    assert paused[0] is PlaybackStatus.PAUSED
+    assert start_time <= paused[1] <= end_time
+    assert paused[2:] == (1.0, False, "pause-1")
     assert playing == (
-        PlaybackStatus.PLAYING,
+        PlaybackStatus.BUFFERING,
         start_time + 1_000_000_000,
         2.0,
         True,
@@ -750,6 +771,87 @@ def test_recording_session_seek_clears_pending_frames(
     assert asyncio.run(run()) >= 1
 
 
+def test_recording_session_reports_failure_and_clears_it_after_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_mcap(tmp_path / "rec.mcap", "/x", 1, b"a")
+
+    should_fail = True
+
+    async def playback_runner(
+        _prepared: PreparedPlayback,
+        _sink: PlaybackSink,
+        *,
+        speed: float,
+        loop: bool,
+        show_status: bool,
+        transform_plan: PlaybackTransformPlan | None = None,
+        controller: PlaybackController | None = None,
+        stats: PlaybackStats | None = None,
+        start_time_ns: int | None = None,
+        recordings: tuple[McapFile, ...] | None = None,
+    ) -> PlaybackStats:
+        del speed, loop, show_status, transform_plan, controller, start_time_ns, recordings
+        if should_fail:
+            raise RuntimeError("decoder failed")
+        assert stats is not None
+        stats.state = "Finished"
+        return stats
+
+    async def run() -> None:
+        nonlocal should_fail
+        session = await RecordingSession.create(
+            (tmp_path / "rec.mcap",),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1,
+            loop=False,
+        )
+        await session._cancel_task()
+        statuses: list[tuple[StatusLevel, str, str | None]] = []
+        removals: list[tuple[str, ...]] = []
+        states: list[PlaybackState] = []
+
+        async def record_status(
+            level: StatusLevel,
+            message: str,
+            *,
+            status_id: str | None = None,
+        ) -> None:
+            statuses.append((level, message, status_id))
+
+        async def record_removal(status_ids: tuple[str, ...]) -> None:
+            removals.append(status_ids)
+
+        monkeypatch.setattr(session.endpoint, "send_status", record_status)
+        monkeypatch.setattr(session.endpoint, "remove_status", record_removal)
+        monkeypatch.setattr(session.endpoint, "broadcast_playback_state", states.append)
+
+        try:
+            session._playback_runner = playback_runner
+            session.play()
+            await session.wait()
+
+            assert session.error == "decoder failed"
+            assert session.stats.state == "Error"
+            assert session.controller.state == "Paused"
+            assert statuses == [(StatusLevel.ERROR, "Playback failed: decoder failed", "playback")]
+            assert states[-1].status is PlaybackStatus.PAUSED
+
+            should_fail = False
+            session.play()
+            await session.wait()
+
+            assert session.error is None
+            assert removals == [("playback",)]
+            assert states[-1].status is PlaybackStatus.ENDED
+        finally:
+            await session.close()
+
+    asyncio.run(run())
+
+
 def test_recording_session_owns_and_closes_open_recordings(tmp_path: Path) -> None:
     _write_mcap(tmp_path / "rec.mcap", "/x", 1, b"a")
 
@@ -812,7 +914,7 @@ def test_recording_session_closes_partial_recording_open(
     ("command", "speed", "expected_status", "subscribe_before_seek"),
     [
         (PlaybackCommand.PAUSE, 0.0, PlaybackStatus.PAUSED, True),
-        (PlaybackCommand.PLAY, 1.0, PlaybackStatus.PLAYING, True),
+        (PlaybackCommand.PLAY, 1.0, PlaybackStatus.BUFFERING, True),
         (PlaybackCommand.PAUSE, 0.0, PlaybackStatus.PAUSED, False),
     ],
 )
