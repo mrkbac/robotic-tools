@@ -188,10 +188,11 @@ def test_library_websocket_isolates_playback_for_the_same_recording(
         first = await connect(url, subprotocols=["foxglove.sdk.v1"])
         second = await connect(url, subprotocols=["foxglove.sdk.v1"])
         try:
+            first_info: ServerInfoMessage = json.loads(await first.recv())
             await first.recv()
-            await first.recv()
+            second_info: ServerInfoMessage = json.loads(await second.recv())
             await second.recv()
-            await second.recv()
+            assert first_info["sessionId"] != second_info["sessionId"]
             await first.send(
                 _playback_request(
                     PlaybackCommand.PAUSE,

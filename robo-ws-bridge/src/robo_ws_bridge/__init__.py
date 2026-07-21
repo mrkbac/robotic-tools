@@ -15,7 +15,13 @@ from .server import (
     WebSocketBridgeServer,
     install_invalid_handshake_log_filter,
 )
-from .ws_types import PlaybackCommand, PlaybackControlRequest, PlaybackState, PlaybackStatus
+from .ws_types import (
+    PlaybackCommand,
+    PlaybackControlRequest,
+    PlaybackState,
+    PlaybackStatus,
+    StatusLevel,
+)
 
 __all__ = [
     "ConnectionGraph",
@@ -28,6 +34,7 @@ __all__ = [
     "ServerConnection",
     "ServiceCallError",
     "ServiceCallResponse",
+    "StatusLevel",
     "WebSocketBridgeClient",
     "WebSocketBridgeEndpoint",
     "WebSocketBridgeServer",

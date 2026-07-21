@@ -83,6 +83,22 @@ async def control(request: PlaybackControlRequest) -> PlaybackState:
 server.on_playback_control(control)
 ```
 
+Each server endpoint has a unique session ID so reconnecting Foxglove clients
+discard stale visualization state. Rotate it explicitly when switching runs:
+
+```python
+await server.clear_session()
+```
+
+Status IDs provide the same small lifecycle for the Problems panel:
+
+```python
+from robo_ws_bridge import StatusLevel
+
+await server.send_status(StatusLevel.ERROR, "Playback failed", status_id="playback")
+await server.remove_status(["playback"])
+```
+
 ### Client Example
 
 ```python

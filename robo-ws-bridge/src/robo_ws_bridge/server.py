@@ -5,6 +5,7 @@ import json
 import logging
 import struct
 import time
+import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
@@ -24,9 +25,11 @@ from .ws_types import (
     PlaybackCommand,
     PlaybackControlRequest,
     PlaybackState,
+    RemoveStatusMessage,
     SerializedTimestamp,
     ServerCapabilities,
     ServerInfoMessage,
+    StatusLevel,
     StatusMessage,
     SubscribeMessage,
     UnadvertiseMessage,
@@ -79,6 +82,7 @@ _OUTBOX_SOFT_LIMIT_BYTES = 256 << 10
 _OUTBOX_HARD_LIMIT_BYTES = 1 << 20
 _TIME_OUTBOX_KEY = -1
 _PLAYBACK_STATE_OUTBOX_KEY = -2
+_CONTROL_OUTBOX_KEY = -3
 _PLAYBACK_CONTROL_HEADER = struct.Struct("<BfBQI")
 _PLAYBACK_STATE_HEADER = struct.Struct("<BBQfBI")
 _MAX_TIMESTAMP_NS = ((1 << 32) - 1) * 1_000_000_000 + 999_999_999
@@ -119,7 +123,7 @@ class OutboxFrame:
     """One queued frame and the subscription key that owns it."""
 
     key: int
-    payload: bytes
+    payload: bytes | str
 
 
 class ConnectionOutbox:
@@ -152,7 +156,7 @@ class ConnectionOutbox:
         """True while more bytes are pending than the soft limit allows."""
         return self.pending_bytes > self._soft_limit_bytes
 
-    def offer(self, key: int, frame: bytes, *, delivery: DeliveryPolicy) -> OfferResult:
+    def offer(self, key: int, frame: bytes | str, *, delivery: DeliveryPolicy) -> OfferResult:
         """Queue one frame; replaces the pending frame for ``latest`` keys."""
         queued = OutboxFrame(key, frame)
         if delivery == "latest":
@@ -201,6 +205,14 @@ class ConnectionOutbox:
         self._reliable.clear()
         self._latest.clear()
         self.pending_bytes = 0
+
+    def clear_data(self) -> None:
+        """Drop queued data and time frames while preserving control messages."""
+        self._latest = {key: frame for key, frame in self._latest.items() if key < _TIME_OUTBOX_KEY}
+        self._reliable = deque(frame for frame in self._reliable if frame.key < 0)
+        self.pending_bytes = sum(
+            len(frame.payload) for frame in (*self._reliable, *self._latest.values())
+        )
 
     def is_key_busy(self, key: int) -> bool:
         """True while a subscription has an in-flight or pending frame."""
@@ -284,7 +296,7 @@ class WebSocketBridgeEndpoint:
         self._capabilities = list(capabilities)
         self._metadata = dict(metadata or {})
         self._supported_encodings = list(supported_encodings or [])
-        self._session_id = session_id
+        self._session_id = uuid.uuid4().hex if session_id is None else session_id
         self._playback_time_range = self._validate_playback_time_range(playback_time_range)
         playback_capability = ServerCapabilities.PLAYBACK_CONTROL.value
         if self._playback_time_range is not None:
@@ -502,7 +514,7 @@ class WebSocketBridgeEndpoint:
         new stream restarts, making the client jump back to pre-seek data.
         """
         for state in self._connections.values():
-            state.outbox.clear()
+            state.outbox.clear_data()
 
     def has_congested_subscriber(self, channel_id: int) -> bool:
         """True when a subscriber of the channel has a backed-up outbox."""
@@ -577,7 +589,7 @@ class WebSocketBridgeEndpoint:
 
     async def send_status(
         self,
-        level: int,
+        level: StatusLevel,
         message: str,
         *,
         status_id: str | None = None,
@@ -585,21 +597,39 @@ class WebSocketBridgeEndpoint:
         """Broadcast a status JSON message to every client."""
         payload: StatusMessage = {
             "op": JsonOpCodes.STATUS.value,
-            "level": level,
+            "level": int(level),
             "message": message,
         }
         if status_id is not None:
             payload["id"] = status_id
         await self._broadcast_json(payload)
 
+    async def remove_status(self, status_ids: Iterable[str]) -> None:
+        """Remove status messages from the Foxglove Problems panel by ID."""
+        payload: RemoveStatusMessage = {
+            "op": JsonOpCodes.REMOVE_STATUS.value,
+            "statusIds": list(status_ids),
+        }
+        await self._broadcast_json(payload)
+
+    async def clear_session(self, new_session_id: str | None = None) -> str:
+        """Rotate the session ID and tell connected clients to clear cached state."""
+        self._session_id = uuid.uuid4().hex if new_session_id is None else new_session_id
+        await self._broadcast_json(self._server_info())
+        return self._session_id
+
     async def _broadcast_json(self, message: JsonMessage) -> None:
-        """Send a JSON message to all connections."""
+        """Queue a reliable JSON control message for every connection."""
         frame = json.dumps(message)
         for state in list(self._connections.values()):
-            try:
-                await state.websocket.send(frame)
-            except ConnectionClosed:
-                Logger.debug("Failed broadcast to closed connection")
+            result = state.outbox.offer(_CONTROL_OUTBOX_KEY, frame, delivery="reliable")
+            if result == "overflow" and state.close_task is None:
+                state.close_task = asyncio.create_task(
+                    state.websocket.close(
+                        code=1013,
+                        reason="Control queue overflow",
+                    )
+                )
 
     async def handle_connection(self, websocket: ServerConnection) -> None:
         """Handle the lifetime of a single client connection."""
@@ -633,6 +663,9 @@ class WebSocketBridgeEndpoint:
                 await _ensure_awaitable(handler(state))
 
     async def _send_server_info(self, state: ConnectionState) -> None:
+        await state.websocket.send(json.dumps(self._server_info()))
+
+    def _server_info(self) -> ServerInfoMessage:
         message: ServerInfoMessage = {
             "op": JsonOpCodes.SERVER_INFO.value,
             "name": self._name,
@@ -642,13 +675,12 @@ class WebSocketBridgeEndpoint:
             message["supportedEncodings"] = list(self._supported_encodings)
         if self._metadata:
             message["metadata"] = dict(self._metadata)
-        if self._session_id is not None:
-            message["sessionId"] = self._session_id
+        message["sessionId"] = self._session_id
         if self._playback_time_range is not None:
             start_time, end_time = self._playback_time_range
             message["dataStartTime"] = self._serialize_timestamp(start_time)
             message["dataEndTime"] = self._serialize_timestamp(end_time)
-        await state.websocket.send(json.dumps(message))
+        return message
 
     @staticmethod
     def _serialize_timestamp(timestamp_ns: int) -> SerializedTimestamp:

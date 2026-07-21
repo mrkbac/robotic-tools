@@ -13,11 +13,17 @@ from robo_ws_bridge import (
     PlaybackControlRequest,
     PlaybackState,
     PlaybackStatus,
+    StatusLevel,
     WebSocketBridgeEndpoint,
     WebSocketBridgeServer,
 )
 from robo_ws_bridge.server import Channel, ConnectionOutbox
-from robo_ws_bridge.ws_types import BinaryOpCodes, ServerInfoMessage
+from robo_ws_bridge.ws_types import (
+    BinaryOpCodes,
+    RemoveStatusMessage,
+    ServerInfoMessage,
+    StatusMessage,
+)
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -190,6 +196,80 @@ def test_playback_control_rejects_invalid_time_range(time_range: tuple[int, int]
 def test_playback_control_capability_requires_time_range() -> None:
     with pytest.raises(ValueError, match="playbackControl requires playback_time_range"):
         WebSocketBridgeEndpoint(capabilities=["playbackControl"])
+
+
+def test_session_id_rotates_and_notifies_connected_clients() -> None:
+    port = _free_port()
+
+    async def run() -> tuple[ServerInfoMessage, ServerInfoMessage, ServerInfoMessage, str]:
+        server = WebSocketBridgeServer(host="127.0.0.1", port=port)
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{port}", subprotocols=["foxglove.sdk.v1"]
+            ) as websocket:
+                initial: ServerInfoMessage = json.loads(await websocket.recv())
+                generated_session_id = await server.clear_session()
+                generated: ServerInfoMessage = json.loads(await websocket.recv())
+                await server.clear_session("recording-2")
+                explicit: ServerInfoMessage = json.loads(await websocket.recv())
+                return initial, generated, explicit, generated_session_id
+        finally:
+            await server.stop()
+
+    initial, generated, explicit, generated_session_id = asyncio.run(run())
+    assert initial["sessionId"]
+    assert generated_session_id != initial["sessionId"]
+    assert generated["sessionId"] == generated_session_id
+    assert explicit["sessionId"] == "recording-2"
+
+
+def test_status_message_can_be_removed_by_stable_id() -> None:
+    port = _free_port()
+
+    async def run() -> tuple[StatusMessage, RemoveStatusMessage]:
+        server = WebSocketBridgeServer(host="127.0.0.1", port=port)
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{port}", subprotocols=["foxglove.websocket.v1"]
+            ) as websocket:
+                await websocket.recv()
+                await server.send_status(
+                    StatusLevel.ERROR,
+                    "Playback failed",
+                    status_id="playback",
+                )
+                status: StatusMessage = json.loads(await websocket.recv())
+                await server.remove_status(["playback"])
+                removed: RemoveStatusMessage = json.loads(await websocket.recv())
+                return status, removed
+        finally:
+            await server.stop()
+
+    status, removed = asyncio.run(run())
+    assert status == {
+        "op": "status",
+        "level": int(StatusLevel.ERROR),
+        "message": "Playback failed",
+        "id": "playback",
+    }
+    assert removed == {"op": "removeStatus", "statusIds": ["playback"]}
+
+
+def test_outbox_clear_data_preserves_reliable_control_frames() -> None:
+    async def run() -> bytes:
+        outbox = ConnectionOutbox()
+        outbox.offer(1, b"message", delivery="reliable")
+        outbox.offer(-1, b"time", delivery="latest")
+        outbox.offer(-2, b"control", delivery="reliable")
+
+        outbox.clear_data()
+        frame = await outbox.next_frame()
+        assert isinstance(frame.payload, bytes)
+        return frame.payload
+
+    assert asyncio.run(run()) == b"control"
 
 
 def test_endpoint_can_share_listener_and_isolates_channels_by_path() -> None:
