@@ -611,6 +611,8 @@ class FFmpegVideoEncoder:
                 "error",
                 "-f",
                 "image2pipe",
+                "-probesize",
+                "32",
             ]
             if decode_codec is not None:
                 cmd.extend(["-c:v", decode_codec])

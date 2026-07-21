@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import time
 
 import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.ffmpeg as ffmpeg_module
@@ -19,6 +20,7 @@ from mcap_codec_support.video.ffmpeg import (
     probe_hw_mjpeg_decoder,
     probe_image_dimensions,
 )
+from PIL import Image
 
 # ---------------------------------------------------------------------------
 # AnnexBParser tests
@@ -326,6 +328,30 @@ class TestBackendSelection:
 
 @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
 class TestFFmpegVideoEncoder:
+    def test_image_pipe_emits_without_full_probe_window(self) -> None:
+        image = io.BytesIO()
+        Image.effect_noise((192, 108), 100).convert("RGB").save(image, format="JPEG", quality=90)
+        encoder = FFmpegVideoEncoder(
+            width=192,
+            height=108,
+            codec_name="libx264",
+            quality=28,
+            target_fps=30.0,
+            gop_size=10,
+        )
+
+        first_output_at: int | None = None
+        try:
+            for index in range(10):
+                if encoder.encode(image.getvalue()) is not None:
+                    first_output_at = index
+                    break
+                time.sleep(0.05)
+        finally:
+            encoder.close()
+
+        assert first_output_at is not None
+
     def test_encode_raw_bytes(self) -> None:
         """Encode raw YUV420p bytes without PyAV."""
         width, height = 64, 64
