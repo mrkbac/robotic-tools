@@ -217,7 +217,9 @@ _APP_JS = """\
   };
 
   const websocketUrl = (files) => {
-    const websocket = new URL("/ws", window.location.href);
+    const firstName = files[0].split("/").at(-1);
+    const label = files.length === 1 ? firstName : `${firstName} +${files.length - 1}`;
+    const websocket = new URL(`/ws/${encodeURIComponent(label)}`, window.location.href);
     websocket.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     websocket.search = query(files).toString();
     return websocket;
@@ -865,7 +867,7 @@ class RecordingLibraryServer:
             await websocket.close(code=1008, reason="Missing request")
             return
         parsed = urlsplit(request.path)
-        if parsed.path != "/ws":
+        if not _is_websocket_path(parsed.path):
             await websocket.close(code=1008, reason="Unknown WebSocket path")
             return
         try:
@@ -885,7 +887,7 @@ class RecordingLibraryServer:
         request: Request,
     ) -> Response | None:
         parsed = urlsplit(request.path)
-        if parsed.path == "/ws":
+        if _is_websocket_path(parsed.path):
             return None
 
         try:
@@ -947,6 +949,10 @@ def _session_transform_config(
     if preset == "none":
         return None
     return create_playback_preset_config(preset, adaptive_quality=True)
+
+
+def _is_websocket_path(path: str) -> bool:
+    return path == "/ws" or path.startswith("/ws/")
 
 
 def _response(status: int, content_type: str, body: str) -> Response:

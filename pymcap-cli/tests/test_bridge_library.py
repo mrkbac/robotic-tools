@@ -331,8 +331,41 @@ def test_library_ui_is_only_a_recording_launcher() -> None:
 
 def test_library_ui_builds_multi_recording_foxglove_links() -> None:
     assert 'for (const file of files) params.append("file", file)' in _APP_JS
+    assert 'const firstName = files[0].split("/").at(-1)' in _APP_JS
+    assert (
+        "const label = files.length === 1 ? firstName : `${firstName} +${files.length - 1}`"
+        in _APP_JS
+    )
+    assert "new URL(`/ws/${encodeURIComponent(label)}`, window.location.href)" in _APP_JS
     assert "document.querySelectorAll" in _APP_JS
     assert 'input[name="recording"]:checked' in _APP_JS
+
+
+def test_library_websocket_accepts_display_name_path(tmp_path: Path) -> None:
+    _write_mcap(tmp_path / "my recording.mcap", "/camera", 1, b"frame")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    async def connect_with_name() -> None:
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{server.port}/ws/my%20recording.mcap?file=my+recording.mcap",
+                subprotocols=["foxglove.sdk.v1"],
+            ) as websocket:
+                server_info: ServerInfoMessage = json.loads(await websocket.recv())
+                assert server_info["name"] == "pymcap-cli: my recording.mcap"
+        finally:
+            await server.stop()
+
+    asyncio.run(connect_with_name())
 
 
 @pytest.mark.parametrize(
