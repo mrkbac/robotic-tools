@@ -3255,6 +3255,9 @@ wheels = [
 name = "small-mcap"
 version = "0.13.0"
 source = { editable = "small-mcap" }
+dependencies = [
+    { name = "typing-extensions" },
+]
 
 [package.optional-dependencies]
 compression = [
@@ -3286,6 +3289,7 @@ requires-dist = [
     { name = "rosbags", marker = "extra == 'dev'", specifier = ">=0.11.0" },
     { name = "small-mcap", extras = ["lz4"], marker = "extra == 'compression'" },
     { name = "small-mcap", extras = ["zstd"], marker = "extra == 'compression'" },
+    { name = "typing-extensions", specifier = ">=4.15.0" },
     { name = "zstandard", marker = "python_full_version < '3.14' and extra == 'zstd'", specifier = ">=0.23.0" },
 ]
 provides-extras = ["zstd", "lz4", "compression", "dev"]

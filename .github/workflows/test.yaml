@@ -25,29 +25,28 @@ jobs:
           enable-cache: true
           cache-suffix: optional-dependencies
 
-      - name: Build pymcap-cli wheel
-        run: |
-          uv build --package pymcap-cli --out-dir dist/optional-dependencies
-          uv build --package mcap-codec-support --out-dir dist/optional-dependencies
-          uv build --package robo-ws-bridge --out-dir dist/optional-dependencies
-          uv build --package ros-parser --out-dir dist/optional-dependencies
-          uv build --package small-mcap --out-dir dist/optional-dependencies
+      - name: Build workspace wheels
+        run: uv build --all-packages --wheel --out-dir dist/optional-dependencies
 
       - name: Test base install and each extra independently
+        env:
+          UV_FIND_LINKS: dist/optional-dependencies
         run: >-
           uv run --no-project --python 3.13 python
           pymcap-cli/tests/check_optional_dependencies.py
           dist/optional-dependencies/pymcap_cli-*.whl
-          dist/optional-dependencies/robo_ws_bridge-*.whl
-          dist/optional-dependencies/ros_parser-*.whl
 
       - name: Test codec-support base install and each extra independently
+        env:
+          UV_FIND_LINKS: dist/optional-dependencies
         run: >-
           uv run --no-project --python 3.13 python
           mcap-codec-support/tests/check_optional_dependencies.py
           dist/optional-dependencies/mcap_codec_support-*.whl
 
       - name: Test small-mcap base install and each extra independently
+        env:
+          UV_FIND_LINKS: dist/optional-dependencies
         run: >-
           uv run --no-project --python 3.13 python
           small-mcap/tests/check_optional_dependencies.py
