@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol, TypeAlias
 from urllib.parse import parse_qs, urlsplit
 
 from robo_ws_bridge import (
+    ConnectionState,
     PlaybackCommand,
     PlaybackControlRequest,
     PlaybackStatus,
@@ -34,6 +35,7 @@ from pymcap_cli.cmd.bridge._playback import (
     PlaybackStats,
     PreparedPlayback,
     prepare_playback,
+    publish_playback_snapshot,
     run_playback,
 )
 from pymcap_cli.cmd.bridge._playback_transforms import create_playback_transform_plan
@@ -366,9 +368,39 @@ class RecordingSession:
         )
         self._start_time_ns = self.timeline_start_ns
         self.error: str | None = None
+        self._snapshot_time_ns: int | None = None
         self._task: asyncio.Task[None] | None = None
         self._control_lock = asyncio.Lock()
         self.endpoint.on_playback_control(self.handle_playback_control)
+
+        output_channels = prepared.channels if transform_plan is None else transform_plan.channels
+        topics_by_channel_id = {
+            sink.channel_ids[channel]: channel.topic for channel in output_channels
+        }
+
+        async def publish_subscription_snapshot(
+            _state: ConnectionState,
+            _subscription_id: int,
+            channel_id: int,
+        ) -> None:
+            topic = topics_by_channel_id.get(channel_id)
+            if topic is None:
+                return
+            if self.controller.state != "Paused" and self.stats.state != "Finished":
+                return
+            current_time_ns = self.sink.current_time_ns
+            if current_time_ns is None:
+                current_time_ns = max(self._start_time_ns, self.stats.playhead_ns)
+            await publish_playback_snapshot(
+                self.prepared,
+                self.sink,
+                timestamp_ns=current_time_ns,
+                transform_plan=self.transform_plan,
+                topics={topic},
+            )
+            await self.endpoint.publish_time(current_time_ns)
+
+        self.endpoint.on_subscribe(publish_subscription_snapshot)
 
     @classmethod
     async def create(
@@ -503,6 +535,7 @@ class RecordingSession:
             playhead_ns=self._start_time_ns,
         )
         self.error = None
+        self._snapshot_time_ns = timestamp_ns - 1 if should_play else timestamp_ns
         self._task = asyncio.create_task(self._run())
 
     async def _cancel_task(self) -> None:
@@ -536,6 +569,16 @@ class RecordingSession:
 
     async def _run(self) -> None:
         try:
+            snapshot_time_ns = self._snapshot_time_ns
+            self._snapshot_time_ns = None
+            if snapshot_time_ns is not None:
+                await publish_playback_snapshot(
+                    self.prepared,
+                    self.sink,
+                    timestamp_ns=snapshot_time_ns,
+                    transform_plan=self.transform_plan,
+                )
+                await self.endpoint.publish_time(self._start_time_ns)
             await self._playback_runner(
                 self.prepared,
                 self.sink,

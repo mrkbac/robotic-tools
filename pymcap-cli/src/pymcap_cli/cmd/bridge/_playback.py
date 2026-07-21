@@ -277,6 +277,13 @@ class PlaybackOutput:
     payload: bytes | memoryview
 
 
+@dataclass(frozen=True, slots=True)
+class _PlaybackSnapshotMessage:
+    channel: PlaybackChannel
+    timestamp_ns: int
+    payload: bytes
+
+
 class PlaybackTransformSession(Protocol):
     async def observe_congestion(
         self,
@@ -471,6 +478,99 @@ def open_playback_messages(
         yield messages
 
 
+async def publish_playback_snapshot(
+    prepared: PreparedPlayback,
+    sink: PlaybackSink,
+    *,
+    timestamp_ns: int,
+    transform_plan: PlaybackTransformPlan | None = None,
+    topics: set[str] | None = None,
+) -> int:
+    """Publish the newest active message at or before a playback timestamp."""
+    selected_channels = {channel.topic: channel for channel in prepared.channels}
+    active_topics = {
+        channel.topic
+        for channel in prepared.channels
+        if topics is None or channel.topic in topics
+        if sink.is_channel_active(
+            channel if transform_plan is None else transform_plan.output_channel(channel)
+        )
+    }
+    if not active_topics:
+        return 0
+
+    def is_active_channel(channel: Channel, _schema: Schema | None) -> bool:
+        return channel.topic in active_topics
+
+    should_include = prepared.message_filter.create_channel_predicate(is_active_channel)
+    resolved = prepared.resolved_filter
+    end_time_ns = min(timestamp_ns + 1, resolved.end_time_ns)
+    if end_time_ns <= resolved.start_time_ns:
+        return 0
+
+    latest: dict[str, _PlaybackSnapshotMessage] = {}
+    with ExitStack() as stack:
+        streams = [stack.enter_context(open_input(path))[0] for path in prepared.files]
+        for schema, channel, message in read_message(
+            streams,
+            should_include=should_include,
+            start_time_ns=resolved.start_time_ns,
+            end_time_ns=end_time_ns,
+            reverse=True,
+        ):
+            if channel.topic in latest:
+                continue
+            playback_channel = _playback_channel(schema, channel)
+            selected_channel = selected_channels.get(playback_channel.topic)
+            if selected_channel is None or not _channel_definitions_are_compatible(
+                playback_channel,
+                selected_channel,
+            ):
+                raise PlaybackError(
+                    f"Topic {playback_channel.topic!r} changed to an incompatible "
+                    "channel definition during playback"
+                )
+            latest[channel.topic] = _PlaybackSnapshotMessage(
+                channel=selected_channel,
+                timestamp_ns=message.log_time,
+                payload=bytes(message.data),
+            )
+            if len(latest) == len(active_topics):
+                break
+
+    transform_session = None if transform_plan is None else transform_plan.create_session()
+    published = 0
+    try:
+        for snapshot in sorted(
+            latest.values(), key=lambda item: (item.timestamp_ns, item.channel.topic)
+        ):
+            if transform_session is None:
+                outputs = (
+                    PlaybackOutput(
+                        channel=snapshot.channel,
+                        timestamp_ns=snapshot.timestamp_ns,
+                        payload=snapshot.payload,
+                    ),
+                )
+            else:
+                outputs = await transform_session.transform(
+                    snapshot.channel,
+                    snapshot.timestamp_ns,
+                    snapshot.payload,
+                )
+            for output in outputs:
+                await sink.publish(output.channel, output.timestamp_ns, output.payload)
+                published += 1
+        if transform_session is not None:
+            for output in await transform_session.finish():
+                await sink.publish(output.channel, output.timestamp_ns, output.payload)
+                published += 1
+    finally:
+        if transform_session is not None:
+            await transform_session.close()
+    return published
+
+
 def _build_status(
     prepared: PreparedPlayback,
     sink: PlaybackSink,
@@ -652,11 +752,12 @@ async def run_playback(
                         if transform_plan is None
                         else transform_plan.output_channel(playback_channel)
                     )
+                    deadline, lag = await wait_for_deadline(clock, message.log_time)
                     if not sink.is_channel_active(advertised_channel):
                         if transform_session is not None:
                             await transform_session.deactivate(playback_channel)
+                        stats.playhead_ns = message.log_time
                         continue
-                    deadline, lag = await wait_for_deadline(clock, message.log_time)
                     # wait_for_deadline returned at wall time deadline + lag.
                     processing_started = deadline + lag
                     if is_frame_channel(playback_channel):

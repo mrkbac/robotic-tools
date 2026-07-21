@@ -45,6 +45,22 @@ def _write_mcap(path: Path, topic: str, timestamp_ns: int, payload: bytes) -> No
         writer.finish()
 
 
+def _write_mcap_messages(
+    path: Path,
+    topic: str,
+    messages: list[tuple[int, bytes]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as stream:
+        writer = McapWriter(stream)
+        writer.start()
+        writer.add_schema(1, "example/Raw", "text", b"bytes data")
+        writer.add_channel(1, topic, "raw", 1)
+        for timestamp_ns, payload in messages:
+            writer.add_message(1, timestamp_ns, payload, publish_time=timestamp_ns)
+        writer.finish()
+
+
 def _playback_request(
     command: PlaybackCommand,
     *,
@@ -91,13 +107,11 @@ async def _receive_playback_state(
 
 def test_library_websocket_accepts_foxglove_playback_control(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     start_time = 1_000_000_001
     end_time = 3_000_000_001
     _write_mcap(tmp_path / "first.mcap", "/first", start_time, b"first")
     _write_mcap(tmp_path / "second.mcap", "/second", end_time, b"second")
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
     server = RecordingLibraryServer(
         RecordingLibrary(tmp_path),
         host="127.0.0.1",
@@ -134,8 +148,7 @@ def test_library_websocket_accepts_foxglove_playback_control(
                         request_id="pause-1",
                     )
                 )
-                paused_frame = await websocket.recv()
-                assert isinstance(paused_frame, bytes)
+                paused_state = await _receive_playback_state(websocket, "pause-1")
 
                 seek_time = start_time + 1_000_000_000
                 await websocket.send(
@@ -146,13 +159,12 @@ def test_library_websocket_accepts_foxglove_playback_control(
                         request_id="seek-2",
                     )
                 )
-                playing_frame = await websocket.recv()
-                assert isinstance(playing_frame, bytes)
+                playing_state = await _receive_playback_state(websocket, "seek-2")
                 return (
                     server_info,
                     _playback_state(initial_frame),
-                    _playback_state(paused_frame),
-                    _playback_state(playing_frame),
+                    paused_state,
+                    playing_state,
                 )
         finally:
             await server.stop()
@@ -174,10 +186,8 @@ def test_library_websocket_accepts_foxglove_playback_control(
 
 def test_library_websocket_isolates_playback_for_the_same_recording(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_mcap(tmp_path / "recording.mcap", "/topic", 1, b"message")
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
     server = RecordingLibraryServer(
         RecordingLibrary(tmp_path),
         host="127.0.0.1",
@@ -357,11 +367,9 @@ def test_library_root_preserves_rosbag2_directory_behavior(tmp_path: Path) -> No
 
 def test_library_server_lists_recordings_and_merges_query_files(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
     _write_mcap(tmp_path / "second.mcap", "/second", 2, b"second")
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
 
     async def get_json(url: str) -> dict[str, object]:
         def request() -> dict[str, object]:
@@ -422,10 +430,9 @@ def test_library_server_lists_recordings_and_merges_query_files(
     assert received == [(1, b"first"), (2, b"second")]
 
 
-def test_library_server_streams_grouped_bag_splits(tmp_path: Path, monkeypatch) -> None:
+def test_library_server_streams_grouped_bag_splits(tmp_path: Path) -> None:
     _write_mcap(tmp_path / "bag" / "bag_0.mcap", "/first", 2, b"second")
     _write_mcap(tmp_path / "bag" / "bag_1.mcap", "/second", 1, b"first")
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
 
     async def run() -> tuple[list[str], list[tuple[int, bytes]]]:
         server = RecordingLibraryServer(
@@ -483,10 +490,8 @@ def test_library_server_streams_grouped_bag_splits(tmp_path: Path, monkeypatch) 
 
 def test_library_server_removes_session_when_listener_disconnects(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
     server = RecordingLibraryServer(
         RecordingLibrary(tmp_path),
         host="127.0.0.1",
@@ -652,6 +657,81 @@ def test_recording_session_seek_clears_pending_frames(
         return calls
 
     assert asyncio.run(run()) >= 1
+
+
+@pytest.mark.parametrize(
+    ("command", "speed", "expected_status", "subscribe_before_seek"),
+    [
+        (PlaybackCommand.PAUSE, 0.0, PlaybackStatus.PAUSED, True),
+        (PlaybackCommand.PLAY, 1.0, PlaybackStatus.PLAYING, True),
+        (PlaybackCommand.PAUSE, 0.0, PlaybackStatus.PAUSED, False),
+    ],
+)
+def test_library_seek_immediately_publishes_latest_message(
+    tmp_path: Path,
+    command: PlaybackCommand,
+    speed: float,
+    expected_status: PlaybackStatus,
+    subscribe_before_seek: bool,
+) -> None:
+    _write_mcap_messages(
+        tmp_path / "rec.mcap",
+        "/x",
+        [(10, b"a"), (20, b"b"), (30, b"c")],
+    )
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    async def run() -> tuple[PlaybackStatus, int, bytes]:
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{server.port}/ws?file=rec.mcap",
+                subprotocols=["foxglove.sdk.v1"],
+            ) as websocket:
+                await websocket.recv()
+                advertisement = json.loads(await websocket.recv())
+                initial_state = await websocket.recv()
+                assert isinstance(initial_state, bytes)
+                channel_id = advertisement["channels"][0]["id"]
+                subscription = json.dumps(
+                    {
+                        "op": "subscribe",
+                        "subscriptions": [{"id": 7, "channelId": channel_id}],
+                    }
+                )
+                if subscribe_before_seek:
+                    await websocket.send(subscription)
+                await websocket.send(
+                    _playback_request(
+                        command,
+                        speed=speed,
+                        seek_time=25,
+                        request_id="paused-seek",
+                    )
+                )
+                state = await _receive_playback_state(websocket, "paused-seek")
+                if not subscribe_before_seek:
+                    await websocket.send(subscription)
+                while True:
+                    frame = await asyncio.wait_for(websocket.recv(), timeout=1)
+                    if isinstance(frame, bytes) and frame[0] == int(BinaryOpCodes.MESSAGE_DATA):
+                        timestamp_ns = struct.unpack_from("<Q", frame, 5)[0]
+                        return state[0], timestamp_ns, frame[13:]
+        finally:
+            await server.stop()
+
+    status, timestamp_ns, payload = asyncio.run(run())
+    assert status is expected_status
+    assert timestamp_ns == 20
+    assert payload == b"b"
 
 
 def test_recording_session_clamps_foxglove_seek_to_timeline_end(tmp_path: Path) -> None:

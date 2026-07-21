@@ -6,7 +6,6 @@ import socket
 import sys
 import threading
 import webbrowser
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated
@@ -38,7 +37,6 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd.bridge._playback import (
-    _SETTLE_SECONDS,
     PlaybackChannel,
     PlaybackClock,
     PlaybackError,
@@ -74,6 +72,7 @@ from pymcap_cli.core.rosbag2_layout import find_bag_splits
 from pymcap_cli.log_setup import ERR
 
 _CLOCK_INTERVAL_SECONDS = 1 / 30
+_CLIENT_SETTLE_SECONDS = 0.05
 
 # A list-valued ``--host`` so the flag may be given bare (``--host`` -> bind all
 # interfaces, like ``vite --host``), with a value (``--host 0.0.0.0``), or omitted.
@@ -216,12 +215,9 @@ class BridgeServerPlaybackSink:
         self._is_started = False
         self.channel_ids: dict[PlaybackChannel, int] = {}
         self._subscriptions: set[tuple[ServerConnection, int, int]] = set()
-        self._has_subscription = asyncio.Event()
-        self._activity_handlers: list[Callable[[bool], None]] = []
-        self._inactive_since: float | None = None
+        self._has_connection = asyncio.Event()
         self.started = asyncio.Event()
         self._clock_done = asyncio.Event()
-        self._timeline_active = asyncio.Event()
         self._clock: PlaybackClock | None = None
         self._clock_task: asyncio.Task[None] | None = None
 
@@ -255,25 +251,25 @@ class BridgeServerPlaybackSink:
             )
 
         def on_subscribe(state: ConnectionState, subscription_id: int, channel_id: int) -> None:
-            was_active = bool(self._subscriptions)
             websocket = state.websocket
             self._subscriptions.add((websocket, subscription_id, channel_id))
-            self._update_subscription_activity(was_active)
+
+        def on_connect(_state: ConnectionState) -> None:
+            self._has_connection.set()
 
         def on_unsubscribe(state: ConnectionState, subscription_id: int, channel_id: int) -> None:
-            was_active = bool(self._subscriptions)
             websocket = state.websocket
             self._subscriptions.discard((websocket, subscription_id, channel_id))
-            self._update_subscription_activity(was_active)
 
         def on_disconnect(state: ConnectionState) -> None:
-            was_active = bool(self._subscriptions)
             websocket = state.websocket
             self._subscriptions = {
                 entry for entry in self._subscriptions if entry[0] is not websocket
             }
-            self._update_subscription_activity(was_active)
+            if not server.connections:
+                self._has_connection.clear()
 
+        server.on_connect(on_connect)
         server.on_subscribe(on_subscribe)
         server.on_unsubscribe(on_unsubscribe)
         server.on_disconnect(on_disconnect)
@@ -285,11 +281,12 @@ class BridgeServerPlaybackSink:
         console.print(f"[green]Serving playback at[/] [bold]{self.url}[/]")
 
     async def wait_until_ready(self) -> None:
-        console.print("[dim]Waiting for a client subscription...[/]")
         while True:
-            await self._has_subscription.wait()
-            await asyncio.sleep(_SETTLE_SECONDS)
-            if self._subscriptions:
+            await self._has_connection.wait()
+            await asyncio.sleep(_CLIENT_SETTLE_SECONDS)
+            server = self.server
+            assert server is not None
+            if server.connections:
                 return
 
     async def publish(
@@ -306,15 +303,10 @@ class BridgeServerPlaybackSink:
         assert server is not None
         self._clock = clock
         self._clock_done.clear()
-        if self._has_subscription.is_set():
-            self._timeline_active.set()
-            await server.publish_time(clock.record_origin_ns)
+        await server.publish_time(clock.record_origin_ns)
 
         async def publish_clock() -> None:
             while not self._clock_done.is_set():
-                await self._timeline_active.wait()
-                if self._clock_done.is_set():
-                    break
                 await server.publish_time(clock.current_time_ns())
                 try:
                     await asyncio.wait_for(self._clock_done.wait(), timeout=_CLOCK_INTERVAL_SECONDS)
@@ -325,16 +317,13 @@ class BridgeServerPlaybackSink:
 
     async def timeline_finished(self, timestamp_ns: int) -> None:
         self._clock_done.set()
-        self._timeline_active.set()
         if self._clock_task is not None:
             await self._clock_task
             self._clock_task = None
         self._clock = None
-        self._timeline_active.clear()
         server = self.server
         assert server is not None
-        if self._has_subscription.is_set():
-            await server.publish_time(timestamp_ns)
+        await server.publish_time(timestamp_ns)
 
     @property
     def current_time_ns(self) -> int | None:
@@ -343,12 +332,10 @@ class BridgeServerPlaybackSink:
 
     async def close(self) -> None:
         self._clock_done.set()
-        self._timeline_active.set()
         if self._clock_task is not None:
             await self._clock_task
             self._clock_task = None
         self._clock = None
-        self._timeline_active.clear()
         if self._owns_server and isinstance(self.server, WebSocketBridgeServer):
             await self.server.stop()
 
@@ -374,37 +361,8 @@ class BridgeServerPlaybackSink:
             return False
         return server.are_all_subscribers_busy(self.channel_ids[channel])
 
-    @property
-    def has_subscriptions(self) -> bool:
-        return bool(self._subscriptions)
-
-    def on_activity_change(self, handler: Callable[[bool], None]) -> None:
-        self._activity_handlers.append(handler)
-
     async def wait_until_active(self) -> float:
-        await self._has_subscription.wait()
-        delay = 0.0
-        if self._inactive_since is not None:
-            delay = asyncio.get_running_loop().time() - self._inactive_since
-            self._inactive_since = None
-        if self._clock is not None:
-            self._clock.delay(delay)
-            self._timeline_active.set()
-            return 0.0
-        return delay
-
-    def _update_subscription_activity(self, was_active: bool) -> None:
-        is_active = bool(self._subscriptions)
-        if is_active == was_active:
-            return
-        if is_active:
-            self._has_subscription.set()
-        else:
-            self._has_subscription.clear()
-            self._inactive_since = asyncio.get_running_loop().time()
-            self._timeline_active.clear()
-        for handler in self._activity_handlers:
-            handler(is_active)
+        return 0.0
 
 
 def serve(
@@ -444,8 +402,8 @@ def serve(
 ) -> int:
     """Host MCAP files or a recording directory for Foxglove clients.
 
-    Playback begins one second after the first client subscribes. All clients
-    on the same file selection share one chronological playback timeline.
+    Playback starts immediately and its clock advances independently of topic
+    subscriptions. All clients on the same file selection share one chronological timeline.
     Passing a directory that isn't a rosbag2 recording starts a small recording
     browser and accepts repeated ``file=`` query parameters at ``/ws``.
 

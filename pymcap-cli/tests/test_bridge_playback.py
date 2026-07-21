@@ -39,6 +39,7 @@ from robo_ws_bridge import ConnectionGraph, WebSocketBridgeEndpoint, WebSocketBr
 from robo_ws_bridge.ws_types import BinaryOpCodes
 from small_mcap import McapWriter, Schema
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -334,6 +335,29 @@ def test_run_playback_can_start_from_seek_time(tmp_path: Path) -> None:
     assert sink.messages == [
         ("/seek", 2, b"b"),
         ("/seek", 3, b"c"),
+    ]
+
+
+def test_publish_playback_snapshot_sends_latest_active_message_per_topic(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    _write_mcap(first, "/first", [(1, b"a"), (5, b"b"), (9, b"c")])
+    _write_mcap(second, "/second", [(2, b"d"), (8, b"e")])
+    prepared = prepare_playback([str(first), str(second)], MessageFilterOptions.from_args())
+    sink = _CollectingSink()
+
+    async def publish() -> int:
+        await sink.start(prepared.channels)
+        return await _playback.publish_playback_snapshot(prepared, sink, timestamp_ns=6)
+
+    published = asyncio.run(publish())
+
+    assert published == 2
+    assert sink.messages == [
+        ("/second", 2, b"d"),
+        ("/first", 5, b"b"),
     ]
 
 
@@ -1523,7 +1547,6 @@ def test_bridge_client_sink_publishes_jit_transformed_payload(
 
 def test_bridge_server_sink_sends_recorded_timestamp_and_time(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     path = tmp_path / "input.mcap"
     _write_mcap(path, "/raw", [(123, b"payload")])
@@ -1571,84 +1594,58 @@ def test_bridge_server_sink_sends_recorded_timestamp_and_time(
             await task
             return message_timestamp, payload, times
 
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
     timestamp, payload, times = asyncio.run(run())
     assert timestamp == 123
     assert payload == b"payload"
     assert 123 in times
 
 
-def test_bridge_server_sink_stops_clock_without_subscriptions(
+def test_bridge_server_sink_advances_clock_without_subscriptions(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     path = tmp_path / "input.mcap"
-    _write_mcap(path, "/raw", [(1, b"first"), (1_000_000_001, b"second")])
+    _write_mcap(path, "/raw", [(1, b"first"), (200_000_001, b"second")])
     prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
     port = _free_port()
 
-    async def run() -> None:
+    async def run() -> tuple[float, list[int]]:
         sink = BridgeServerPlaybackSink("127.0.0.1", port)
-        became_inactive = asyncio.Event()
-
-        def activity_changed(is_active: bool) -> None:
-            if not is_active:
-                became_inactive.set()
-
-        sink.on_activity_change(activity_changed)
-        task = asyncio.create_task(
-            run_playback(
-                prepared,
-                sink,
-                speed=1,
-                loop=True,
-                show_status=False,
-            )
-        )
-        await sink.started.wait()
-        try:
-            async with connect(
-                f"ws://127.0.0.1:{port}",
-                subprotocols=["foxglove.websocket.v1"],
-            ) as websocket:
-                await websocket.recv()
-                advertise = json.loads(await websocket.recv())
-                channel_id = advertise["channels"][0]["id"]
-                await websocket.send(
-                    json.dumps(
-                        {
-                            "op": "subscribe",
-                            "subscriptions": [{"id": 7, "channelId": channel_id}],
-                        }
-                    )
+        await sink.start(prepared.channels)
+        async with connect(
+            f"ws://127.0.0.1:{port}",
+            subprotocols=["foxglove.websocket.v1"],
+        ) as websocket:
+            await websocket.recv()
+            await websocket.recv()
+            started = asyncio.get_running_loop().time()
+            task = asyncio.create_task(
+                run_playback(
+                    prepared,
+                    sink,
+                    speed=1,
+                    loop=False,
+                    show_status=False,
                 )
-                while True:
-                    frame = await websocket.recv()
-                    if isinstance(frame, bytes) and frame[0] == int(BinaryOpCodes.MESSAGE_DATA):
-                        break
+            )
+            times: list[int] = []
+            while not task.done():
+                try:
+                    frame = await asyncio.wait_for(websocket.recv(), timeout=1)
+                except ConnectionClosed:
+                    break
+                if isinstance(frame, bytes) and frame[0] == int(BinaryOpCodes.TIME):
+                    times.append(struct.unpack_from("<Q", frame, 1)[0])
+            await task
+            return asyncio.get_running_loop().time() - started, times
 
-                await websocket.send(json.dumps({"op": "unsubscribe", "subscriptionIds": [7]}))
-                await asyncio.wait_for(became_inactive.wait(), timeout=1)
-
-                while True:
-                    try:
-                        await asyncio.wait_for(websocket.recv(), timeout=0.01)
-                    except asyncio.TimeoutError:
-                        break
-                with pytest.raises(asyncio.TimeoutError):
-                    await asyncio.wait_for(websocket.recv(), timeout=0.08)
-        finally:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
-    asyncio.run(run())
+    elapsed, times = asyncio.run(run())
+    assert elapsed >= 0.15
+    assert len(times) >= 2
+    assert max(times) > min(times)
 
 
 def test_bridge_server_sink_advertises_and_sends_jit_transform(
     image_small_mcap: Path,
-    monkeypatch,
 ) -> None:
     prepared = prepare_playback([str(image_small_mcap)], MessageFilterOptions.from_args())
     plan = create_playback_transform_plan(
@@ -1693,7 +1690,6 @@ def test_bridge_server_sink_advertises_and_sends_jit_transform(
             await task
             return advertise, payload
 
-    monkeypatch.setattr("pymcap_cli.cmd.bridge.serve._SETTLE_SECONDS", 0.0)
     advertise, payload = asyncio.run(run())
     channel_info = advertise["channels"][0]
     assert channel_info["schemaName"] == "sensor_msgs/msg/CompressedImage"
