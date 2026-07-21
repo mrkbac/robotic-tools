@@ -1313,6 +1313,30 @@ def test_playback_clock_uses_absolute_speed_scaled_deadlines() -> None:
     assert clock.deadline(3_000_000_000) == 12.75
 
 
+def test_playback_controller_pause_freezes_attached_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(_playback.time, "monotonic", lambda: now[0])
+    clock = PlaybackClock(
+        record_origin_ns=0,
+        wall_origin=0,
+        speed=1,
+        recording_end_ns=10_000_000_000,
+    )
+    controller = PlaybackController(speed=1)
+    controller.attach_clock(clock)
+
+    now[0] = 1.0
+    controller.pause()
+    now[0] = 5.0
+    assert clock.current_time_ns() == 1_000_000_000
+
+    controller.play()
+    now[0] = 6.0
+    assert clock.current_time_ns() == 2_000_000_000
+
+
 def test_bridge_client_sink_publishes_to_existing_server(
     tmp_path: Path,
     monkeypatch,

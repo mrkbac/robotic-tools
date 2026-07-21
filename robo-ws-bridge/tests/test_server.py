@@ -187,6 +187,95 @@ def test_playback_control_state_is_broadcast_to_all_clients() -> None:
     assert first_response[0] == int(BinaryOpCodes.PLAYBACK_STATE)
 
 
+def test_playback_state_is_sent_to_clients_connecting_after_broadcast() -> None:
+    port = _free_port()
+    playback_state = PlaybackState(
+        status=PlaybackStatus.PLAYING,
+        current_time=125,
+        playback_speed=2.0,
+        did_seek=False,
+        request_id="old-request",
+    )
+
+    async def run() -> bytes:
+        server = WebSocketBridgeServer(
+            host="127.0.0.1",
+            port=port,
+            playback_time_range=(100, 200),
+        )
+        server.register_channel(Channel(1, "/data", "raw", "example/Raw", "bytes data"))
+        server.broadcast_playback_state(playback_state)
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{port}", subprotocols=["foxglove.sdk.v1"]
+            ) as websocket:
+                await websocket.recv()
+                advertisement = json.loads(await websocket.recv())
+                assert advertisement["op"] == "advertise"
+                response = await asyncio.wait_for(websocket.recv(), timeout=0.1)
+                assert isinstance(response, bytes)
+                return response
+        finally:
+            await server.stop()
+
+    assert asyncio.run(run()) == struct.pack(
+        "<BBQfBI",
+        int(BinaryOpCodes.PLAYBACK_STATE),
+        int(PlaybackStatus.PLAYING),
+        125,
+        2.0,
+        0,
+        0,
+    )
+
+
+def test_playback_control_handler_rejection_keeps_connection_open() -> None:
+    port = _free_port()
+
+    async def run() -> dict[str, str | int]:
+        server = WebSocketBridgeServer(
+            host="127.0.0.1",
+            port=port,
+            playback_time_range=(100, 200),
+        )
+
+        def reject(_request: PlaybackControlRequest) -> PlaybackState:
+            raise ValueError("unsupported playback speed")
+
+        server.on_playback_control(reject)
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{port}", subprotocols=["foxglove.sdk.v1"]
+            ) as websocket:
+                await websocket.recv()
+                request_id = b"invalid"
+                await websocket.send(
+                    struct.pack(
+                        "<BBfBQI",
+                        int(BinaryOpCodes.PLAYBACK_CONTROL_REQUEST),
+                        int(PlaybackCommand.PLAY),
+                        0,
+                        0,
+                        0,
+                        len(request_id),
+                    )
+                    + request_id
+                )
+                response: dict[str, str | int] = json.loads(await websocket.recv())
+                await websocket.ping()
+                return response
+        finally:
+            await server.stop()
+
+    assert asyncio.run(run()) == {
+        "op": "status",
+        "level": 2,
+        "message": "unsupported playback speed",
+    }
+
+
 @pytest.mark.parametrize("time_range", [(-1, 10), (11, 10)])
 def test_playback_control_rejects_invalid_time_range(time_range: tuple[int, int]) -> None:
     with pytest.raises(ValueError, match="playback_time_range"):
@@ -371,6 +460,17 @@ def test_outbox_reliable_frames_keep_order_and_hard_cap_drops() -> None:
         return [(await outbox.next_frame()).payload for _ in range(count)]
 
     assert asyncio.run(drain(2)) == [b"first", b"second"]
+
+
+def test_outbox_time_frame_does_not_starve_reliable_control() -> None:
+    outbox = ConnectionOutbox()
+    outbox.offer(-2, b"playback-state", delivery="reliable")
+    outbox.offer(-1, b"time", delivery="latest")
+
+    async def receive_first() -> bytes:
+        return (await outbox.next_frame()).payload
+
+    assert asyncio.run(receive_first()) == b"playback-state"
 
 
 def test_outbox_congestion_flag_follows_pending_bytes() -> None:

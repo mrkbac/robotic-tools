@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pymcap_cli.cmd.bridge.serve as serve_module
 from pymcap_cli.cmd.bridge._playback import PlaybackChannel, PlaybackStats
-from robo_ws_bridge import WebSocketBridgeEndpoint
+from robo_ws_bridge import PlaybackState, PlaybackStatus, WebSocketBridgeEndpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +29,11 @@ class _Prepared:
 class _Endpoint(WebSocketBridgeEndpoint):
     def __init__(self) -> None:
         super().__init__(capabilities=["time"], playback_time_range=(1, 2))
+        self.playback_states: list[PlaybackState] = []
+
+    def broadcast_playback_state(self, playback_state: PlaybackState) -> None:
+        self.playback_states.append(playback_state)
+        super().broadcast_playback_state(playback_state)
 
     async def start(self) -> None:
         pass
@@ -44,14 +49,20 @@ class _Sink:
     async def start(self, _channels: tuple[PlaybackChannel, ...]) -> None:
         self.is_started = True
 
+    @property
+    def current_time_ns(self) -> int | None:
+        return None
 
-def _patch_direct_transport(monkeypatch, sink: _Sink) -> None:
-    monkeypatch.setattr(serve_module, "WebSocketBridgeServer", lambda **_kwargs: _Endpoint())
+
+def _patch_direct_transport(monkeypatch, sink: _Sink) -> _Endpoint:
+    endpoint = _Endpoint()
+    monkeypatch.setattr(serve_module, "WebSocketBridgeServer", lambda **_kwargs: endpoint)
     monkeypatch.setattr(
         serve_module,
         "BridgeServerPlaybackSink",
         lambda *_args, **_kwargs: sink,
     )
+    return endpoint
 
 
 def test_foxglove_url_targets_direct_desktop_app() -> None:
@@ -174,9 +185,11 @@ def test_serve_direct_file_launches_foxglove_unless_disabled(
 ) -> None:
     sink = _Sink()
     launched: list[str] = []
+    endpoint: _Endpoint
 
     async def run_playback(*_args, **_kwargs) -> PlaybackStats:
         assert sink.is_started
+        assert endpoint.playback_states[0].status is PlaybackStatus.PLAYING
         return PlaybackStats(state="Finished")
 
     monkeypatch.setattr(serve_module, "resolve_playback_transform_config", lambda **_kw: None)
@@ -186,7 +199,7 @@ def test_serve_direct_file_launches_foxglove_unless_disabled(
         "create_playback_transform_plan",
         lambda *_args: None,
     )
-    _patch_direct_transport(monkeypatch, sink)
+    endpoint = _patch_direct_transport(monkeypatch, sink)
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", launched.append)
 
@@ -200,6 +213,7 @@ def test_serve_direct_file_launches_foxglove_unless_disabled(
         == 0
     )
     assert launched == ["foxglove://open?ds=foxglove-websocket&ds.url=ws%3A%2F%2F127.0.0.1%3A9090"]
+    assert endpoint.playback_states[0].status is PlaybackStatus.PLAYING
 
     launched.clear()
     sink.is_started = False

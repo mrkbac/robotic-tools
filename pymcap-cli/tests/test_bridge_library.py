@@ -12,6 +12,7 @@ from contextlib import closing, suppress
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
+import pymcap_cli.cmd.bridge._playback as _playback
 import pytest
 from pymcap_cli.cmd.bridge._library import (
     _APP_JS,
@@ -21,9 +22,10 @@ from pymcap_cli.cmd.bridge._library import (
     RecordingLibraryServer,
     RecordingSession,
 )
+from pymcap_cli.cmd.bridge._playback import PlaybackClock
 from pymcap_cli.cmd.bridge.serve import _library_root
 from pymcap_cli.core.message_filter import MessageFilterOptions
-from robo_ws_bridge import PlaybackCommand, PlaybackControlRequest, PlaybackStatus
+from robo_ws_bridge import PlaybackCommand, PlaybackControlRequest, PlaybackState, PlaybackStatus
 from robo_ws_bridge.ws_types import BinaryOpCodes, ServerInfoMessage
 from small_mcap import McapWriter
 from websockets.asyncio.client import ClientConnection, connect
@@ -110,6 +112,7 @@ def test_library_websocket_accepts_foxglove_playback_control(
         ServerInfoMessage,
         tuple[PlaybackStatus, int, float, bool, str],
         tuple[PlaybackStatus, int, float, bool, str],
+        tuple[PlaybackStatus, int, float, bool, str],
     ]:
         await server.start()
         try:
@@ -120,11 +123,13 @@ def test_library_websocket_accepts_foxglove_playback_control(
             ) as websocket:
                 server_info: ServerInfoMessage = json.loads(await websocket.recv())
                 await websocket.recv()  # channel advertisement
+                initial_frame = await websocket.recv()
+                assert isinstance(initial_frame, bytes)
 
                 await websocket.send(
                     _playback_request(
                         PlaybackCommand.PAUSE,
-                        speed=0.5,
+                        speed=0,
                         seek_time=None,
                         request_id="pause-1",
                     )
@@ -145,17 +150,19 @@ def test_library_websocket_accepts_foxglove_playback_control(
                 assert isinstance(playing_frame, bytes)
                 return (
                     server_info,
+                    _playback_state(initial_frame),
                     _playback_state(paused_frame),
                     _playback_state(playing_frame),
                 )
         finally:
             await server.stop()
 
-    server_info, paused, playing = asyncio.run(run())
+    server_info, initial, paused, playing = asyncio.run(run())
     assert server_info["capabilities"] == ["time", "playbackControl"]
     assert server_info["dataStartTime"] == {"sec": 1, "nsec": 1}
     assert server_info["dataEndTime"] == {"sec": 3, "nsec": 1}
-    assert paused == (PlaybackStatus.PAUSED, start_time, 0.5, False, "pause-1")
+    assert initial == (PlaybackStatus.PLAYING, start_time, 1.0, False, "")
+    assert paused == (PlaybackStatus.PAUSED, start_time, 1.0, False, "pause-1")
     assert playing == (
         PlaybackStatus.PLAYING,
         start_time + 1_000_000_000,
@@ -384,6 +391,7 @@ def test_library_server_lists_recordings_and_merges_query_files(
             async with connect(url, subprotocols=["foxglove.websocket.v1"]) as websocket:
                 await websocket.recv()
                 advertisement = json.loads(await websocket.recv())
+                await websocket.recv()  # initial playback state
                 topics_by_id = {
                     channel["id"]: channel["topic"] for channel in advertisement["channels"]
                 }
@@ -447,6 +455,7 @@ def test_library_server_streams_grouped_bag_splits(tmp_path: Path, monkeypatch) 
             ) as websocket:
                 await websocket.recv()
                 advertisement = json.loads(await websocket.recv())
+                await websocket.recv()  # initial playback state
                 await websocket.send(
                     json.dumps(
                         {
@@ -496,6 +505,7 @@ def test_library_server_removes_session_when_listener_disconnects(
             async with connect(url, subprotocols=["foxglove.websocket.v1"]) as websocket:
                 await websocket.recv()
                 advertisement = json.loads(await websocket.recv())
+                await websocket.recv()  # initial playback state
                 channel_id = advertisement["channels"][0]["id"]
                 await websocket.send(
                     json.dumps(
@@ -642,3 +652,62 @@ def test_recording_session_seek_clears_pending_frames(
         return calls
 
     assert asyncio.run(run()) >= 1
+
+
+def test_recording_session_clamps_foxglove_seek_to_timeline_end(tmp_path: Path) -> None:
+    _write_mcap(tmp_path / "rec.mcap", "/x", 1, b"a")
+
+    async def run() -> PlaybackState:
+        session = await RecordingSession.create(
+            (tmp_path / "rec.mcap",),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1,
+            loop=False,
+        )
+        try:
+            return await session.handle_playback_control(
+                PlaybackControlRequest(
+                    playback_command=PlaybackCommand.PAUSE,
+                    playback_speed=0,
+                    seek_time=session.timeline_end_ns + 10_000_000_000,
+                    request_id="seek-past-end",
+                )
+            )
+        finally:
+            await session.close()
+
+    state = asyncio.run(run())
+    assert state.status is PlaybackStatus.PAUSED
+    assert state.current_time == 1
+    assert state.did_seek is True
+
+
+def test_recording_session_playback_state_uses_active_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_mcap(tmp_path / "rec.mcap", "/x", 10_000_000_000, b"a")
+    monkeypatch.setattr(_playback.time, "monotonic", lambda: 10.0)
+
+    async def run() -> PlaybackState:
+        session = await RecordingSession.create(
+            (tmp_path / "rec.mcap",),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1,
+            loop=False,
+        )
+        session.stats.playhead_ns = 1_000_000_000
+        session.sink._clock = PlaybackClock(
+            record_origin_ns=2_000_000_000,
+            wall_origin=9.0,
+            speed=1,
+            recording_end_ns=10_000_000_000,
+        )
+        try:
+            return session._foxglove_playback_state(did_seek=False)
+        finally:
+            await session.close()
+
+    assert asyncio.run(run()).current_time == 3_000_000_000

@@ -336,6 +336,11 @@ class BridgeServerPlaybackSink:
         if self._has_subscription.is_set():
             await server.publish_time(timestamp_ns)
 
+    @property
+    def current_time_ns(self) -> int | None:
+        """Current playback clock time, or ``None`` outside an active timeline."""
+        return None if self._clock is None else self._clock.current_time_ns()
+
     async def close(self) -> None:
         self._clock_done.set()
         self._timeline_active.set()
@@ -586,6 +591,7 @@ def serve(
             if not no_browser:
                 _launch_url(foxglove_urls[0])
             session.play()
+            session.broadcast_playback_state()
             try:
                 return await session.wait()
             finally:

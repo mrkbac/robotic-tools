@@ -239,10 +239,6 @@ class ConnectionOutbox:
     def _pop(self) -> OutboxFrame | None:
         if not self._reliable and not self._latest:
             return None
-        time_frame = self._latest.pop(_TIME_OUTBOX_KEY, None)
-        if time_frame is not None:
-            self.pending_bytes -= len(time_frame.payload)
-            return time_frame
         take_latest = self._latest and (self._take_latest_next or not self._reliable)
         self._take_latest_next = not self._take_latest_next
         if take_latest:
@@ -315,6 +311,7 @@ class WebSocketBridgeEndpoint:
         self._on_subscribe: list[SubscriptionHandler] = []
         self._on_unsubscribe: list[SubscriptionHandler] = []
         self._playback_control_handler: PlaybackControlHandler | None = None
+        self._playback_state: PlaybackState | None = None
 
         self._state_lock = asyncio.Lock()
         self._disconnected_dropped_frames = 0
@@ -492,20 +489,28 @@ class WebSocketBridgeEndpoint:
 
     def broadcast_playback_state(self, playback_state: PlaybackState) -> None:
         """Queue a playback-state update for every connected client."""
-        frame = self._encode_playback_state(playback_state)
+        self._playback_state = replace(playback_state, request_id=None)
         for state in list(self._connections.values()):
-            result = state.outbox.offer(
-                _PLAYBACK_STATE_OUTBOX_KEY,
-                frame,
-                delivery="reliable",
-            )
-            if result == "overflow" and state.close_task is None:
-                state.close_task = asyncio.create_task(
-                    state.websocket.close(
-                        code=1013,
-                        reason="Playback control queue overflow",
-                    )
+            self._queue_playback_state(state, playback_state)
+
+    def _queue_playback_state(
+        self,
+        state: ConnectionState,
+        playback_state: PlaybackState,
+    ) -> None:
+        frame = self._encode_playback_state(playback_state)
+        result = state.outbox.offer(
+            _PLAYBACK_STATE_OUTBOX_KEY,
+            frame,
+            delivery="reliable",
+        )
+        if result == "overflow" and state.close_task is None:
+            state.close_task = asyncio.create_task(
+                state.websocket.close(
+                    code=1013,
+                    reason="Playback control queue overflow",
                 )
+            )
 
     def clear_pending_frames(self) -> None:
         """Drop every connection's queued frames, e.g. before a hard seek.
@@ -640,6 +645,8 @@ class WebSocketBridgeEndpoint:
         try:
             await self._send_server_info(state)
             await self.advertise_all()
+            if self._playback_state is not None:
+                self._queue_playback_state(state, self._playback_state)
             for handler in self._on_connect:
                 await _ensure_awaitable(handler(state))
             async for raw in websocket:
@@ -739,11 +746,15 @@ class WebSocketBridgeEndpoint:
             await state.websocket.close(code=1002, reason="Invalid playback control request")
             return
 
-        result = self._playback_control_handler(request)
-        if isinstance(result, PlaybackState):
-            playback_state = result
-        else:
-            playback_state = await result
+        try:
+            result = self._playback_control_handler(request)
+            if isinstance(result, PlaybackState):
+                playback_state = result
+            else:
+                playback_state = await result
+        except ValueError as error:
+            await self._send_error(state, str(error))
+            return
         self.broadcast_playback_state(replace(playback_state, request_id=request.request_id))
 
     @staticmethod

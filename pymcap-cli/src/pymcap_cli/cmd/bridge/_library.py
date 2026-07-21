@@ -419,6 +419,7 @@ class RecordingSession:
             loop=loop,
         )
         session.play()
+        session.broadcast_playback_state()
         return session
 
     def play(self) -> None:
@@ -434,6 +435,10 @@ class RecordingSession:
         if self._task is not None and not self._task.done():
             self.controller.pause()
 
+    def broadcast_playback_state(self) -> None:
+        """Notify Foxglove after a playback state change outside a client request."""
+        self.endpoint.broadcast_playback_state(self._foxglove_playback_state(did_seek=False))
+
     def set_speed(self, speed: float) -> None:
         if not math.isfinite(speed) or speed <= 0:
             raise ValueError("speed must be finite and positive")
@@ -446,8 +451,11 @@ class RecordingSession:
     ) -> FoxglovePlaybackState:
         """Apply one Foxglove playback request to this session."""
         async with self._control_lock:
-            self.set_speed(request.playback_speed)
             should_play = request.playback_command is PlaybackCommand.PLAY
+            if request.playback_speed > 0:
+                self.set_speed(request.playback_speed)
+            elif should_play or request.playback_speed != 0:
+                raise ValueError("playback speed must be finite and positive while playing")
             if request.seek_time is not None:
                 await self._seek_to_timestamp(request.seek_time, should_play=should_play)
             elif should_play:
@@ -457,8 +465,10 @@ class RecordingSession:
             return self._foxglove_playback_state(did_seek=request.seek_time is not None)
 
     def _foxglove_playback_state(self, *, did_seek: bool) -> FoxglovePlaybackState:
-        playhead_ns = self.stats.playhead_ns
-        current_time = self._start_time_ns if playhead_ns is None else playhead_ns
+        current_time = self.sink.current_time_ns
+        if current_time is None:
+            playhead_ns = self.stats.playhead_ns
+            current_time = self._start_time_ns if playhead_ns is None else playhead_ns
         if self.controller.state == "Paused":
             status = PlaybackStatus.PAUSED
         elif self.stats.state == "Finished":
@@ -475,10 +485,8 @@ class RecordingSession:
         )
 
     async def _seek_to_timestamp(self, timestamp_ns: int, *, should_play: bool) -> None:
-        if not self.timeline_start_ns <= timestamp_ns <= self.timeline_end_ns:
-            raise ValueError(
-                f"seek time must be between {self.timeline_start_ns} and {self.timeline_end_ns}"
-            )
+        # Foxglove's step buttons can intentionally seek past either boundary.
+        timestamp_ns = min(max(timestamp_ns, self.timeline_start_ns), self.timeline_end_ns)
         self.controller.stop()
         await self._cancel_task()
         # Drop frames still queued for slow clients so the post-seek stream is
@@ -545,7 +553,7 @@ class RecordingSession:
             self.error = str(exc)
             self.stats.state = "Error"
         else:
-            self.endpoint.broadcast_playback_state(self._foxglove_playback_state(did_seek=False))
+            self.broadcast_playback_state()
 
 
 class RecordingSessionManager:

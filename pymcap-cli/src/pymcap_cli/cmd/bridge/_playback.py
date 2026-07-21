@@ -119,12 +119,15 @@ class PlaybackClock:
     wall_origin: float
     speed: float
     recording_end_ns: int
+    _paused_time_ns: int | None = None
 
     def deadline(self, timestamp_ns: int) -> float:
         elapsed = (timestamp_ns - self.record_origin_ns) / 1_000_000_000 / self.speed
         return self.wall_origin + elapsed
 
     def current_time_ns(self, now: float | None = None) -> int:
+        if self._paused_time_ns is not None:
+            return self._paused_time_ns
         wall_now = time.monotonic() if now is None else now
         elapsed_ns = int((wall_now - self.wall_origin) * self.speed * 1_000_000_000)
         return min(self.record_origin_ns + max(0, elapsed_ns), self.recording_end_ns)
@@ -139,6 +142,19 @@ class PlaybackClock:
         self.record_origin_ns = self.current_time_ns(wall_now)
         self.wall_origin = wall_now
         self.speed = speed
+
+    def pause(self, now: float | None = None) -> None:
+        if self._paused_time_ns is not None:
+            return
+        wall_now = time.monotonic() if now is None else now
+        self._paused_time_ns = self.current_time_ns(wall_now)
+
+    def resume(self, now: float | None = None) -> None:
+        if self._paused_time_ns is None:
+            return
+        self.record_origin_ns = self._paused_time_ns
+        self.wall_origin = time.monotonic() if now is None else now
+        self._paused_time_ns = None
 
 
 class _PlaybackStoppedError(Exception):
@@ -161,6 +177,7 @@ class PlaybackController:
         self._speed = speed
         self._pause_started = time.monotonic() if start_paused else None
         self._pending_clock_delay = 0.0
+        self._clock: PlaybackClock | None = None
         if not start_paused:
             self._can_play.set()
 
@@ -183,19 +200,32 @@ class PlaybackController:
         if not math.isfinite(speed) or speed <= 0:
             raise ValueError("speed must be finite and positive")
         self._speed = speed
+        if self._clock is not None:
+            self._clock.set_speed(speed)
+
+    def attach_clock(self, clock: PlaybackClock) -> None:
+        self._clock = clock
+        self._pending_clock_delay = 0.0
+        if self._state == "Paused":
+            clock.pause()
 
     def pause(self) -> None:
         if self._state != "Playing":
             return
         self._state = "Paused"
         self._pause_started = time.monotonic()
+        if self._clock is not None:
+            self._clock.pause()
         self._can_play.clear()
 
     def play(self) -> None:
         if self._state != "Paused":
             return
         assert self._pause_started is not None
-        self._pending_clock_delay += time.monotonic() - self._pause_started
+        if self._clock is None:
+            self._pending_clock_delay += time.monotonic() - self._pause_started
+        else:
+            self._clock.resume()
         self._pause_started = None
         self._state = "Playing"
         self._can_play.set()
@@ -596,6 +626,8 @@ async def run_playback(
                             speed=playback_speed,
                             recording_end_ns=prepared.recording_end_ns,
                         )
+                        if controller is not None:
+                            controller.attach_clock(clock)
                         await sink.timeline_started(clock)
                     assert clock is not None
                     last_input_time_ns = message.log_time
