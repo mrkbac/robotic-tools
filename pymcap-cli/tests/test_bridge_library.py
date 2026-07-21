@@ -1,4 +1,4 @@
-"""Recording-library tests for ``pymcap-cli bridge serve DIRECTORY``."""
+"""Recording-library tests for ``pymcap-cli bridge serve``."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from pymcap_cli.cmd.bridge._library import (
     _APP_JS,
     _INDEX_HTML,
     _STYLE_CSS,
+    RecordingEntry,
     RecordingLibrary,
     RecordingLibraryServer,
     RecordingSession,
@@ -248,6 +249,22 @@ def test_recording_library_discovers_nested_mcap_files(tmp_path: Path) -> None:
         "nested/second.mcap",
     ]
     assert all(recording.size_bytes > 0 for recording in recordings)
+
+
+def test_recording_library_from_paths_exposes_only_selected_files(tmp_path: Path) -> None:
+    selected = tmp_path / "selected.mcap"
+    sibling = tmp_path / "sibling.mcap"
+    _write_mcap(selected, "/selected", 1, b"selected")
+    _write_mcap(sibling, "/sibling", 2, b"sibling")
+
+    library = RecordingLibrary.from_paths((selected,))
+
+    assert library.recordings() == (
+        RecordingEntry(path="selected.mcap", size_bytes=selected.stat().st_size),
+    )
+    assert library.resolve(["selected.mcap"]) == (selected,)
+    with pytest.raises(ValueError, match="not available"):
+        library.resolve(["sibling.mcap"])
 
 
 def test_recording_library_groups_rosbag_splits_as_one_entry(tmp_path: Path) -> None:

@@ -9,7 +9,6 @@ import webbrowser
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlencode
 
 from cyclopts import Parameter
 from robo_ws_bridge import (
@@ -30,7 +29,6 @@ from pymcap_cli.cmd._cli_options import (
     OptionalCodecOption,
     OptionalPointCloudDropInvalidOption,
     OptionalPointCloudSortFieldOption,
-    ProgressOption,
     ServerPortOption,
     StartTimeOption,
     TopicOption,
@@ -40,10 +38,7 @@ from pymcap_cli.cmd.bridge._playback import (
     PlaybackChannel,
     PlaybackClock,
     PlaybackError,
-    PlaybackStats,
     is_frame_channel,
-    prepare_playback,
-    run_playback,
 )
 from pymcap_cli.cmd.bridge._playback_transforms import (
     OptionalAdaptiveQualityOption,
@@ -63,7 +58,6 @@ from pymcap_cli.cmd.bridge._playback_transforms import (
     OptionalVideoFormatOption,
     OptionalVideoOption,
     apply_preset,
-    create_playback_transform_plan,
     resolve_playback_transform_config,
 )
 from pymcap_cli.cmd.bridge._shared import console
@@ -168,17 +162,6 @@ def _display_hosts(host: str) -> list[str]:
     return ["localhost", *_lan_ip_addresses()]
 
 
-def _foxglove_url(host: str, port: int) -> str:
-    websocket_url = f"ws://{_url_host(host)}:{port}"
-    query = urlencode(
-        {
-            "ds": "foxglove-websocket",
-            "ds.url": websocket_url,
-        }
-    )
-    return f"foxglove://open?{query}"
-
-
 def _is_graphical_session() -> bool:
     if sys.platform in {"darwin", "win32", "cygwin"}:
         return True
@@ -187,8 +170,7 @@ def _is_graphical_session() -> bool:
 
 def _launch_url(url: str) -> None:
     if not _is_graphical_session():
-        # webbrowser would fall back to a terminal browser (w3m, lynx, ...),
-        # which hijacks the terminal and cannot open foxglove:// links.
+        # webbrowser would fall back to a terminal browser and hijack the server terminal.
         console.print(f"[dim]No graphical session; open[/] {url} [dim]from your desktop.[/]")
         return
     threading.Thread(
@@ -397,15 +379,13 @@ def serve(
     start: StartTimeOption = "",
     end: EndTimeOption = "",
     early_bail: EarlyBailOption = False,
-    progress: ProgressOption = True,
     no_browser: NoBrowserOption = False,
 ) -> int:
     """Host MCAP files or a recording directory for Foxglove clients.
 
-    Playback starts immediately and its clock advances independently of topic
-    subscriptions. All clients on the same file selection share one chronological timeline.
-    Passing a directory that isn't a rosbag2 recording starts a small recording
-    browser and accepts repeated ``file=`` query parameters at ``/ws``.
+    Every input opens through the same recording browser. Each Foxglove connection
+    gets an independent playback timeline and accepts repeated ``file=`` query
+    parameters at ``/ws``.
 
     Examples
     --------
@@ -463,102 +443,47 @@ def serve(
             end=end,
             early_bail=early_bail,
         )
+        from pymcap_cli.cmd.bridge._library import (  # noqa: PLC0415
+            RecordingLibrary,
+            RecordingLibraryServer,
+        )
+
         library_root = _library_root(files)
-        if library_root is not None:
-            from pymcap_cli.cmd.bridge._library import (  # noqa: PLC0415
-                RecordingLibrary,
-                RecordingLibraryServer,
-            )
-
-            library_server = RecordingLibraryServer(
-                RecordingLibrary(library_root),
-                host=_bind_host(resolved_host),
-                port=port,
-                message_filter=message_filter,
-                transform_config=transform_config,
-                speed=speed,
-                loop=loop,
-            )
-
-            async def run_library() -> None:
-                await library_server.start()
-                hosts = _display_hosts(resolved_host)
-                urls = [f"http://{h}:{library_server.port}/" for h in hosts]
-                console.print("[green]Serving recording library at[/]")
-                for url in urls:
-                    console.print(f"  [bold]{url}[/]")
-                if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
-                    console.print(
-                        "[yellow]Warning:[/] Foxglove playback sessions have no authentication; "
-                        "protect remote access with a trusted network or reverse proxy."
-                    )
-                if not no_browser:
-                    _launch_url(urls[0])
-                try:
-                    await library_server.serve_forever()
-                finally:
-                    await library_server.stop()
-
-            asyncio.run(run_library())
-            return 0
-        prepared = prepare_playback(files, message_filter)
-        transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
-        output_channels = prepared.channels if transform_plan is None else transform_plan.channels
-        timeline_start_ns = max(
-            prepared.recording_start_ns,
-            prepared.resolved_filter.start_time_ns,
+        library = (
+            RecordingLibrary(library_root)
+            if library_root is not None
+            else RecordingLibrary.from_paths(tuple(Path(file) for file in files))
         )
-        timeline_end_ns = min(
-            prepared.recording_end_ns,
-            prepared.resolved_filter.end_time_ns,
-        )
-        endpoint = WebSocketBridgeServer(
+        library_server = RecordingLibraryServer(
+            library,
             host=_bind_host(resolved_host),
             port=port,
-            name="pymcap-cli bridge serve",
-            capabilities=["time"],
-            supported_encodings=sorted({channel.message_encoding for channel in output_channels}),
-            metadata={"source": "pymcap-cli"},
-            playback_time_range=(timeline_start_ns, timeline_end_ns),
-        )
-        sink = BridgeServerPlaybackSink(
-            _bind_host(resolved_host),
-            port,
-            endpoint=endpoint,
-        )
-        from pymcap_cli.cmd.bridge._library import RecordingSession  # noqa: PLC0415
-
-        session = RecordingSession(
-            tuple(Path(file) for file in files),
-            prepared,
-            transform_plan,
-            endpoint,
-            sink,
+            message_filter=message_filter,
+            transform_config=transform_config,
             speed=speed,
             loop=loop,
-            show_status=progress and console.is_terminal,
-            playback_runner=run_playback,
         )
 
-        async def run_direct() -> PlaybackStats:
+        async def run_library() -> None:
+            await library_server.start()
+            hosts = _display_hosts(resolved_host)
+            urls = [f"http://{h}:{library_server.port}/" for h in hosts]
+            console.print("[green]Serving recording library at[/]")
+            for url in urls:
+                console.print(f"  [bold]{url}[/]")
+            if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
+                console.print(
+                    "[yellow]Warning:[/] Foxglove playback sessions have no authentication; "
+                    "protect remote access with a trusted network or reverse proxy."
+                )
+            if not no_browser:
+                _launch_url(urls[0])
             try:
-                await sink.start(output_channels)
-                await endpoint.start()
-                foxglove_urls = [_foxglove_url(h, port) for h in _display_hosts(resolved_host)]
-                for foxglove_url in foxglove_urls:
-                    console.print(f"[dim]Open in Foxglove:[/] {foxglove_url}")
-                if not no_browser:
-                    _launch_url(foxglove_urls[0])
-                session.play()
-                session.broadcast_playback_state()
-                return await session.wait()
+                await library_server.serve_forever()
             finally:
-                try:
-                    await session.close()
-                finally:
-                    await endpoint.stop()
+                await library_server.stop()
 
-        stats = asyncio.run(run_direct())
+        asyncio.run(run_library())
     except ImportError as exc:
         missing = exc.name or str(exc)
         ERR.print(
@@ -573,5 +498,4 @@ def serve(
     except KeyboardInterrupt:
         console.print("\n[dim]Server stopped.[/]")
         return 0
-    console.print(f"[green]Served[/] {stats.messages:,} messages.")
     return 0

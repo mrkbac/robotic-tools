@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from robo_ws_bridge import (
     PlaybackState as FoxglovePlaybackState,
 )
 from small_mcap import McapFile
+from typing_extensions import Self
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
@@ -273,6 +275,12 @@ class RecordingEntry:
     size_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectedRecordings:
+    paths: dict[str, Path]
+    entries: tuple[RecordingEntry, ...]
+
+
 class RecordingLibrary:
     """Discover and safely resolve MCAP files beneath one root directory."""
 
@@ -280,8 +288,42 @@ class RecordingLibrary:
         if not root.is_dir():
             raise ValueError(f"{root} is not a directory")
         self.root = root.resolve()
+        self._selected: _SelectedRecordings | None = None
+
+    @classmethod
+    def from_paths(cls, paths: tuple[Path, ...]) -> Self:
+        if not paths:
+            raise ValueError("At least one MCAP input is required")
+        resolved_paths = tuple(path.resolve() for path in paths)
+        root = Path(os.path.commonpath(path.parent for path in resolved_paths))
+        library = cls(root)
+        selected_paths: dict[str, Path] = {}
+        entries: list[RecordingEntry] = []
+        for path in resolved_paths:
+            splits = find_bag_splits(path) if path.is_dir() else []
+            is_mcap = path.is_file() and path.suffix.lower() == ".mcap"
+            if not is_mcap and not splits:
+                raise ValueError(f"MCAP file does not exist: {path}")
+            relative = path.relative_to(root).as_posix()
+            if relative in selected_paths:
+                raise ValueError(f"duplicate file selection: {path}")
+            selected_paths[relative] = path
+            entries.append(
+                RecordingEntry(
+                    path=relative,
+                    size_bytes=(
+                        sum(split.stat().st_size for split in splits)
+                        if splits
+                        else path.stat().st_size
+                    ),
+                )
+            )
+        library._selected = _SelectedRecordings(selected_paths, tuple(entries))
+        return library
 
     def recordings(self) -> tuple[RecordingEntry, ...]:
+        if self._selected is not None:
+            return self._selected.entries
         entries: dict[str, RecordingEntry] = {}
         candidates: list[Path] = []
         for candidate in self.root.rglob("*.mcap"):
@@ -323,6 +365,19 @@ class RecordingLibrary:
             raise ValueError("At least one file is required")
         if len(requested) > _MAX_FILES_PER_SESSION:
             raise ValueError(f"At most {_MAX_FILES_PER_SESSION} files may be opened together")
+
+        if self._selected is not None:
+            resolved_files: list[Path] = []
+            seen: set[Path] = set()
+            for raw_path in requested:
+                candidate = self._selected.paths.get(raw_path)
+                if candidate is None:
+                    raise ValueError(f"Recording is not available: {raw_path}")
+                if candidate in seen:
+                    raise ValueError(f"duplicate file selection: {raw_path}")
+                seen.add(candidate)
+                resolved_files.append(candidate)
+            return tuple(resolved_files)
 
         resolved_files: list[Path] = []
         seen: set[Path] = set()

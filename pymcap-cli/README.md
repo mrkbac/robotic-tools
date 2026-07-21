@@ -913,7 +913,7 @@ pymcap-cli bridge play first.mcap second.mcap --target localhost --speed 2
 # The bridge target can come from the environment
 PYMCAP_BRIDGE=localhost pymcap-cli bridge play recording.mcap -t '/camera/.*'
 
-# Host an MCAP directly for Foxglove clients
+# Host an MCAP through the minimal Foxglove launcher
 pymcap-cli bridge serve recording.mcap --port 8765
 
 # Browse a directory and open one or more recordings in Foxglove
@@ -934,15 +934,12 @@ pymcap-cli bridge play recording.mcap --target localhost \
 and releases per-channel codec state after the last subscriber leaves. For
 `bridge play`, `--only-subscribed` uses the target's `connectionGraph` capability to
 follow consumers dynamically and pauses playback while no selected topic has one.
-Direct-file serving launches Foxglove Desktop through `foxglove://open` after the
-WebSocket listener is ready; pass `--no-browser` for headless operation.
+`bridge serve` always serves the same minimal recording launcher. Passing explicit
+files shows only those files; passing a directory discovers recordings beneath it.
+Opening one file or a multi-file selection launches Foxglove Desktop through
+`foxglove://open`. Pass `--no-browser` for headless operation. Playback loops by
+default; pass `--no-loop` to play each connection once.
 
-When `bridge serve` receives a directory instead of a recording, it serves a
-minimal file browser on the same port. Opening one file or a multi-file
-selection launches Foxglove Desktop through `foxglove://open` and keeps a small
-browser controller open for play/pause, speed, seek, looping, and connection
-status. Playback loops by default; clear **Loop** in the controller or pass
-`--no-loop` when starting the server to play each selection once.
 Foxglove connects to `/ws` with one repeated `file` parameter per selected
 recording, for example:
 
@@ -950,14 +947,14 @@ recording, for example:
 ws://localhost:9090/ws?file=run-1.mcap&file=run-2.mcap
 ```
 
-Files are merged chronologically. Clients using the same ordered file selection
-share a playhead and controls; other selections run independently. Directory
-playback and its clock pause whenever no topics have subscribers. After the last
-subscriber leaves, an unused session is closed and removed after 30 seconds.
+Files selected within one connection are merged chronologically. Every Foxglove
+connection receives an independent playhead, controls, and MCAP cache. The playback
+clock advances even when no topics are subscribed, while message transforms and
+publishing remain subscriber-aware. Closing the Foxglove connection closes its session.
 The playback clock remains authoritative at high speeds: messages more than
 100 ms late are counted and dropped before further JIT transform work instead
 of building a backlog.
-Directory mode has no authentication, so expose it remotely only through a
+The server has no authentication, so expose it remotely only through a
 trusted network or an authenticated reverse proxy.
 
 ### Shell Autocompletion
