@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 from mcap.reader import make_reader
 from pybag.mcap_reader import McapFileReader
+from pytest_benchmark.fixture import BenchmarkFixture
 from rosbags.rosbag2 import Reader as RosbagsReader
 from rosbags.rosbag2 import ReaderError
-from small_mcap import include_topics, read_message
+from small_mcap import McapFile, include_topics, read_message
 
 # Test file path - nuScenes MCAP file with 30,900 messages, 19.15s duration, 560 zstd chunks
 TEST_MCAP_FILE = (
@@ -290,3 +291,50 @@ def test_benchmark_parallel_nonseekable(benchmark, config):
 
     result = benchmark(read_small_mcap, config)
     assert result > 0, "should read at least one message"
+
+
+SEEK_START_NS = 1_532_402_927_647_000_000
+SEEK_END_NS = SEEK_START_NS + 100_000_000
+
+
+def read_cold_seek(path: Path) -> int:
+    with McapFile.open(path) as recording:
+        return next(
+            message.log_time
+            for _schema, _channel, message in recording.read_message(
+                start_time_ns=SEEK_START_NS,
+                end_time_ns=SEEK_END_NS,
+                reverse=True,
+            )
+        )
+
+
+def read_warm_seek(recording: McapFile) -> int:
+    return next(
+        message.log_time
+        for _schema, _channel, message in recording.read_message(
+            start_time_ns=SEEK_START_NS,
+            end_time_ns=SEEK_END_NS,
+            reverse=True,
+        )
+    )
+
+
+@pytest.mark.benchmark
+def test_benchmark_mcap_file_cold_seek(benchmark: BenchmarkFixture) -> None:
+    benchmark.group = "mcap-file-seek"
+
+    timestamp_ns = benchmark(read_cold_seek, TEST_MCAP_FILE)
+
+    assert SEEK_START_NS <= timestamp_ns < SEEK_END_NS
+
+
+@pytest.mark.benchmark
+def test_benchmark_mcap_file_warm_seek(benchmark: BenchmarkFixture) -> None:
+    benchmark.group = "mcap-file-seek"
+
+    with McapFile.open(TEST_MCAP_FILE) as recording:
+        read_warm_seek(recording)
+        timestamp_ns = benchmark(read_warm_seek, recording)
+
+    assert SEEK_START_NS <= timestamp_ns < SEEK_END_NS

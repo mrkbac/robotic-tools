@@ -541,20 +541,22 @@ def serve(
         )
 
         async def run_direct() -> PlaybackStats:
-            await sink.start(output_channels)
-            await endpoint.start()
-            foxglove_urls = [_foxglove_url(h, port) for h in _display_hosts(resolved_host)]
-            for foxglove_url in foxglove_urls:
-                console.print(f"[dim]Open in Foxglove:[/] {foxglove_url}")
-            if not no_browser:
-                _launch_url(foxglove_urls[0])
-            session.play()
-            session.broadcast_playback_state()
             try:
+                await sink.start(output_channels)
+                await endpoint.start()
+                foxglove_urls = [_foxglove_url(h, port) for h in _display_hosts(resolved_host)]
+                for foxglove_url in foxglove_urls:
+                    console.print(f"[dim]Open in Foxglove:[/] {foxglove_url}")
+                if not no_browser:
+                    _launch_url(foxglove_urls[0])
+                session.play()
+                session.broadcast_playback_state()
                 return await session.wait()
             finally:
-                await session.close()
-                await endpoint.stop()
+                try:
+                    await session.close()
+                finally:
+                    await endpoint.stop()
 
         stats = asyncio.run(run_direct())
     except ImportError as exc:

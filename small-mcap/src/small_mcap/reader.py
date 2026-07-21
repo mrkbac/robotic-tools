@@ -125,6 +125,16 @@ _ReaderReturnType = Iterable[tuple[Schema | None, Channel, Message]]
 _ShouldIncludeType = Callable[[Channel, Schema | None], bool]
 
 
+@dataclass(frozen=True, slots=True)
+class _LoadedChunk:
+    chunk: Chunk | None
+    message_indexes: tuple[MessageIndex, ...]
+    decompressed_data: bytes | memoryview | None = None
+
+
+_ChunkLoader = Callable[[ChunkIndex, bool], _LoadedChunk]
+
+
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | memoryview:
     if not isinstance(chunk.compression, str):
         raise UnsupportedCompressionError(
@@ -145,24 +155,7 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | 
     return data
 
 
-def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapRecord]:
-    """Decompress a chunk and yield its individual records.
-
-    Chunks may only contain Schema, Channel, and Message records per the MCAP spec.
-
-    Args:
-        chunk: The chunk to decompress and iterate over.
-        validate_crc: Whether to validate the chunk's CRC32 checksum.
-
-    Yields:
-        Schema, Channel, and Message records from the chunk.
-
-    Raises:
-        IllegalOpcodeInChunkError: If a record with an illegal opcode is found in the chunk.
-        CRCValidationError: If validate_crc is True and the CRC doesn't match.
-        UnsupportedCompressionError: If the chunk uses an unsupported compression type.
-    """
-    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+def _breakup_chunk_data(data: bytes | memoryview) -> Iterable[McapRecord]:
     view = memoryview(data)
     pos = 0
 
@@ -183,10 +176,29 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapReco
         pos = record_data_end
 
 
-def _breakup_chunk_with_indexes(
-    chunk: Chunk,
+def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapRecord]:
+    """Decompress a chunk and yield its individual records.
+
+    Chunks may only contain Schema, Channel, and Message records per the MCAP spec.
+
+    Args:
+        chunk: The chunk to decompress and iterate over.
+        validate_crc: Whether to validate the chunk's CRC32 checksum.
+
+    Yields:
+        Schema, Channel, and Message records from the chunk.
+
+    Raises:
+        IllegalOpcodeInChunkError: If a record with an illegal opcode is found in the chunk.
+        CRCValidationError: If validate_crc is True and the CRC doesn't match.
+        UnsupportedCompressionError: If the chunk uses an unsupported compression type.
+    """
+    yield from _breakup_chunk_data(_get_chunk_data_stream(chunk, validate_crc=validate_crc))
+
+
+def _breakup_chunk_data_with_indexes(
+    data: bytes | memoryview,
     message_indexes: Iterable[MessageIndex],
-    validate_crc: bool = False,
     reverse: bool = False,
 ) -> Iterable[McapRecord]:
     # materialize for truthy emptiness check
@@ -194,7 +206,6 @@ def _breakup_chunk_with_indexes(
     if not message_indexes:
         return
 
-    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
     view = memoryview(data)
 
     offsets_iter: Iterable[int]
@@ -232,6 +243,16 @@ def _breakup_chunk_with_indexes(
             yield Message.read(view[pos:record_data_end])
         else:
             raise IllegalOpcodeInChunkError(opcode)
+
+
+def _breakup_chunk_with_indexes(
+    chunk: Chunk,
+    message_indexes: Iterable[MessageIndex],
+    validate_crc: bool = False,
+    reverse: bool = False,
+) -> Iterable[McapRecord]:
+    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+    yield from _breakup_chunk_data_with_indexes(data, message_indexes, reverse)
 
 
 def _read_chunk_and_indexes(data: bytes | memoryview) -> tuple[Chunk, list[MessageIndex]]:
@@ -624,6 +645,41 @@ def _yield_chunk_messages(
         yield from breakup_chunk(chunk, validate_crc=validate_crc)
 
 
+def _yield_loaded_chunk_messages(
+    loaded: _LoadedChunk,
+    exclude_channels: set[int],
+    start_time_ns: int,
+    end_time_ns: int,
+    validate_crc: bool,
+    reverse: bool,
+) -> Iterable[McapRecord]:
+    if loaded.decompressed_data is None:
+        assert loaded.chunk is not None
+        yield from _yield_chunk_messages(
+            loaded.chunk,
+            list(loaded.message_indexes),
+            exclude_channels,
+            start_time_ns,
+            end_time_ns,
+            validate_crc,
+            reverse,
+        )
+        return
+
+    if loaded.message_indexes:
+        filtered: Iterable[MessageIndex] = (
+            index for index in loaded.message_indexes if index.channel_id not in exclude_channels
+        )
+        filtered = _filter_message_indices_by_time(filtered, start_time_ns, end_time_ns)
+        yield from _breakup_chunk_data_with_indexes(
+            loaded.decompressed_data,
+            filtered,
+            reverse,
+        )
+    else:
+        yield from _breakup_chunk_data(loaded.decompressed_data)
+
+
 def _predecompress_chunk(chunk: Chunk, validate_crc: bool) -> Chunk:
     """Decompress a Chunk record, validate CRC, return a clean Chunk with uncompressed data."""
     decompressed = _decompress_data_threadsafe(chunk)
@@ -856,48 +912,30 @@ def _read_message_seeking_unchunked(
             seek(length, io.SEEK_CUR)
 
 
-def _read_message_seeking(
-    stream: IO[bytes],
+def _read_message_indexed(
+    summary: Summary,
     should_include: _ShouldIncludeType,
     start_time_ns: int,
     end_time_ns: int,
     validate_crc: bool,
     reverse: bool,
     num_workers: int,
+    load_chunk: _ChunkLoader,
+    *,
+    prefetch_stream: IO[bytes] | None = None,
 ) -> _ReaderReturnType:
-    summary = get_summary(stream)
-    # No summary or chunk indexes exists
-    if summary is None or not summary.chunk_indexes:
-        # seek to start
-        stream.seek(0, io.SEEK_SET)
-        # Unchunked, seekable, no CRC: skip filtered message bodies with seek()
-        # instead of reading the whole file. reverse/validate_crc need every byte,
-        # so they keep the general path.
-        if not reverse and not validate_crc:
-            yield from _read_message_seeking_unchunked(
-                stream, should_include, start_time_ns, end_time_ns
-            )
-            return
-        yield from _read_message_non_seeking(
-            stream, should_include, start_time_ns, end_time_ns, validate_crc, reverse, num_workers
-        )
-        return
     exclude_channels: set[int] = {
         channel.id
         for channel in summary.channels.values()
         if not should_include(channel, summary.schemas.get(channel.schema_id))
     }
 
-    def _lazy_yield(stream: IO[bytes], index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
+    def _lazy_yield(index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
         yield index
         if _chunk_fully_excluded(index, exclude_channels):
             return
-        stream.seek(index.chunk_start_offset)
-        raw = stream.read(index.chunk_length + index.message_index_length)
-        chunk, message_indexes = _read_chunk_and_indexes(raw)
-        yield from _yield_chunk_messages(
-            chunk,
-            message_indexes,
+        yield from _yield_loaded_chunk_messages(
+            load_chunk(index, validate_crc),
             exclude_channels,
             start_time_ns,
             end_time_ns,
@@ -947,10 +985,10 @@ def _read_message_seeking(
     # If chunks don't overlap, we can yield sequentially without heap merging
     # This is more efficient as it avoids the heap overhead
     reader: Iterable[McapRecord]
-    if chunks_non_overlapping and num_workers > 0:
+    if chunks_non_overlapping and num_workers > 0 and prefetch_stream is not None:
         # Parallel prefetch: main thread reads raw bytes, workers decompress
         reader = _prefetch_chunks(
-            _iter_seek_chunks(stream, sorted_chunks),
+            _iter_seek_chunks(prefetch_stream, sorted_chunks),
             validate_crc,
             num_workers,
             flush=lambda chunk, indexes: _yield_chunk_messages(
@@ -964,11 +1002,11 @@ def _read_message_seeking(
             ),
         )
     elif chunks_non_overlapping:
-        lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
+        lazy_iterables = (_lazy_yield(cidx) for cidx in sorted_chunks)
         # Chunks are ordered, no need for heap merge
         reader = itertools.chain.from_iterable(lazy_iterables)
     else:
-        lazy_iterables = (_lazy_yield(stream, cidx) for cidx in sorted_chunks)
+        lazy_iterables = (_lazy_yield(cidx) for cidx in sorted_chunks)
         # Chunks overlap, use heap merge to maintain time order
         reader = heapq.merge(*lazy_iterables, key=_lazy_sort, reverse=reverse)
 
@@ -980,6 +1018,52 @@ def _read_message_seeking(
         end_time_ns,
         summary.schemas,
         summary.channels,
+    )
+
+
+def _read_message_seeking(
+    stream: IO[bytes],
+    should_include: _ShouldIncludeType,
+    start_time_ns: int,
+    end_time_ns: int,
+    validate_crc: bool,
+    reverse: bool,
+    num_workers: int,
+) -> _ReaderReturnType:
+    summary = get_summary(stream)
+    # No summary or chunk indexes exists
+    if summary is None or not summary.chunk_indexes:
+        # seek to start
+        stream.seek(0, io.SEEK_SET)
+        # Unchunked, seekable, no CRC: skip filtered message bodies with seek()
+        # instead of reading the whole file. reverse/validate_crc need every byte,
+        # so they keep the general path.
+        if not reverse and not validate_crc:
+            yield from _read_message_seeking_unchunked(
+                stream, should_include, start_time_ns, end_time_ns
+            )
+            return
+        yield from _read_message_non_seeking(
+            stream, should_include, start_time_ns, end_time_ns, validate_crc, reverse, num_workers
+        )
+        return
+
+    def load_chunk(index: ChunkIndex, _validate_crc: bool) -> _LoadedChunk:
+        stream.seek(index.chunk_start_offset)
+        raw = stream.read(index.chunk_length + index.message_index_length)
+        chunk, message_indexes = _read_chunk_and_indexes(raw)
+        return _LoadedChunk(chunk, tuple(message_indexes))
+
+    yield from _read_message_indexed(
+        summary,
+        should_include,
+        start_time_ns,
+        end_time_ns,
+        validate_crc,
+        reverse,
+        num_workers,
+        load_chunk,
+        prefetch_stream=stream,
     )
 
 

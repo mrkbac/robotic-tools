@@ -13,7 +13,16 @@ from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
-from small_mcap import Channel, Message, Schema, Statistics, Summary, get_summary, read_message
+from small_mcap import (
+    Channel,
+    McapFile,
+    Message,
+    Schema,
+    Statistics,
+    Summary,
+    get_summary,
+    read_message,
+)
 
 from pymcap_cli.cmd.bridge._shared import console
 from pymcap_cli.core.input_handler import open_input
@@ -22,7 +31,7 @@ from pymcap_cli.rihs01 import compute_rihs01
 from pymcap_cli.utils import bytes_to_human
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from pymcap_cli.core.message_filter import (
         MessageFilterOptions,
@@ -457,25 +466,50 @@ def open_playback_messages(
     prepared: PreparedPlayback,
     *,
     start_time_ns: int | None = None,
+    end_time_ns: int | None = None,
+    reverse: bool = False,
+    should_include: Callable[[Channel, Schema | None], bool] | None = None,
+    recordings: tuple[McapFile, ...] | None = None,
 ) -> Iterator[Iterator[tuple[Schema | None, Channel, Message]]]:
+    if recordings is not None and len(recordings) != len(prepared.files):
+        raise PlaybackError("Opened recording count does not match prepared inputs")
     with ExitStack() as stack:
-        streams = [stack.enter_context(open_input(path))[0] for path in prepared.files]
         resolved = prepared.resolved_filter
-        end_time_ns = 2**63 - 1 if resolved.early_bail else resolved.end_time_ns
+        resolved_end_time_ns = 2**63 - 1 if resolved.early_bail else resolved.end_time_ns
+        effective_end_ns = (
+            resolved_end_time_ns if end_time_ns is None else min(resolved_end_time_ns, end_time_ns)
+        )
         effective_start_ns = (
             resolved.start_time_ns
             if start_time_ns is None
             else max(resolved.start_time_ns, start_time_ns)
         )
-        messages = iter(
-            read_message(
-                streams,
-                should_include=prepared.message_filter.create_channel_predicate(),
-                start_time_ns=effective_start_ns,
-                end_time_ns=end_time_ns,
-            )
+        predicate = (
+            prepared.message_filter.create_channel_predicate()
+            if should_include is None
+            else should_include
         )
-        yield messages
+        if recordings is None:
+            streams = [stack.enter_context(open_input(path))[0] for path in prepared.files]
+            source_messages = read_message(
+                streams,
+                should_include=predicate,
+                start_time_ns=effective_start_ns,
+                end_time_ns=effective_end_ns,
+                reverse=reverse,
+            )
+        else:
+            iterators = [
+                recording.read_message(
+                    should_include=predicate,
+                    start_time_ns=effective_start_ns,
+                    end_time_ns=effective_end_ns,
+                    reverse=reverse,
+                )
+                for recording in recordings
+            ]
+            source_messages = read_message(iterators, reverse=reverse)
+        yield iter(source_messages)
 
 
 async def publish_playback_snapshot(
@@ -485,6 +519,7 @@ async def publish_playback_snapshot(
     timestamp_ns: int,
     transform_plan: PlaybackTransformPlan | None = None,
     topics: set[str] | None = None,
+    recordings: tuple[McapFile, ...] | None = None,
 ) -> int:
     """Publish the newest active message at or before a playback timestamp."""
     selected_channels = {channel.topic: channel for channel in prepared.channels}
@@ -509,15 +544,14 @@ async def publish_playback_snapshot(
         return 0
 
     latest: dict[str, _PlaybackSnapshotMessage] = {}
-    with ExitStack() as stack:
-        streams = [stack.enter_context(open_input(path))[0] for path in prepared.files]
-        for schema, channel, message in read_message(
-            streams,
-            should_include=should_include,
-            start_time_ns=resolved.start_time_ns,
-            end_time_ns=end_time_ns,
-            reverse=True,
-        ):
+    with open_playback_messages(
+        prepared,
+        end_time_ns=end_time_ns,
+        reverse=True,
+        should_include=should_include,
+        recordings=recordings,
+    ) as messages:
+        for schema, channel, message in messages:
             if channel.topic in latest:
                 continue
             playback_channel = _playback_channel(schema, channel)
@@ -607,6 +641,7 @@ async def run_playback(
     controller: PlaybackController | None = None,
     stats: PlaybackStats | None = None,
     start_time_ns: int | None = None,
+    recordings: tuple[McapFile, ...] | None = None,
 ) -> PlaybackStats:
     if not math.isfinite(speed) or speed <= 0:
         raise PlaybackError("--speed must be finite and positive")
@@ -699,6 +734,7 @@ async def run_playback(
             with open_playback_messages(
                 prepared,
                 start_time_ns=start_time_ns,
+                recordings=recordings,
             ) as messages:
                 while True:
                     activity_delay = await sink.wait_until_active()

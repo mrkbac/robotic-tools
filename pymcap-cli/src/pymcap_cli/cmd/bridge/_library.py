@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -24,6 +24,7 @@ from robo_ws_bridge import (
 from robo_ws_bridge import (
     PlaybackState as FoxglovePlaybackState,
 )
+from small_mcap import McapFile
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
@@ -66,7 +67,25 @@ class PlaybackRunner(Protocol):
         controller: PlaybackController | None = None,
         stats: PlaybackStats | None = None,
         start_time_ns: int | None = None,
+        recordings: tuple[McapFile, ...] | None = None,
     ) -> PlaybackStats: ...
+
+
+def _open_recordings(files: tuple[Path, ...]) -> tuple[McapFile, ...]:
+    with ExitStack() as stack:
+        recordings = tuple(stack.enter_context(McapFile.open(path)) for path in files)
+        stack.pop_all()
+    return recordings
+
+
+def _open_local_recordings(files: tuple[str, ...]) -> tuple[McapFile, ...] | None:
+    paths: list[Path] = []
+    for file in files:
+        parsed = urlsplit(file)
+        if parsed.scheme not in {"", "file"}:
+            return None
+        paths.append(Path(parsed.path))
+    return _open_recordings(tuple(paths))
 
 
 _INDEX_HTML = """\
@@ -346,6 +365,7 @@ class RecordingSession:
         loop: bool,
         show_status: bool = False,
         playback_runner: PlaybackRunner = run_playback,
+        recordings: tuple[McapFile, ...] | None = None,
     ) -> None:
         self.files = files
         self.prepared = prepared
@@ -397,10 +417,14 @@ class RecordingSession:
                 timestamp_ns=current_time_ns,
                 transform_plan=self.transform_plan,
                 topics={topic},
+                recordings=self._recordings,
             )
             await self.endpoint.publish_time(current_time_ns)
 
         self.endpoint.on_subscribe(publish_subscription_snapshot)
+        self._recordings = (
+            _open_local_recordings(prepared.files) if recordings is None else recordings
+        )
 
     @classmethod
     async def create(
@@ -417,41 +441,53 @@ class RecordingSession:
             [str(path) for path in files],
             message_filter,
         )
-        transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
-        output_channels = prepared.channels if transform_plan is None else transform_plan.channels
-        timeline_start_ns = max(
-            prepared.recording_start_ns,
-            prepared.resolved_filter.start_time_ns,
-        )
-        timeline_end_ns = min(
-            prepared.recording_end_ns,
-            prepared.resolved_filter.end_time_ns,
-        )
-        endpoint = WebSocketBridgeEndpoint(
-            name=f"pymcap-cli: {', '.join(path.name for path in files)}",
-            capabilities=["time"],
-            supported_encodings=sorted({channel.message_encoding for channel in output_channels}),
-            metadata={"source": "pymcap-cli"},
-            playback_time_range=(timeline_start_ns, timeline_end_ns),
-        )
-        sink = BridgeServerPlaybackSink(
-            "127.0.0.1",
-            0,
-            endpoint=endpoint,
-            url="/ws",
-        )
-        await sink.start(output_channels)
-        session = cls(
-            files,
-            prepared,
-            transform_plan,
-            endpoint,
-            sink,
-            speed=speed,
-            loop=loop,
-        )
-        session.play()
-        session.broadcast_playback_state()
+        recording_paths = tuple(Path(path) for path in prepared.files)
+        recordings = await asyncio.to_thread(_open_recordings, recording_paths)
+        try:
+            transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
+            output_channels = (
+                prepared.channels if transform_plan is None else transform_plan.channels
+            )
+            timeline_start_ns = max(
+                prepared.recording_start_ns,
+                prepared.resolved_filter.start_time_ns,
+            )
+            timeline_end_ns = min(
+                prepared.recording_end_ns,
+                prepared.resolved_filter.end_time_ns,
+            )
+            endpoint = WebSocketBridgeEndpoint(
+                name=f"pymcap-cli: {', '.join(path.name for path in files)}",
+                capabilities=["time"],
+                supported_encodings=sorted(
+                    {channel.message_encoding for channel in output_channels}
+                ),
+                metadata={"source": "pymcap-cli"},
+                playback_time_range=(timeline_start_ns, timeline_end_ns),
+            )
+            sink = BridgeServerPlaybackSink(
+                "127.0.0.1",
+                0,
+                endpoint=endpoint,
+                url="/ws",
+            )
+            await sink.start(output_channels)
+            session = cls(
+                files,
+                prepared,
+                transform_plan,
+                endpoint,
+                sink,
+                speed=speed,
+                loop=loop,
+                recordings=recordings,
+            )
+            session.play()
+            session.broadcast_playback_state()
+        except BaseException:
+            for recording in recordings:
+                recording.close()
+            raise
         return session
 
     def play(self) -> None:
@@ -564,8 +600,12 @@ class RecordingSession:
 
     async def close(self) -> None:
         self.controller.stop()
-        await self._cancel_task()
-        await self.endpoint.close_connections()
+        try:
+            await self._cancel_task()
+            await self.endpoint.close_connections()
+        finally:
+            for recording in self._recordings or ():
+                recording.close()
 
     async def _run(self) -> None:
         try:
@@ -577,6 +617,7 @@ class RecordingSession:
                     self.sink,
                     timestamp_ns=snapshot_time_ns,
                     transform_plan=self.transform_plan,
+                    recordings=self._recordings,
                 )
                 await self.endpoint.publish_time(self._start_time_ns)
             await self._playback_runner(
@@ -589,6 +630,7 @@ class RecordingSession:
                 controller=self.controller,
                 stats=self.stats,
                 start_time_ns=self._start_time_ns,
+                recordings=self._recordings,
             )
         except asyncio.CancelledError:
             raise

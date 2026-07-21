@@ -60,6 +60,19 @@ with open("input.mcap", "rb") as f:
         print(f"{channel.topic} at {message.log_time}")
 ```
 
+### Reuse a file across seeks
+
+`McapFile` keeps the file summary and recently decompressed chunks available for repeated reads.
+Each iterator has independent position and ordering state.
+
+```python
+from small_mcap import McapFile
+
+with McapFile.open("input.mcap") as recording:
+    forward = recording.read_message(start_time_ns=1_000_000_000)
+    snapshot = recording.read_message(end_time_ns=2_000_000_000, reverse=True)
+```
+
 ### Read decoded messages
 
 ```python

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from inspect import signature
 from urllib.parse import parse_qs, urlsplit
 
+import pymcap_cli.cmd.bridge._library as library_module
 import pymcap_cli.cmd.bridge.serve as serve_module
 from pymcap_cli.cmd.bridge._playback import PlaybackChannel, PlaybackStats
 from robo_ws_bridge import PlaybackState, PlaybackStatus, WebSocketBridgeEndpoint
@@ -20,6 +21,7 @@ class _ResolvedFilter:
 
 @dataclass(frozen=True, slots=True)
 class _Prepared:
+    files: tuple[str, ...] = ("recording.mcap",)
     channels: tuple[PlaybackChannel, ...] = ()
     recording_start_ns: int = 1
     recording_end_ns: int = 2
@@ -56,6 +58,7 @@ class _Sink:
 
 def _patch_direct_transport(monkeypatch, sink: _Sink) -> _Endpoint:
     endpoint = _Endpoint()
+    monkeypatch.setattr(library_module, "_open_recordings", lambda _files: ())
     monkeypatch.setattr(serve_module, "WebSocketBridgeServer", lambda **_kwargs: endpoint)
     monkeypatch.setattr(
         serve_module,
@@ -322,6 +325,7 @@ def test_serve_empty_host_binds_all_and_lists_reachable_urls(monkeypatch, capsys
     )
     monkeypatch.setattr(serve_module, "WebSocketBridgeServer", lambda **_kwargs: _Endpoint())
     monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", make_sink)
+    monkeypatch.setattr(library_module, "_open_recordings", lambda _files: ())
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", lambda _url: None)
     monkeypatch.setattr(serve_module, "_lan_ip_addresses", lambda: ["192.168.1.50"])

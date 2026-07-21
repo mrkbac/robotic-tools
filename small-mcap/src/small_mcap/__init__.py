@@ -22,6 +22,7 @@ from small_mcap.exceptions import (
 
 # Reader classes and functions
 from small_mcap.json_decoder import JSONDecoderFactory, JSONEncoderFactory
+from small_mcap.mcap_file import McapFile
 from small_mcap.reader import (
     ChannelDecoderFactoryProtocol,
     DecodedMessage,
@@ -104,6 +105,7 @@ __all__ = [
     "JSONEncoderFactory",
     "LazyChunk",
     "McapError",
+    "McapFile",
     "McapRecord",
     "McapWriter",
     "Message",

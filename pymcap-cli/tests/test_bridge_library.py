@@ -27,7 +27,7 @@ from pymcap_cli.cmd.bridge.serve import _library_root
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from robo_ws_bridge import PlaybackCommand, PlaybackControlRequest, PlaybackState, PlaybackStatus
 from robo_ws_bridge.ws_types import BinaryOpCodes, ServerInfoMessage
-from small_mcap import McapWriter
+from small_mcap import McapFile, McapWriter
 from websockets.asyncio.client import ClientConnection, connect
 
 if TYPE_CHECKING:
@@ -657,6 +657,64 @@ def test_recording_session_seek_clears_pending_frames(
         return calls
 
     assert asyncio.run(run()) >= 1
+
+
+def test_recording_session_owns_and_closes_open_recordings(tmp_path: Path) -> None:
+    _write_mcap(tmp_path / "rec.mcap", "/x", 1, b"a")
+
+    async def run() -> tuple[McapFile, ...]:
+        session = await RecordingSession.create(
+            (tmp_path / "rec.mcap",),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1,
+            loop=False,
+        )
+        recordings = session._recordings
+        assert recordings is not None
+        await session.close()
+        return recordings
+
+    recordings = asyncio.run(run())
+    for recording in recordings:
+        with pytest.raises(RuntimeError, match="closed"):
+            recording.read_message()
+
+
+def test_recording_session_closes_partial_recording_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    _write_mcap(first, "/first", 1, b"a")
+    _write_mcap(second, "/second", 2, b"b")
+    real_open = _playback.McapFile.open
+    opened = real_open(first)
+    calls = 0
+
+    def fail_second_open(_path: Path) -> McapFile:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return opened
+        raise OSError("open failed")
+
+    monkeypatch.setattr(_playback.McapFile, "open", fail_second_open)
+
+    async def create() -> None:
+        await RecordingSession.create(
+            (first, second),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1,
+            loop=False,
+        )
+
+    with pytest.raises(OSError, match="open failed"):
+        asyncio.run(create())
+    with pytest.raises(RuntimeError, match="closed"):
+        opened.read_message()
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ import time
 from typing import TYPE_CHECKING
 
 import pytest
+import small_mcap.mcap_file as mcap_file_module
 from mcap_codec_support.pointcloud import POINTCLOUD2
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
@@ -37,7 +38,7 @@ from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.core.processors.image_compress import ImageCompressProcessor
 from robo_ws_bridge import ConnectionGraph, WebSocketBridgeEndpoint, WebSocketBridgeServer
 from robo_ws_bridge.ws_types import BinaryOpCodes
-from small_mcap import McapWriter, Schema
+from small_mcap import Chunk, McapFile, McapWriter, Schema
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -126,6 +127,29 @@ def test_prepare_playback_merges_files_chronologically(tmp_path: Path) -> None:
         ("/first", 3, b"c"),
         ("/second", 4, b"d"),
     ]
+
+
+def test_open_playback_messages_preserves_multi_file_id_remapping(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.mcap"
+    second = tmp_path / "second.mcap"
+    _write_mcap(first, "/first", [(1, b"a")])
+    _write_mcap(second, "/second", [(2, b"b")])
+    prepared = prepare_playback([str(first), str(second)], MessageFilterOptions.from_args())
+
+    with (
+        McapFile.open(first) as first_recording,
+        McapFile.open(second) as second_recording,
+        open_playback_messages(
+            prepared,
+            recordings=(first_recording, second_recording),
+        ) as messages,
+    ):
+        records = list(messages)
+
+    assert [channel.topic for _, channel, _ in records] == ["/first", "/second"]
+    assert records[0][1].id != records[1][1].id
 
 
 def test_prepare_playback_applies_shared_topic_and_time_filters(tmp_path: Path) -> None:
@@ -359,6 +383,43 @@ def test_publish_playback_snapshot_sends_latest_active_message_per_topic(
         ("/second", 2, b"d"),
         ("/first", 5, b"b"),
     ]
+
+
+def test_publish_playback_snapshot_reuses_open_recording_chunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "snapshot.mcap"
+    _write_mcap(path, "/camera", [(1, b"a"), (2, b"b")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    sink = _CollectingSink()
+    calls = 0
+    original = mcap_file_module._get_chunk_data_stream
+
+    def count_decompression(
+        chunk: Chunk,
+        validate_crc: bool = False,
+    ) -> bytes | memoryview:
+        nonlocal calls
+        calls += 1
+        return original(chunk, validate_crc)
+
+    monkeypatch.setattr(mcap_file_module, "_get_chunk_data_stream", count_decompression)
+
+    async def publish(recording: McapFile) -> None:
+        await sink.start(prepared.channels)
+        for _ in range(2):
+            await _playback.publish_playback_snapshot(
+                prepared,
+                sink,
+                timestamp_ns=2,
+                recordings=(recording,),
+            )
+
+    with McapFile.open(path) as recording:
+        asyncio.run(publish(recording))
+
+    assert calls == 1
 
 
 def test_run_playback_waits_while_controller_is_paused(tmp_path: Path) -> None:
