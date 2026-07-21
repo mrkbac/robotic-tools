@@ -8,6 +8,7 @@ import small_mcap
 import small_mcap.reader as reader_module
 from small_mcap import (
     Channel,
+    CRCValidationError,
     McapWriter,
     Message,
     Schema,
@@ -15,6 +16,7 @@ from small_mcap import (
     include_topics,
     read_message,
 )
+from small_mcap.records import LazyChunk, MessageIndex
 from small_mcap.writer import CompressionType, IndexType
 
 if TYPE_CHECKING:
@@ -62,6 +64,41 @@ def _records(
         (channel.topic, message.log_time, message.sequence, bytes(message.data))
         for _schema, channel, message in messages
     ]
+
+
+def _without_footer(path: Path) -> bytes:
+    data = path.read_bytes()
+    return data[:-37]
+
+
+def _truncate_final_chunk(path: Path) -> bytes:
+    data = path.read_bytes()
+    chunks: list[tuple[int, int]] = []
+    with path.open("rb") as stream:
+        previous = 0
+        for record in small_mcap.stream_reader(stream, emit_chunks=True, lazy_chunks=True):
+            if isinstance(record, LazyChunk):
+                chunks.append((previous, stream.tell()))
+            previous = stream.tell()
+    assert len(chunks) >= 2
+    start, end = chunks[-1]
+    assert end - start > 10
+    return data[: end - 10]
+
+
+def _truncate_final_message_index(path: Path) -> bytes:
+    data = path.read_bytes()
+    indexes: list[tuple[int, int]] = []
+    with path.open("rb") as stream:
+        previous = 0
+        for record in small_mcap.stream_reader(stream, emit_chunks=True, lazy_chunks=True):
+            if isinstance(record, MessageIndex):
+                indexes.append((previous, stream.tell()))
+            previous = stream.tell()
+    assert indexes
+    start, end = indexes[-1]
+    assert end - start > 5
+    return data[: end - 5]
 
 
 @pytest.mark.parametrize(
@@ -312,3 +349,127 @@ def test_mcap_file_close_is_idempotent_and_invalidates_iterators(tmp_path: Path)
         next(iterator)
     with pytest.raises(RuntimeError, match="closed"):
         recording.read_message()
+
+
+def test_mcap_file_recovers_missing_footer_without_modifying_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing-footer.mcap"
+    _write_recording(path)
+    path.write_bytes(_without_footer(path))
+    original = path.read_bytes()
+
+    with small_mcap.McapFile.open(path, recover=True) as recording:
+        assert recording.is_recovered is True
+        assert recording.supports_reverse is True
+        assert recording.recovery_warning == (
+            "Incomplete MCAP — reconstructed the index in memory and ignored the truncated tail."
+        )
+        assert len(_records(recording.read_message())) == 24
+        assert _records(recording.read_message(reverse=True))[0][2] == 23
+
+    assert path.read_bytes() == original
+
+
+def test_mcap_file_recovery_does_not_decompress_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chunk-index-only.mcap"
+    _write_recording(path)
+    path.write_bytes(_without_footer(path))
+
+    def fail_decompression(
+        _chunk: small_mcap.Chunk,
+        validate_crc: bool = False,
+    ) -> bytes:
+        del validate_crc
+        raise AssertionError("recovery must not decompress chunks")
+
+    monkeypatch.setattr("small_mcap.rebuild._get_chunk_data_stream", fail_decompression)
+    with small_mcap.McapFile.open(path, recover=True) as recording:
+        assert recording.supports_reverse is True
+
+
+def test_mcap_file_ignores_truncated_final_chunk(tmp_path: Path) -> None:
+    path = tmp_path / "truncated-chunk.mcap"
+    _write_recording(path, message_count=48)
+    path.write_bytes(_truncate_final_chunk(path))
+
+    with small_mcap.McapFile.open(path, recover=True) as recording:
+        messages = _records(recording.read_message())
+        reverse = _records(recording.read_message(reverse=True))
+
+    assert messages
+    assert len(messages) < 48
+    assert reverse == list(reversed(messages))
+
+
+def test_mcap_file_ignores_truncated_final_record(tmp_path: Path) -> None:
+    path = tmp_path / "truncated-record.mcap"
+    _write_recording(path)
+    data = path.read_bytes()
+    path.write_bytes(data[:-40])
+
+    with small_mcap.McapFile.open(path, recover=True) as recording:
+        assert len(_records(recording.read_message())) == 24
+        assert recording.supports_reverse is True
+
+
+def test_mcap_file_uses_sequential_fallback_for_truncated_message_index(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "truncated-message-index.mcap"
+    _write_recording(path)
+    path.write_bytes(_truncate_final_message_index(path))
+
+    with small_mcap.McapFile.open(path, recover=True) as recording:
+        assert recording.supports_reverse is False
+        assert len(_records(recording.read_message())) == 24
+        with pytest.raises(small_mcap.SeekRequiredError, match="reverse=True"):
+            recording.read_message(reverse=True)
+
+
+def test_mcap_file_rejects_corrupt_complete_middle_chunk_when_read(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt-middle.mcap"
+    _write_recording(path, message_count=48)
+    data = bytearray(_without_footer(path))
+    chunks: list[LazyChunk] = []
+    with path.open("rb") as stream:
+        chunks.extend(
+            record
+            for record in small_mcap.stream_reader(stream, emit_chunks=True, lazy_chunks=True)
+            if isinstance(record, LazyChunk)
+        )
+    middle = chunks[len(chunks) // 2]
+    data[middle.record_start + 60] ^= 0xFF
+    path.write_bytes(data)
+
+    with (
+        small_mcap.McapFile.open(path, recover=True) as recording,
+        pytest.raises(CRCValidationError, match="crc validation failed"),
+    ):
+        list(recording.read_message())
+
+
+def test_mcap_file_recovered_unchunked_file_is_sequential_only(tmp_path: Path) -> None:
+    path = tmp_path / "unchunked.mcap"
+    _write_recording(path, use_chunking=False)
+    path.write_bytes(_without_footer(path))
+
+    with small_mcap.McapFile.open(path, recover=True) as recording:
+        assert recording.is_recovered is True
+        assert recording.supports_reverse is False
+        assert len(_records(recording.read_message())) == 24
+        with pytest.raises(small_mcap.SeekRequiredError, match="reverse=True"):
+            list(recording.read_message(reverse=True))
+
+
+def test_mcap_file_recovery_is_opt_in(tmp_path: Path) -> None:
+    path = tmp_path / "opt-in.mcap"
+    _write_recording(path)
+    path.write_bytes(_without_footer(path))
+
+    with small_mcap.McapFile.open(path) as recording:
+        assert recording.summary is None
+        assert recording.is_recovered is False
+        assert recording.supports_reverse is False
+        assert recording.recovery_warning is None

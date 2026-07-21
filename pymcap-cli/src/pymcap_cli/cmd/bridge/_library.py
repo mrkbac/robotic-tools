@@ -47,7 +47,7 @@ from pymcap_cli.cmd.bridge._playback_transforms import (
     create_playback_transform_plan,
 )
 from pymcap_cli.cmd.bridge.serve import BridgeServerPlaybackSink
-from pymcap_cli.core.rosbag2_layout import find_bag_splits
+from pymcap_cli.core.rosbag2_layout import expand_bag_paths, find_bag_splits
 
 if TYPE_CHECKING:
     from pymcap_cli.cmd.bridge._playback import PlaybackSink, PlaybackTransformPlan
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 _MAX_FILES_PER_SESSION = 32
 _PLAYBACK_STATUS_ID = "playback"
 _PLAYBACK_DEGRADED_STATUS_ID = "playback-degraded"
+_RECOVERY_STATUS_ID = "incomplete-mcap"
 JsonValue: TypeAlias = (
     str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 )
@@ -88,7 +89,7 @@ class PlaybackRunner(Protocol):
 
 def _open_recordings(files: tuple[Path, ...]) -> tuple[McapFile, ...]:
     with ExitStack() as stack:
-        recordings = tuple(stack.enter_context(McapFile.open(path)) for path in files)
+        recordings = tuple(stack.enter_context(McapFile.open(path, recover=True)) for path in files)
         stack.pop_all()
     return recordings
 
@@ -474,7 +475,14 @@ class RecordingSession:
         self._task: asyncio.Task[None] | None = None
         self._has_degraded_status = False
         self._control_lock = asyncio.Lock()
-        self.endpoint.on_playback_control(self.handle_playback_control)
+        self._recordings = (
+            _open_local_recordings(prepared.files) if recordings is None else recordings
+        )
+        self.supports_playback_controls = bool(self._recordings) and all(
+            recording.supports_reverse for recording in self._recordings or ()
+        )
+        if self.supports_playback_controls:
+            self.endpoint.on_playback_control(self.handle_playback_control)
         self.sink.on_timeline_started(self._handle_timeline_started)
 
         output_channels = prepared.channels if transform_plan is None else transform_plan.channels
@@ -505,10 +513,29 @@ class RecordingSession:
             )
             await self.endpoint.publish_time(current_time_ns)
 
-        self.endpoint.on_subscribe(publish_subscription_snapshot)
-        self._recordings = (
-            _open_local_recordings(prepared.files) if recordings is None else recordings
+        if self.supports_playback_controls:
+            self.endpoint.on_subscribe(publish_subscription_snapshot)
+
+        recovery_warning = next(
+            (
+                warning
+                for recording in self._recordings or ()
+                if (warning := recording.recovery_warning) is not None
+            ),
+            None,
         )
+
+        async def report_recovery_status(_state: ConnectionState) -> None:
+            if recovery_warning is None:
+                await self.endpoint.remove_status((_RECOVERY_STATUS_ID,))
+            else:
+                await self.endpoint.send_status(
+                    StatusLevel.WARNING,
+                    recovery_warning,
+                    status_id=_RECOVERY_STATUS_ID,
+                )
+
+        self.endpoint.on_connect(report_recovery_status)
 
     @classmethod
     async def create(
@@ -520,14 +547,17 @@ class RecordingSession:
         speed: float,
         loop: bool,
     ) -> RecordingSession:
-        prepared = await asyncio.to_thread(
-            prepare_playback,
-            [str(path) for path in files],
-            message_filter,
+        recording_paths = tuple(
+            Path(path) for path in expand_bag_paths([str(path) for path in files])
         )
-        recording_paths = tuple(Path(path) for path in prepared.files)
         recordings = await asyncio.to_thread(_open_recordings, recording_paths)
         try:
+            prepared = await asyncio.to_thread(
+                prepare_playback,
+                [str(path) for path in recording_paths],
+                message_filter,
+                recordings=recordings,
+            )
             transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
             output_channels = (
                 prepared.channels if transform_plan is None else transform_plan.channels
@@ -540,6 +570,7 @@ class RecordingSession:
                 prepared.recording_end_ns,
                 prepared.resolved_filter.end_time_ns,
             )
+            supports_playback_controls = all(recording.supports_reverse for recording in recordings)
             endpoint = WebSocketBridgeEndpoint(
                 name=f"pymcap-cli: {', '.join(path.name for path in files)}",
                 capabilities=["time"],
@@ -547,7 +578,9 @@ class RecordingSession:
                     {channel.message_encoding for channel in output_channels}
                 ),
                 metadata={"source": "pymcap-cli"},
-                playback_time_range=(timeline_start_ns, timeline_end_ns),
+                playback_time_range=(
+                    (timeline_start_ns, timeline_end_ns) if supports_playback_controls else None
+                ),
             )
             sink = BridgeServerPlaybackSink(
                 "127.0.0.1",
@@ -563,11 +596,12 @@ class RecordingSession:
                 endpoint,
                 sink,
                 speed=speed,
-                loop=loop,
+                loop=loop if supports_playback_controls else False,
                 recordings=recordings,
             )
             session.play()
-            session.broadcast_playback_state()
+            if supports_playback_controls:
+                session.broadcast_playback_state()
         except BaseException:
             for recording in recordings:
                 recording.close()
@@ -588,6 +622,8 @@ class RecordingSession:
 
     def broadcast_playback_state(self) -> None:
         """Notify Foxglove after a playback state change outside a client request."""
+        if not self.supports_playback_controls:
+            return
         self.endpoint.broadcast_playback_state(self._foxglove_playback_state(did_seek=False))
 
     def _handle_timeline_started(self) -> None:
@@ -605,6 +641,8 @@ class RecordingSession:
         request: PlaybackControlRequest,
     ) -> FoxglovePlaybackState:
         """Apply one Foxglove playback request to this session."""
+        if not self.supports_playback_controls:
+            raise ValueError("Playback controls require indexes for every selected recording")
         async with self._control_lock:
             should_play = request.playback_command is PlaybackCommand.PLAY
             if request.playback_speed > 0:

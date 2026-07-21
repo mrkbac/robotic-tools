@@ -9,7 +9,7 @@ from typing import IO, TYPE_CHECKING
 
 from typing_extensions import Self
 
-from small_mcap.exceptions import EndOfFileError
+from small_mcap.exceptions import EndOfFileError, SeekRequiredError
 from small_mcap.reader import (
     _get_chunk_data_stream,
     _LoadedChunk,
@@ -19,6 +19,7 @@ from small_mcap.reader import (
     get_summary,
     read_message,
 )
+from small_mcap.rebuild import rebuild_summary
 from small_mcap.records import Channel, ChunkIndex, Message, Schema, Summary
 
 if TYPE_CHECKING:
@@ -27,6 +28,9 @@ if TYPE_CHECKING:
     from _typeshed import StrPath
 
 _DEFAULT_CHUNK_CACHE_BYTES = 64 * 1024 * 1024
+_RECOVERY_WARNING = (
+    "Incomplete MCAP — reconstructed the index in memory and ignored the truncated tail."
+)
 _MessageIterator = Iterable[tuple[Schema | None, Channel, Message]]
 _ChannelPredicate = Callable[[Channel, Schema | None], bool]
 _CacheKey = tuple[int, bool]
@@ -41,11 +45,14 @@ class McapFile:
         stream: IO[bytes],
         summary: Summary | None,
         chunk_cache_bytes: int,
+        *,
+        is_recovered: bool = False,
     ) -> None:
         self._path = path
         self._stream = stream
         self._summary = summary
         self._chunk_cache_bytes = chunk_cache_bytes
+        self._is_recovered = is_recovered
         self._chunk_cache: OrderedDict[_CacheKey, _LoadedChunk] = OrderedDict()
         self._cached_chunk_bytes = 0
         self._source_lock = threading.Lock()
@@ -58,6 +65,7 @@ class McapFile:
         path: StrPath,
         *,
         chunk_cache_bytes: int = _DEFAULT_CHUNK_CACHE_BYTES,
+        recover: bool = False,
     ) -> Self:
         if chunk_cache_bytes < 0:
             raise ValueError("chunk_cache_bytes must be non-negative")
@@ -65,14 +73,51 @@ class McapFile:
         stream = resolved_path.open("rb")
         try:
             summary = get_summary(stream)
+            is_recovered = recover and summary is None
+            if is_recovered:
+                stream.seek(0)
+                rebuilt = rebuild_summary(
+                    stream,
+                    validate_crc=True,
+                    calculate_channel_sizes=False,
+                    exact_sizes=False,
+                    allow_incomplete_tail_only=True,
+                )
+                summary = rebuilt.summary
         except BaseException:
             stream.close()
             raise
-        return cls(resolved_path, stream, summary, chunk_cache_bytes)
+        return cls(
+            resolved_path,
+            stream,
+            summary,
+            chunk_cache_bytes,
+            is_recovered=is_recovered,
+        )
 
     @property
     def summary(self) -> Summary | None:
         return self._summary
+
+    @property
+    def is_recovered(self) -> bool:
+        return self._is_recovered
+
+    @property
+    def supports_reverse(self) -> bool:
+        summary = self._summary
+        return (
+            summary is not None
+            and bool(summary.chunk_indexes)
+            and all(
+                index.message_index_length > 0 and bool(index.message_index_offsets)
+                for index in summary.chunk_indexes
+            )
+        )
+
+    @property
+    def recovery_warning(self) -> str | None:
+        return _RECOVERY_WARNING if self._is_recovered else None
 
     def read_message(
         self,
@@ -84,6 +129,9 @@ class McapFile:
         num_workers: int = 0,
     ) -> _MessageIterator:
         self._ensure_open()
+        if reverse and not self.supports_reverse:
+            raise SeekRequiredError("reverse=True")
+        validate_crc = validate_crc or self._is_recovered
         summary = self._summary
         if summary is None or not summary.chunk_indexes or num_workers > 0:
             messages = self._read_fallback(

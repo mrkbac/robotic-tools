@@ -405,7 +405,7 @@ def stream_reader(
         # Dispatch on the opcode int we already decoded; isinstance against the
         # McapRecord ABC hits ABCMeta.__instancecheck__, which dominates the
         # main-thread cost on index-heavy files (tens of thousands of records).
-        if validate_crc and not skip_magic and opcode == Opcode.DATA_END:
+        if validate_crc and not skip_magic and not lazy_chunks and opcode == Opcode.DATA_END:
             data_end = cast("DataEnd", record)
             if data_end.data_section_crc not in (0, checksum_before_read):
                 raise CRCValidationError(

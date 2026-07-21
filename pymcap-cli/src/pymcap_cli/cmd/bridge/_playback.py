@@ -393,17 +393,54 @@ def _input_description(
         return start_ns, end_ns, list(channels_by_id.values())
 
 
-def prepare_playback(files: list[str], message_filter: MessageFilterOptions) -> PreparedPlayback:
+def _recording_description(
+    recording: McapFile,
+    message_filter: MessageFilterOptions,
+) -> tuple[int | None, int | None, list[PlaybackChannel]]:
+    summary = recording.summary
+    if summary is not None and summary.statistics is not None and summary.channels:
+        stats = summary.statistics
+        channels = [
+            _playback_channel(summary.schemas.get(channel.schema_id), channel)
+            for channel in summary.channels.values()
+            if message_filter.matches_topic(channel.topic)
+        ]
+        if stats.message_count == 0:
+            return None, None, channels
+        return stats.message_start_time, stats.message_end_time, channels
+
+    start_ns: int | None = None
+    end_ns: int | None = None
+    channels_by_id: dict[int, PlaybackChannel] = {}
+    for schema, channel, message in recording.read_message():
+        if message_filter.matches_topic(channel.topic):
+            channels_by_id.setdefault(channel.id, _playback_channel(schema, channel))
+        start_ns = message.log_time if start_ns is None else min(start_ns, message.log_time)
+        end_ns = message.log_time if end_ns is None else max(end_ns, message.log_time)
+    return start_ns, end_ns, list(channels_by_id.values())
+
+
+def prepare_playback(
+    files: list[str],
+    message_filter: MessageFilterOptions,
+    *,
+    recordings: tuple[McapFile, ...] | None = None,
+) -> PreparedPlayback:
     expanded = expand_bag_paths(files)
     if not expanded:
         raise PlaybackError("At least one MCAP input is required")
+    if recordings is not None and len(recordings) != len(expanded):
+        raise PlaybackError("Opened recording count does not match prepared inputs")
 
     starts: list[int] = []
     ends: list[int] = []
     by_topic: dict[str, PlaybackChannel] = {}
     source_by_topic: dict[str, str] = {}
-    for path in expanded:
-        start_ns, end_ns, channels = _input_description(path, message_filter)
+    for index, path in enumerate(expanded):
+        if recordings is None:
+            start_ns, end_ns, channels = _input_description(path, message_filter)
+        else:
+            start_ns, end_ns, channels = _recording_description(recordings[index], message_filter)
         if start_ns is not None and end_ns is not None:
             starts.append(start_ns)
             ends.append(end_ns)
@@ -453,7 +490,7 @@ def prepare_playback(files: list[str], message_filter: MessageFilterOptions) -> 
         recording_start_ns=recording_start_ns,
         recording_end_ns=recording_end_ns,
     )
-    with open_playback_messages(prepared) as messages:
+    with open_playback_messages(prepared, recordings=recordings) as messages:
         try:
             next(messages)
         except StopIteration as exc:

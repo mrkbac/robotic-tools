@@ -73,6 +73,16 @@ with McapFile.open("input.mcap") as recording:
     snapshot = recording.read_message(end_time_ns=2_000_000_000, reverse=True)
 ```
 
+Recovery of an incomplete file is opt-in. It reconstructs chunk indexes in memory, preserves
+complete on-disk message indexes, ignores only an incomplete tail, and never modifies the source:
+
+```python
+with McapFile.open("incomplete.mcap", recover=True) as recording:
+    print(recording.is_recovered, recording.supports_reverse)
+    for schema, channel, message in recording.read_message():
+        ...
+```
+
 ### Read decoded messages
 
 ```python

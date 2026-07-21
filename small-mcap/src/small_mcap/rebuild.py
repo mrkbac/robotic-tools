@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import IO
 
-from small_mcap.exceptions import McapError
+from small_mcap.exceptions import EndOfFileError, McapError
 from small_mcap.reader import (
     _RECORD_HEADER_SIZE,
     _get_chunk_data_stream,
@@ -227,6 +227,7 @@ def rebuild_summary(
     exact_sizes: bool,
     initial_state: RebuildInfo | None = None,
     skip_magic: bool = False,
+    allow_incomplete_tail_only: bool = False,
 ) -> RebuildInfo:
     """Rebuild summary section from an MCAP file's data section.
 
@@ -243,6 +244,8 @@ def rebuild_summary(
             calculate_channel_sizes=True.
         initial_state: Optional previous RebuildInfo to resume from. When used for resuming, first
             seek to initial_state.next_offset before calling and set skip_magic=True.
+        allow_incomplete_tail_only: Ignore an incomplete final record, but propagate corruption
+            found in any complete record.
 
     Returns:
         RebuildInfo containing header, summary, and optionally channel_sizes.
@@ -252,6 +255,13 @@ def rebuild_summary(
     Raises:
         McapError: If the file is invalid or header is missing
     """
+    stream_end: int | None = None
+    if allow_incomplete_tail_only and stream.seekable():
+        initial_position = stream.tell()
+        stream.seek(0, io.SEEK_END)
+        stream_end = stream.tell()
+        stream.seek(initial_position)
+
     # Initialize or resume from previous state
     if initial_state is not None:
         # Resume from previous state
@@ -311,7 +321,10 @@ def rebuild_summary(
         if (
             force
             or exact_sizes
-            or any(msg_idx.channel_id not in summary.channels for msg_idx in pending_indexes)
+            or (
+                not allow_incomplete_tail_only
+                and any(msg_idx.channel_id not in summary.channels for msg_idx in pending_indexes)
+            )
         ):
             if rebuild_indexes:
                 # Rebuild MessageIndex records from chunk data
@@ -384,6 +397,8 @@ def rebuild_summary(
         ):
             record_start_pos = prev_pos
             current_pos = stream.tell()
+            if stream_end is not None and current_pos > stream_end:
+                raise EndOfFileError  # noqa: TRY301
             next_offset = current_pos  # Track position after each successful record read
             prev_pos = current_pos
 
@@ -401,7 +416,7 @@ def rebuild_summary(
                             compressed_size=pending_chunk.data_len,
                             message_end_time=pending_chunk.message_end_time,
                             message_index_length=message_index_length,
-                            message_index_offsets=pending_message_index_offsets,
+                            message_index_offsets=pending_message_index_offsets.copy(),
                             message_start_time=pending_chunk.message_start_time,
                             uncompressed_size=pending_chunk.uncompressed_size,
                         )
@@ -454,8 +469,22 @@ def rebuild_summary(
                 statistics.metadata_count += 1
             elif isinstance(record, MetadataIndex):
                 summary.metadata_indexes.append(record)
-    except Exception:  # noqa: BLE001, S110
-        pass
+    except EndOfFileError:
+        tail_opcode: int | None = None
+        if stream_end is not None and next_offset < stream_end:
+            failed_position = stream.tell()
+            stream.seek(next_offset)
+            opcode_bytes = stream.read(1)
+            stream.seek(failed_position)
+            if opcode_bytes:
+                tail_opcode = opcode_bytes[0]
+        if pending_chunk is not None and tail_opcode == Opcode.MESSAGE_INDEX:
+            pending_indexes.clear()
+            pending_message_index_offsets.clear()
+            last_message_index_end_offset = message_index_start_offset
+    except Exception:
+        if allow_incomplete_tail_only:
+            raise
 
     if pending_chunk is not None:
         message_index_length = last_message_index_end_offset - message_index_start_offset
@@ -467,7 +496,7 @@ def rebuild_summary(
                 compressed_size=pending_chunk.data_len,
                 message_end_time=pending_chunk.message_end_time,
                 message_index_length=max(0, message_index_length),
-                message_index_offsets=pending_message_index_offsets,
+                message_index_offsets=pending_message_index_offsets.copy(),
                 message_start_time=pending_chunk.message_start_time,
                 uncompressed_size=pending_chunk.uncompressed_size,
             )
@@ -480,9 +509,13 @@ def rebuild_summary(
         should_rebuild_indexes = not prior_chunks or any(
             ci.message_index_length > 0 for ci in prior_chunks
         )
-        finish_chunk(force=True, rebuild_indexes=should_rebuild_indexes)
-    except Exception:  # noqa: BLE001, S110
-        pass
+        if allow_incomplete_tail_only:
+            finish_chunk()
+        else:
+            finish_chunk(force=True, rebuild_indexes=should_rebuild_indexes)
+    except Exception:
+        if allow_incomplete_tail_only:
+            raise
 
     # Finalize statistics
     statistics.schema_count = len(summary.schemas)

@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 
 import pymcap_cli.cmd.bridge._playback as _playback
 import pytest
+import small_mcap.mcap_file as mcap_file_module
 from pymcap_cli.cmd.bridge._library import (
     _APP_JS,
     _INDEX_HTML,
@@ -48,6 +49,9 @@ from websockets.asyncio.client import ClientConnection, connect
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import IO
+
+    from small_mcap import RebuildInfo
 
 
 def _write_mcap(path: Path, topic: str, timestamp_ns: int, payload: bytes) -> None:
@@ -74,6 +78,17 @@ def _write_mcap_messages(
         writer.add_channel(1, topic, "raw", 1)
         for timestamp_ns, payload in messages:
             writer.add_message(1, timestamp_ns, payload, publish_time=timestamp_ns)
+        writer.finish()
+
+
+def _write_unindexed_mcap(path: Path) -> None:
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, use_chunking=False)
+        writer.start()
+        writer.add_schema(1, "example/Raw", "text", b"bytes data")
+        writer.add_channel(1, "/sequential", "raw", 1)
+        writer.add_message(1, 10, b"a", publish_time=10)
+        writer.add_message(1, 20, b"b", publish_time=20)
         writer.finish()
 
 
@@ -921,6 +936,188 @@ def test_recording_session_owns_and_closes_open_recordings(tmp_path: Path) -> No
             recording.read_message()
 
 
+def test_recording_session_recovers_once_and_reuses_reader_for_seek(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "recovered.mcap"
+    _write_mcap_messages(path, "/x", [(10, b"a"), (20, b"b"), (30, b"c")])
+    path.write_bytes(path.read_bytes()[:-37])
+    real_rebuild = mcap_file_module.rebuild_summary
+    recovery_scans = 0
+
+    def count_recovery(
+        stream: IO[bytes],
+        *,
+        validate_crc: bool,
+        calculate_channel_sizes: bool,
+        exact_sizes: bool,
+        allow_incomplete_tail_only: bool,
+    ) -> RebuildInfo:
+        nonlocal recovery_scans
+        recovery_scans += 1
+        return real_rebuild(
+            stream,
+            validate_crc=validate_crc,
+            calculate_channel_sizes=calculate_channel_sizes,
+            exact_sizes=exact_sizes,
+            allow_incomplete_tail_only=allow_incomplete_tail_only,
+        )
+
+    monkeypatch.setattr(mcap_file_module, "rebuild_summary", count_recovery)
+
+    async def run() -> tuple[list[str], list[tuple[StatusLevel, str, str | None]]]:
+        session = await RecordingSession.create(
+            (path,),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1_000_000,
+            loop=True,
+        )
+        statuses: list[tuple[StatusLevel, str, str | None]] = []
+
+        async def record_status(
+            level: StatusLevel,
+            message: str,
+            *,
+            status_id: str | None = None,
+        ) -> None:
+            statuses.append((level, message, status_id))
+
+        monkeypatch.setattr(session.endpoint, "send_status", record_status)
+        try:
+            result = session.endpoint._on_connect[-1](None)
+            assert result is not None
+            await result
+            await session.handle_playback_control(
+                PlaybackControlRequest(
+                    playback_command=PlaybackCommand.PAUSE,
+                    playback_speed=0,
+                    seek_time=20,
+                    request_id="seek-recovered",
+                )
+            )
+            assert session.error is None
+            assert session.supports_playback_controls is True
+            assert session._recordings is not None
+            assert session._recordings[0].is_recovered is True
+            return session.endpoint._server_info()["capabilities"], statuses
+        finally:
+            await session.close()
+
+    capabilities, statuses = asyncio.run(run())
+    assert recovery_scans == 1
+    assert "playbackControl" in capabilities
+    assert statuses == [
+        (
+            StatusLevel.WARNING,
+            "Incomplete MCAP — reconstructed the index in memory and ignored the truncated tail.",
+            "incomplete-mcap",
+        )
+    ]
+
+
+def test_recording_session_uses_sequential_autoplay_without_indexes(tmp_path: Path) -> None:
+    path = tmp_path / "sequential.mcap"
+    _write_unindexed_mcap(path)
+    path.write_bytes(path.read_bytes()[:-37])
+
+    async def run() -> tuple[list[str], bool, bool, int]:
+        session = await RecordingSession.create(
+            (path,),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1_000_000,
+            loop=True,
+        )
+        try:
+            assert session._recordings is not None
+            return (
+                session.endpoint._server_info()["capabilities"],
+                session.supports_playback_controls,
+                session.loop,
+                len(list(session._recordings[0].read_message())),
+            )
+        finally:
+            await session.close()
+
+    capabilities, supports_controls, loop, messages = asyncio.run(run())
+    assert "playbackControl" not in capabilities
+    assert supports_controls is False
+    assert loop is False
+    assert messages == 2
+
+
+def test_recording_session_mixed_recovery_and_healthy_files_supports_seek(
+    tmp_path: Path,
+) -> None:
+    healthy = tmp_path / "healthy.mcap"
+    recovered = tmp_path / "recovered.mcap"
+    _write_mcap(healthy, "/healthy", 10, b"healthy")
+    _write_mcap(recovered, "/recovered", 20, b"recovered")
+    recovered.write_bytes(recovered.read_bytes()[:-37])
+
+    async def run() -> tuple[bool, int, bool]:
+        session = await RecordingSession.create(
+            (healthy, recovered),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1_000_000,
+            loop=False,
+        )
+        try:
+            assert session._recordings is not None
+            with _playback.open_playback_messages(
+                session.prepared,
+                recordings=session._recordings,
+            ) as messages:
+                message_count = sum(1 for _message in messages)
+            return (
+                session.supports_playback_controls,
+                message_count,
+                any(recording.is_recovered for recording in session._recordings),
+            )
+        finally:
+            await session.close()
+
+    supports_controls, messages, is_recovered = asyncio.run(run())
+    assert supports_controls is True
+    assert messages == 2
+    assert is_recovered is True
+
+
+def test_recording_session_healthy_file_removes_recovery_problem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "healthy.mcap"
+    _write_mcap(path, "/x", 1, b"a")
+
+    async def run() -> list[tuple[str, ...]]:
+        session = await RecordingSession.create(
+            (path,),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=1_000_000,
+            loop=False,
+        )
+        removals: list[tuple[str, ...]] = []
+
+        async def record_removal(status_ids: tuple[str, ...]) -> None:
+            removals.append(status_ids)
+
+        monkeypatch.setattr(session.endpoint, "remove_status", record_removal)
+        try:
+            result = session.endpoint._on_connect[-1](None)
+            assert result is not None
+            await result
+            return removals
+        finally:
+            await session.close()
+
+    assert asyncio.run(run()) == [("incomplete-mcap",)]
+
+
 def test_recording_session_closes_partial_recording_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -933,8 +1130,9 @@ def test_recording_session_closes_partial_recording_open(
     opened = real_open(first)
     calls = 0
 
-    def fail_second_open(_path: Path) -> McapFile:
+    def fail_second_open(_path: Path, *, recover: bool = False) -> McapFile:
         nonlocal calls
+        assert recover is True
         calls += 1
         if calls == 1:
             return opened
