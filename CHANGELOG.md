@@ -8,6 +8,54 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.25.0, mcap-codec-support 0.13.0, small-mcap 0.13.0, robo-ws-bridge 0.9.0
+
+Headline: `bridge serve` playback is now controlled directly from Foxglove,
+with shareable per-connection URLs, responsive seeks, reusable MCAP caches, and
+graceful playback of incomplete recordings.
+
+### pymcap-cli 0.25.0
+
+- `bridge serve` now uses Foxglove's native play/pause, seek, and playback-speed
+  controls. Every connection gets an independent playhead and cache, playback
+  state stays synchronized after seeks and reconnects, and closing Foxglove
+  releases that session.
+- Launcher links are shareable Foxglove connection URLs. They preserve ordered
+  multi-file selections and can select `none`, `compress`, `fast`, `low`, or
+  `decompress` transforms per connection without changing server defaults.
+- Seeks publish the requested state immediately and reuse open files, summaries,
+  and recently decompressed chunks instead of reopening and re-decoding the
+  recording on every jump.
+- Incomplete recordings can be played without modifying the source. The server
+  reconstructs available indexes in memory, ignores only a truncated tail, and
+  reports recovery, playback failures, and dropped-frame degradation in
+  Foxglove's Problems panel.
+
+### mcap-codec-support 0.13.0
+
+- Live JPEG-to-video transforms begin emitting frames after a minimal FFmpeg
+  probe instead of waiting for the default probe window, reducing startup
+  latency for Foxglove video playback.
+
+### small-mcap 0.13.0
+
+- New `McapFile` keeps one recording open across independent forward and reverse
+  iterators and caches its summary and recently decompressed chunks, making
+  repeated seeks substantially cheaper.
+- Opt-in incomplete-file recovery reconstructs indexes in memory, validates
+  recovered data, preserves complete on-disk message indexes, and leaves the
+  source untouched.
+
+### robo-ws-bridge 0.9.0
+
+- Servers can expose Foxglove-native playback control, including time ranges,
+  play/pause, seeks, speed changes, and synchronized playback state.
+- Session IDs and lifecycle-aware status messages let clients clear stale
+  visualization state and show or remove actionable items in Foxglove's
+  Problems panel.
+
+---
+
 ## pymcap-cli 0.24.0, small-mcap 0.12.0, robo-ws-bridge 0.8.0
 
 Headline: new lossless `add`, `sort`, and `decompress` commands complete
