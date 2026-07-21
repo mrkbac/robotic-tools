@@ -11,7 +11,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 from urllib.parse import parse_qs, urlsplit
 
 from robo_ws_bridge import (
@@ -41,7 +41,10 @@ from pymcap_cli.cmd.bridge._playback import (
     publish_playback_snapshot,
     run_playback,
 )
-from pymcap_cli.cmd.bridge._playback_transforms import create_playback_transform_plan
+from pymcap_cli.cmd.bridge._playback_transforms import (
+    create_playback_preset_config,
+    create_playback_transform_plan,
+)
 from pymcap_cli.cmd.bridge.serve import BridgeServerPlaybackSink
 from pymcap_cli.core.rosbag2_layout import find_bag_splits
 
@@ -54,6 +57,13 @@ _MAX_FILES_PER_SESSION = 32
 JsonValue: TypeAlias = (
     str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 )
+SessionPreset = Literal["none", "compress", "decompress", "fast", "low"]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingRequest:
+    files: tuple[Path, ...]
+    preset: SessionPreset | None
 
 
 class PlaybackRunner(Protocol):
@@ -203,15 +213,26 @@ _APP_JS = """\
     return params;
   };
 
-  const foxgloveUrl = (files) => {
+  const websocketUrl = (files) => {
     const websocket = new URL("/ws", window.location.href);
     websocket.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     websocket.search = query(files).toString();
+    return websocket;
+  };
+
+  const foxgloveUrl = (websocket) => {
     const foxglove = new URL("foxglove://open");
     foxglove.searchParams.set("ds", "foxglove-websocket");
-    foxglove.searchParams.set("ds.url", websocket.toString());
+    foxglove.searchParams.set("ds.url", websocket);
     return foxglove;
   };
+
+  const openFoxglove = (event) => {
+    event.preventDefault();
+    window.location.href = foxgloveUrl(event.currentTarget.href).toString();
+  };
+
+  open.addEventListener("click", openFoxglove);
 
   const updateOpenLink = () => {
     const files = selected();
@@ -221,7 +242,7 @@ _APP_JS = """\
       status.textContent = "No recording selected";
       return;
     }
-    open.href = foxgloveUrl(files).toString();
+    open.href = websocketUrl(files).toString();
     open.setAttribute("aria-disabled", "false");
     status.textContent = files.length === 1
       ? "1 recording selected"
@@ -253,7 +274,8 @@ _APP_JS = """\
         const path = document.createElement("a");
         path.className = "path";
         path.textContent = recording.path;
-        path.href = foxgloveUrl([recording.path]).toString();
+        path.href = websocketUrl([recording.path]).toString();
+        path.addEventListener("click", openFoxglove);
         const size = document.createElement("span");
         size.className = "size";
         size.textContent = formatSize(recording.sizeBytes);
@@ -714,12 +736,17 @@ class RecordingSessionManager:
         self._sessions: set[RecordingSession] = set()
         self._lock = asyncio.Lock()
 
-    async def create(self, files: tuple[Path, ...]) -> RecordingSession:
+    async def create(
+        self,
+        files: tuple[Path, ...],
+        *,
+        preset: SessionPreset | None = None,
+    ) -> RecordingSession:
         async with self._lock:
             session = await RecordingSession.create(
                 files,
                 message_filter=self.message_filter,
-                transform_config=self.transform_config,
+                transform_config=_session_transform_config(self.transform_config, preset),
                 speed=self.speed,
                 loop=self.loop,
             )
@@ -811,8 +838,8 @@ class RecordingLibraryServer:
             await websocket.close(code=1008, reason="Unknown WebSocket path")
             return
         try:
-            files = self._resolve_query(parsed.query)
-            session = await self.manager.create(files)
+            request = self._resolve_query(parsed.query)
+            session = await self.manager.create(request.files, preset=request.preset)
         except (OSError, PlaybackError, ValueError) as exc:
             await websocket.close(code=1008, reason=str(exc)[:120])
             return
@@ -849,9 +876,46 @@ class RecordingLibraryServer:
             return _json_response(400, {"error": str(exc)})
         return _json_response(404, {"error": "not found"})
 
-    def _resolve_query(self, query_string: str) -> tuple[Path, ...]:
+    def _resolve_query(self, query_string: str) -> RecordingRequest:
         query = parse_qs(query_string, keep_blank_values=True)
-        return self.library.resolve(query.get("file", []))
+        unknown = sorted(query.keys() - {"file", "preset"})
+        if unknown:
+            raise ValueError(f"Unknown WebSocket query parameter: {unknown[0]}")
+        return RecordingRequest(
+            files=self.library.resolve(query.get("file", [])),
+            preset=_parse_session_preset(query.get("preset", [])),
+        )
+
+
+def _parse_session_preset(values: list[str]) -> SessionPreset | None:
+    if not values:
+        return None
+    if len(values) > 1:
+        raise ValueError("preset may be provided at most once")
+    match values[0]:
+        case "none":
+            return "none"
+        case "compress":
+            return "compress"
+        case "decompress":
+            return "decompress"
+        case "fast":
+            return "fast"
+        case "low":
+            return "low"
+        case value:
+            raise ValueError(f"Unknown playback preset: {value}")
+
+
+def _session_transform_config(
+    default: PlaybackTransformConfig,
+    preset: SessionPreset | None,
+) -> PlaybackTransformConfig:
+    if preset is None:
+        return default
+    if preset == "none":
+        return None
+    return create_playback_preset_config(preset, adaptive_quality=True)
 
 
 def _response(status: int, content_type: str, body: str) -> Response:

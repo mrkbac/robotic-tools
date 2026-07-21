@@ -205,6 +205,21 @@ _PRESETS: dict[Preset, _PresetSpec] = {
 }
 
 
+def create_playback_preset_config(
+    preset: Preset,
+    *,
+    adaptive_quality: bool = False,
+) -> RoscompressConfig | RosdecompressConfig:
+    if preset == "decompress":
+        return RosdecompressConfig()
+    spec = _PRESETS[preset]
+    return RoscompressConfig(
+        image_format=spec.image_format or "video",
+        scale=spec.scale,
+        adaptive_quality=adaptive_quality,
+    )
+
+
 def apply_preset(
     preset: Preset | None,
     *,

@@ -940,11 +940,31 @@ Opening one file or a multi-file selection launches Foxglove Desktop through
 `foxglove://open`. Pass `--no-browser` for headless operation. Playback loops by
 default; pass `--no-loop` to play each connection once.
 
+The launcher's links contain the raw WebSocket URL. Clicking one opens Foxglove,
+while copying its address produces a connection URL that can be shared or pasted
+directly into Foxglove:
+
 Foxglove connects to `/ws` with one repeated `file` parameter per selected
 recording, for example:
 
 ```text
 ws://localhost:9090/ws?file=run-1.mcap&file=run-2.mcap
+```
+
+An optional `preset` overrides the server's transform configuration for that
+connection only. Without it, the server's CLI configuration remains the default:
+
+```text
+# Original messages, even when the server has a compression preset
+ws://localhost:9090/ws?file=run.mcap&preset=none
+
+# Full-resolution or reduced-bandwidth JIT compression
+wss://recordings.example/ws?file=run.mcap&preset=compress
+wss://recordings.example/ws?file=run.mcap&preset=fast
+wss://recordings.example/ws?file=run.mcap&preset=low
+
+# Decode roscompress messages for Foxglove
+ws://localhost:9090/ws?file=run.mcap&preset=decompress
 ```
 
 Files selected within one connection are merged chronologically. Every Foxglove

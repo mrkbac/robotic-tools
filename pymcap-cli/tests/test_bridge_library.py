@@ -22,8 +22,10 @@ from pymcap_cli.cmd.bridge._library import (
     RecordingLibrary,
     RecordingLibraryServer,
     RecordingSession,
+    _session_transform_config,
 )
 from pymcap_cli.cmd.bridge._playback import PlaybackClock
+from pymcap_cli.cmd.bridge._playback_transforms import RoscompressConfig, RosdecompressConfig
 from pymcap_cli.cmd.bridge.serve import _library_root
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from robo_ws_bridge import PlaybackCommand, PlaybackControlRequest, PlaybackState, PlaybackStatus
@@ -296,11 +298,13 @@ def test_library_ui_is_only_a_recording_launcher() -> None:
     assert "controllerUrl" not in _APP_JS
     assert "/api/control" not in _APP_JS
     assert "/api/session" not in _APP_JS
-    assert "window.location.href =" not in _APP_JS
     assert "window.location.assign" not in _APP_JS
     assert "setInterval" not in _APP_JS
-    assert "path.href = foxgloveUrl([recording.path]).toString()" in _APP_JS
-    assert "open.href = foxgloveUrl(files).toString()" in _APP_JS
+    assert "path.href = websocketUrl([recording.path]).toString()" in _APP_JS
+    assert "open.href = websocketUrl(files).toString()" in _APP_JS
+    assert 'path.addEventListener("click", openFoxglove)' in _APP_JS
+    assert 'open.addEventListener("click", openFoxglove)' in _APP_JS
+    assert "window.location.href = foxgloveUrl(event.currentTarget.href).toString()" in _APP_JS
     assert ".playback-control" not in _STYLE_CSS
 
 
@@ -308,6 +312,76 @@ def test_library_ui_builds_multi_recording_foxglove_links() -> None:
     assert 'for (const file of files) params.append("file", file)' in _APP_JS
     assert "document.querySelectorAll" in _APP_JS
     assert 'input[name="recording"]:checked' in _APP_JS
+
+
+@pytest.mark.parametrize(
+    "preset",
+    ["none", "compress", "decompress", "fast", "low"],
+)
+def test_recording_library_resolves_session_preset(tmp_path: Path, preset: str) -> None:
+    recording = tmp_path / "recording.mcap"
+    _write_mcap(recording, "/camera", 1, b"frame")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    request = server._resolve_query(f"file=recording.mcap&preset={preset}")
+
+    assert request.files == (recording,)
+    assert request.preset == preset
+
+
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        ("file=recording.mcap&preset=unknown", "preset"),
+        ("file=recording.mcap&preset=none&preset=fast", "at most once"),
+        ("file=recording.mcap&codec=h265", "Unknown"),
+    ],
+)
+def test_recording_library_rejects_invalid_session_options(
+    tmp_path: Path,
+    query: str,
+    message: str,
+) -> None:
+    _write_mcap(tmp_path / "recording.mcap", "/camera", 1, b"frame")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        server._resolve_query(query)
+
+
+def test_session_preset_overrides_server_transform_config() -> None:
+    server_default = RoscompressConfig(codec="h265")
+
+    assert _session_transform_config(server_default, None) is server_default
+    assert _session_transform_config(server_default, "none") is None
+    assert _session_transform_config(server_default, "decompress") == RosdecompressConfig()
+    assert _session_transform_config(server_default, "compress") == RoscompressConfig(
+        adaptive_quality=True
+    )
+    assert _session_transform_config(server_default, "fast") == RoscompressConfig(
+        adaptive_quality=True,
+        scale=960,
+    )
+    assert _session_transform_config(server_default, "low") == RoscompressConfig(
+        adaptive_quality=True,
+        scale=480,
+    )
 
 
 @pytest.mark.parametrize("path", ["/control", "/control.js", "/api/control", "/api/session"])
