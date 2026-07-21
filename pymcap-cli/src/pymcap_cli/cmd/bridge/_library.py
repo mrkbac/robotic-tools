@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
 _MAX_FILES_PER_SESSION = 32
 _PLAYBACK_STATUS_ID = "playback"
+_PLAYBACK_DEGRADED_STATUS_ID = "playback-degraded"
 JsonValue: TypeAlias = (
     str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 )
@@ -469,6 +470,7 @@ class RecordingSession:
         self.error: str | None = None
         self._snapshot_time_ns: int | None = None
         self._task: asyncio.Task[None] | None = None
+        self._has_degraded_status = False
         self._control_lock = asyncio.Lock()
         self.endpoint.on_playback_control(self.handle_playback_control)
         self.sink.on_timeline_started(self._handle_timeline_started)
@@ -732,6 +734,18 @@ class RecordingSession:
             )
             self.broadcast_playback_state()
         else:
+            if self.stats.dropped_messages:
+                count = self.stats.dropped_messages
+                unit = "frame" if count == 1 else "frames"
+                await self.endpoint.send_status(
+                    StatusLevel.WARNING,
+                    f"Playback dropped {count:,} {unit} to stay synchronized",
+                    status_id=_PLAYBACK_DEGRADED_STATUS_ID,
+                )
+                self._has_degraded_status = True
+            elif self._has_degraded_status:
+                await self.endpoint.remove_status((_PLAYBACK_DEGRADED_STATUS_ID,))
+                self._has_degraded_status = False
             self.broadcast_playback_state()
 
 

@@ -778,6 +778,7 @@ def test_recording_session_reports_failure_and_clears_it_after_recovery(
     _write_mcap(tmp_path / "rec.mcap", "/x", 1, b"a")
 
     should_fail = True
+    dropped_messages = 3
 
     async def playback_runner(
         _prepared: PreparedPlayback,
@@ -796,11 +797,12 @@ def test_recording_session_reports_failure_and_clears_it_after_recovery(
         if should_fail:
             raise RuntimeError("decoder failed")
         assert stats is not None
+        stats.dropped_messages = dropped_messages
         stats.state = "Finished"
         return stats
 
     async def run() -> None:
-        nonlocal should_fail
+        nonlocal dropped_messages, should_fail
         session = await RecordingSession.create(
             (tmp_path / "rec.mcap",),
             message_filter=MessageFilterOptions.from_args(),
@@ -845,6 +847,18 @@ def test_recording_session_reports_failure_and_clears_it_after_recovery(
 
             assert session.error is None
             assert removals == [("playback",)]
+            assert statuses[-1] == (
+                StatusLevel.WARNING,
+                "Playback dropped 3 frames to stay synchronized",
+                "playback-degraded",
+            )
+            assert states[-1].status is PlaybackStatus.ENDED
+
+            dropped_messages = 0
+            session.play()
+            await session.wait()
+
+            assert removals == [("playback",), ("playback-degraded",)]
             assert states[-1].status is PlaybackStatus.ENDED
         finally:
             await session.close()
