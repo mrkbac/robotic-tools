@@ -1,5 +1,6 @@
 """Type definitions for WebSocket protocol messages."""
 
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Literal, TypedDict
 
@@ -49,8 +50,10 @@ class BinaryOpCodes(IntEnum):
     TIME = 0x02
     SERVICE_CALL_RESPONSE = 0x03
     FETCH_ASSET_RESPONSE = 0x04
+    PLAYBACK_STATE = 0x05
     CLIENT_MESSAGE_DATA = 0x01  # Same as MESSAGE_DATA
     SERVICE_CALL_REQUEST = 0x02  # Same as TIME
+    PLAYBACK_CONTROL_REQUEST = 0x03  # Same as SERVICE_CALL_RESPONSE
 
 
 class StatusLevel(IntEnum):
@@ -71,6 +74,44 @@ class ServerCapabilities(Enum):
     SERVICES = "services"
     CONNECTION_GRAPH = "connectionGraph"
     ASSETS = "assets"
+    PLAYBACK_CONTROL = "playbackControl"
+
+
+class PlaybackCommand(IntEnum):
+    """Playback commands sent by a Foxglove client."""
+
+    PLAY = 0
+    PAUSE = 1
+
+
+class PlaybackStatus(IntEnum):
+    """Current status of server-side playback."""
+
+    PLAYING = 0
+    PAUSED = 1
+    BUFFERING = 2
+    ENDED = 3
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackControlRequest:
+    """A decoded client request to control server-side playback."""
+
+    playback_command: PlaybackCommand
+    playback_speed: float
+    seek_time: int | None
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackState:
+    """Playback state broadcast by the server."""
+
+    status: PlaybackStatus
+    current_time: int
+    playback_speed: float
+    did_seek: bool
+    request_id: str | None = None
 
 
 # Type definitions for JSON messages
@@ -87,6 +128,15 @@ class ServerInfoMessage(TypedDict):
     supportedEncodings: NotRequired[list[str]]
     metadata: NotRequired[dict[str, str]]
     sessionId: NotRequired[str]
+    dataStartTime: NotRequired["SerializedTimestamp"]
+    dataEndTime: NotRequired["SerializedTimestamp"]
+
+
+class SerializedTimestamp(TypedDict):
+    """JSON timestamp used for playback time ranges."""
+
+    sec: int
+    nsec: int
 
 
 class StatusMessage(TypedDict):

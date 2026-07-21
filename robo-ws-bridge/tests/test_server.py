@@ -8,9 +8,16 @@ import struct
 from contextlib import suppress
 
 import pytest
-from robo_ws_bridge import WebSocketBridgeEndpoint, WebSocketBridgeServer
+from robo_ws_bridge import (
+    PlaybackCommand,
+    PlaybackControlRequest,
+    PlaybackState,
+    PlaybackStatus,
+    WebSocketBridgeEndpoint,
+    WebSocketBridgeServer,
+)
 from robo_ws_bridge.server import Channel, ConnectionOutbox
-from robo_ws_bridge.ws_types import BinaryOpCodes
+from robo_ws_bridge.ws_types import BinaryOpCodes, ServerInfoMessage
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -43,6 +50,146 @@ def test_publish_time_broadcasts_time_frame() -> None:
 
     frame = asyncio.run(run())
     assert frame == struct.pack("<BQ", int(BinaryOpCodes.TIME), 123456789)
+
+
+def test_playback_control_round_trips_over_sdk_subprotocol() -> None:
+    port = _free_port()
+    seen_requests: list[PlaybackControlRequest] = []
+    start_time = 12_345_678_901
+    end_time = 23_456_789_012
+
+    async def run() -> tuple[ServerInfoMessage, bytes, str | None]:
+        server = WebSocketBridgeServer(
+            host="127.0.0.1",
+            port=port,
+            session_id="recording-1",
+            playback_time_range=(start_time, end_time),
+        )
+
+        async def control(request: PlaybackControlRequest) -> PlaybackState:
+            seen_requests.append(request)
+            return PlaybackState(
+                status=PlaybackStatus.PLAYING,
+                current_time=request.seek_time if request.seek_time is not None else start_time,
+                playback_speed=request.playback_speed,
+                did_seek=request.seek_time is not None,
+            )
+
+        server.on_playback_control(control)
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{port}", subprotocols=["foxglove.sdk.v1"]
+            ) as websocket:
+                server_info: ServerInfoMessage = json.loads(await websocket.recv())
+                request_id = b"request-7"
+                request = (
+                    struct.pack(
+                        "<BBfBQI",
+                        int(BinaryOpCodes.PLAYBACK_CONTROL_REQUEST),
+                        int(PlaybackCommand.PLAY),
+                        1.5,
+                        1,
+                        17_000_000_000,
+                        len(request_id),
+                    )
+                    + request_id
+                )
+                await websocket.send(request)
+                response = await websocket.recv()
+                assert isinstance(response, bytes)
+                return server_info, response, websocket.subprotocol
+        finally:
+            await server.stop()
+
+    server_info, response, subprotocol = asyncio.run(run())
+
+    assert subprotocol == "foxglove.sdk.v1"
+    assert server_info["capabilities"] == ["playbackControl"]
+    assert server_info["sessionId"] == "recording-1"
+    assert server_info["dataStartTime"] == {"sec": 12, "nsec": 345_678_901}
+    assert server_info["dataEndTime"] == {"sec": 23, "nsec": 456_789_012}
+    assert seen_requests == [
+        PlaybackControlRequest(
+            playback_command=PlaybackCommand.PLAY,
+            playback_speed=1.5,
+            seek_time=17_000_000_000,
+            request_id="request-7",
+        )
+    ]
+    assert response == (
+        struct.pack(
+            "<BBQfBI",
+            int(BinaryOpCodes.PLAYBACK_STATE),
+            int(PlaybackStatus.PLAYING),
+            17_000_000_000,
+            1.5,
+            1,
+            len(b"request-7"),
+        )
+        + b"request-7"
+    )
+
+
+def test_playback_control_state_is_broadcast_to_all_clients() -> None:
+    port = _free_port()
+
+    async def run() -> tuple[bytes, bytes]:
+        server = WebSocketBridgeServer(
+            host="127.0.0.1",
+            port=port,
+            playback_time_range=(100, 200),
+        )
+        server.on_playback_control(
+            lambda request: PlaybackState(
+                status=PlaybackStatus.PAUSED,
+                current_time=150,
+                playback_speed=request.playback_speed,
+                did_seek=False,
+            )
+        )
+        await server.start()
+        first = await connect(f"ws://127.0.0.1:{port}", subprotocols=["foxglove.sdk.v1"])
+        second = await connect(f"ws://127.0.0.1:{port}", subprotocols=["foxglove.sdk.v1"])
+        try:
+            await first.recv()
+            await second.recv()
+            request_id = b"pause"
+            await first.send(
+                struct.pack(
+                    "<BBfBQI",
+                    int(BinaryOpCodes.PLAYBACK_CONTROL_REQUEST),
+                    int(PlaybackCommand.PAUSE),
+                    0.5,
+                    0,
+                    0,
+                    len(request_id),
+                )
+                + request_id
+            )
+            first_response, second_response = await asyncio.gather(first.recv(), second.recv())
+            assert isinstance(first_response, bytes)
+            assert isinstance(second_response, bytes)
+            return first_response, second_response
+        finally:
+            await first.close()
+            await second.close()
+            await server.stop()
+
+    first_response, second_response = asyncio.run(run())
+    assert first_response == second_response
+    assert first_response[0] == int(BinaryOpCodes.PLAYBACK_STATE)
+
+
+@pytest.mark.parametrize("time_range", [(-1, 10), (11, 10)])
+def test_playback_control_rejects_invalid_time_range(time_range: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match="playback_time_range"):
+        WebSocketBridgeEndpoint(playback_time_range=time_range)
+
+
+def test_playback_control_capability_requires_time_range() -> None:
+    with pytest.raises(ValueError, match="playbackControl requires playback_time_range"):
+        WebSocketBridgeEndpoint(capabilities=["playbackControl"])
 
 
 def test_endpoint_can_share_listener_and_isolates_channels_by_path() -> None:

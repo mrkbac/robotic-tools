@@ -8,7 +8,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, cast, overload
 
 from websockets.asyncio.server import Server, ServerConnection, serve
@@ -21,6 +21,11 @@ from .ws_types import (
     ChannelInfo,
     JsonMessage,
     JsonOpCodes,
+    PlaybackCommand,
+    PlaybackControlRequest,
+    PlaybackState,
+    SerializedTimestamp,
+    ServerCapabilities,
     ServerInfoMessage,
     StatusMessage,
     SubscribeMessage,
@@ -73,6 +78,10 @@ OfferResult = Literal["queued", "replaced", "overflow"]
 _OUTBOX_SOFT_LIMIT_BYTES = 256 << 10
 _OUTBOX_HARD_LIMIT_BYTES = 1 << 20
 _TIME_OUTBOX_KEY = -1
+_PLAYBACK_STATE_OUTBOX_KEY = -2
+_PLAYBACK_CONTROL_HEADER = struct.Struct("<BfBQI")
+_PLAYBACK_STATE_HEADER = struct.Struct("<BBQfBI")
+_MAX_TIMESTAMP_NS = ((1 << 32) - 1) * 1_000_000_000 + 999_999_999
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +256,9 @@ JsonHandler = Callable[[ConnectionState, JsonDict], Awaitable[None] | None]
 BinaryHandler = Callable[[ConnectionState, bytes], Awaitable[None] | None]
 ConnectionHandler = Callable[[ConnectionState], Awaitable[None] | None]
 SubscriptionHandler = Callable[[ConnectionState, int, int], Awaitable[None] | None]
+PlaybackControlHandler = Callable[
+    [PlaybackControlRequest], Awaitable[PlaybackState] | PlaybackState
+]
 
 
 def _ensure_awaitable(result: Awaitable[None] | None) -> Awaitable[None]:
@@ -265,11 +277,21 @@ class WebSocketBridgeEndpoint:
         capabilities: Iterable[str] = (),
         metadata: dict[str, str] | None = None,
         supported_encodings: Iterable[str] | None = None,
+        session_id: str | None = None,
+        playback_time_range: tuple[int, int] | None = None,
     ) -> None:
         self._name = name
         self._capabilities = list(capabilities)
         self._metadata = dict(metadata or {})
         self._supported_encodings = list(supported_encodings or [])
+        self._session_id = session_id
+        self._playback_time_range = self._validate_playback_time_range(playback_time_range)
+        playback_capability = ServerCapabilities.PLAYBACK_CONTROL.value
+        if self._playback_time_range is not None:
+            if playback_capability not in self._capabilities:
+                self._capabilities.append(playback_capability)
+        elif playback_capability in self._capabilities:
+            raise ValueError("playbackControl requires playback_time_range")
 
         self._channels: dict[int, Channel] = {}
         self._connections: dict[ServerConnection, ConnectionState] = {}
@@ -280,9 +302,24 @@ class WebSocketBridgeEndpoint:
         self._on_disconnect: list[ConnectionHandler] = []
         self._on_subscribe: list[SubscriptionHandler] = []
         self._on_unsubscribe: list[SubscriptionHandler] = []
+        self._playback_control_handler: PlaybackControlHandler | None = None
 
         self._state_lock = asyncio.Lock()
         self._disconnected_dropped_frames = 0
+
+    @staticmethod
+    def _validate_playback_time_range(
+        playback_time_range: tuple[int, int] | None,
+    ) -> tuple[int, int] | None:
+        if playback_time_range is None:
+            return None
+        start_time, end_time = playback_time_range
+        if not 0 <= start_time <= end_time <= _MAX_TIMESTAMP_NS:
+            raise ValueError(
+                "playback_time_range must be ordered, non-negative, and representable as "
+                "Foxglove timestamps"
+            )
+        return playback_time_range
 
     async def close_connections(self) -> None:
         """Close every client currently attached to this endpoint."""
@@ -353,6 +390,10 @@ class WebSocketBridgeEndpoint:
     def on_unsubscribe(self, handler: SubscriptionHandler) -> None:
         """Attach a handler that runs when a client unsubscribes from a channel."""
         self._on_unsubscribe.append(handler)
+
+    def on_playback_control(self, handler: PlaybackControlHandler) -> None:
+        """Set the handler for play, pause, speed, and seek requests."""
+        self._playback_control_handler = handler
 
     @property
     def connections(self) -> list[ConnectionState]:
@@ -436,6 +477,23 @@ class WebSocketBridgeEndpoint:
         frame = struct.pack("<BQ", int(BinaryOpCodes.TIME), timestamp_ns)
         for state in list(self._connections.values()):
             state.outbox.offer(_TIME_OUTBOX_KEY, frame, delivery="latest")
+
+    def broadcast_playback_state(self, playback_state: PlaybackState) -> None:
+        """Queue a playback-state update for every connected client."""
+        frame = self._encode_playback_state(playback_state)
+        for state in list(self._connections.values()):
+            result = state.outbox.offer(
+                _PLAYBACK_STATE_OUTBOX_KEY,
+                frame,
+                delivery="reliable",
+            )
+            if result == "overflow" and state.close_task is None:
+                state.close_task = asyncio.create_task(
+                    state.websocket.close(
+                        code=1013,
+                        reason="Playback control queue overflow",
+                    )
+                )
 
     def clear_pending_frames(self) -> None:
         """Drop every connection's queued frames, e.g. before a hard seek.
@@ -584,7 +642,20 @@ class WebSocketBridgeEndpoint:
             message["supportedEncodings"] = list(self._supported_encodings)
         if self._metadata:
             message["metadata"] = dict(self._metadata)
+        if self._session_id is not None:
+            message["sessionId"] = self._session_id
+        if self._playback_time_range is not None:
+            start_time, end_time = self._playback_time_range
+            message["dataStartTime"] = self._serialize_timestamp(start_time)
+            message["dataEndTime"] = self._serialize_timestamp(end_time)
         await state.websocket.send(json.dumps(message))
+
+    @staticmethod
+    def _serialize_timestamp(timestamp_ns: int) -> SerializedTimestamp:
+        return {
+            "sec": timestamp_ns // 1_000_000_000,
+            "nsec": timestamp_ns % 1_000_000_000,
+        }
 
     async def _handle_json_frame(self, state: ConnectionState, payload: str) -> None:
         try:
@@ -612,9 +683,84 @@ class WebSocketBridgeEndpoint:
         if not payload:
             return
         opcode = payload[0]
+        if opcode == int(BinaryOpCodes.PLAYBACK_CONTROL_REQUEST):
+            await self._handle_playback_control_request(state, payload)
         handlers = self._binary_handlers.get(opcode, [])
         for handler in handlers:
             await _ensure_awaitable(handler(state, payload))
+
+    async def _handle_playback_control_request(
+        self,
+        state: ConnectionState,
+        payload: bytes,
+    ) -> None:
+        if self._playback_time_range is None:
+            await self._send_error(state, "Server does not support playback control")
+            return
+        if self._playback_control_handler is None:
+            await self._send_error(state, "Server has no playback control handler")
+            return
+        try:
+            request = self._decode_playback_control_request(payload)
+        except (UnicodeDecodeError, ValueError):
+            Logger.warning("Invalid playback control request")
+            await state.websocket.close(code=1002, reason="Invalid playback control request")
+            return
+
+        result = self._playback_control_handler(request)
+        if isinstance(result, PlaybackState):
+            playback_state = result
+        else:
+            playback_state = await result
+        self.broadcast_playback_state(replace(playback_state, request_id=request.request_id))
+
+    @staticmethod
+    def _decode_playback_control_request(payload: bytes) -> PlaybackControlRequest:
+        if len(payload) < 1 + _PLAYBACK_CONTROL_HEADER.size:
+            raise ValueError("playback control request is too short")
+        command_value, playback_speed, had_seek, seek_time, request_id_length = (
+            _PLAYBACK_CONTROL_HEADER.unpack_from(payload, 1)
+        )
+        request_id_start = 1 + _PLAYBACK_CONTROL_HEADER.size
+        request_id_end = request_id_start + request_id_length
+        if len(payload) < request_id_end:
+            raise ValueError("playback control request ID is truncated")
+        try:
+            playback_command = PlaybackCommand(command_value)
+        except ValueError as error:
+            raise ValueError("invalid playback command") from error
+        request_id = payload[request_id_start:request_id_end].decode("utf-8")
+        return PlaybackControlRequest(
+            playback_command=playback_command,
+            playback_speed=playback_speed,
+            seek_time=seek_time if had_seek else None,
+            request_id=request_id,
+        )
+
+    @staticmethod
+    def _encode_playback_state(playback_state: PlaybackState) -> bytes:
+        request_id = playback_state.request_id.encode("utf-8") if playback_state.request_id else b""
+        try:
+            header = _PLAYBACK_STATE_HEADER.pack(
+                int(BinaryOpCodes.PLAYBACK_STATE),
+                int(playback_state.status),
+                playback_state.current_time,
+                playback_state.playback_speed,
+                playback_state.did_seek,
+                len(request_id),
+            )
+        except struct.error as error:
+            raise ValueError("playback state contains an out-of-range value") from error
+        return header + request_id
+
+    @staticmethod
+    async def _send_error(state: ConnectionState, message: str) -> None:
+        payload: StatusMessage = {
+            "op": JsonOpCodes.STATUS.value,
+            "level": 2,
+            "message": message,
+        }
+        await state.websocket.send(json.dumps(payload))
 
     async def _apply_subscriptions(self, state: ConnectionState, message: SubscribeMessage) -> None:
         subscriptions = message["subscriptions"]
@@ -667,10 +813,12 @@ class WebSocketBridgeServer(WebSocketBridgeEndpoint):
         host: str = "127.0.0.1",
         port: int = 8765,
         name: str = "websocket-bridge",
-        subprotocol: str = "foxglove.websocket.v1",
+        subprotocol: str | None = None,
         capabilities: Iterable[str] = (),
         metadata: dict[str, str] | None = None,
         supported_encodings: Iterable[str] | None = None,
+        session_id: str | None = None,
+        playback_time_range: tuple[int, int] | None = None,
         max_message_size: int | None = None,
     ) -> None:
         super().__init__(
@@ -678,10 +826,16 @@ class WebSocketBridgeServer(WebSocketBridgeEndpoint):
             capabilities=capabilities,
             metadata=metadata,
             supported_encodings=supported_encodings,
+            session_id=session_id,
+            playback_time_range=playback_time_range,
         )
         self._host = host
         self._port = port
-        self._subprotocol = subprotocol
+        self._subprotocols = (
+            (subprotocol,)
+            if subprotocol is not None
+            else ("foxglove.sdk.v1", "foxglove.websocket.v1")
+        )
         self._max_message_size = max_message_size
         self._server: Server | None = None
 
@@ -696,7 +850,7 @@ class WebSocketBridgeServer(WebSocketBridgeEndpoint):
             self.handle_connection,
             self._host,
             self._port,
-            subprotocols=[Subprotocol(self._subprotocol)],
+            subprotocols=[Subprotocol(value) for value in self._subprotocols],
             max_size=self._max_message_size,
         )
 

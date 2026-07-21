@@ -526,7 +526,7 @@ def serve(
                     console.print(f"  [bold]{url}[/]")
                 if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
                     console.print(
-                        "[yellow]Warning:[/] playback controls have no authentication; "
+                        "[yellow]Warning:[/] Foxglove playback sessions have no authentication; "
                         "protect remote access with a trusted network or reverse proxy."
                     )
                 if not no_browser:
@@ -540,26 +540,57 @@ def serve(
             return 0
         prepared = prepare_playback(files, message_filter)
         transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
-        sink = BridgeServerPlaybackSink(_bind_host(resolved_host), port)
+        output_channels = prepared.channels if transform_plan is None else transform_plan.channels
+        timeline_start_ns = max(
+            prepared.recording_start_ns,
+            prepared.resolved_filter.start_time_ns,
+        )
+        timeline_end_ns = min(
+            prepared.recording_end_ns,
+            prepared.resolved_filter.end_time_ns,
+        )
+        endpoint = WebSocketBridgeServer(
+            host=_bind_host(resolved_host),
+            port=port,
+            name="pymcap-cli bridge serve",
+            capabilities=["time"],
+            supported_encodings=sorted({channel.message_encoding for channel in output_channels}),
+            metadata={"source": "pymcap-cli"},
+            playback_time_range=(timeline_start_ns, timeline_end_ns),
+        )
+        sink = BridgeServerPlaybackSink(
+            _bind_host(resolved_host),
+            port,
+            endpoint=endpoint,
+        )
+        from pymcap_cli.cmd.bridge._library import RecordingSession  # noqa: PLC0415
+
+        session = RecordingSession(
+            tuple(Path(file) for file in files),
+            prepared,
+            transform_plan,
+            endpoint,
+            sink,
+            speed=speed,
+            loop=loop,
+            show_status=progress and console.is_terminal,
+            playback_runner=run_playback,
+        )
 
         async def run_direct() -> PlaybackStats:
-            output_channels = (
-                prepared.channels if transform_plan is None else transform_plan.channels
-            )
             await sink.start(output_channels)
+            await endpoint.start()
             foxglove_urls = [_foxglove_url(h, port) for h in _display_hosts(resolved_host)]
             for foxglove_url in foxglove_urls:
                 console.print(f"[dim]Open in Foxglove:[/] {foxglove_url}")
             if not no_browser:
                 _launch_url(foxglove_urls[0])
-            return await run_playback(
-                prepared,
-                sink,
-                speed=speed,
-                loop=loop,
-                show_status=progress and console.is_terminal,
-                transform_plan=transform_plan,
-            )
+            session.play()
+            try:
+                return await session.wait()
+            finally:
+                await session.close()
+                await endpoint.stop()
 
         stats = asyncio.run(run_direct())
     except ImportError as exc:

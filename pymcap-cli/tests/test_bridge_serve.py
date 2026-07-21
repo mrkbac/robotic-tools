@@ -9,11 +9,32 @@ from urllib.parse import parse_qs, urlsplit
 
 import pymcap_cli.cmd.bridge.serve as serve_module
 from pymcap_cli.cmd.bridge._playback import PlaybackChannel, PlaybackStats
+from robo_ws_bridge import WebSocketBridgeEndpoint
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedFilter:
+    start_time_ns: int = 1
+    end_time_ns: int = 2
 
 
 @dataclass(frozen=True, slots=True)
 class _Prepared:
     channels: tuple[PlaybackChannel, ...] = ()
+    recording_start_ns: int = 1
+    recording_end_ns: int = 2
+    resolved_filter: _ResolvedFilter = _ResolvedFilter()
+
+
+class _Endpoint(WebSocketBridgeEndpoint):
+    def __init__(self) -> None:
+        super().__init__(capabilities=["time"], playback_time_range=(1, 2))
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
 
 
 class _Sink:
@@ -22,6 +43,15 @@ class _Sink:
 
     async def start(self, _channels: tuple[PlaybackChannel, ...]) -> None:
         self.is_started = True
+
+
+def _patch_direct_transport(monkeypatch, sink: _Sink) -> None:
+    monkeypatch.setattr(serve_module, "WebSocketBridgeServer", lambda **_kwargs: _Endpoint())
+    monkeypatch.setattr(
+        serve_module,
+        "BridgeServerPlaybackSink",
+        lambda *_args, **_kwargs: sink,
+    )
 
 
 def test_foxglove_url_targets_direct_desktop_app() -> None:
@@ -60,7 +90,7 @@ def test_serve_enables_adaptive_quality_for_roscompress_video(
     )
     monkeypatch.setattr(serve_module, "prepare_playback", lambda *_args: _Prepared())
     monkeypatch.setattr(serve_module, "create_playback_transform_plan", lambda *_args: None)
-    monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", lambda *_args: sink)
+    _patch_direct_transport(monkeypatch, sink)
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", lambda _url: None)
 
@@ -105,7 +135,7 @@ def test_serve_fast_and_low_presets_scale_video(monkeypatch) -> None:
     )
     monkeypatch.setattr(serve_module, "prepare_playback", lambda *_args: _Prepared())
     monkeypatch.setattr(serve_module, "create_playback_transform_plan", lambda *_args: None)
-    monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", lambda *_args: sink)
+    _patch_direct_transport(monkeypatch, sink)
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", lambda _url: None)
 
@@ -156,7 +186,7 @@ def test_serve_direct_file_launches_foxglove_unless_disabled(
         "create_playback_transform_plan",
         lambda *_args: None,
     )
-    monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", lambda *_args: sink)
+    _patch_direct_transport(monkeypatch, sink)
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", launched.append)
 
@@ -226,7 +256,7 @@ def test_serve_direct_file_always_prints_foxglove_link(monkeypatch, capsys) -> N
     monkeypatch.setattr(
         serve_module, "create_playback_transform_plan", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", lambda *_args: sink)
+    _patch_direct_transport(monkeypatch, sink)
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", lambda _url: None)
 
@@ -257,10 +287,18 @@ def test_serve_empty_host_binds_all_and_lists_reachable_urls(monkeypatch, capsys
         return PlaybackStats()
 
     sink = _Sink()
-    sink_args: list[tuple[object, ...]] = []
+    sink_args: list[tuple[str, int]] = []
 
-    def make_sink(*args: object) -> _Sink:
-        sink_args.append(args)
+    def make_sink(
+        host: str,
+        port: int,
+        *,
+        endpoint: WebSocketBridgeEndpoint | None = None,
+        url: str | None = None,
+    ) -> _Sink:
+        sink_args.append((host, port))
+        assert endpoint is not None
+        assert url is None
         return sink
 
     monkeypatch.setattr(serve_module, "resolve_playback_transform_config", lambda **_kw: None)
@@ -268,6 +306,7 @@ def test_serve_empty_host_binds_all_and_lists_reachable_urls(monkeypatch, capsys
     monkeypatch.setattr(
         serve_module, "create_playback_transform_plan", lambda *_args, **_kwargs: None
     )
+    monkeypatch.setattr(serve_module, "WebSocketBridgeServer", lambda **_kwargs: _Endpoint())
     monkeypatch.setattr(serve_module, "BridgeServerPlaybackSink", make_sink)
     monkeypatch.setattr(serve_module, "run_playback", run_playback)
     monkeypatch.setattr(serve_module, "_launch_url", lambda _url: None)

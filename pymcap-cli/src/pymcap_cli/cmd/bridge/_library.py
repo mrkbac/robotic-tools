@@ -10,10 +10,19 @@ from contextlib import suppress
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 from urllib.parse import parse_qs, urlsplit
 
-from robo_ws_bridge import WebSocketBridgeEndpoint, install_invalid_handshake_log_filter
+from robo_ws_bridge import (
+    PlaybackCommand,
+    PlaybackControlRequest,
+    PlaybackStatus,
+    WebSocketBridgeEndpoint,
+    install_invalid_handshake_log_filter,
+)
+from robo_ws_bridge import (
+    PlaybackState as FoxglovePlaybackState,
+)
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
@@ -22,7 +31,6 @@ from websockets.typing import Subprotocol
 from pymcap_cli.cmd.bridge._playback import (
     PlaybackController,
     PlaybackError,
-    PlaybackState,
     PlaybackStats,
     PreparedPlayback,
     prepare_playback,
@@ -33,15 +41,31 @@ from pymcap_cli.cmd.bridge.serve import BridgeServerPlaybackSink
 from pymcap_cli.core.rosbag2_layout import find_bag_splits
 
 if TYPE_CHECKING:
-    from pymcap_cli.cmd.bridge._playback import PlaybackTransformPlan
+    from pymcap_cli.cmd.bridge._playback import PlaybackSink, PlaybackTransformPlan
     from pymcap_cli.cmd.bridge._playback_transforms import PlaybackTransformConfig
     from pymcap_cli.core.message_filter import MessageFilterOptions
 
 _MAX_FILES_PER_SESSION = 32
-_SESSION_IDLE_TIMEOUT_SECONDS = 30.0
 JsonValue: TypeAlias = (
     str | int | float | bool | None | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 )
+
+
+class PlaybackRunner(Protocol):
+    async def __call__(
+        self,
+        prepared: PreparedPlayback,
+        sink: PlaybackSink,
+        *,
+        speed: float,
+        loop: bool,
+        show_status: bool,
+        transform_plan: PlaybackTransformPlan | None = None,
+        controller: PlaybackController | None = None,
+        stats: PlaybackStats | None = None,
+        start_time_ns: int | None = None,
+    ) -> PlaybackStats: ...
+
 
 _INDEX_HTML = """\
 <!doctype html>
@@ -56,62 +80,14 @@ _INDEX_HTML = """\
 <body>
   <main>
     <h1>MCAP recordings</h1>
-    <p class="muted">Select one or more files. Selected recordings are merged by log time.</p>
+    <p class="muted">Open one recording, or select several to merge them by log time.</p>
     <div class="toolbar">
-      <button id="open">Open in Foxglove</button>
-      <button id="play-pause">Play</button>
-      <label class="playback-control">Speed x
-        <input id="speed" type="number" min="0.1" step="0.25" value="1">
-      </label>
-      <label class="playback-control"><input id="loop" type="checkbox" checked> Loop</label>
+      <a id="open" class="button" aria-disabled="true">Open selected in Foxglove</a>
       <span id="status" class="muted">No recording selected</span>
     </div>
     <div id="recordings" class="recordings"></div>
-    <section id="sessions">
-      <h2>Active sessions</h2>
-      <div id="active-sessions"></div>
-    </section>
   </main>
   <script src="/app.js"></script>
-</body>
-</html>
-"""
-
-_CONTROL_HTML = """\
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>MCAP playback</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <main class="controller">
-    <h1>MCAP playback</h1>
-    <div id="files" class="selected-files"></div>
-    <div class="toolbar">
-      <button id="foxglove">Open Foxglove</button>
-      <button id="play-pause">Play</button>
-      <label class="playback-control">Speed x
-        <input id="speed" type="number" min="0.1" step="0.25" value="1">
-      </label>
-      <button class="speed-preset" data-speed="1">1x</button>
-      <button class="speed-preset" data-speed="5">5x</button>
-      <button class="speed-preset" data-speed="10">10x</button>
-      <label class="playback-control"><input id="loop" type="checkbox" checked> Loop</label>
-    </div>
-    <div class="timeline">
-      <input id="seek" type="range" min="0" max="0" value="0" step="0.001">
-      <div class="timeline-labels">
-        <span id="position">0:00</span>
-        <span id="duration">0:00</span>
-      </div>
-    </div>
-    <p id="status" class="muted">Connecting…</p>
-  </main>
-  <script src="/control.js"></script>
 </body>
 </html>
 """
@@ -155,16 +131,18 @@ h1 { margin: 0; }
   padding: 1rem 0;
   background: var(--bg);
 }
-button {
+.button {
+  display: inline-block;
   padding: .45rem .75rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--card);
   color: var(--fg);
   cursor: pointer;
+  text-decoration: none;
 }
-button:hover { border-color: var(--accent); }
-button:disabled { opacity: .45; cursor: default; }
+.button:hover { border-color: var(--accent); }
+.button[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 #status { margin-left: .5rem; }
 .recordings { display: grid; gap: .4rem; }
 .recording {
@@ -185,60 +163,13 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .path:hover { color: var(--accent); text-decoration: underline; }
 .size { color: var(--muted); white-space: nowrap; }
-.controller { max-width: 460px; }
-.controller h1 { font-size: 1.35rem; }
-.selected-files {
-  margin-top: .6rem;
-  color: var(--muted);
-  font: 12px/1.5 ui-monospace, monospace;
-  overflow-wrap: anywhere;
-}
-.timeline { margin-top: .5rem; }
-.timeline input { width: 100%; }
-.timeline-labels {
-  display: flex;
-  justify-content: space-between;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.playback-control { display: inline-flex; gap: .35rem; align-items: center; }
-#speed { width: 4.5rem; }
-#play-pause { min-width: 5rem; text-align: center; }
-.speed-preset.active { border-color: var(--accent); color: var(--accent); }
-#sessions { margin-top: 2rem; }
-#sessions h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
-#active-sessions { display: grid; gap: .4rem; }
-.session {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: .75rem;
-  align-items: center;
-  padding: .6rem .8rem;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--card);
-}
-.session .files {
-  color: var(--fg);
-  font: 13px/1.4 ui-monospace, monospace;
-  overflow-wrap: anywhere;
-  text-decoration: none;
-}
-.session .files:hover { color: var(--accent); text-decoration: underline; }
-.session .meta { color: var(--muted); white-space: nowrap; }
 """
 
 _APP_JS = """\
 (() => {
   const list = document.getElementById("recordings");
-  const activeSessions = document.getElementById("active-sessions");
   const status = document.getElementById("status");
   const open = document.getElementById("open");
-  const playPause = document.getElementById("play-pause");
-  const speed = document.getElementById("speed");
-  const loop = document.getElementById("loop");
-  const controls = [open, playPause, speed, loop];
-  let speedChangeTimer = null;
 
   const selected = () =>
     [...document.querySelectorAll('input[name="recording"]:checked')].map((item) => item.value);
@@ -259,30 +190,19 @@ _APP_JS = """\
     return foxglove;
   };
 
-  const controllerUrl = (files) => {
-    const controller = new URL("/control", window.location.href);
-    controller.search = query(files).toString();
-    return controller;
-  };
-
-  const openSession = (files) => {
-    // Launch the Foxglove desktop deep link, then move this tab to the
-    // in-page controller — one click does both. A hidden iframe dispatches
-    // the foxglove:// handler without consuming the page navigation, and a
-    // short delay lets the OS pick it up before we redirect to /control.
-    const launcher = document.createElement("iframe");
-    launcher.hidden = true;
-    launcher.src = foxgloveUrl(files).toString();
-    document.body.append(launcher);
-    setTimeout(() => {
-      window.location.href = controllerUrl(files).toString();
-    }, 400);
-  };
-
-  const updateButtons = () => {
-    const disabled = selected().length === 0;
-    for (const control of controls) control.disabled = disabled;
-    if (disabled) status.textContent = "No recording selected";
+  const updateOpenLink = () => {
+    const files = selected();
+    if (!files.length) {
+      open.removeAttribute("href");
+      open.setAttribute("aria-disabled", "true");
+      status.textContent = "No recording selected";
+      return;
+    }
+    open.href = foxgloveUrl(files).toString();
+    open.setAttribute("aria-disabled", "false");
+    status.textContent = files.length === 1
+      ? "1 recording selected"
+      : `${files.length} recordings selected`;
   };
 
   const formatSize = (bytes) => {
@@ -291,90 +211,6 @@ _APP_JS = """\
     if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
     return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
   };
-
-  const refreshStatus = async () => {
-    const files = selected();
-    if (!files.length) return;
-    try {
-      const response = await fetch(`/api/session?${query(files)}`);
-      const value = await response.json();
-      const viewers = value.viewers === 1 ? "1 viewer" : `${value.viewers} viewers`;
-      const droppedCount = (value.droppedMessages || 0) + (value.droppedFrames || 0);
-      const dropped = droppedCount ? ` · ${droppedCount} dropped` : "";
-      status.textContent = `${value.state} · ${viewers} · ${value.messages} messages${dropped}`;
-      playPause.textContent = value.isPlaying ? "Pause" : "Play";
-      if (document.activeElement !== speed) speed.value = String(value.speed);
-      loop.checked = value.loop;
-    } catch (_error) {
-      status.textContent = "Status unavailable";
-    }
-  };
-
-  const control = async (action, options = {}) => {
-    const params = query(selected());
-    params.set("action", action);
-    for (const [key, value] of Object.entries(options)) params.set(key, String(value));
-    const response = await fetch(`/api/control?${params}`);
-    const value = await response.json();
-    status.textContent = value.error || value.state;
-    await refreshStatus();
-  };
-
-  const formatTime = (seconds) => {
-    const total = Math.max(0, Math.round(seconds));
-    const minutes = Math.floor(total / 60);
-    const remainder = total % 60;
-    return `${minutes}:${String(remainder).padStart(2, "0")}`;
-  };
-
-  const refreshSessions = async () => {
-    try {
-      const response = await fetch("/api/sessions");
-      const value = await response.json();
-      activeSessions.replaceChildren();
-      if (!value.sessions.length) {
-        const empty = document.createElement("p");
-        empty.className = "muted";
-        empty.textContent = "No active sessions";
-        activeSessions.append(empty);
-        return;
-      }
-      for (const session of value.sessions) {
-        const row = document.createElement("div");
-        row.className = "session";
-        // Open the running session's controller without re-launching Foxglove.
-        const files = document.createElement("a");
-        files.className = "files";
-        files.textContent = session.files.join(" + ");
-        files.href = controllerUrl(session.paths);
-        files.onclick = (event) => {
-          event.preventDefault();
-          window.location.href = controllerUrl(session.paths).toString();
-        };
-        const viewers = session.viewers === 1 ? "1 viewer" : `${session.viewers} viewers`;
-        const meta = document.createElement("span");
-        meta.className = "meta";
-        const position = formatTime(session.positionSeconds);
-        const duration = formatTime(session.durationSeconds);
-        meta.textContent = `${session.state} · ${viewers} · ${position} / ${duration}`;
-        row.append(files, meta);
-        activeSessions.append(row);
-      }
-    } catch (_error) {
-      activeSessions.replaceChildren();
-    }
-  };
-
-  playPause.onclick = () => control("toggle");
-  speed.oninput = () => {
-    clearTimeout(speedChangeTimer);
-    const value = Number(speed.value);
-    if (Number.isFinite(value) && value > 0) {
-      speedChangeTimer = setTimeout(() => control("speed", {speed: value}), 250);
-    }
-  };
-  loop.onchange = () => control("loop", {enabled: loop.checked});
-  open.onclick = () => openSession(selected());
 
   fetch("/api/recordings")
     .then((response) => response.json())
@@ -390,142 +226,22 @@ _APP_JS = """\
         checkbox.type = "checkbox";
         checkbox.name = "recording";
         checkbox.value = recording.path;
-        checkbox.onchange = () => { updateButtons(); refreshStatus(); };
+        checkbox.onchange = updateOpenLink;
         const path = document.createElement("a");
         path.className = "path";
         path.textContent = recording.path;
-        path.href = controllerUrl([recording.path]);
-        path.target = "_blank";
-        path.onclick = (event) => {
-          event.preventDefault();
-          openSession([recording.path]);
-        };
+        path.href = foxgloveUrl([recording.path]).toString();
         const size = document.createElement("span");
         size.className = "size";
         size.textContent = formatSize(recording.sizeBytes);
         label.append(checkbox, path, size);
         list.append(label);
       }
-      updateButtons();
+      updateOpenLink();
     })
     .catch(() => { list.innerHTML = '<p class="muted">Could not load recordings.</p>'; });
 
-  updateButtons();
-  refreshSessions();
-  setInterval(() => { refreshStatus(); refreshSessions(); }, 1000);
-})();
-"""
-
-_CONTROL_JS = """\
-(() => {
-  const files = new URLSearchParams(window.location.search).getAll("file");
-  const seek = document.getElementById("seek");
-  const position = document.getElementById("position");
-  const duration = document.getElementById("duration");
-  const status = document.getElementById("status");
-  const playPause = document.getElementById("play-pause");
-  const speed = document.getElementById("speed");
-  const speedPresets = [...document.querySelectorAll(".speed-preset")];
-  const loop = document.getElementById("loop");
-  let isSeeking = false;
-  let speedChangeTimer = null;
-
-  const query = () => {
-    const params = new URLSearchParams();
-    for (const file of files) params.append("file", file);
-    return params;
-  };
-
-  const foxgloveUrl = () => {
-    const websocket = new URL("/ws", window.location.href);
-    websocket.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    websocket.search = query().toString();
-    const foxglove = new URL("foxglove://open");
-    foxglove.searchParams.set("ds", "foxglove-websocket");
-    foxglove.searchParams.set("ds.url", websocket.toString());
-    return foxglove;
-  };
-
-  const formatTime = (seconds) => {
-    const total = Math.max(0, Math.round(seconds));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const remainder = total % 60;
-    return hours
-      ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
-      : `${minutes}:${String(remainder).padStart(2, "0")}`;
-  };
-
-  const renderPosition = () => {
-    position.textContent = formatTime(Number(seek.value));
-  };
-
-  const refresh = async () => {
-    try {
-      const response = await fetch(`/api/session?${query()}`);
-      const value = await response.json();
-      const viewers = value.viewers === 1 ? "1 viewer" : `${value.viewers} viewers`;
-      const droppedCount = (value.droppedMessages || 0) + (value.droppedFrames || 0);
-      const dropped = droppedCount ? ` · ${droppedCount} dropped` : "";
-      status.textContent = `${value.state} · ${viewers} · ${value.messages} messages${dropped}`;
-      playPause.textContent = value.isPlaying ? "Pause" : "Play";
-      if (document.activeElement !== speed) speed.value = String(value.speed);
-      for (const preset of speedPresets) {
-        preset.classList.toggle("active", Number(preset.dataset.speed) === value.speed);
-      }
-      loop.checked = value.loop;
-      seek.max = String(value.durationSeconds);
-      duration.textContent = formatTime(value.durationSeconds);
-      if (!isSeeking) {
-        seek.value = String(value.positionSeconds);
-        renderPosition();
-      }
-    } catch (_error) {
-      status.textContent = "Status unavailable";
-    }
-  };
-
-  const control = async (action, options = {}) => {
-    const params = query();
-    params.set("action", action);
-    for (const [key, value] of Object.entries(options)) params.set(key, String(value));
-    const response = await fetch(`/api/control?${params}`);
-    const value = await response.json();
-    status.textContent = value.error || value.state;
-    await refresh();
-  };
-
-  document.getElementById("files").textContent = files.join(" + ");
-  document.getElementById("foxglove").onclick = () => {
-    window.location.href = foxgloveUrl();
-  };
-  playPause.onclick = () => control("toggle");
-  speed.oninput = () => {
-    clearTimeout(speedChangeTimer);
-    const value = Number(speed.value);
-    if (Number.isFinite(value) && value > 0) {
-      speedChangeTimer = setTimeout(() => control("speed", {speed: value}), 250);
-    }
-  };
-  for (const preset of speedPresets) {
-    preset.onclick = () => {
-      const value = Number(preset.dataset.speed);
-      speed.value = String(value);
-      control("speed", {speed: value});
-    };
-  }
-  loop.onchange = () => control("loop", {enabled: loop.checked});
-  seek.oninput = () => {
-    isSeeking = true;
-    renderPosition();
-  };
-  seek.onchange = async () => {
-    await control("seek", {offset: Number(seek.value)});
-    isSeeking = false;
-  };
-
-  refresh();
-  setInterval(refresh, 500);
+  updateOpenLink();
 })();
 """
 
@@ -614,7 +330,7 @@ class RecordingLibrary:
 
 
 class RecordingSession:
-    """One shared playback room for an ordered set of recordings."""
+    """One independent playback session for an ordered set of recordings."""
 
     def __init__(
         self,
@@ -626,6 +342,8 @@ class RecordingSession:
         *,
         speed: float,
         loop: bool,
+        show_status: bool = False,
+        playback_runner: PlaybackRunner = run_playback,
     ) -> None:
         self.files = files
         self.prepared = prepared
@@ -634,6 +352,8 @@ class RecordingSession:
         self.sink = sink
         self.speed = speed
         self.loop = loop
+        self.show_status = show_status
+        self._playback_runner = playback_runner
         self.controller = PlaybackController(is_looping=loop, speed=speed)
         self.stats = PlaybackStats()
         self.timeline_start_ns = max(
@@ -647,6 +367,8 @@ class RecordingSession:
         self._start_time_ns = self.timeline_start_ns
         self.error: str | None = None
         self._task: asyncio.Task[None] | None = None
+        self._control_lock = asyncio.Lock()
+        self.endpoint.on_playback_control(self.handle_playback_control)
 
     @classmethod
     async def create(
@@ -665,11 +387,20 @@ class RecordingSession:
         )
         transform_plan = create_playback_transform_plan(transform_config, prepared.channels)
         output_channels = prepared.channels if transform_plan is None else transform_plan.channels
+        timeline_start_ns = max(
+            prepared.recording_start_ns,
+            prepared.resolved_filter.start_time_ns,
+        )
+        timeline_end_ns = min(
+            prepared.recording_end_ns,
+            prepared.resolved_filter.end_time_ns,
+        )
         endpoint = WebSocketBridgeEndpoint(
             name=f"pymcap-cli: {', '.join(path.name for path in files)}",
             capabilities=["time"],
             supported_encodings=sorted({channel.message_encoding for channel in output_channels}),
             metadata={"source": "pymcap-cli"},
+            playback_time_range=(timeline_start_ns, timeline_end_ns),
         )
         sink = BridgeServerPlaybackSink(
             "127.0.0.1",
@@ -690,33 +421,6 @@ class RecordingSession:
         session.play()
         return session
 
-    @property
-    def state(self) -> PlaybackState:
-        if self.error is not None:
-            return "Error"
-        if self.controller.state == "Paused":
-            return self.controller.state
-        return self.stats.state
-
-    def status(self) -> dict[str, JsonValue]:
-        playhead_ns = self.stats.playhead_ns or self._start_time_ns
-        return {
-            "state": self.state.lower(),
-            "viewers": len(self.endpoint.connections),
-            "messages": self.stats.messages,
-            "droppedMessages": self.stats.dropped_messages,
-            "droppedFrames": self.endpoint.dropped_frames,
-            "payloadBytes": self.stats.payload_bytes,
-            "playheadNs": playhead_ns,
-            "positionSeconds": (playhead_ns - self.timeline_start_ns) / 1_000_000_000,
-            "durationSeconds": (self.timeline_end_ns - self.timeline_start_ns) / 1_000_000_000,
-            "isPlaying": self.is_playing,
-            "speed": self.speed,
-            "loop": self.loop,
-            "files": [path.name for path in self.files],
-            "error": self.error,
-        }
-
     def play(self) -> None:
         if self._task is not None and not self._task.done():
             self.controller.play()
@@ -730,42 +434,57 @@ class RecordingSession:
         if self._task is not None and not self._task.done():
             self.controller.pause()
 
-    @property
-    def is_playing(self) -> bool:
-        return (
-            self._task is not None and not self._task.done() and self.controller.state == "Playing"
-        )
-
-    def toggle_playback(self) -> None:
-        if self.is_playing:
-            self.pause()
-        else:
-            self.play()
-
-    def set_looping(self, is_looping: bool) -> None:
-        self.loop = is_looping
-        self.controller.set_looping(is_looping)
-
     def set_speed(self, speed: float) -> None:
         if not math.isfinite(speed) or speed <= 0:
             raise ValueError("speed must be finite and positive")
         self.speed = speed
         self.controller.set_speed(speed)
 
-    async def seek(self, offset_seconds: float) -> None:
-        if not math.isfinite(offset_seconds):
-            raise ValueError("seek offset must be finite")
-        duration_seconds = (self.timeline_end_ns - self.timeline_start_ns) / 1_000_000_000
-        if not 0 <= offset_seconds <= duration_seconds:
-            raise ValueError(f"seek offset must be between 0 and {duration_seconds:g} seconds")
+    async def handle_playback_control(
+        self,
+        request: PlaybackControlRequest,
+    ) -> FoxglovePlaybackState:
+        """Apply one Foxglove playback request to this session."""
+        async with self._control_lock:
+            self.set_speed(request.playback_speed)
+            should_play = request.playback_command is PlaybackCommand.PLAY
+            if request.seek_time is not None:
+                await self._seek_to_timestamp(request.seek_time, should_play=should_play)
+            elif should_play:
+                self.play()
+            else:
+                self.pause()
+            return self._foxglove_playback_state(did_seek=request.seek_time is not None)
 
-        should_play = self.state in {"Preparing", "Waiting", "Playing"}
+    def _foxglove_playback_state(self, *, did_seek: bool) -> FoxglovePlaybackState:
+        playhead_ns = self.stats.playhead_ns
+        current_time = self._start_time_ns if playhead_ns is None else playhead_ns
+        if self.controller.state == "Paused":
+            status = PlaybackStatus.PAUSED
+        elif self.stats.state == "Finished":
+            status = PlaybackStatus.ENDED
+        elif self.controller.state == "Playing":
+            status = PlaybackStatus.PLAYING
+        else:
+            status = PlaybackStatus.BUFFERING
+        return FoxglovePlaybackState(
+            status=status,
+            current_time=current_time,
+            playback_speed=self.speed,
+            did_seek=did_seek,
+        )
+
+    async def _seek_to_timestamp(self, timestamp_ns: int, *, should_play: bool) -> None:
+        if not self.timeline_start_ns <= timestamp_ns <= self.timeline_end_ns:
+            raise ValueError(
+                f"seek time must be between {self.timeline_start_ns} and {self.timeline_end_ns}"
+            )
         self.controller.stop()
         await self._cancel_task()
         # Drop frames still queued for slow clients so the post-seek stream is
         # not preceded by stale pre-seek frames (which look like a jump back).
         self.endpoint.clear_pending_frames()
-        self._start_time_ns = self.timeline_start_ns + round(offset_seconds * 1_000_000_000)
+        self._start_time_ns = timestamp_ns
         self.controller = PlaybackController(
             start_paused=not should_play,
             is_looping=self.loop,
@@ -786,6 +505,22 @@ class RecordingSession:
         with suppress(asyncio.CancelledError, KeyboardInterrupt):
             await self._task
 
+    async def wait(self) -> PlaybackStats:
+        """Wait for the current playback run, following task replacement after seeks."""
+        while self._task is not None:
+            task = self._task
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+                if self._task is task:
+                    break
+                continue
+            if self._task is task:
+                break
+        return self.stats
+
     async def close(self) -> None:
         self.controller.stop()
         await self._cancel_task()
@@ -793,12 +528,12 @@ class RecordingSession:
 
     async def _run(self) -> None:
         try:
-            await run_playback(
+            await self._playback_runner(
                 self.prepared,
                 self.sink,
                 speed=self.speed,
                 loop=self.loop,
-                show_status=False,
+                show_status=self.show_status,
                 transform_plan=self.transform_plan,
                 controller=self.controller,
                 stats=self.stats,
@@ -809,6 +544,8 @@ class RecordingSession:
         except Exception as exc:  # noqa: BLE001 - expose background failures in session status
             self.error = str(exc)
             self.stats.state = "Error"
+        else:
+            self.endpoint.broadcast_playback_state(self._foxglove_playback_state(did_seek=False))
 
 
 class RecordingSessionManager:
@@ -819,102 +556,49 @@ class RecordingSessionManager:
         transform_config: PlaybackTransformConfig,
         speed: float,
         loop: bool,
-        session_idle_timeout: float,
     ) -> None:
         if not math.isfinite(speed) or speed <= 0:
             raise ValueError("speed must be finite and positive")
-        if not math.isfinite(session_idle_timeout) or session_idle_timeout < 0:
-            raise ValueError("session idle timeout must be finite and non-negative")
         self.message_filter = message_filter
         self.transform_config = transform_config
         self.speed = speed
         self.loop = loop
-        self.session_idle_timeout = session_idle_timeout
-        self._sessions: dict[tuple[Path, ...], RecordingSession] = {}
-        self._cleanup_tasks: dict[tuple[Path, ...], asyncio.Task[None]] = {}
+        self._sessions: set[RecordingSession] = set()
         self._lock = asyncio.Lock()
-        self._is_closing = False
 
-    async def get_or_create(self, files: tuple[Path, ...]) -> RecordingSession:
+    async def create(self, files: tuple[Path, ...]) -> RecordingSession:
         async with self._lock:
-            session = self._sessions.get(files)
-            if session is None:
-                session = await RecordingSession.create(
-                    files,
-                    message_filter=self.message_filter,
-                    transform_config=self.transform_config,
-                    speed=self.speed,
-                    loop=self.loop,
-                )
-                self._sessions[files] = session
-                session.sink.on_activity_change(
-                    lambda is_active, files=files, session=session: self._activity_changed(
-                        files,
-                        session,
-                        is_active,
-                    )
-                )
+            session = await RecordingSession.create(
+                files,
+                message_filter=self.message_filter,
+                transform_config=self.transform_config,
+                speed=self.speed,
+                loop=self.loop,
+            )
+            self._sessions.add(session)
             return session
 
-    def get(self, files: tuple[Path, ...]) -> RecordingSession | None:
-        return self._sessions.get(files)
+    @property
+    def active_session_count(self) -> int:
+        return len(self._sessions)
 
-    def sessions(self) -> tuple[RecordingSession, ...]:
-        return tuple(self._sessions.values())
-
-    def _activity_changed(
-        self,
-        files: tuple[Path, ...],
-        session: RecordingSession,
-        is_active: bool,
-    ) -> None:
-        if self._is_closing:
-            return
-        cleanup_task = self._cleanup_tasks.pop(files, None)
-        if cleanup_task is not None:
-            cleanup_task.cancel()
-        if not is_active:
-            self._cleanup_tasks[files] = asyncio.create_task(
-                self._cleanup_after_idle(files, session)
-            )
-
-    async def _cleanup_after_idle(
-        self,
-        files: tuple[Path, ...],
-        session: RecordingSession,
-    ) -> None:
-        cleanup_task = asyncio.current_task()
-        try:
-            await asyncio.sleep(self.session_idle_timeout)
-            async with self._lock:
-                if self._sessions.get(files) is not session or session.sink.has_subscriptions:
-                    return
-                self._sessions.pop(files)
-            await session.close()
-        finally:
-            if self._cleanup_tasks.get(files) is cleanup_task:
-                self._cleanup_tasks.pop(files)
+    async def remove(self, session: RecordingSession) -> None:
+        async with self._lock:
+            if session not in self._sessions:
+                return
+            self._sessions.remove(session)
+        await session.close()
 
     async def close(self) -> None:
-        self._is_closing = True
-        try:
-            cleanup_tasks = tuple(self._cleanup_tasks.values())
-            self._cleanup_tasks.clear()
-            for cleanup_task in cleanup_tasks:
-                cleanup_task.cancel()
-            for cleanup_task in cleanup_tasks:
-                with suppress(asyncio.CancelledError):
-                    await cleanup_task
-            sessions = tuple(self._sessions.values())
+        async with self._lock:
+            sessions = tuple(self._sessions)
             self._sessions.clear()
-            for session in sessions:
-                await session.close()
-        finally:
-            self._is_closing = False
+        for session in sessions:
+            await session.close()
 
 
 class RecordingLibraryServer:
-    """Serve a minimal recording UI and path-isolated Foxglove sessions."""
+    """Serve a minimal recording UI and per-connection Foxglove sessions."""
 
     def __init__(
         self,
@@ -926,7 +610,6 @@ class RecordingLibraryServer:
         transform_config: PlaybackTransformConfig,
         speed: float,
         loop: bool,
-        session_idle_timeout: float = _SESSION_IDLE_TIMEOUT_SECONDS,
     ) -> None:
         self.library = library
         self.host = host
@@ -936,7 +619,6 @@ class RecordingLibraryServer:
             transform_config=transform_config,
             speed=speed,
             loop=loop,
-            session_idle_timeout=session_idle_timeout,
         )
         self._server: Server | None = None
 
@@ -948,7 +630,10 @@ class RecordingLibraryServer:
             self._handle_connection,
             self.host,
             self.port,
-            subprotocols=[Subprotocol("foxglove.websocket.v1")],
+            subprotocols=[
+                Subprotocol("foxglove.sdk.v1"),
+                Subprotocol("foxglove.websocket.v1"),
+            ],
             process_request=self._process_request,
         )
         socket = next(iter(self._server.sockets), None)
@@ -979,11 +664,14 @@ class RecordingLibraryServer:
             return
         try:
             files = self._resolve_query(parsed.query)
-            session = await self.manager.get_or_create(files)
+            session = await self.manager.create(files)
         except (OSError, PlaybackError, ValueError) as exc:
             await websocket.close(code=1008, reason=str(exc)[:120])
             return
-        await session.endpoint.handle_connection(websocket)
+        try:
+            await session.endpoint.handle_connection(websocket)
+        finally:
+            await self.manager.remove(session)
 
     async def _process_request(
         self,
@@ -1001,11 +689,6 @@ class RecordingLibraryServer:
                 return _response(200, "text/css; charset=utf-8", _STYLE_CSS)
             if parsed.path == "/app.js":
                 return _response(200, "text/javascript; charset=utf-8", _APP_JS)
-            if parsed.path == "/control":
-                self._resolve_query(parsed.query)
-                return _response(200, "text/html; charset=utf-8", _CONTROL_HTML)
-            if parsed.path == "/control.js":
-                return _response(200, "text/javascript; charset=utf-8", _CONTROL_JS)
             if parsed.path == "/favicon.ico":
                 return _response(204, "image/x-icon", "")
             if parsed.path == "/api/recordings":
@@ -1014,102 +697,6 @@ class RecordingLibraryServer:
                     for entry in self.library.recordings()
                 ]
                 return _json_response(200, {"recordings": recordings})
-            if parsed.path == "/api/sessions":
-                sessions: list[JsonValue] = []
-                for session in self.manager.sessions():
-                    status = session.status()
-                    status["paths"] = [
-                        path.relative_to(self.library.root).as_posix() for path in session.files
-                    ]
-                    sessions.append(status)
-                return _json_response(200, {"sessions": sessions})
-            if parsed.path == "/api/session":
-                files = self._resolve_query(parsed.query)
-                session = self.manager.get(files)
-                if session is None:
-                    return _json_response(
-                        200,
-                        {
-                            "state": "idle",
-                            "viewers": 0,
-                            "messages": 0,
-                            "droppedMessages": 0,
-                            "droppedFrames": 0,
-                            "payloadBytes": 0,
-                            "playheadNs": 0,
-                            "positionSeconds": 0,
-                            "durationSeconds": 0,
-                            "isPlaying": False,
-                            "speed": self.manager.speed,
-                            "loop": self.manager.loop,
-                            "files": [path.name for path in files],
-                            "error": None,
-                        },
-                    )
-                return _json_response(200, session.status())
-            if parsed.path == "/api/control":
-                query = parse_qs(parsed.query, keep_blank_values=True)
-                action = query.get("action", [""])[0]
-                if action not in {"toggle", "seek", "loop", "speed"}:
-                    return _json_response(
-                        400,
-                        {"error": "action must be toggle, seek, loop, or speed"},
-                    )
-                files = self._resolve_query(parsed.query)
-                session = self.manager.get(files)
-                if action == "toggle":
-                    if session is None:
-                        session = await self.manager.get_or_create(files)
-                    else:
-                        session.toggle_playback()
-                elif action == "seek":
-                    offsets = query.get("offset", [])
-                    if len(offsets) != 1:
-                        return _json_response(
-                            400,
-                            {"error": "seek requires one offset in seconds"},
-                        )
-                    try:
-                        offset_seconds = float(offsets[0])
-                    except ValueError:
-                        return _json_response(
-                            400,
-                            {"error": "seek offset must be a number"},
-                        )
-                    session = await self.manager.get_or_create(files)
-                    await session.seek(offset_seconds)
-                elif action == "loop":
-                    enabled_values = query.get("enabled", [])
-                    if len(enabled_values) != 1 or enabled_values[0] not in {"true", "false"}:
-                        return _json_response(
-                            400,
-                            {"error": "loop requires enabled=true or enabled=false"},
-                        )
-                    session = await self.manager.get_or_create(files)
-                    session.set_looping(enabled_values[0] == "true")
-                else:
-                    speed_values = query.get("speed", [])
-                    if len(speed_values) != 1:
-                        return _json_response(
-                            400,
-                            {"error": "speed requires one positive multiplier"},
-                        )
-                    try:
-                        speed = float(speed_values[0])
-                    except ValueError:
-                        return _json_response(
-                            400,
-                            {"error": "speed must be a number"},
-                        )
-                    if not math.isfinite(speed) or speed <= 0:
-                        return _json_response(
-                            400,
-                            {"error": "speed must be finite and positive"},
-                        )
-                    session = await self.manager.get_or_create(files)
-                    session.set_speed(speed)
-                assert session is not None
-                return _json_response(200, session.status())
         except (OSError, PlaybackError, ValueError) as exc:
             return _json_response(400, {"error": str(exc)})
         return _json_response(404, {"error": "not found"})

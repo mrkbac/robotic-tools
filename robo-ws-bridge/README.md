@@ -12,7 +12,8 @@ uv add robo-ws-bridge
 
 - **WebSocketBridgeServer**: Async server for publishing robotics data over WebSocket
 - **WebSocketBridgeClient**: Async client for subscribing to data streams
-- Full support for Foxglove WebSocket protocol messages (advertise, subscribe, publish, etc.)
+- Native channel streaming, time synchronization, playback control, subscriptions, and status messages
+- Extensible handlers for parameters, services, client publishing, connection graphs, and assets
 
 ## Usage
 
@@ -45,6 +46,41 @@ async def main():
         await asyncio.sleep(0.1)
 
 asyncio.run(main())
+```
+
+### Playback control
+
+Playback control uses our native async server implementation; it does not depend on the Foxglove SDK.
+Supplying the recording time range advertises the `playbackControl` capability; the server accepts
+the `foxglove.sdk.v1` subprotocol by default.
+
+```python
+from robo_ws_bridge import (
+    PlaybackCommand,
+    PlaybackControlRequest,
+    PlaybackState,
+    PlaybackStatus,
+    WebSocketBridgeServer,
+)
+
+server = WebSocketBridgeServer(playback_time_range=(start_time_ns, end_time_ns))
+
+async def control(request: PlaybackControlRequest) -> PlaybackState:
+    if request.seek_time is not None:
+        await recording.seek(request.seek_time)
+    await recording.set_speed(request.playback_speed)
+    if request.playback_command is PlaybackCommand.PLAY:
+        await recording.play()
+    else:
+        await recording.pause()
+    return PlaybackState(
+        status=PlaybackStatus.PLAYING if recording.is_playing else PlaybackStatus.PAUSED,
+        current_time=recording.current_time,
+        playback_speed=recording.speed,
+        did_seek=request.seek_time is not None,
+    )
+
+server.on_playback_control(control)
 ```
 
 ### Client Example
