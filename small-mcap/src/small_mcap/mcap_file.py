@@ -5,9 +5,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
-
-from typing_extensions import Self
+from typing import IO, TYPE_CHECKING, TypeVar
 
 from small_mcap.exceptions import EndOfFileError, SeekRequiredError
 from small_mcap.reader import (
@@ -34,6 +32,7 @@ _RECOVERY_WARNING = (
 _MessageIterator = Iterable[tuple[Schema | None, Channel, Message]]
 _ChannelPredicate = Callable[[Channel, Schema | None], bool]
 _CacheKey = tuple[int, bool]
+_McapFileT = TypeVar("_McapFileT", bound="McapFile")
 
 
 class McapFile:
@@ -60,13 +59,13 @@ class McapFile:
         self._is_closed = False
 
     @classmethod
-    def open(
-        cls,
+    def open(  # noqa: PYI019
+        cls: type[_McapFileT],
         path: StrPath,
         *,
         chunk_cache_bytes: int = _DEFAULT_CHUNK_CACHE_BYTES,
         recover: bool = False,
-    ) -> Self:
+    ) -> _McapFileT:
         if chunk_cache_bytes < 0:
             raise ValueError("chunk_cache_bytes must be non-negative")
         resolved_path = Path(path)
@@ -165,7 +164,7 @@ class McapFile:
             self._chunk_cache.clear()
             self._cached_chunk_bytes = 0
 
-    def __enter__(self) -> Self:
+    def __enter__(self: _McapFileT) -> _McapFileT:  # noqa: PYI019
         self._ensure_open()
         return self
 

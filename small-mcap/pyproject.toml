@@ -25,9 +25,7 @@ classifiers = [
     "Topic :: System :: Logging",
     "Typing :: Typed",
 ]
-dependencies = [
-    "typing-extensions>=4.15.0",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/mrkbac/robotic-tools"
