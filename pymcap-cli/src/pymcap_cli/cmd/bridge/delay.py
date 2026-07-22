@@ -277,10 +277,6 @@ def _ms(value_ns: float) -> float:
     return value_ns / 1_000_000
 
 
-def _format_ms(value_ns: float) -> str:
-    return f"{_ms(value_ns):+,.3f}"
-
-
 def _format_duration(value_ns: float) -> str:
     sign = "+" if value_ns >= 0 else "-"
     magnitude = abs(value_ns)
@@ -295,12 +291,6 @@ def _format_duration(value_ns: float) -> str:
     minutes = int(magnitude // (60 * NS_TO_SEC))
     seconds = (magnitude - minutes * 60 * NS_TO_SEC) / NS_TO_SEC
     return f"{sign}{minutes}m {seconds:04.1f}s"
-
-
-def _format_latest_mean(stats: RunningDelayStats) -> str:
-    if stats.count == 0:
-        return "-"
-    return f"{_format_ms(stats.latest_ns)} / {_format_ms(stats.mean_ns)}"
 
 
 def _format_latest(stats: RunningDelayStats) -> str:

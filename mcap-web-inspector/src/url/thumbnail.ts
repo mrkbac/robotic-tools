@@ -8,7 +8,7 @@ const JPEG_QUALITY = 0.5;
  * Resize raw image data to a 48x36 JPEG micro-thumbnail (center-crop, cover fit).
  * Returns a base64 string (no data URL prefix), or null on failure.
  */
-export async function createMicroThumbnail(
+async function createMicroThumbnail(
   imageData: Uint8Array,
   format: string,
 ): Promise<string | null> {

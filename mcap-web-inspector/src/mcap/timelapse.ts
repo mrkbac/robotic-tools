@@ -83,7 +83,7 @@ const TIMELAPSE_BITRATE = 1_000_000; // 1 Mbps
  * Each JPEG/PNG frame is decoded via `createImageBitmap()` (hardware-accel),
  * drawn to an OffscreenCanvas, and encoded via mediabunny's CanvasSource.
  */
-export async function encodeTimelapse(
+async function encodeTimelapse(
   samples: TimelapseSample[],
   onProgress?: (current: number, total: number) => void,
 ): Promise<Blob> {

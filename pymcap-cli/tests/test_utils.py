@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from pymcap_cli.constants import MAX_INT64, NS_TO_MS, NS_TO_SEC
+from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.utils import (
     RelativeTime,
     bytes_to_human,
     compile_topic_patterns,
     parse_time_arg,
     parse_timestamp_args,
-    parse_timestamp_args_absolute,
-    parse_timestamp_bounds_absolute,
 )
 
 # ---------------------------------------------------------------------------
@@ -210,30 +208,3 @@ class TestParseTimestampArgs:
     def test_relative_allowed_when_requested(self):
         result = parse_timestamp_args("@5s", 0, 0, allow_relative=True)
         assert result == RelativeTime("start", 5 * NS_TO_SEC)
-
-    def test_absolute_wrapper_rejects_relative(self):
-        with pytest.raises(ValueError, match="Invalid time format"):
-            parse_timestamp_args_absolute("@5s", 0, 0)
-
-
-# ---------------------------------------------------------------------------
-# parse_timestamp_bounds_absolute
-# ---------------------------------------------------------------------------
-
-
-class TestParseTimestampBoundsAbsolute:
-    def test_defaults(self):
-        assert parse_timestamp_bounds_absolute("", 0, "", 0) == (0, MAX_INT64)
-
-    def test_seconds(self):
-        assert parse_timestamp_bounds_absolute("", 2, "", 3) == (
-            2 * NS_TO_SEC,
-            3 * NS_TO_SEC,
-        )
-
-    def test_explicit_zero_end_is_preserved(self):
-        assert parse_timestamp_bounds_absolute("", 0, "0", 0) == (0, 0)
-
-    def test_relative_rejected(self):
-        with pytest.raises(ValueError, match="Invalid time format"):
-            parse_timestamp_bounds_absolute("@5s", 0, "", 0)

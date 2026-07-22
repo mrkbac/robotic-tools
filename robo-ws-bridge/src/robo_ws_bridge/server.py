@@ -78,7 +78,6 @@ def install_invalid_handshake_log_filter() -> None:
 DeliveryPolicy = Literal["reliable", "latest"]
 OfferResult = Literal["queued", "replaced", "overflow"]
 
-_OUTBOX_SOFT_LIMIT_BYTES = 256 << 10
 _OUTBOX_HARD_LIMIT_BYTES = 1 << 20
 _TIME_OUTBOX_KEY = -1
 _PLAYBACK_STATE_OUTBOX_KEY = -2
@@ -135,13 +134,7 @@ class ConnectionOutbox:
     overflow is reported so the endpoint can reset the slow connection.
     """
 
-    def __init__(
-        self,
-        *,
-        soft_limit_bytes: int = _OUTBOX_SOFT_LIMIT_BYTES,
-        hard_limit_bytes: int = _OUTBOX_HARD_LIMIT_BYTES,
-    ) -> None:
-        self._soft_limit_bytes = soft_limit_bytes
+    def __init__(self, *, hard_limit_bytes: int = _OUTBOX_HARD_LIMIT_BYTES) -> None:
         self._hard_limit_bytes = hard_limit_bytes
         self._reliable: deque[OutboxFrame] = deque()
         self._latest: dict[int, OutboxFrame] = {}
@@ -150,11 +143,6 @@ class ConnectionOutbox:
         self._take_latest_next = False
         self.pending_bytes = 0
         self.dropped_frames = 0
-
-    @property
-    def is_congested(self) -> bool:
-        """True while more bytes are pending than the soft limit allows."""
-        return self.pending_bytes > self._soft_limit_bytes
 
     def offer(self, key: int, frame: bytes | str, *, delivery: DeliveryPolicy) -> OfferResult:
         """Queue one frame; replaces the pending frame for ``latest`` keys."""
@@ -520,13 +508,6 @@ class WebSocketBridgeEndpoint:
         """
         for state in self._connections.values():
             state.outbox.clear_data()
-
-    def has_congested_subscriber(self, channel_id: int) -> bool:
-        """True when a subscriber of the channel has a backed-up outbox."""
-        for state in self._connections.values():
-            if state.outbox.is_congested and channel_id in state.subscriptions.values():
-                return True
-        return False
 
     def are_all_subscribers_busy(self, channel_id: int) -> bool:
         """True when every subscription for a channel already has queued work."""

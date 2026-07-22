@@ -154,10 +154,10 @@ def main() -> None:
     baseline = base_ns["decoder_baseline"]
 
     # Build optimized decoder via the code generator (full create_decoder)
-    optimized_decoder = create_decoder(opt_plan, comments=False)
+    optimized_decoder = create_decoder(opt_plan)
 
     # Also show the generated LE code
-    factory = DecoderGeneratorFactory(opt_plan, comments=False, endianness="<")
+    factory = DecoderGeneratorFactory(opt_plan, endianness="<")
     optimized_code = factory.generate_decoder_code("decoder_optimized", be_fallback="decoder_be")
 
     print("\nBaseline (old-style) decoder:")
@@ -195,10 +195,10 @@ def main() -> None:
     print("\n── Encoder ─────────────────────────────────────────────────────")
 
     # Build encoder
-    optimized_encoder = create_encoder(opt_plan, comments=False)
+    optimized_encoder = create_encoder(opt_plan)
 
     # Show generated encoder code
-    enc_factory = EncoderGeneratorFactory(opt_plan, comments=False, endianness="<")
+    enc_factory = EncoderGeneratorFactory(opt_plan, endianness="<")
     encoder_code = enc_factory.generate_encoder_code("encoder_optimized")
     print("\nOptimized encoder:")
     print("-" * 70)

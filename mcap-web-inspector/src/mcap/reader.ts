@@ -41,7 +41,7 @@ export const decompressHandlers: DecompressHandlers = {
 };
 
 /** IReadable implementation for browser File/Blob objects. */
-export class BlobReadable implements IReadable {
+class BlobReadable implements IReadable {
   private blob: Blob;
 
   constructor(blob: Blob) {

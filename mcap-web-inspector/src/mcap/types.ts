@@ -1,11 +1,7 @@
-// Re-export all generated types (snake_case, number — matching JSON schema)
+// Re-export generated types used by the application.
 export type {
-  FileInfo,
-  HeaderInfo,
-  StatisticsInfo,
   Stats,
   CompressionStats,
-  ChunkOverlaps,
   ChunksInfo,
   SchemaInfo,
   MessageDistribution,

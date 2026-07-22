@@ -473,19 +473,6 @@ def test_outbox_time_frame_does_not_starve_reliable_control() -> None:
     assert asyncio.run(receive_first()) == b"playback-state"
 
 
-def test_outbox_congestion_flag_follows_pending_bytes() -> None:
-    outbox = ConnectionOutbox(soft_limit_bytes=150)
-    assert not outbox.is_congested
-    outbox.offer(1, b"y" * 200, delivery="reliable")
-    assert outbox.is_congested
-
-    async def drain() -> bytes:
-        return (await outbox.next_frame()).payload
-
-    asyncio.run(drain())
-    assert not outbox.is_congested
-
-
 def test_outbox_discard_removes_pending_subscription_frames() -> None:
     outbox = ConnectionOutbox()
     outbox.offer(7, b"latest", delivery="latest")

@@ -44,10 +44,6 @@ export interface TfChannelInfo {
 
 const TF_SCHEMAS = new Set(["tf2_msgs/msg/TFMessage", "tf2_msgs/TFMessage"]);
 
-export function isTfSchema(name: string): boolean {
-  return TF_SCHEMAS.has(name);
-}
-
 const STATIC_TF_TOPICS = new Set(["/tf_static"]);
 
 /** Find all channels whose schema is a TFMessage type. */
@@ -59,7 +55,7 @@ export function findTfChannels(
   for (const [channelId, channel] of channelsById) {
     const schema = schemasById.get(channel.schemaId);
     if (!schema) continue;
-    if (isTfSchema(schema.name)) {
+    if (TF_SCHEMAS.has(schema.name)) {
       result.push({
         channelId,
         topic: channel.topic,
@@ -136,7 +132,7 @@ export function parseTfMessage(
 // ---------------------------------------------------------------------------
 
 /** Find the latest transform with timestampNs <= timeNs via binary search. */
-export function binarySearchLatest(
+function binarySearchLatest(
   arr: TfTransform[],
   timeNs: bigint,
 ): TfTransform | null {

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from pymcap_cli.index.fingerprint import (
     HEAD_BYTES,
     TAIL_BYTES,
-    fingerprint_path,
     fingerprint_stream,
 )
 
@@ -19,11 +18,17 @@ def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def _fingerprint_path(path: Path) -> tuple[str, int]:
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        return fingerprint_stream(stream, size), size
+
+
 def test_fingerprint_is_deterministic(tmp_path: Path) -> None:
     a = tmp_path / "a.bin"
     _write(a, b"hello world" * 100)
-    fp1, size1 = fingerprint_path(a)
-    fp2, size2 = fingerprint_path(a)
+    fp1, size1 = _fingerprint_path(a)
+    fp2, size2 = _fingerprint_path(a)
     assert fp1 == fp2
     assert size1 == size2 == a.stat().st_size
 
@@ -33,8 +38,8 @@ def test_fingerprint_changes_with_head(tmp_path: Path) -> None:
     b = tmp_path / "b.bin"
     _write(a, b"AAA" + b"x" * 1024)
     _write(b, b"BBB" + b"x" * 1024)
-    fp_a, _ = fingerprint_path(a)
-    fp_b, _ = fingerprint_path(b)
+    fp_a, _ = _fingerprint_path(a)
+    fp_b, _ = _fingerprint_path(b)
     assert fp_a != fp_b
 
 
@@ -45,8 +50,8 @@ def test_fingerprint_changes_with_tail(tmp_path: Path) -> None:
     b = tmp_path / "b.bin"
     a.write_bytes(body + b"end_a")
     b.write_bytes(body + b"end_b")
-    fp_a, _ = fingerprint_path(a)
-    fp_b, _ = fingerprint_path(b)
+    fp_a, _ = _fingerprint_path(a)
+    fp_b, _ = _fingerprint_path(b)
     assert fp_a != fp_b
 
 
@@ -57,8 +62,8 @@ def test_fingerprint_is_bounded_head_tail_probe(tmp_path: Path) -> None:
     a.write_bytes(b"h" * HEAD_BYTES + b"a" * 1024 + b"t" * TAIL_BYTES)
     b.write_bytes(b"h" * HEAD_BYTES + b"b" * 1024 + b"t" * TAIL_BYTES)
 
-    fp_a, _ = fingerprint_path(a)
-    fp_b, _ = fingerprint_path(b)
+    fp_a, _ = _fingerprint_path(a)
+    fp_b, _ = _fingerprint_path(b)
 
     assert fp_a == fp_b
 
@@ -69,8 +74,8 @@ def test_fingerprint_changes_with_size(tmp_path: Path) -> None:
     b = tmp_path / "b.bin"
     a.write_bytes(b"y" * 100)
     b.write_bytes(b"y" * 200)
-    fp_a, _ = fingerprint_path(a)
-    fp_b, _ = fingerprint_path(b)
+    fp_a, _ = _fingerprint_path(a)
+    fp_b, _ = _fingerprint_path(b)
     assert fp_a != fp_b
 
 
@@ -91,6 +96,6 @@ def test_fingerprint_independent_of_path(tmp_path: Path) -> None:
     b.parent.mkdir()
     a.write_bytes(payload)
     b.write_bytes(payload)
-    fp_a, _ = fingerprint_path(a)
-    fp_b, _ = fingerprint_path(b)
+    fp_a, _ = _fingerprint_path(a)
+    fp_b, _ = _fingerprint_path(b)
     assert fp_a == fp_b

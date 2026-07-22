@@ -390,56 +390,6 @@ class CompressedPointCloudDecompressFactory:
         return _decode
 
 
-class CloudiniCompressedPointcloud2DecoderFactory:
-    """Decode Cloudini compressed point clouds to a structured numpy array.
-
-    Chains :class:`CloudiniPointCloudDecompressFactory` with
-    :func:`pointcloud2.read_points`, so the output has the same shape as the
-    regular PointCloud2 path — a numpy structured array ready to be packed
-    into an Arrow ``LIST<STRUCT<...>>``.
-
-    Requires ``pureini``; construction raises ``ImportError`` if missing.
-    """
-
-    def __init__(self) -> None:
-        self._decompress_factory = CloudiniPointCloudDecompressFactory()
-
-    def decoder_for(
-        self,
-        message_encoding: str,
-        schema: Schema | None,
-    ) -> Callable[[bytes | memoryview], np.ndarray] | None:
-        decoder = self._decompress_factory.decoder_for(message_encoding, schema)
-        if decoder is None:
-            return None
-
-        def _decode(data: bytes | memoryview) -> np.ndarray:
-            return _pointcloud_dict_to_array(decoder(data))
-
-        return _decode
-
-
-class DracoCompressedPointcloudDecoderFactory:
-    """Decode Draco compressed point clouds to a structured numpy array."""
-
-    def __init__(self) -> None:
-        self._decompress_factory = DracoPointCloudDecompressFactory()
-
-    def decoder_for(
-        self,
-        message_encoding: str,
-        schema: Schema | None,
-    ) -> Callable[[bytes | memoryview], np.ndarray] | None:
-        decoder = self._decompress_factory.decoder_for(message_encoding, schema)
-        if decoder is None:
-            return None
-
-        def _decode(data: bytes | memoryview) -> np.ndarray:
-            return _pointcloud_dict_to_array(decoder(data))
-
-        return _decode
-
-
 class CompressedPointCloudDecoderFactory:
     """Decode either compressed point cloud schema to a structured numpy array."""
 
@@ -462,7 +412,6 @@ class CompressedPointCloudDecoderFactory:
 
 
 PointCloudDecompressFactory = CompressedPointCloudDecompressFactory
-CompressedPointcloud2DecoderFactory = CompressedPointCloudDecoderFactory
 
 
 _SCHEMA_ENCODING_ROS2 = "ros2msg"

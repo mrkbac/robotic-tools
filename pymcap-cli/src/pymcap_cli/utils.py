@@ -39,7 +39,7 @@ from small_mcap import (
     rebuild_summary,
 )
 
-from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, MAX_INT64, NS_TO_SEC
+from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION, NS_TO_SEC
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR
 from pymcap_cli.types.types_manual import (
@@ -532,33 +532,6 @@ def parse_timestamp_args(
     if nanoseconds != 0:
         return nanoseconds
     return None
-
-
-def parse_timestamp_args_absolute(date_or_nanos: str, seconds: int, nanoseconds: int) -> int | None:
-    """Parse timestamp args, rejecting relative anchors.
-
-    Use this from commands that resolve times before any input file is open
-    (e.g. ``cat``, ``plot``) and so cannot yet resolve ``@5s`` / ``end-30s``
-    against the file's summary. Filter uses :py:func:`parse_timestamp_args`
-    with ``allow_relative=True`` and resolves relative bounds in
-    :py:meth:`TimeFilterProcessor.initialize`.
-    """
-    return parse_timestamp_args(date_or_nanos, seconds, nanoseconds)
-
-
-def parse_timestamp_bounds_absolute(
-    start: str,
-    start_secs: int,
-    end: str,
-    end_secs: int,
-) -> tuple[int, int]:
-    """Parse absolute start/end CLI bounds with command defaults applied."""
-    start_ns = parse_timestamp_args_absolute(start, start_secs, 0)
-    end_ns = parse_timestamp_args_absolute(end, end_secs, 0)
-    return (
-        0 if start_ns is None else start_ns,
-        MAX_INT64 if end_ns is None else end_ns,
-    )
 
 
 def confirm_output_overwrite(output: Path, force: bool) -> None:

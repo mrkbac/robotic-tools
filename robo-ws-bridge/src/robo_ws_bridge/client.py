@@ -761,20 +761,6 @@ class WebSocketBridgeClient:
         finally:
             self._pending_asset_requests.pop(request_id, None)
 
-    async def _send_json(self, message: str) -> bool:
-        """Send a raw JSON message to the server (internal use only).
-
-        Args:
-            message: JSON string to send
-
-        Returns:
-            True if message was sent, False if not connected
-        """
-        if not self._websocket:
-            return False
-        await self._websocket.send(message)
-        return True
-
     async def _handle_messages_loop(self) -> None:
         """Main message handling loop with automatic reconnection."""
         while self._should_connect:

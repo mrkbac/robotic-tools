@@ -12,6 +12,7 @@ import numpy as np
 import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
 from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
+from mcap_codec_support.video import IMAGE
 from mcap_codec_support.video.common import EncoderConfig
 from pymcap_cli.cmd.bridge._adaptive import (
     AdaptiveVideoRung,
@@ -28,20 +29,13 @@ from pymcap_cli.cmd.bridge._proxy_runtime import (
 )
 from pymcap_cli.cmd.bridge._proxy_transforms import (
     COMPRESSED_VIDEO_SCHEMA,
-    ImageConfig,
-    PointCloudConfig,
-    ProcessorRule,
     ProxyConfig,
     VideoTransformer,
-    build_transform_rules,
     create_transformer,
     is_video_keyframe,
 )
+from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig
 from pymcap_cli.cmd.bridge.proxy import BridgeProxy, _ChannelState
-from pymcap_cli.core.processors.message_transform import (
-    MessageTransformProcessor,
-    TransformOutput,
-)
 from pymcap_cli.core.processors.video_compress import ResolvedVideoCompressionBackend
 from rich.console import Console
 
@@ -63,23 +57,9 @@ async def _wait_for(predicate: Callable[[], bool]) -> None:
 
 def _proxy_config() -> ProxyConfig:
     return ProxyConfig(
-        image=ImageConfig(
+        transform=RoscompressConfig(
             image_format="none",
-            codec="h264",
-            quality=28,
-            encoder=None,
-            backend="auto",
-            scale=None,
-            jpeg_quality=90,
-        ),
-        pointcloud=PointCloudConfig(
-            enabled=False,
-            pc_format="cloudini",
-            pc_schema="auto",
-            pc_encoding="lossy",
-            pc_compression="zstd",
-            resolution=0.01,
-            draco_compression_level=7,
+            pointcloud=False,
         ),
         transform_queue_size=1,
         throttle_hz=0,
@@ -248,41 +228,22 @@ def test_bridge_proxy_defers_upstream_subscribe_until_connected() -> None:
     asyncio.run(run())
 
 
-class _AppendLiveProcessor(MessageTransformProcessor):
-    def matches(self, _channel, schema) -> bool:
-        return schema is not None and schema.name == "std_msgs/msg/String"
-
-    def transform(self, channel, schema, decoded):
-        return [
-            TransformOutput(
-                topic=channel.topic,
-                schema_name=schema.name,
-                schema_encoding=schema.encoding,
-                schema_data=schema.data,
-                data={"data": f"{decoded.data}!"},
-            )
-        ]
-
-
-def test_processor_rule_wraps_message_transform_processor() -> None:
-    rule = ProcessorRule(processor_factory=_AppendLiveProcessor)
-
-    transformer = rule.create_transformer(
+def test_create_transformer_builds_image_processor() -> None:
+    config = replace(_proxy_config().transform, image_format="jpeg")
+    transformer = create_transformer(
+        config,
         {
             "id": 3,
-            "topic": "/chatter",
+            "topic": "/camera/image",
             "encoding": "cdr",
-            "schemaName": "std_msgs/msg/String",
-            "schema": "string data",
+            "schemaName": "sensor_msgs/msg/Image",
+            "schema": IMAGE,
             "schemaEncoding": "ros2msg",
-        }
+        },
     )
 
     assert transformer is not None
-    result = transformer.transform(SimpleNamespace(data="ok"), 0)
-    assert result is not None
-    assert result.payload == {"data": "ok!"}
-    assert transformer.output_schema_name == "std_msgs/msg/String"
+    assert transformer.output_schema_name == "sensor_msgs/msg/CompressedImage"
 
 
 def test_pointcloud_rule_drops_invalid_points_before_compression(
@@ -294,18 +255,10 @@ def test_pointcloud_rule_drops_invalid_points_before_compression(
     )
     config = replace(
         _proxy_config(),
-        pointcloud=PointCloudConfig(
-            enabled=True,
-            pc_format="cloudini",
-            pc_schema="auto",
-            pc_encoding="lossy",
-            pc_compression="zstd",
-            resolution=0.01,
-            draco_compression_level=7,
-        ),
+        transform=replace(_proxy_config().transform, pointcloud=True),
     )
     transformer = create_transformer(
-        build_transform_rules(config),
+        config.transform,
         {
             "id": 9,
             "topic": "/lidar/points",
@@ -559,7 +512,7 @@ def test_video_transformer_uses_roscompress_backend_resolver(
     )
 
     transformer = VideoTransformer(
-        ImageConfig(
+        RoscompressConfig(
             image_format="video",
             codec="h264",
             quality=28,
@@ -782,7 +735,7 @@ def test_video_transformer_rebuilds_session_on_scale_factor_change(
             self.header = SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=2), frame_id="cam")
 
     transformer = VideoTransformer(
-        ImageConfig(
+        RoscompressConfig(
             image_format="video",
             codec="h264",
             quality=28,

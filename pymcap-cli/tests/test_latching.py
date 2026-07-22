@@ -88,21 +88,21 @@ class TestLatchingProcessor:
         non_latched = self._channel(ch_id=2, topic="/scan")
         assert proc.on_channel(channel_context(latched), latched, None) is Action.CONTINUE
         assert proc.on_channel(channel_context(non_latched), non_latched, None) is Action.CONTINUE
-        assert proc.latched_channel_ids == {1}
+        assert proc._latched_channel_ids == {1}
 
     def test_metadata_detection_disabled_by_default(self) -> None:
         proc = LatchingProcessor()
         channel = self._channel(ch_id=1, topic="/static_thing", latched=True)
         action = proc.on_channel(channel_context(channel), channel, None)
         assert action is Action.CONTINUE
-        assert proc.latched_channel_ids == set()
+        assert proc._latched_channel_ids == set()
 
     def test_metadata_detection_when_opted_in(self) -> None:
         proc = LatchingProcessor(from_metadata=True)
         channel = self._channel(ch_id=1, topic="/static_thing", latched=True)
         action = proc.on_channel(channel_context(channel), channel, None)
         assert action is Action.CONTINUE
-        assert proc.latched_channel_ids == {1}
+        assert proc._latched_channel_ids == {1}
 
     def test_pattern_takes_precedence_over_disabled_metadata(self) -> None:
         proc = LatchingProcessor(patterns=[re.compile(r"_static")])
@@ -110,7 +110,7 @@ class TestLatchingProcessor:
         channel = self._channel(ch_id=1, topic="/tf_static", latched=True)
         action = proc.on_channel(channel_context(channel), channel, None)
         assert action is Action.CONTINUE
-        assert proc.latched_channel_ids == {1}
+        assert proc._latched_channel_ids == {1}
 
 
 # ---------------------------------------------------------------------------
@@ -402,12 +402,12 @@ def test_latched_chunk_is_decoded_not_fast_copied(tmp_path: Path) -> None:
             processor = McapProcessor(options)
             stats = processor.process(output_stream=out_stream)
 
-    # If the latched chunks were fast-copied, latched_channel_ids would be
+    # If the latched chunks were fast-copied, _latched_channel_ids would be
     # empty (channels populated, but cache miss because on_message never fired
     # for them). Verify on_message did fire.
     latching_proc = next(
         p for p in processor._get_processors(0) if isinstance(p, LatchingProcessor)
     )
-    assert latching_proc.latched_channel_ids, "latched channels never registered"
+    assert latching_proc._latched_channel_ids, "latched channels never registered"
     assert any(stats.messages_processed for _ in [None])
     assert stats.chunks_processed > 0

@@ -21,14 +21,12 @@ from ._plans import (
 class DecoderGeneratorFactory:
     """Factory class for generating decoder code with managed state."""
 
-    def __init__(
-        self, plan: PlanList, *, comments: bool = True, endianness: Literal["<", ">"] = "<"
-    ) -> None:
+    def __init__(self, plan: PlanList, *, endianness: Literal["<", ">"] = "<") -> None:
         self.plan = plan
         self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0
         self.struct_patterns: dict[str, str] = {}
-        self.code = CodeWriter(comments=comments)
+        self.code = CodeWriter()
         # Collect all required types and classes during generation
         self.message_classes: set[type] = set()
         self.current_alignment = 8  # perfect alignment at the start
@@ -295,7 +293,7 @@ class DecoderGeneratorFactory:
             self.code.append(f"for {random_i} in range({array_size}):")
 
         self.reset_alignment()  # Need to reset alignment at the start of loops
-        with self.code:
+        with self.code.indent(None):
             self.generate_plan(temp_var, plan)
             self.code.append(f"{target}[{random_i}] = {temp_var}")
 
@@ -512,7 +510,7 @@ class DecoderGeneratorFactory:
         return str(self.code)
 
 
-def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
+def create_decoder(plan: PlanList) -> DecoderFunction:
     """Create a decoder function from an execution plan using code generation.
 
     This generates optimized Python code for the specific plan, eliminating
@@ -527,12 +525,12 @@ def create_decoder(plan: PlanList, *, comments: bool = True) -> DecoderFunction:
     - Opt 5: Returns constructor result directly (no temp variable)
     """
     # Generate BE decoder with validity check (separate function, cold path)
-    factory_be = DecoderGeneratorFactory(plan, comments=comments, endianness=">")
+    factory_be = DecoderGeneratorFactory(plan, endianness=">")
     decoder_be_name = f"decoder_{plan[0].__name__}_be"
     code_be = factory_be.generate_decoder_code(decoder_be_name, validate_endianness=CDR_BIG_ENDIAN)
 
     # Generate LE decoder inlined as main with BE fallback guard (hot path)
-    factory_le = DecoderGeneratorFactory(plan, comments=comments, endianness="<")
+    factory_le = DecoderGeneratorFactory(plan, endianness="<")
     main_name = f"decoder_{plan[0].__name__}_main"
     code_le = factory_le.generate_decoder_code(main_name, be_fallback=decoder_be_name)
 

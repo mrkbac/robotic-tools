@@ -94,37 +94,6 @@ def encode_varint64_to_buffer(value: int, buffer: memoryview, offset: int = 0) -
     return ptr - offset
 
 
-def encode_varint64(value: int) -> bytes:
-    """
-    Encode a signed 64-bit integer using zigzag encoding + varint.
-    Value 0 is reserved for NaN, so all values are shifted by +1.
-
-    Args:
-        value: The signed 64-bit integer to encode
-
-    Returns:
-        Varint-encoded bytes
-
-    Note: This creates a new bytearray. For better performance,
-    use encode_varint64_to_buffer() to write directly to a buffer.
-    """
-    # Zigzag encoding: (value << 1) ^ (value >> 63)
-    # For Python, we need to handle the sign extension properly
-    val = value << 1 if value >= 0 else ((-value - 1) << 1) | 1
-
-    # Reserve value 0 for NaN
-    val += 1
-
-    # Varint encoding
-    result = bytearray()
-    while val > 0x7F:
-        result.append((val & 0x7F) | 0x80)
-        val >>= 7
-    result.append(val & 0xFF)
-
-    return bytes(result)
-
-
 @nb.njit(cache=True, fastmath=True)
 def decode_varint(data: bytes | memoryview, offset: int = 0) -> tuple[int, int]:
     """
@@ -226,22 +195,6 @@ def decode_string(buff: BufferView) -> str:
     length = int(decode(buff, "H"))
     encoded = buff.read_bytes(length)
     return encoded.decode("utf-8")
-
-
-def to_int64(data: bytes | bytearray | memoryview, offset: int, dtype: str) -> int:
-    """
-    Read a value from bytes and convert to int64.
-
-    Args:
-        data: The byte buffer (bytes, bytearray, or memoryview)
-        offset: Offset in the buffer
-        dtype: Data type ('b', 'B', 'h', 'H', 'i', 'I', 'q', 'Q')
-
-    Returns:
-        The value as int64
-    """
-    value = struct.unpack_from(f"<{dtype}", data, offset)[0]
-    return int(value)
 
 
 def build_field_metadata(

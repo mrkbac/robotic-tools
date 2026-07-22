@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { loadFileHandle } from "../stores/fileHandleStore.ts";
 import { supportsFileSystemAccess } from "../stores/fileHandleSupport.ts";
 
-export type RecoveryStatus = "idle" | "loading" | "prompt" | "granted";
+type RecoveryStatus = "idle" | "loading" | "prompt" | "granted";
 
 interface FileHandleRecovery {
   status: RecoveryStatus;

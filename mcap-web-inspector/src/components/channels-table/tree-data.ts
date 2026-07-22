@@ -69,7 +69,7 @@ function aggregateNode(node: TopicTreeNode): {
     if (ch.message_distribution.length > 0) {
       if (distribution.length < ch.message_distribution.length) {
         distribution = distribution.concat(
-          new Array(ch.message_distribution.length - distribution.length).fill(
+          Array(ch.message_distribution.length - distribution.length).fill(
             0,
           ),
         );
@@ -94,7 +94,7 @@ function aggregateNode(node: TopicTreeNode): {
     if (agg.distribution.length > 0) {
       if (distribution.length < agg.distribution.length) {
         distribution = distribution.concat(
-          new Array(agg.distribution.length - distribution.length).fill(0),
+          Array(agg.distribution.length - distribution.length).fill(0),
         );
       }
       for (let i = 0; i < agg.distribution.length; i++) {

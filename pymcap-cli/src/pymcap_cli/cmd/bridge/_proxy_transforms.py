@@ -1,9 +1,9 @@
-"""Rule-based live transforms for `pymcap-cli bridge proxy`."""
+"""Live transforms for `pymcap-cli bridge proxy`."""
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import Channel, Schema
@@ -16,6 +16,14 @@ from pymcap_cli.cmd.bridge._proxy_runtime import (
     LiveTransformer,
     TransformResult,
     schema_from_channel,
+)
+from pymcap_cli.cmd.bridge._roscompress import (
+    RoscompressConfig,
+    create_image_processor,
+    create_pointcloud_cleanup_processor,
+    create_pointcloud_compress_processor,
+    pointcloud_output_schema,
+    resolve_cleanup,
 )
 from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,
@@ -36,9 +44,7 @@ COMPRESSED_VIDEO_SCHEMA = "foxglove_msgs/msg/CompressedVideo"
 
 def _normalize_schema_name(name: str) -> str:
     parts = name.split("/")
-    if len(parts) == 3 and parts[1] in ("msg", "srv", "action"):
-        return f"{parts[0]}/{parts[2]}"
-    return name
+    return f"{parts[0]}/{parts[2]}" if len(parts) == 3 and parts[1] == "msg" else name
 
 
 class _StampLike(Protocol):
@@ -56,34 +62,8 @@ class _HeaderMessageLike(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ImageConfig:
-    image_format: Literal["video", "jpeg", "png", "none"]
-    codec: str
-    quality: int
-    encoder: str | None
-    backend: Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
-    scale: int | None
-    jpeg_quality: int
-    adaptive_quality: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class PointCloudConfig:
-    enabled: bool
-    pc_format: Literal["cloudini", "draco"]
-    pc_schema: Literal["auto", "pointcloud2", "foxglove"]
-    pc_encoding: Literal["lossy", "lossless", "none"]
-    pc_compression: Literal["zstd", "lz4", "none"]
-    resolution: float
-    draco_compression_level: int
-    drop_invalid: bool = True
-    sort_field: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ProxyConfig:
-    image: ImageConfig
-    pointcloud: PointCloudConfig
+    transform: RoscompressConfig
     transform_queue_size: int
     throttle_hz: float
     max_message_size: int | None
@@ -98,46 +78,6 @@ class _LiveChannel:
 class _LiveDecodedMessage:
     decoded_message: object
     channel: _LiveChannel
-
-
-class LiveTransformRule(Protocol):
-    def create_transformer(self, channel: ChannelInfo) -> LiveTransformer | None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ProcessorRule:
-    """Apply an existing MessageTransformProcessor to a live topic/schema."""
-
-    processor_factory: Callable[[], MessageTransformProcessor]
-    preprocessor_factories: tuple[Callable[[], MessageTransformProcessor], ...] = ()
-    output_schema_name: str | None = None
-    output_schema_text: str | None = None
-    output_schema_encoding: str | None = None
-    output_message_encoding: str | None = None
-
-    def create_transformer(self, channel: ChannelInfo) -> LiveTransformer | None:
-        if not _is_ros_cdr_channel(channel):
-            return None
-        schema = schema_from_channel(channel)
-        processor = self.processor_factory()
-        preprocessors = tuple(factory() for factory in self.preprocessor_factories)
-        small_channel = _small_channel_from_info(channel, schema)
-        if not processor.matches(small_channel, schema):
-            return None
-        return ProcessorTransformer(
-            processor=processor,
-            preprocessors=preprocessors,
-            channel=small_channel,
-            schema=schema,
-            output_schema_name=self.output_schema_name or schema.name,
-            output_schema_text=(
-                self.output_schema_text
-                if self.output_schema_text is not None
-                else channel.get("schema", "")
-            ),
-            output_schema_encoding=self.output_schema_encoding or schema.encoding,
-            output_message_encoding=self.output_message_encoding or channel["encoding"],
-        )
 
 
 class ProcessorTransformer:
@@ -194,19 +134,6 @@ class ProcessorTransformer:
             logger.debug("Ignoring finalize output from live processor %s", type(self._processor))
 
 
-@dataclass(frozen=True, slots=True)
-class VideoRule:
-    config: ImageConfig
-
-    def create_transformer(self, channel: ChannelInfo) -> LiveTransformer | None:
-        if self.config.image_format != "video" or not _is_ros_cdr_channel(channel):
-            return None
-        schema_name = _normalize_schema_name(channel.get("schemaName", ""))
-        if schema_name not in _IMAGE_SCHEMAS:
-            return None
-        return VideoTransformer(self.config, channel["topic"])
-
-
 class VideoTransformer:
     """Encode one live image topic to CompressedVideo, one frame at a time.
 
@@ -220,7 +147,7 @@ class VideoTransformer:
     output_message_encoding = MESSAGE_ENCODING
     worker_count = 1
 
-    def __init__(self, config: ImageConfig, topic: str) -> None:
+    def __init__(self, config: RoscompressConfig, topic: str) -> None:
         from mcap_codec_support.video import (  # noqa: PLC0415
             COMPRESSED_VIDEO_SCHEMA,
             FOXGLOVE_COMPRESSED_VIDEO,
@@ -301,93 +228,61 @@ class VideoTransformer:
         self._session.close()
 
 
-def build_transform_rules(config: ProxyConfig) -> list[LiveTransformRule]:
-    rules: list[LiveTransformRule] = [VideoRule(config.image)]
-
-    if config.image.image_format in {"jpeg", "png"}:
+def create_transformer(config: RoscompressConfig, channel: ChannelInfo) -> LiveTransformer | None:
+    if not _is_ros_cdr_channel(channel):
+        return None
+    schema_name = _normalize_schema_name(channel.get("schemaName", ""))
+    if config.image_format == "video" and schema_name in _IMAGE_SCHEMAS:
+        return VideoTransformer(config, channel["topic"])
+    if config.image_format in {"jpeg", "png"} and schema_name in _RAW_IMAGE_SCHEMAS:
         from mcap_codec_support.video import COMPRESSED_IMAGE  # noqa: PLC0415
 
-        from pymcap_cli.core.processors.image_compress import (  # noqa: PLC0415
-            ImageCompressProcessor,
+        return _processor_transformer(
+            channel,
+            create_image_processor(config),
+            output_schema_name="sensor_msgs/msg/CompressedImage",
+            output_schema_text=COMPRESSED_IMAGE,
         )
-
-        image_format: Literal["jpeg", "png"] = (
-            "jpeg" if config.image.image_format == "jpeg" else "png"
+    if config.pointcloud and schema_name in _POINTCLOUD2_SCHEMAS:
+        preprocessors: tuple[MessageTransformProcessor, ...] = ()
+        cleanup = resolve_cleanup(config)
+        if cleanup.enabled:
+            cleaner = create_pointcloud_cleanup_processor(config)
+            assert cleaner is not None
+            preprocessors = (cleaner,)
+        output_schema_name, output_schema_text = pointcloud_output_schema(config)
+        return _processor_transformer(
+            channel,
+            create_pointcloud_compress_processor(
+                config,
+                workers=pointcloud_worker_count(max_workers=8),
+            ),
+            preprocessors=preprocessors,
+            output_schema_name=output_schema_name,
+            output_schema_text=output_schema_text,
         )
-        rules.append(
-            ProcessorRule(
-                processor_factory=lambda: ImageCompressProcessor(
-                    image_format=image_format,
-                    jpeg_quality=config.image.jpeg_quality,
-                    scale=config.image.scale,
-                ),
-                output_schema_name="sensor_msgs/msg/CompressedImage",
-                output_schema_text=COMPRESSED_IMAGE,
-            )
-        )
-
-    if config.pointcloud.enabled:
-        from mcap_codec_support.pointcloud import (  # noqa: PLC0415
-            COMPRESSED_POINTCLOUD2,
-            COMPRESSED_POINTCLOUD2_SCHEMA,
-            FOXGLOVE_COMPRESSED_POINTCLOUD,
-            FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
-        )
-
-        from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
-            PointcloudCompressProcessor,
-        )
-
-        preprocessor_factories: tuple[Callable[[], MessageTransformProcessor], ...] = ()
-        if config.pointcloud.drop_invalid or config.pointcloud.sort_field is not None:
-            from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
-                PointcloudCleanProcessor,
-            )
-
-            preprocessor_factories = (
-                lambda: PointcloudCleanProcessor(
-                    drop_invalid=config.pointcloud.drop_invalid,
-                    sort_field=config.pointcloud.sort_field,
-                ),
-            )
-
-        pc_schema = config.pointcloud.pc_schema
-        if pc_schema == "auto":
-            pc_schema = "foxglove" if config.pointcloud.pc_format == "draco" else "pointcloud2"
-        if pc_schema == "foxglove":
-            output_schema_name = FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA
-            output_schema_text = FOXGLOVE_COMPRESSED_POINTCLOUD
-        else:
-            output_schema_name = COMPRESSED_POINTCLOUD2_SCHEMA
-            output_schema_text = COMPRESSED_POINTCLOUD2
-        rules.append(
-            ProcessorRule(
-                processor_factory=lambda: PointcloudCompressProcessor(
-                    pc_format=config.pointcloud.pc_format,
-                    pc_schema=config.pointcloud.pc_schema,
-                    pc_encoding=config.pointcloud.pc_encoding,
-                    pc_compression=config.pointcloud.pc_compression,
-                    resolution=config.pointcloud.resolution,
-                    draco_compression_level=config.pointcloud.draco_compression_level,
-                    workers=pointcloud_worker_count(max_workers=8),
-                ),
-                preprocessor_factories=preprocessor_factories,
-                output_schema_name=output_schema_name,
-                output_schema_text=output_schema_text,
-            )
-        )
-
-    return rules
-
-
-def create_transformer(
-    rules: Iterable[LiveTransformRule], channel: ChannelInfo
-) -> LiveTransformer | None:
-    for rule in rules:
-        transformer = rule.create_transformer(channel)
-        if transformer is not None:
-            return transformer
     return None
+
+
+def _processor_transformer(
+    channel: ChannelInfo,
+    processor: MessageTransformProcessor,
+    *,
+    preprocessors: tuple[MessageTransformProcessor, ...] = (),
+    output_schema_name: str,
+    output_schema_text: str,
+) -> ProcessorTransformer:
+    schema = schema_from_channel(channel)
+    return ProcessorTransformer(
+        processor=processor,
+        preprocessors=preprocessors,
+        channel=_small_channel_from_info(channel, schema),
+        schema=schema,
+        output_schema_name=output_schema_name,
+        output_schema_text=output_schema_text,
+        output_schema_encoding=SCHEMA_ENCODING,
+        output_message_encoding=MESSAGE_ENCODING,
+    )
 
 
 def is_video_keyframe(data: bytes, video_format: str) -> bool:

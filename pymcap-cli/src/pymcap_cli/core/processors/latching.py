@@ -23,13 +23,11 @@ from pymcap_cli.core.processors.base import (
     Action,
     ChannelContext,
     ChunkContext,
-    InputContext,
     InputProcessor,
     MessageContext,
     MessageHeader,
     MessageHeaderDecision,
     MessageScope,
-    PipelineContext,
     SegmentContext,
 )
 
@@ -92,36 +90,14 @@ class LatchingProcessor(InputProcessor):
         self._patterns = patterns or []
         self._from_metadata = from_metadata
         self._latched_channel_ids: set[int] = set()
-        self._latched_topics: set[str] = set()
         self._last_message: dict[int, Message] = {}
         self._previous_message: dict[int, Message] = {}
         self._replayed_segments: set[OutputKey] = set()
-
-    @property
-    def latched_channel_ids(self) -> set[int]:
-        return self._latched_channel_ids
-
-    @property
-    def latched_topics(self) -> set[str]:
-        return self._latched_topics
 
     def _is_latched(self, channel: Channel) -> bool:
         if any(p.search(channel.topic) for p in self._patterns):
             return True
         return self._from_metadata and _channel_is_transient_local(channel)
-
-    @override
-    def initialize(self, context: PipelineContext) -> None:
-        for input_context in context.inputs:
-            if input_context.summary is None:
-                continue
-            for channel in input_context.summary.channels.values():
-                if self._is_latched(channel):
-                    self._latched_topics.add(channel.topic)
-
-    @override
-    def prepare_input(self, context: InputContext) -> None:
-        _ = context
 
     @override
     def on_channel(
@@ -130,7 +106,6 @@ class LatchingProcessor(InputProcessor):
         # Discover channels that arrive without a summary (recovery / streaming).
         if channel.id not in self._latched_channel_ids and self._is_latched(channel):
             self._latched_channel_ids.add(channel.id)
-            self._latched_topics.add(channel.topic)
         return Action.CONTINUE
 
     @override

@@ -245,6 +245,7 @@ protected_modules = ["mcap_codec_support"]
 allowed_importers = [
     "pymcap_cli.cmd.bridge._playback_transforms",
     "pymcap_cli.cmd.bridge._proxy_transforms",
+    "pymcap_cli.cmd.bridge._roscompress",
     "pymcap_cli.cmd.bridge.proxy",
     "pymcap_cli.cmd.process_cmd",
     "pymcap_cli.cmd.roscompress_cmd",

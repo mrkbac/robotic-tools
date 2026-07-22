@@ -3,7 +3,7 @@ import { parse } from "@foxglove/rosmsg";
 import { MessageReader } from "@foxglove/rosmsg2-serialization";
 
 /** A single thumbnail extracted from a CompressedImage message. */
-export interface ImageThumbnail {
+interface ImageThumbnail {
   channelId: number;
   topic: string;
   /** Image format (e.g. "jpeg", "png"). */
@@ -29,10 +29,6 @@ const COMPRESSED_IMAGE_SCHEMAS = new Set([
   "foxglove.CompressedImage",
 ]);
 
-export function isCompressedImageSchema(name: string): boolean {
-  return COMPRESSED_IMAGE_SCHEMAS.has(name);
-}
-
 /** Find all channels whose schema is a CompressedImage type. */
 export function findImageChannels(
   channelsById: ReadonlyMap<number, Channel & { type: "Channel" }>,
@@ -42,7 +38,7 @@ export function findImageChannels(
   for (const [channelId, channel] of channelsById) {
     const schema = schemasById.get(channel.schemaId);
     if (!schema) continue;
-    if (isCompressedImageSchema(schema.name)) {
+    if (COMPRESSED_IMAGE_SCHEMAS.has(schema.name)) {
       result.push({
         channelId,
         topic: channel.topic,
@@ -65,7 +61,7 @@ export function createImageReader(schemaData: string): MessageReader | null {
 }
 
 /** Extract image data from CDR using a Foxglove MessageReader. */
-export function extractFromCdrFoxglove(
+function extractFromCdrFoxglove(
   reader: MessageReader,
   data: Uint8Array,
 ): { format: string; imageData: Uint8Array } | null {
@@ -130,7 +126,7 @@ function readCdrBytes(
  *   format: string (4B len + chars)
  *   data: sequence<uint8> (4B len + bytes)
  */
-export function extractFromCdr(
+function extractFromCdr(
   data: Uint8Array,
 ): { format: string; imageData: Uint8Array } | null {
   if (data.byteLength < 16) return null;
@@ -166,7 +162,7 @@ export function extractFromCdr(
  *   3: data (bytes)
  *   4: format (string)
  */
-export function extractFromProtobuf(
+function extractFromProtobuf(
   data: Uint8Array,
 ): { format: string; imageData: Uint8Array } | null {
   let format = "";
@@ -241,7 +237,7 @@ export function extractImage(
 }
 
 /** Convert a thumbnail's raw image data to a data URL for persistent storage. */
-export function thumbnailToDataUrl(thumb: ImageThumbnail): string {
+function thumbnailToDataUrl(thumb: ImageThumbnail): string {
   const mime = thumb.format.startsWith("image/")
     ? thumb.format
     : `image/${thumb.format || "jpeg"}`;

@@ -66,14 +66,6 @@ class MessageFilterOptions:
     def has_positive_topics(self) -> bool:
         return bool(self.topics)
 
-    @property
-    def has_topic_filters(self) -> bool:
-        return bool(self.has_positive_topics or self.exclude_topics)
-
-    @property
-    def has_time_filters(self) -> bool:
-        return bool(self.start_time is not None or self.end_time is not None or self.early_bail)
-
     @staticmethod
     def _compile_selectors(selectors: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
         try:

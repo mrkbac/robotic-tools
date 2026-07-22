@@ -17,7 +17,6 @@ from pymcap_cli.cmd._cli_options import (
     ENCODING_GROUP,
     POINTCLOUD_GROUP,
 )
-from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd.bridge._adaptive import (
     MAX_VIDEO_FPS,
     AdaptiveQualityGovernor,
@@ -32,9 +31,21 @@ from pymcap_cli.cmd.bridge._playback import (
     PlaybackTransformPlan,
     PlaybackTransformSession,
 )
+from pymcap_cli.cmd.bridge._roscompress import (
+    BackendName,
+    ImageFormat,
+    PointCloudCompression,
+    PointCloudEncoding,
+    PointCloudFormat,
+    PointCloudSchema,
+    RoscompressConfig,
+    create_image_processor,
+    create_pointcloud_processors,
+    pointcloud_output_schema,
+    resolve_cleanup,
+)
 
 if TYPE_CHECKING:
-    from pymcap_cli.cmd._pointcloud_cleanup import PointcloudCleanupConfig
     from pymcap_cli.core.processors.message_transform import (
         MessageTransformProcessor,
         TransformOutput,
@@ -45,13 +56,7 @@ logger = logging.getLogger(__name__)
 
 TRANSFORM_GROUP = Group("ROS Transform")
 Preset = Literal["compress", "decompress", "fast", "low"]
-BackendName = Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
-ImageFormat = Literal["video", "jpeg", "png", "none"]
 VideoFormat = Literal["compressed", "raw"]
-PointCloudFormat = Literal["cloudini", "draco"]
-PointCloudSchema = Literal["auto", "pointcloud2", "foxglove"]
-PointCloudEncoding = Literal["lossy", "lossless", "none"]
-PointCloudCompression = Literal["zstd", "lz4", "none"]
 
 OptionalPresetOption = Annotated[
     Preset | None,
@@ -156,27 +161,6 @@ OptionalDracoCompressionLevelOption = Annotated[
         help="Preset default: 7.",
     ),
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class RoscompressConfig:
-    image_format: ImageFormat = "video"
-    codec: Literal["h264", "h265", "vp9", "av1"] = "h264"
-    quality: int = 28
-    adaptive_quality: bool = False
-    encoder: str | None = None
-    backend: BackendName = "auto"
-    scale: int | None = None
-    jpeg_quality: int = 90
-    pointcloud: bool = True
-    resolution: float = 0.01
-    pc_format: PointCloudFormat = "cloudini"
-    pc_schema: PointCloudSchema = "auto"
-    pc_encoding: PointCloudEncoding = "lossy"
-    pc_compression: PointCloudCompression = "zstd"
-    draco_compression_level: int = 7
-    pointcloud_drop_invalid: bool | None = None
-    pointcloud_sort_field: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,13 +488,7 @@ def _create_roscompress_plan(
     channels: tuple[PlaybackChannel, ...],
 ) -> JitPlaybackTransformPlan:
     from mcap_codec_support._schemas import normalize_schema_name  # noqa: PLC0415
-    from mcap_codec_support.pointcloud import (  # noqa: PLC0415
-        COMPRESSED_POINTCLOUD2,
-        COMPRESSED_POINTCLOUD2_SCHEMA,
-        FOXGLOVE_COMPRESSED_POINTCLOUD,
-        FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
-        POINTCLOUD2_SCHEMAS,
-    )
+    from mcap_codec_support.pointcloud import POINTCLOUD2_SCHEMAS  # noqa: PLC0415
     from mcap_codec_support.video import (  # noqa: PLC0415
         COMPRESSED_IMAGE,
         COMPRESSED_VIDEO_SCHEMA,
@@ -519,11 +497,7 @@ def _create_roscompress_plan(
         RAW_SCHEMAS,
     )
 
-    cleanup = resolve_pointcloud_cleanup(
-        pointcloud_compression_enabled=config.pointcloud,
-        pointcloud_drop_invalid=config.pointcloud_drop_invalid,
-        pointcloud_sort_field=config.pointcloud_sort_field,
-    )
+    cleanup = resolve_cleanup(config)
     specs: list[_ChannelTransformSpec] = []
     for source in channels:
         schema_name = normalize_schema_name(source.schema_name)
@@ -576,15 +550,7 @@ def _create_roscompress_plan(
             and (config.pointcloud or cleanup.enabled)
         ):
             if config.pointcloud:
-                resolved_schema = config.pc_schema
-                if resolved_schema == "auto":
-                    resolved_schema = "foxglove" if config.pc_format == "draco" else "pointcloud2"
-                if resolved_schema == "foxglove":
-                    out_name = FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA
-                    out_schema = FOXGLOVE_COMPRESSED_POINTCLOUD
-                else:
-                    out_name = COMPRESSED_POINTCLOUD2_SCHEMA
-                    out_schema = COMPRESSED_POINTCLOUD2
+                out_name, out_schema = pointcloud_output_schema(config)
                 output = PlaybackChannel(
                     topic=source.topic,
                     message_encoding="cdr",
@@ -592,9 +558,7 @@ def _create_roscompress_plan(
                     schema_encoding="ros2msg",
                     schema_text=out_schema,
                 )
-            factory = partial(
-                _create_pointcloud_processor_transform, source, output, config, cleanup
-            )
+            factory = partial(_create_pointcloud_processor_transform, source, output, config)
         if is_video:
             specs.append(_ChannelTransformSpec(source, output, factories, video_rungs))
         else:
@@ -806,19 +770,10 @@ def _create_image_processor_transform(
     output: PlaybackChannel,
     config: RoscompressConfig,
 ) -> _ProcessorChannelTransform:
-    from pymcap_cli.core.processors.image_compress import ImageCompressProcessor  # noqa: PLC0415
-
-    image_format = cast("Literal['jpeg', 'png']", config.image_format)
     return _ProcessorChannelTransform(
         source,
         output,
-        (
-            ImageCompressProcessor(
-                image_format=image_format,
-                jpeg_quality=config.jpeg_quality,
-                scale=config.scale,
-            ),
-        ),
+        (create_image_processor(config),),
     )
 
 
@@ -826,36 +781,8 @@ def _create_pointcloud_processor_transform(
     source: PlaybackChannel,
     output: PlaybackChannel,
     config: RoscompressConfig,
-    cleanup: PointcloudCleanupConfig,
 ) -> _ProcessorChannelTransform:
-    processors: list[object] = []
-    if cleanup.enabled:
-        from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
-            PointcloudCleanProcessor,
-        )
-
-        processors.append(
-            PointcloudCleanProcessor(
-                drop_invalid=cleanup.drop_invalid,
-                sort_field=cleanup.sort_field,
-            )
-        )
-    if config.pointcloud:
-        from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
-            PointcloudCompressProcessor,
-        )
-
-        processors.append(
-            PointcloudCompressProcessor(
-                pc_format=config.pc_format,
-                pc_schema=config.pc_schema,
-                pc_encoding=config.pc_encoding,
-                pc_compression=config.pc_compression,
-                resolution=config.resolution,
-                draco_compression_level=config.draco_compression_level,
-            )
-        )
-    return _ProcessorChannelTransform(source, output, tuple(processors))
+    return _ProcessorChannelTransform(source, output, create_pointcloud_processors(config))
 
 
 @dataclass(frozen=True, slots=True)

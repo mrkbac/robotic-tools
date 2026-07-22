@@ -268,13 +268,6 @@ def _path_prefix_where(path: Path) -> tuple[str, tuple[str, str]]:
     return "WHERE (abs_path >= ? AND abs_path < ?)", (lower, upper)
 
 
-def _optional_path_filter_params(path: Path | None) -> tuple[str | None, str, str]:
-    if path is None:
-        return None, "", ""
-    lower, upper = _path_prefix_bounds(path)
-    return lower, lower, upper
-
-
 SqlValue = str | int | None
 SqlParams = Sequence[SqlValue]
 
@@ -339,10 +332,6 @@ def _status_int(
         warnings.append(f"{label}: no value returned")
         return None
     return int(row[0])
-
-
-def _status_unavailable(label: str, reason: str, warnings: list[str]) -> None:
-    warnings.append(f"{label}: {reason}")
 
 
 def _format_optional_count(value: int | None) -> str:

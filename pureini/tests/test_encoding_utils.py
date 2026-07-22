@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import struct
-
 import numpy as np
 import pytest
 from pureini.encoding_utils import (
@@ -14,8 +12,7 @@ from pureini.encoding_utils import (
     decode_varint,
     encode,
     encode_string,
-    encode_varint64,
-    to_int64,
+    encode_varint64_to_buffer,
 )
 from pureini.types import EncodingInfo, EncodingOptions, FieldType, PointField
 
@@ -85,37 +82,43 @@ class TestBufferView:
 
 
 class TestVarintRoundtrip:
+    @staticmethod
+    def _encode(value: int) -> bytes:
+        buffer = bytearray(10)
+        size = encode_varint64_to_buffer(value, memoryview(buffer))
+        return bytes(buffer[:size])
+
     @pytest.mark.parametrize("value", [0, 1, -1, 127, -128, 1000, -1000, 2**31, -(2**31)])
     def test_roundtrip(self, value: int):
-        encoded = encode_varint64(value)
+        encoded = self._encode(value)
         decoded, consumed = decode_varint(encoded, 0)
         assert decoded == value
         assert consumed == len(encoded)
 
     def test_zero(self):
-        encoded = encode_varint64(0)
+        encoded = self._encode(0)
         decoded, _ = decode_varint(encoded, 0)
         assert decoded == 0
 
     def test_large_positive(self):
         value = 2**30  # within safe zigzag range
-        encoded = encode_varint64(value)
+        encoded = self._encode(value)
         decoded, _ = decode_varint(encoded, 0)
         assert decoded == value
 
     def test_large_negative(self):
         value = -(2**30)
-        encoded = encode_varint64(value)
+        encoded = self._encode(value)
         decoded, _ = decode_varint(encoded, 0)
         assert decoded == value
 
     def test_single_byte_values(self):
         # Small values should encode to few bytes
-        encoded = encode_varint64(0)
+        encoded = self._encode(0)
         assert len(encoded) == 1
 
     def test_multi_byte_values(self):
-        encoded = encode_varint64(10000)
+        encoded = self._encode(10000)
         assert len(encoded) > 1
 
 
@@ -179,29 +182,6 @@ class TestStringEncoding:
         buf2 = BufferView(data)
         result = decode_string(buf2)
         assert result == "hello 🌍"
-
-
-# ---------------------------------------------------------------------------
-# to_int64
-# ---------------------------------------------------------------------------
-
-
-class TestToInt64:
-    def test_uint8(self):
-        data = bytes([42])
-        assert to_int64(data, 0, "B") == 42
-
-    def test_int32(self):
-        data = struct.pack("<i", -1000)
-        assert to_int64(data, 0, "i") == -1000
-
-    def test_uint32(self):
-        data = struct.pack("<I", 3_000_000_000)
-        assert to_int64(data, 0, "I") == 3_000_000_000
-
-    def test_with_offset(self):
-        data = b"\x00\x00" + struct.pack("<i", 99)
-        assert to_int64(data, 2, "i") == 99
 
 
 # ---------------------------------------------------------------------------

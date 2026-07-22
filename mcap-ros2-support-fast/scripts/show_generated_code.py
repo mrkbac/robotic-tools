@@ -22,7 +22,7 @@ def show_code_for_endianness(plan: tuple, endianness: "Literal['<', '>']", label
     print("=" * 80)
 
     # Generate the decoder code
-    decoder_factory = DecoderGeneratorFactory(plan, comments=True, endianness=endianness)
+    decoder_factory = DecoderGeneratorFactory(plan, endianness=endianness)
     target_type_name = f"decoder_{plan[0].__name__}_main"
     decoder_code = decoder_factory.generate_decoder_code(target_type_name)
 
@@ -31,7 +31,7 @@ def show_code_for_endianness(plan: tuple, endianness: "Literal['<', '>']", label
     print(decoder_code)
 
     # Generate the encoder code
-    encoder_factory = EncoderGeneratorFactory(plan, comments=True, endianness=endianness)
+    encoder_factory = EncoderGeneratorFactory(plan, endianness=endianness)
     target_type_name = f"encoder_{plan[0].__name__}_main"
     encoder_code = encoder_factory.generate_encoder_code(target_type_name)
 

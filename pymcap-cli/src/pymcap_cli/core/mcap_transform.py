@@ -14,16 +14,14 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-from small_mcap import get_summary
 
-from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.display.osc_utils import OSCProgressColumn
 from pymcap_cli.log_setup import ERR, OUT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from small_mcap import Channel, DecodedMessage, McapWriter, Schema, Summary
+    from small_mcap import Channel, Schema, Summary
 
 
 def create_progress(*, title: str) -> Progress:
@@ -67,89 +65,6 @@ def count_included_messages(
         if should_include(channel, schema):
             total += count
     return total
-
-
-def get_total_message_count(
-    file: str,
-    should_include: Callable[[Channel, Schema | None], bool] | None = None,
-) -> int | None:
-    """Read the MCAP summary and return the total message count, or None.
-
-    Thin wrapper over :func:`count_included_messages` for callers that only
-    need the count and have no summary in hand.
-    """
-    with open_input(file) as (f, _file_size):
-        summary = get_summary(f)
-    return count_included_messages(summary, should_include)
-
-
-def ensure_schema(
-    writer: McapWriter,
-    schema_name: str,
-    encoding: str,
-    data: bytes,
-    schema_ids: dict[str, int],
-) -> int:
-    """Register a schema if not already registered and return its ID."""
-    if schema_name not in schema_ids:
-        sid = max(schema_ids.values(), default=0) + 1
-        writer.add_schema(sid, schema_name, encoding, data)
-        schema_ids[schema_name] = sid
-    return schema_ids[schema_name]
-
-
-def ensure_channel(
-    writer: McapWriter,
-    topic: str,
-    message_encoding: str,
-    schema_id: int,
-    channel_ids: dict[str, int],
-    metadata: dict[str, str] | None = None,
-) -> int:
-    """Register a channel if not already registered and return its ID."""
-    if topic not in channel_ids:
-        cid = max(channel_ids.values(), default=0) + 1
-        writer.add_channel(
-            channel_id=cid,
-            topic=topic,
-            message_encoding=message_encoding,
-            schema_id=schema_id,
-            metadata=metadata,
-        )
-        channel_ids[topic] = cid
-    return channel_ids[topic]
-
-
-def copy_message(
-    msg: DecodedMessage,
-    writer: McapWriter,
-    schema_ids: dict[str, int],
-    channel_ids: dict[str, int],
-) -> None:
-    """Copy a message unchanged to the output writer, registering schema/channel as needed."""
-    topic = msg.channel.topic
-    if topic not in channel_ids:
-        if msg.schema:
-            schema_id = ensure_schema(
-                writer, msg.schema.name, msg.schema.encoding, msg.schema.data, schema_ids
-            )
-        else:
-            schema_id = 0
-        ensure_channel(
-            writer,
-            topic,
-            msg.channel.message_encoding,
-            schema_id,
-            channel_ids,
-            msg.channel.metadata,
-        )
-
-    writer.add_message(
-        channel_id=channel_ids[topic],
-        log_time=msg.message.log_time,
-        data=msg.message.data,
-        publish_time=msg.message.publish_time,
-    )
 
 
 def print_size_comparison(input_size: int, output_size: int) -> None:

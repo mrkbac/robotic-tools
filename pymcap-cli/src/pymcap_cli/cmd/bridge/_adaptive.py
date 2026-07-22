@@ -183,9 +183,6 @@ class AdaptiveQualityGovernor(Generic[K]):
     def active_index(self, key: K) -> int:
         return self._active.get(key, 0)
 
-    def active_rung(self, key: K) -> AdaptiveVideoRung:
-        return self._rungs[key][self._active[key]]
-
     def should_drop_frame(self, key: K, *, now: float) -> bool:
         rungs = self._rungs.get(key)
         if not rungs:

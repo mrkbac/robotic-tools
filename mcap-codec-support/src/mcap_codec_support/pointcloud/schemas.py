@@ -2,7 +2,6 @@
 
 POINTCLOUD2_SCHEMAS = {"sensor_msgs/msg/PointCloud2", "sensor_msgs/PointCloud2"}
 COMPRESSED_POINTCLOUD2_SCHEMA = "point_cloud_interfaces/msg/CompressedPointCloud2"
-CLOUDINI_COMPRESSED_POINTCLOUD2_SCHEMA = COMPRESSED_POINTCLOUD2_SCHEMA
 FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA = "foxglove_msgs/msg/CompressedPointCloud"
 
 COMPRESSED_POINTCLOUD2 = """\

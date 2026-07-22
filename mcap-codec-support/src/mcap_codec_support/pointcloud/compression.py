@@ -337,6 +337,3 @@ class DracoPointCloudCompressor:
     def compress_message(self, msg: Pointcloud2Msg) -> dict[str, Any]:
         """Compress and wrap the payload in a Foxglove CompressedPointCloud message."""
         return build_foxglove_compressed_pointcloud_message(msg, self.compress(msg))
-
-
-PointCloudCompressor = CloudiniPointCloudCompressor

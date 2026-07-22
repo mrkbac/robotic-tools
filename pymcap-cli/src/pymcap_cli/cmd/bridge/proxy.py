@@ -44,7 +44,6 @@ from pymcap_cli.cmd._cli_options import (
     ServerHostOption,
     ServerPortOption,
 )
-from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.cmd.bridge._adaptive import (
     AdaptiveQualityGovernor,
     RungTransition,
@@ -62,14 +61,12 @@ from pymcap_cli.cmd.bridge._proxy_runtime import (
 )
 from pymcap_cli.cmd.bridge._proxy_transforms import (
     COMPRESSED_VIDEO_SCHEMA,
-    ImageConfig,
-    PointCloudConfig,
     ProxyConfig,
     VideoTransformer,
-    build_transform_rules,
     create_transformer,
     is_video_keyframe,
 )
+from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig, resolve_cleanup
 from pymcap_cli.cmd.bridge._shared import console, to_ws_url
 from pymcap_cli.log_setup import ERR
 
@@ -138,7 +135,6 @@ class BridgeProxy:
             supported_encodings=[MESSAGE_ENCODING],
             max_message_size=config.max_message_size,
         )
-        self._transform_rules = build_transform_rules(config)
         # Downstream delivery, backpressure, and slow-client drops are owned by
         # the transport's per-connection outbox; the governor keys adaptive
         # video rungs by downstream channel id.
@@ -216,12 +212,14 @@ class BridgeProxy:
             )
 
         is_adaptive_video = (
-            self.config.image.adaptive_quality
+            self.config.transform.adaptive_quality
             and isinstance(transformer, VideoTransformer)
             and downstream_channel.get("schemaName", "") == COMPRESSED_VIDEO_SCHEMA
         )
         if is_adaptive_video:
-            self._governor.register(downstream_id, adaptive_video_rungs(self.config.image.quality))
+            self._governor.register(
+                downstream_id, adaptive_video_rungs(self.config.transform.quality)
+            )
 
         state = _ChannelState(
             upstream_info=channel,
@@ -477,7 +475,7 @@ class BridgeProxy:
         )
 
     def _create_transformer(self, channel: ChannelInfo) -> "LiveTransformer | None":
-        return create_transformer(self._transform_rules, channel)
+        return create_transformer(self.config.transform, channel)
 
 
 def proxy(
@@ -581,16 +579,7 @@ def proxy(
         image_format == "video" if adaptive_quality is None else adaptive_quality
     )
     try:
-        cleanup = resolve_pointcloud_cleanup(
-            pointcloud_compression_enabled=pointcloud,
-            pointcloud_drop_invalid=pointcloud_drop_invalid,
-            pointcloud_sort_field=pointcloud_sort_field,
-        )
-    except ValueError as exc:
-        ERR.print(f"[red]Error:[/] {exc}")
-        return 1
-    config = ProxyConfig(
-        image=ImageConfig(
+        transform = RoscompressConfig(
             image_format=image_format,
             codec=codec,
             quality=quality,
@@ -599,18 +588,22 @@ def proxy(
             scale=scale,
             jpeg_quality=jpeg_quality,
             adaptive_quality=resolved_adaptive_quality,
-        ),
-        pointcloud=PointCloudConfig(
-            enabled=pointcloud,
+            pointcloud=pointcloud,
             pc_format=pc_format,
             pc_schema=pc_schema,
             pc_encoding=pc_encoding,
             pc_compression=pc_compression,
             resolution=resolution,
             draco_compression_level=draco_compression_level,
-            drop_invalid=cleanup.drop_invalid,
-            sort_field=cleanup.sort_field,
-        ),
+            pointcloud_drop_invalid=pointcloud_drop_invalid,
+            pointcloud_sort_field=pointcloud_sort_field,
+        )
+        resolve_cleanup(transform)
+    except ValueError as exc:
+        ERR.print(f"[red]Error:[/] {exc}")
+        return 1
+    config = ProxyConfig(
+        transform=transform,
         transform_queue_size=transform_queue_size,
         throttle_hz=throttle_hz,
         max_message_size=max_message_size if max_message_size > 0 else None,
@@ -662,10 +655,10 @@ async def _proxy_async(
 
 
 def _validate_optional_dependencies(config: ProxyConfig) -> None:
-    if config.image.image_format != "none":
+    if config.transform.image_format != "none":
         import mcap_codec_support.video  # noqa: PLC0415
 
-    if config.pointcloud.enabled:
+    if config.transform.pointcloud:
         import mcap_codec_support.pointcloud  # noqa: F401, PLC0415
 
 

@@ -102,14 +102,12 @@ def _default_value_from_type(type_id: TypeId) -> Any:
 class EncoderGeneratorFactory:
     """Factory class for generating encoder code with managed state."""
 
-    def __init__(
-        self, plan: PlanList, *, comments: bool = True, endianness: Literal["<", ">"] = "<"
-    ) -> None:
+    def __init__(self, plan: PlanList, *, endianness: Literal["<", ">"] = "<") -> None:
         self.plan = plan
         self.endianness = endianness  # '<' for little-endian, '>' for big-endian
         self.name_counter = 0
         self.struct_patterns: dict[str, str] = {}
-        self.code = CodeWriter(comments=comments)
+        self.code = CodeWriter()
         # Collect all required types and classes during generation
         self.message_classes: set[type] = set()
         self.current_alignment = 8  # perfect alignment at the start
@@ -500,7 +498,7 @@ class EncoderGeneratorFactory:
         return namespace
 
 
-def create_encoder(plan: PlanList, *, comments: bool = True) -> EncoderFunction:
+def create_encoder(plan: PlanList) -> EncoderFunction:
     """Create an encoder function from an execution plan using code generation.
 
     This generates optimized Python code for the specific plan, eliminating
@@ -510,7 +508,7 @@ def create_encoder(plan: PlanList, *, comments: bool = True) -> EncoderFunction:
     - Opt 3: Simplified _get_field (no sentinel/None check)
     - Opt 4: Static offset tracking (skip _offset/_pad for fixed-size prefix)
     """
-    factory = EncoderGeneratorFactory(plan, comments=comments)
+    factory = EncoderGeneratorFactory(plan)
     target_type_name = f"encoder_{plan[0].__name__}_main"
     code = factory.generate_encoder_code(target_type_name)
     namespace = factory.create_namespace()

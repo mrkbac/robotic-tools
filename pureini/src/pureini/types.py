@@ -52,23 +52,6 @@ DECODE_BUT_SKIP_STORE = 0xFFFFFFFF  # uint32_t max value
 POINTS_PER_CHUNK = 32768
 
 
-def sizeof_field_type(field_type: FieldType) -> int:
-    """Return size in bytes for a given field type."""
-    size_map = {
-        FieldType.INT8: 1,
-        FieldType.UINT8: 1,
-        FieldType.INT16: 2,
-        FieldType.UINT16: 2,
-        FieldType.INT32: 4,
-        FieldType.UINT32: 4,
-        FieldType.FLOAT32: 4,
-        FieldType.FLOAT64: 8,
-        FieldType.INT64: 8,
-        FieldType.UINT64: 8,
-    }
-    return size_map.get(field_type, 0)
-
-
 @dataclass(slots=True, eq=True)
 class PointField:
     """

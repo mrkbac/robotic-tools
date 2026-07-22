@@ -14,12 +14,9 @@ Switching algorithms would re-fingerprint every file on the next scan, so
 from __future__ import annotations
 
 import struct
-from typing import IO, TYPE_CHECKING
+from typing import IO
 
 import xxhash
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 HEAD_BYTES = 64 * 1024
 TAIL_BYTES = 64 * 1024
@@ -41,10 +38,3 @@ def fingerprint_stream(stream: IO[bytes], size_bytes: int) -> str:
         hasher.update(stream.read(size_bytes - tail_offset))
     hasher.update(_SIZE_STRUCT.pack(size_bytes))
     return hasher.hexdigest()
-
-
-def fingerprint_path(path: Path) -> tuple[str, int]:
-    """Fingerprint the file at ``path``. Returns (fingerprint, size_bytes)."""
-    size = path.stat().st_size
-    with path.open("rb") as f:
-        return fingerprint_stream(f, size), size

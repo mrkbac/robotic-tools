@@ -1,29 +1,11 @@
-import logging
 import math
 import shlex
-import time
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.segment import Segment
-
-logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def function_time(name: str) -> Generator[None, None, None]:
-    start = time.perf_counter_ns()
-    try:
-        yield
-    finally:
-        end = time.perf_counter_ns()
-        duration = (end - start) / 1_000_000  # Convert to milliseconds
-        logger.info(f"{name} took {duration:.2f} ms")
-
 
 NANOSECONDS_PER_SECOND = 1_000_000_000
 STRFTIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -50,17 +32,15 @@ def nanoseconds_duration(ns_total: int) -> str:
 
 def quaternion_to_euler(x: float, y: float, z: float, w: float) -> tuple[float, float, float]:
     """Convert quaternion to Euler angles (roll, pitch, yaw)."""
-    t0 = +2.0 * (w * x + y * z)
-    t1 = +1.0 - 2.0 * (x * x + y * y)
+    t0 = 2.0 * (w * x + y * z)
+    t1 = 1.0 - 2.0 * (x * x + y * y)
     roll_x = math.atan2(t0, t1)
 
-    t2 = +2.0 * (w * y - z * x)
-    t2 = min(t2, +1.0)
-    t2 = max(t2, -1.0)
+    t2 = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
     pitch_y = math.asin(t2)
 
-    t3 = +2.0 * (w * z + x * y)
-    t4 = +1.0 - 2.0 * (y * y + z * z)
+    t3 = 2.0 * (w * z + x * y)
+    t4 = 1.0 - 2.0 * (y * y + z * z)
     yaw_z = math.atan2(t3, t4)
 
     return roll_x, pitch_y, yaw_z
