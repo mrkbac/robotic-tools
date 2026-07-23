@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import websockets
+from websockets.frames import CloseCode
 from websockets.typing import Subprotocol
 
 from .ws_types import (
@@ -782,7 +783,17 @@ class WebSocketBridgeClient:
                         else:
                             logger.warning(f"Received unknown message type: {type(raw)}")
 
-            except websockets.ConnectionClosed:
+            except websockets.ConnectionClosed as error:
+                received_close = error.rcvd
+                if received_close is not None and received_close.code == CloseCode.POLICY_VIOLATION:
+                    logger.warning(
+                        "WebSocket connection rejected by server: %s", received_close.reason
+                    )
+                    self._websocket = None
+                    self._connection_event.clear()
+                    self._should_connect = False
+                    await self._set_connection_status(ConnectionStatus.DISCONNECTED)
+                    break
                 logger.exception("WebSocket connection closed, will reconnect...")
                 self._websocket = None
                 self._connection_event.clear()  # Clear event when disconnected

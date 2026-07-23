@@ -149,6 +149,27 @@ class TestFfmpegDiscovery:
     def test_check_encoder_cli_nonexistent(self) -> None:
         assert check_encoder_cli("totally_fake_encoder_xyz") is False
 
+    def test_probe_encoder_cli_uses_hardware_safe_dimensions(self, monkeypatch) -> None:
+        monkeypatch.setattr(ffmpeg_module, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(ffmpeg_module, "check_encoder_cli", lambda _name: True)
+
+        def fake_run(args, **_kwargs):
+            size_index = args.index("-s:v") + 1
+            return subprocess.CompletedProcess(
+                args,
+                0 if args[size_index] == "256x256" else 1,
+                b"",
+                b"",
+            )
+
+        monkeypatch.setattr(ffmpeg_module.subprocess, "run", fake_run)
+
+        ffmpeg_module.probe_encoder_cli.cache_clear()
+        try:
+            assert ffmpeg_module.probe_encoder_cli("h264_nvenc") is True
+        finally:
+            ffmpeg_module.probe_encoder_cli.cache_clear()
+
     def test_resolve_encoder_skips_listed_but_unusable_hardware(self, monkeypatch) -> None:
         monkeypatch.setattr(ffmpeg_module, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
         monkeypatch.setattr(ffmpeg_module.platform, "system", lambda: "Linux")

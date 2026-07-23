@@ -15,7 +15,8 @@ from robo_ws_bridge import (
     WebSocketBridgeClient,
     WebSocketBridgeServer,
 )
-from robo_ws_bridge.ws_types import BinaryOpCodes
+from robo_ws_bridge.ws_types import BinaryOpCodes, ConnectionStatus
+from websockets.asyncio.server import serve
 
 
 def test_connection_graph_applies_updates_and_removals() -> None:
@@ -254,3 +255,37 @@ def test_call_service_round_trips_through_a_real_server() -> None:
     result = asyncio.run(run())
     assert result == ServiceCallResponse(service_id=5, call_id=1, encoding="cdr", payload=b"pong")
     assert seen == {"service_id": 5, "encoding": "cdr", "request": b"ping"}
+
+
+def test_client_does_not_reconnect_after_policy_violation() -> None:
+    port = _free_port()
+    connection_count = 0
+
+    async def run() -> None:
+        nonlocal connection_count
+
+        async def reject(websocket) -> None:
+            nonlocal connection_count
+            connection_count += 1
+            await websocket.close(code=1008, reason="select a recording")
+
+        server = await serve(reject, "127.0.0.1", port)
+        client = WebSocketBridgeClient(
+            f"ws://127.0.0.1:{port}",
+            min_retry_delay=0.01,
+            max_retry_delay=0.01,
+        )
+        await client.connect()
+        try:
+            assert client._receiver_task is not None
+            await asyncio.wait_for(client._receiver_task, timeout=1)
+            assert client.get_connection_status() is ConnectionStatus.DISCONNECTED
+            assert client._connection_task is not None
+            await asyncio.wait_for(client._connection_task, timeout=2)
+        finally:
+            await client.disconnect()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+    assert connection_count == 1

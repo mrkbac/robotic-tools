@@ -8,7 +8,7 @@ import math
 import os
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
@@ -645,17 +645,27 @@ class RecordingSession:
             raise ValueError("Playback controls require indexes for every selected recording")
         async with self._control_lock:
             should_play = request.playback_command is PlaybackCommand.PLAY
+            speed_restart_time_ns: int | None = None
             if request.playback_speed > 0:
+                if request.playback_speed != self.speed:
+                    speed_restart_time_ns = self._foxglove_playback_state(
+                        did_seek=False
+                    ).current_time
                 self.set_speed(request.playback_speed)
             elif should_play or request.playback_speed != 0:
                 raise ValueError("playback speed must be finite and positive while playing")
             if request.seek_time is not None:
                 await self._seek_to_timestamp(request.seek_time, should_play=should_play)
+            elif speed_restart_time_ns is not None:
+                await self._seek_to_timestamp(speed_restart_time_ns, should_play=should_play)
             elif should_play:
                 self.play()
             else:
                 self.pause()
-            return self._foxglove_playback_state(did_seek=request.seek_time is not None)
+            state = self._foxglove_playback_state(did_seek=request.seek_time is not None)
+            if should_play and (request.seek_time is not None or speed_restart_time_ns is not None):
+                return replace(state, status=PlaybackStatus.PLAYING)
+            return state
 
     def _foxglove_playback_state(self, *, did_seek: bool) -> FoxglovePlaybackState:
         current_time = self.sink.current_time_ns

@@ -215,7 +215,7 @@ def test_library_websocket_accepts_foxglove_playback_control(
     assert start_time <= paused[1] <= end_time
     assert paused[2:] == (1.0, False, "pause-1")
     assert playing == (
-        PlaybackStatus.BUFFERING,
+        PlaybackStatus.PLAYING,
         start_time + 1_000_000_000,
         2.0,
         True,
@@ -1159,7 +1159,7 @@ def test_recording_session_closes_partial_recording_open(
     ("command", "speed", "expected_status", "subscribe_before_seek"),
     [
         (PlaybackCommand.PAUSE, 0.0, PlaybackStatus.PAUSED, True),
-        (PlaybackCommand.PLAY, 1.0, PlaybackStatus.BUFFERING, True),
+        (PlaybackCommand.PLAY, 1.0, PlaybackStatus.PLAYING, True),
         (PlaybackCommand.PAUSE, 0.0, PlaybackStatus.PAUSED, False),
     ],
 )
@@ -1287,3 +1287,49 @@ def test_recording_session_playback_state_uses_active_clock(
             await session.close()
 
     assert asyncio.run(run()).current_time == 3_000_000_000
+
+
+def test_recording_session_speed_change_restarts_at_active_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_mcap(tmp_path / "rec.mcap", "/x", 10_000_000_000, b"a")
+    monkeypatch.setattr(_playback.time, "monotonic", lambda: 10.0)
+
+    async def run() -> tuple[list[tuple[int, bool]], PlaybackState]:
+        session = await RecordingSession.create(
+            (tmp_path / "rec.mcap",),
+            message_filter=MessageFilterOptions.from_args(),
+            transform_config=None,
+            speed=10,
+            loop=False,
+        )
+        session.sink._clock = PlaybackClock(
+            record_origin_ns=2_000_000_000,
+            wall_origin=9.0,
+            speed=10,
+            recording_end_ns=20_000_000_000,
+        )
+        restarts: list[tuple[int, bool]] = []
+
+        async def record_restart(timestamp_ns: int, *, should_play: bool) -> None:
+            restarts.append((timestamp_ns, should_play))
+
+        monkeypatch.setattr(session, "_seek_to_timestamp", record_restart)
+        try:
+            state = await session.handle_playback_control(
+                PlaybackControlRequest(
+                    playback_command=PlaybackCommand.PLAY,
+                    playback_speed=1,
+                    seek_time=None,
+                    request_id="slow-down",
+                )
+            )
+            return restarts, state
+        finally:
+            await session.close()
+
+    restarts, state = asyncio.run(run())
+    assert restarts == [(12_000_000_000, True)]
+    assert state.playback_speed == 1
+    assert state.did_seek is False

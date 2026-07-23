@@ -70,7 +70,7 @@ def probe_encoder_cli(encoder_name: str, timeout: float = 5.0) -> bool:
     ffmpeg = find_ffmpeg()
     if not ffmpeg or not check_encoder_cli(encoder_name):
         return False
-    width = height = 64
+    width = height = 256
     try:
         result = subprocess.run(  # noqa: S603
             [
