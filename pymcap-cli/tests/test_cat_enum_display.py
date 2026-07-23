@@ -14,7 +14,8 @@ from unittest.mock import patch
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from pymcap_cli.cmd import cat_cmd as cat_cmd_module
 from pymcap_cli.cmd.cat_cmd import cat
-from pymcap_cli.display.cat_helpers import plan_for_query, query_result_is_empty
+from pymcap_cli.core.named_message_path import query_result_is_empty
+from pymcap_cli.display.cat_helpers import plan_for_query
 from pymcap_cli.display.message_render import (
     BytesMode,
     EnumField,

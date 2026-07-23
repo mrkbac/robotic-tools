@@ -16,7 +16,6 @@ from robo_ws_bridge.ws_types import ChannelInfo
 from ros_parser.message_path import (
     NO_OUTPUT,
     MessagePathError,
-    MessagePathEvaluator,
     MessagePathVariables,
 )
 from small_mcap import JSONDecoderFactory
@@ -47,12 +46,12 @@ from pymcap_cli.cmd.bridge._shared import (
     to_ws_url,
 )
 from pymcap_cli.core.message_filter import MessageFilterOptions
-from pymcap_cli.display.cat_helpers import (
-    SchemaCache,
+from pymcap_cli.core.named_message_path import (
+    create_cat_query_evaluators,
+    evaluate_cat_queries,
     parse_cat_queries,
-    plan_for_query,
-    query_result_is_empty,
 )
+from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query
 from pymcap_cli.display.message_render import (
     TTY_BYTES_TRUNCATE,
     BytesMode,
@@ -86,11 +85,7 @@ async def _cat_async(
     path_variables = dict(variables or {})
     try:
         parsed_queries = parse_cat_queries(query)
-        stream_evaluators = {
-            topic: MessagePathEvaluator(parsed.path)
-            for topic, parsed in parsed_queries.items()
-            if parsed.path.has_stream
-        }
+        stream_evaluators = create_cat_query_evaluators(parsed_queries)
     except Exception:
         logger.exception("Invalid --query syntax")
         return 1
@@ -150,9 +145,17 @@ async def _cat_async(
         header.append("]", style="dim")
         schema = decoder_cache.schema_for(channel["id"])
         root_plan = schema_cache.enum_plan(schema) if schema is not None else None
-        query_for_topic = parsed_queries.get(channel["topic"])
-        parsed_query = query_for_topic.path if query_for_topic is not None else None
-        plan = plan_for_query(root_plan, parsed_query)
+        queries_for_topic = parsed_queries.get(channel["topic"])
+        single_query = (
+            queries_for_topic[0]
+            if queries_for_topic is not None and len(queries_for_topic) == 1
+            else None
+        )
+        plan = (
+            plan_for_query(root_plan, single_query.path if single_query is not None else None)
+            if single_query is not None or queries_for_topic is None
+            else None
+        )
 
         changed_paths = None
         if changed:
@@ -184,26 +187,30 @@ async def _cat_async(
 
     def _emit_reduced() -> None:
         # Stream reducers (@@count, @@max, ...) emit one value when the session ends
-        for stream_topic, evaluator in stream_evaluators.items():
-            try:
-                final = evaluator.finalize(path_variables)
-            except MessagePathError as exc:
-                logger.warning(f"Filter error on {stream_topic}: {exc}")
-                continue
-            if final is NO_OUTPUT:
-                continue
-            source = parsed_queries[stream_topic].source
-            value = message_to_dict(final, bytes_mode=bytes_mode)
-            if is_tty:
-                reduced_line = Text()
-                reduced_line.append(source, style="bold cyan")
-                reduced_line.append(" = ", style="dim")
-                reduced_line.append(json.dumps(value), style="green")
-                console.print(reduced_line)
-            else:
-                entry = {"topic": stream_topic, "query": source, "value": value}
-                sys.stdout.write(json.dumps(entry, separators=(",", ":")) + "\n")
-                sys.stdout.flush()
+        for stream_topic, evaluators in stream_evaluators.items():
+            topic_queries = parsed_queries[stream_topic]
+            for parsed, evaluator in zip(topic_queries, evaluators, strict=True):
+                if evaluator is None:
+                    continue
+                try:
+                    final = evaluator.finalize(path_variables)
+                except MessagePathError as exc:
+                    logger.warning(f"Filter error on {stream_topic}: {exc}")
+                    continue
+                if final is NO_OUTPUT:
+                    continue
+                query_name = parsed.output_name if len(topic_queries) > 1 else parsed.source
+                value = message_to_dict(final, bytes_mode=bytes_mode)
+                if is_tty:
+                    reduced_line = Text()
+                    reduced_line.append(query_name, style="bold cyan")
+                    reduced_line.append(" = ", style="dim")
+                    reduced_line.append(json.dumps(value), style="green")
+                    console.print(reduced_line)
+                else:
+                    entry = {"topic": stream_topic, "query": query_name, "value": value}
+                    sys.stdout.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                    sys.stdout.flush()
 
     def _on_message(channel: ChannelInfo, log_time_ns: int, payload: bytes) -> None:
         nonlocal total, return_code
@@ -227,34 +234,35 @@ async def _cat_async(
             return
 
         topic = channel["topic"]
-        query_for_topic = parsed_queries.get(topic)
-        parsed_query = query_for_topic.path if query_for_topic is not None else None
-        if query_for_topic is not None and topic not in validated_topics:
+        queries_for_topic = parsed_queries.get(topic)
+        if queries_for_topic is not None and topic not in validated_topics:
             validated_topics.add(topic)
             schema = decoder_cache.schema_for(channel["id"])
-            if schema is not None and not schema_cache.validate_query(
-                query_for_topic.path,
-                schema,
-                topic,
-                query_repr=query_for_topic.source,
-            ):
-                return_code = 1
-                done.set()
-                return
-
-        if parsed_query is not None:
-            evaluator = stream_evaluators.get(topic)
-            try:
-                if evaluator is not None:
-                    data = evaluator.observe(decoded, log_time_ns, path_variables)
-                    if data is NO_OUTPUT:
+            if schema is not None:
+                for parsed in queries_for_topic:
+                    if not schema_cache.validate_query(
+                        parsed.path,
+                        schema,
+                        topic,
+                        query_repr=parsed.source,
+                    ):
+                        return_code = 1
+                        done.set()
                         return
-                else:
-                    data = parsed_query.apply(decoded, path_variables)
+
+        if queries_for_topic is not None:
+            try:
+                data = evaluate_cat_queries(
+                    queries_for_topic,
+                    stream_evaluators[topic],
+                    decoded,
+                    log_time_ns,
+                    path_variables,
+                )
+                if data is NO_OUTPUT:
+                    return
             except MessagePathError as exc:
                 logger.warning(f"Filter error on {topic}: {exc}")
-                return
-            if query_result_is_empty(data):
                 return
         else:
             data = decoded
@@ -353,8 +361,8 @@ def cat(
     exclude_topic
         Topic regexes to skip. Wins over includes and over ``--query``.
     query
-        MessagePath expression (e.g. ``/odom.pose.position.x``); restricts output
-        to its topic and projects the addressed subfield.
+        MessagePath expression (e.g. ``/odom.pose.position.x``); repeat to project
+        more fields and prefix with ``LABEL=`` to choose an output name.
     grep
         Regex applied to scalar values in the decoded message.
     grep_ignore_case
@@ -375,6 +383,7 @@ def cat(
     pymcap-cli bridge cat localhost:8765 -t '.*' -l 1 | jq
     pymcap-cli bridge cat localhost:8765 -q '/odom.pose.position.x' -l 5
     pymcap-cli bridge cat localhost:8765 -q '/odom.pose' -q '/imu.data' -l 5
+    pymcap-cli bridge cat localhost:8765 -q 'x=/odom.pose.position.x' -q 'y=/odom.pose.position.y'
     ```
     """
     if duration is not None and duration <= 0:

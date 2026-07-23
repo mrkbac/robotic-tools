@@ -22,7 +22,8 @@ from small_mcap import JSONDecoderFactory, get_summary, read_message_decoded
 
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.message_filter import MessageFilterOptions
-from pymcap_cli.display.cat_helpers import SchemaCache, query_result_is_empty
+from pymcap_cli.core.named_message_path import query_result_is_empty
+from pymcap_cli.display.cat_helpers import SchemaCache
 from pymcap_cli.types.check_spec_types import (
     CheckSpecInput,
     ComparableValue,

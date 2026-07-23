@@ -280,11 +280,68 @@ class TestCatQueryValidation:
         ]
         assert [message["message"] for message in messages] == [0, 0]
 
-    def test_query_rejects_multiple_paths_for_one_topic(self, simple_mcap: Path, capsys) -> None:
-        exit_code = cat(file=str(simple_mcap), query=["/test.i", "/test"])
+    def test_query_projects_multiple_unlabeled_paths_for_one_topic(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        recording = tmp_path / "series.mcap"
+        _make_series_mcap(recording)
+
+        exit_code = cat(
+            file=str(recording),
+            query=["/val.i.@@unchanged_for", "/val.i"],
+        )
+
+        assert exit_code == 0
+        messages = [json.loads(line)["message"] for line in capsys.readouterr().out.splitlines()]
+        assert messages == [
+            {".i.@@unchanged_for": 0.0, ".i": 1.0},
+            {".i.@@unchanged_for": 0.0, ".i": 4.0},
+            {".i.@@unchanged_for": 0.0, ".i": 2.0},
+        ]
+
+    def test_query_projects_multiple_labeled_paths_for_one_topic(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        recording = tmp_path / "series.mcap"
+        _make_series_mcap(recording)
+
+        exit_code = cat(
+            file=str(recording),
+            query=["unchanged_for=/val.i.@@unchanged_for", "value=/val.i"],
+            limit=1,
+        )
+
+        assert exit_code == 0
+        message = json.loads(capsys.readouterr().out)["message"]
+        assert message == {"unchanged_for": 0.0, "value": 1.0}
+
+    def test_query_omits_no_output_projection_without_dropping_message(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        recording = tmp_path / "series.mcap"
+        _make_series_mcap(recording)
+
+        exit_code = cat(
+            file=str(recording),
+            query=["elapsed=/val.i.@@timedelta", "value=/val.i"],
+            limit=2,
+        )
+
+        assert exit_code == 0
+        messages = [json.loads(line)["message"] for line in capsys.readouterr().out.splitlines()]
+        assert messages == [
+            {"value": 1.0},
+            {"elapsed": 1.0, "value": 4.0},
+        ]
+
+    def test_query_rejects_duplicate_output_names(self, simple_mcap: Path, capsys) -> None:
+        exit_code = cat(file=str(simple_mcap), query=["/test.i", "/test.i"])
 
         assert exit_code == 1
-        assert "Only one --query per topic" in capsys.readouterr().err
+        assert "Duplicate query output name '.i'" in capsys.readouterr().err
 
     def test_query_valid_field(self, image_small_mcap: Path):
         """Test that valid query on existing field works."""
@@ -358,6 +415,24 @@ class TestCatQueryValidation:
         lines = capsys.readouterr().out.strip().splitlines()
         assert len(lines) == 1
         assert json.loads(lines[0]) == {"topic": "/val", "query": "/val.i.@@max", "value": 4.0}
+
+    def test_query_stream_reducer_keeps_label_with_multiple_projections(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+        mcap = tmp_path / "series.mcap"
+        _make_series_mcap(mcap)
+
+        exit_code = cat(file=str(mcap), query=["maximum=/val.i.@@max", "value=/val.i"])
+
+        assert exit_code == 0
+        lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [line["message"] for line in lines[:-1]] == [
+            {"value": 1.0},
+            {"value": 4.0},
+            {"value": 2.0},
+        ]
+        assert lines[-1] == {"topic": "/val", "query": "maximum", "value": 4.0}
 
     def test_query_stream_transform_then_reducer(self, tmp_path: Path, capsys, monkeypatch) -> None:
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)

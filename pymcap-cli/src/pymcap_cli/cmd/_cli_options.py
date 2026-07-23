@@ -378,7 +378,7 @@ QueryOption = Annotated[
         group=FILTERING_GROUP,
         help=(
             "MessagePath expression scoping output to one topic and/or subfield. "
-            "Repeat for additional topics."
+            "Repeat for more projections; prefix with LABEL= to choose an output name."
         ),
     ),
 ]

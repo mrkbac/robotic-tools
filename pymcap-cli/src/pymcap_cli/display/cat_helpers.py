@@ -13,7 +13,6 @@ from ros_parser.message_path import (
     FieldAccess,
     MessagePath,
     ValidationError,
-    parse_message_path,
 )
 
 from pymcap_cli.display.message_render import EnumPlan, build_enum_plan, resolve_msgdef_by_name
@@ -23,41 +22,6 @@ if TYPE_CHECKING:
     from ros_parser.models import MessageDefinition
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class CatQuery:
-    """One parsed cat query together with its user-facing representation."""
-
-    source: str
-    path: MessagePath
-
-
-def parse_cat_queries(queries: list[str] | None) -> dict[str, CatQuery]:
-    """Parse repeatable cat queries and index them by selected topic."""
-    parsed: dict[str, CatQuery] = {}
-    for source in queries or ():
-        path = parse_message_path(source)
-        if path.topic in parsed:
-            raise ValueError(
-                f"Only one --query per topic is supported; "
-                f"topic '{path.topic}' was specified more than once"
-            )
-        parsed[path.topic] = CatQuery(source=source, path=path)
-    return parsed
-
-
-def query_result_is_empty(result: object) -> bool:
-    """True when a query produced nothing to show — ``None`` or an empty sequence.
-
-    Filter/slice queries (e.g. ``.transforms[:]{child_frame_id=="base_link"}``) return
-    an empty list when nothing matched. Callers skip those so ``--limit`` counts real
-    hits and empty frames don't clutter the stream. A falsy *scalar* (``0``, ``False``,
-    ``""``) is a genuine value and is NOT treated as empty.
-    """
-    if result is None:
-        return True
-    return isinstance(result, (list, tuple)) and len(result) == 0
 
 
 def plan_for_query(root_plan: EnumPlan | None, parsed_query: MessagePath | None) -> EnumPlan | None:

@@ -16,7 +16,7 @@ from mcap_ros2_support_fast.writer import Schema
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-from ros_parser.message_path import NO_OUTPUT, MessagePathError, MessagePathEvaluator
+from ros_parser.message_path import NO_OUTPUT, MessagePathError
 from small_mcap import Channel, JSONDecoderFactory, get_summary, read_message_decoded
 
 from pymcap_cli.cmd._cli_options import (
@@ -41,12 +41,12 @@ from pymcap_cli.cmd._cli_options import (
 from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.display.cat_helpers import (
-    SchemaCache,
+from pymcap_cli.core.named_message_path import (
+    create_cat_query_evaluators,
+    evaluate_cat_queries,
     parse_cat_queries,
-    plan_for_query,
-    query_result_is_empty,
 )
+from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query
 from pymcap_cli.display.message_render import (
     TTY_BYTES_TRUNCATE,
     BytesMode,
@@ -112,6 +112,9 @@ def cat(
       # Query fields from multiple topics
       pymcap-cli cat recording.mcap -q '/odom.pose' -q '/imu.angular_velocity'
 
+      # Query multiple fields from one topic with optional output labels
+      pymcap-cli cat recording.mcap -q 'x=/odom.pose.position.x' -q 'y=/odom.pose.position.y'
+
       # Filter array elements
       pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
 
@@ -143,11 +146,7 @@ def cat(
 
     try:
         parsed_queries = parse_cat_queries(query)
-        stream_evaluators = {
-            topic: MessagePathEvaluator(parsed.path)
-            for topic, parsed in parsed_queries.items()
-            if parsed.path.has_stream
-        }
+        stream_evaluators = create_cat_query_evaluators(parsed_queries)
     except Exception:
         logger.exception("Invalid query syntax")
         return 1
@@ -227,11 +226,16 @@ def cat(
                 if limit is not None and message_count >= limit:
                     break
 
-                query_for_topic = parsed_queries.get(msg.channel.topic)
-                parsed_query = query_for_topic.path if query_for_topic is not None else None
+                queries_for_topic = parsed_queries.get(msg.channel.topic)
+                single_query = (
+                    queries_for_topic[0]
+                    if queries_for_topic is not None and len(queries_for_topic) == 1
+                    else None
+                )
+                parsed_query = single_query.path if single_query is not None else None
 
                 # Validate query against schema on first message of each topic
-                if query_for_topic is not None and msg.channel.topic not in validated_topics:
+                if queries_for_topic is not None and msg.channel.topic not in validated_topics:
                     validated_topics.add(msg.channel.topic)
 
                     if msg.schema is None:
@@ -239,27 +243,27 @@ def cat(
                             f"Cannot validate query for topic '{msg.channel.topic}' "
                             "(no schema available)"
                         )
-                    elif not schema_cache.validate_query(
-                        query_for_topic.path,
-                        msg.schema,
-                        msg.channel.topic,
-                        query_repr=query_for_topic.source,
-                    ):
-                        return 1
+                    else:
+                        for parsed in queries_for_topic:
+                            if not schema_cache.validate_query(
+                                parsed.path,
+                                msg.schema,
+                                msg.channel.topic,
+                                query_repr=parsed.source,
+                            ):
+                                return 1
 
                 # Apply query filter
-                if parsed_query is not None:
-                    evaluator = stream_evaluators.get(msg.channel.topic)
+                if queries_for_topic is not None:
                     try:
-                        if evaluator is not None:
-                            data = evaluator.observe(
-                                msg.decoded_message, msg.message.log_time, variables
-                            )
-                            if data is NO_OUTPUT:
-                                continue
-                        else:
-                            data = parsed_query.apply(msg.decoded_message, variables)
-                        if query_result_is_empty(data):
+                        data = evaluate_cat_queries(
+                            queries_for_topic,
+                            stream_evaluators[msg.channel.topic],
+                            msg.decoded_message,
+                            msg.message.log_time,
+                            variables,
+                        )
+                        if data is NO_OUTPUT:
                             continue
                     except MessagePathError as e:
                         logger.warning(f"Filter error on {msg.channel.topic}: {e}")
@@ -283,7 +287,11 @@ def cat(
                     header.append("]", style="dim")
 
                     root_plan = schema_cache.enum_plan(schema) if schema is not None else None
-                    plan = plan_for_query(root_plan, parsed_query)
+                    plan = (
+                        plan_for_query(root_plan, parsed_query)
+                        if single_query is not None or queries_for_topic is None
+                        else None
+                    )
 
                     changed_paths = None
                     if changed:
@@ -322,31 +330,35 @@ def cat(
                         print(line, file=sys.stdout)  # noqa: T201
 
             # Stream reducers (@@count, @@max, ...) emit one value at end of stream
-            for stream_topic, evaluator in stream_evaluators.items():
-                try:
-                    final = evaluator.finalize(variables)
-                except MessagePathError as e:
-                    logger.warning(f"Filter error on {stream_topic}: {e}")
-                    continue
-                if final is NO_OUTPUT:
-                    continue
-                source = parsed_queries[stream_topic].source
-                value = message_to_dict(final, bytes_mode=bytes_mode)
-                if is_tty:
-                    reduced_line = Text()
-                    reduced_line.append(source, style="bold cyan")
-                    reduced_line.append(" = ", style="dim")
-                    reduced_line.append(json.dumps(value), style="green")
-                    console_out.print(reduced_line)
-                else:
-                    reduced_entry = json.dumps(
-                        {"topic": stream_topic, "query": source, "value": value},
-                        separators=(",", ":"),
-                    )
-                    if out_file is not None:
-                        out_file.write(reduced_entry + "\n")
+            for stream_topic, evaluators in stream_evaluators.items():
+                topic_queries = parsed_queries[stream_topic]
+                for parsed, evaluator in zip(topic_queries, evaluators, strict=True):
+                    if evaluator is None:
+                        continue
+                    try:
+                        final = evaluator.finalize(variables)
+                    except MessagePathError as e:
+                        logger.warning(f"Filter error on {stream_topic}: {e}")
+                        continue
+                    if final is NO_OUTPUT:
+                        continue
+                    query_name = parsed.output_name if len(topic_queries) > 1 else parsed.source
+                    value = message_to_dict(final, bytes_mode=bytes_mode)
+                    if is_tty:
+                        reduced_line = Text()
+                        reduced_line.append(query_name, style="bold cyan")
+                        reduced_line.append(" = ", style="dim")
+                        reduced_line.append(json.dumps(value), style="green")
+                        console_out.print(reduced_line)
                     else:
-                        print(reduced_entry, file=sys.stdout)  # noqa: T201
+                        reduced_entry = json.dumps(
+                            {"topic": stream_topic, "query": query_name, "value": value},
+                            separators=(",", ":"),
+                        )
+                        if out_file is not None:
+                            out_file.write(reduced_entry + "\n")
+                        else:
+                            print(reduced_entry, file=sys.stdout)  # noqa: T201
 
         if writing_to_file:
             logger.info(f"Wrote {message_count:,} messages to {output}")

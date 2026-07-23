@@ -906,6 +906,29 @@ def test_cat_async_applies_repeatable_queries_by_topic(
     ]
 
 
+def test_cat_async_projects_multiple_paths_for_one_topic(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = _run_cat_against_server(
+        register=[_json_string_channel(1, "/chatter")],
+        publish=[
+            (1, b'{"data":"same"}', 1_000_000_000),
+            (1, b'{"data":"same"}', 2_000_000_000),
+        ],
+        cat_kwargs=_default_cat_kwargs(
+            query=["unchanged_for=/chatter.data.@@unchanged_for", "/chatter.data"],
+            limit=2,
+        ),
+    )
+
+    assert rc == 0
+    messages = [json.loads(line)["message"] for line in capsys.readouterr().out.splitlines()]
+    assert messages == [
+        {"unchanged_for": 0.0, ".data": "same"},
+        {"unchanged_for": 1.0, ".data": "same"},
+    ]
+
+
 def test_cat_async_skips_channel_with_unknown_encoding(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

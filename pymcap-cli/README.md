@@ -179,6 +179,11 @@ pymcap-cli cat recording.mcap --limit 100
 # Query specific field using message path
 pymcap-cli cat recording.mcap --query '/odom.pose.position.x'
 
+# Query multiple fields from one topic; labels become output keys
+pymcap-cli cat recording.mcap \
+  --query 'x=/odom.pose.position.x' \
+  --query 'y=/odom.pose.position.y'
+
 # Filter array elements
 pymcap-cli cat recording.mcap --query '/detections.objects[:]{confidence>0.8}'
 
@@ -202,6 +207,10 @@ pymcap-cli cat recording.mcap -o messages.jsonl
 pymcap-cli cat recording.mcap --bytes base64   # base64-encoded
 pymcap-cli cat recording.mcap --bytes skip     # omit binary fields
 ```
+
+When multiple queries select the same topic, their values are combined into one
+object per source message. Without labels, the relative expressions (for example
+`.pose.position.x`) are used as output keys.
 
 ### `check` — Recording Contract Validation
 
