@@ -13,6 +13,7 @@ from pymcap_cli.core.processors.chunk_groupers import PatternGrouper
 from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.message_predicate import MessagePredicateProcessor
 from pymcap_cli.core.processors.nth_message import NthMessageProcessor
 from pymcap_cli.core.processors.qos_metadata import QosMetadataProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
@@ -217,6 +218,20 @@ class TestExtraProcessorWiring:
         process_cmd.process(**_kwargs(), time_offset=["/imu=500ms"])
 
         assert any(isinstance(p, TimeOffsetProcessor) for p in self._extras(rec))
+
+    def test_where_adds_predicate_processor_with_variables(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        process_cmd.process(
+            **_kwargs(),
+            where=["/events{score >= $minimum}", '/events{kind == "alarm"}'],
+            var=["minimum=10"],
+        )
+
+        processor = next(p for p in self._extras(rec) if isinstance(p, MessagePredicateProcessor))
+        assert len(processor.paths_by_topic["/events"]) == 2
+        assert processor.variables == {"minimum": 10}
 
     def test_decimate_adds_nth_message_processor(self, monkeypatch: pytest.MonkeyPatch):
         rec = _Recorder()

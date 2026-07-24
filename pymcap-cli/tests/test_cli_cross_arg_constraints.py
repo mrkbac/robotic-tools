@@ -27,7 +27,7 @@ from pymcap_cli.cli import app
         (["rechunk", "x.mcap", "o.mcap", "--max-groups", "0"], "Must be >= 1"),
         (
             ["process", "x.mcap", "-o", "o.mcap", "--var", "a=1"],
-            "--var requires --split-expression",
+            "--var requires one of --where, --split-expression",
         ),
         (
             ["roscompress", "x.mcap", "o.mcap", "--image-format", "none", "--quality", "20"],

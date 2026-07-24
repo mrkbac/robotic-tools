@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING, Annotated, Literal, TypeVar
 
 from cyclopts import Group, Parameter, validators
 from rich.console import Console
-from ros_parser.message_path import MessagePathError
+from ros_parser.message_path import LarkError, MessagePathError
 
-from pymcap_cli.cmd._arg_constraints import constraint_group, each_requires
+from pymcap_cli.cmd._arg_constraints import (
+    constraint_group,
+    each_requires,
+    requires_one_of,
+)
 from pymcap_cli.cmd._cli_options import (
     MESSAGE_PATH_GROUP,
     AlwaysDecodeChunkOption,
@@ -62,6 +66,7 @@ from pymcap_cli.core.processors.channel_merge import ChannelMergeProcessor
 from pymcap_cli.core.processors.dedup import DedupIdenticalProcessor
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.message_predicate import MessagePredicateProcessor
 from pymcap_cli.core.processors.nth_message import NthMessageProcessor
 from pymcap_cli.core.processors.qos_metadata import QosMetadataProcessor
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
@@ -94,18 +99,21 @@ COMPRESS_GROUP = Group("Message Compression")
 ROS2_COMPATIBILITY_GROUP = Group("ROS 2 Compatibility")
 SPLIT_GROUP = Group("Splitting (multi-output)")
 SPLIT_EXPR_GROUP = Group("Splitting — Expression Options")
+DECODED_FILTER_GROUP = Group("Decoded Message Filtering")
 
-# The expression-only split knobs (and --var) only apply under --split-expression.
+# Split-specific expression knobs only apply under --split-expression.
 _EXPRESSION_ONLY_CONSTRAINT = constraint_group(
     each_requires(
         "--split-expression",
-        "--var",
         "--split-hysteresis",
         "--split-hysteresis-count",
         "--split-keep-trailing-context",
         "--split-keep-trailing-count",
         "--split-skip-value",
     )
+)
+_MESSAGE_PATH_VARIABLE_CONSTRAINT = constraint_group(
+    requires_one_of("--var", "--where", "--split-expression")
 )
 
 T = TypeVar("T")
@@ -165,6 +173,18 @@ def process(
     # ----- Content filtering -----
     metadata_mode: MetadataModeOption = MetadataMode.INCLUDE,
     attachments_mode: AttachmentsModeOption = AttachmentsMode.INCLUDE,
+    where: Annotated[
+        list[str] | None,
+        Parameter(
+            name=["--where"],
+            group=[DECODED_FILTER_GROUP, _MESSAGE_PATH_VARIABLE_CONSTRAINT],
+            help=(
+                "Drop messages that match none of the topic-qualified MessagePath "
+                "predicates. Repeatable predicates for one topic are ORed; use "
+                "&& inside one path for AND. Topics without a predicate pass through."
+            ),
+        ),
+    ] = None,
     # ----- Deduplication -----
     dedup_identical: DedupIdenticalOption = False,
     # ----- Latching -----
@@ -400,7 +420,11 @@ def process(
         str | None,
         Parameter(
             name=["--split-expression"],
-            group=[SPLIT_GROUP, _EXPRESSION_ONLY_CONSTRAINT],
+            group=[
+                SPLIT_GROUP,
+                _EXPRESSION_ONLY_CONSTRAINT,
+                _MESSAGE_PATH_VARIABLE_CONSTRAINT,
+            ],
             help=(
                 "Split whenever a ros-parser message path changes value, "
                 "e.g. '/gps/fix.status.status'. Extractors must resolve to a primitive; "
@@ -410,7 +434,7 @@ def process(
     ] = None,
     var: Annotated[
         MessagePathVariablesOption,
-        Parameter(group=[MESSAGE_PATH_GROUP, _EXPRESSION_ONLY_CONSTRAINT]),
+        Parameter(group=[MESSAGE_PATH_GROUP, _MESSAGE_PATH_VARIABLE_CONSTRAINT]),
     ] = None,
     split_max_size: Annotated[
         str | None,
@@ -563,6 +587,10 @@ def process(
     # Filter by topic and time
     pymcap-cli process in.mcap -o out.mcap -t '/camera/.*' --start @10s
 
+    # Filter decoded messages; repeated predicates for a topic are ORed
+    pymcap-cli process in.mcap -o out.mcap \
+        --where '/detections.objects[:]{confidence >= 0.8 && label == "car"}'
+
     # Merge multiple files with dedup
     pymcap-cli process a.mcap b.mcap -o merged.mcap --dedup-identical
 
@@ -656,6 +684,8 @@ def process(
             parse_qos_override_yaml(qos_override.read_text()) if qos_override is not None else {}
         )
         qos_set_rules = [parse_qos_set_rule(token) for token in qos_set or []]
+        variables = create_message_path_variables(var)
+        where_processor = MessagePredicateProcessor(where, variables=variables) if where else None
         qos_processor = (
             QosMetadataProcessor(
                 qos_format=qos_format,
@@ -665,7 +695,7 @@ def process(
             if qos_format == "numeric" or qos_topic_overrides or qos_set_rules
             else None
         )
-    except (OSError, UnicodeError, TypeError, ValueError) as e:
+    except (LarkError, MessagePathError, OSError, UnicodeError, TypeError, ValueError) as e:
         logger.error(str(e))  # noqa: TRY400
         return 1
 
@@ -678,6 +708,8 @@ def process(
     extras: list[InputProcessor] = []
     if qos_processor is not None:
         extras.append(qos_processor)
+    if where_processor is not None:
+        extras.append(where_processor)
     if alias_rules:
         extras.append(TopicAliasProcessor(alias_rules))
     if merge_channels:
@@ -822,7 +854,6 @@ def process(
 
     if split_expression:
         try:
-            variables = create_message_path_variables(var)
             skip_values = tuple(
                 parse_message_path_scalar(value, source="--split-skip-value")
                 for value in split_skip_value or ()

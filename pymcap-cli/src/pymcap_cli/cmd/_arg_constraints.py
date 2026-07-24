@@ -31,6 +31,7 @@ __all__ = [
     "constraint_group",
     "each_requires",
     "requires",
+    "requires_one_of",
     "requires_value",
 ]
 
@@ -58,6 +59,20 @@ def requires(dependent: str, *required: str) -> GroupValidator:
         missing = [flag for flag in required if flag not in supplied]
         if missing:
             raise ValueError(f"{dependent} requires {', '.join(missing)}.")
+
+    return validator
+
+
+def requires_one_of(dependent: str, *required: str) -> GroupValidator:
+    """Build a validator: supplying ``dependent`` requires any one controller."""
+    if not required:
+        raise ValueError("requires_one_of() needs at least one required flag.")
+
+    def validator(argument_collection: ArgumentCollection) -> None:
+        supplied = _supplied_flags(argument_collection)
+        if dependent not in supplied or any(flag in supplied for flag in required):
+            return
+        raise ValueError(f"{dependent} requires one of {', '.join(required)}.")
 
     return validator
 

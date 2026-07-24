@@ -441,6 +441,15 @@ The most powerful command — combines recovery, filtering, and optimization in 
 pymcap-cli process data.mcap -o filtered.mcap \
   -t '/camera/.*' -t '/lidar/.*'
 
+# Filter decoded messages. Repeated predicates for one topic are ORed.
+pymcap-cli process data.mcap -o alerts.mcap \
+  --where '/diagnostics.status[:]{level >= 2}' \
+  --where '/diagnostics.status[:]{message == "stale"}'
+
+# Put AND conditions inside one MessagePath predicate.
+pymcap-cli process data.mcap -o confident-cars.mcap \
+  --where '/detections.objects[:]{confidence >= 0.8 && label == "car"}'
+
 # Time range filtering (nanoseconds or RFC3339)
 pymcap-cli process data.mcap -o subset.mcap -S "2022-01-01T00:00:00Z" -E "2022-01-01T01:00:00Z"
 
@@ -467,6 +476,11 @@ pymcap-cli process data.mcap -o qos-fixed.mcap \
 pymcap-cli process corrupt.mcap -o recovered.mcap \
   -t '/camera/.*' --recovery-mode
 ```
+
+`--where` only filters the topic named by its MessagePath; topics without a
+predicate pass through unchanged. Use `--topic` when the output should contain
+only the filtered topic. Predicate paths may reference `--var` values. Stream
+modifiers (`@@`) are not supported by `--where`.
 
 ### `recover` — Advanced Recovery
 
