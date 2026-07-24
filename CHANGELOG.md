@@ -8,6 +8,65 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.26.0, mcap-codec-support 0.14.0, small-mcap 0.14.0, robo-ws-bridge 0.10.0, digitalis 0.12.0, mcap-ros2-support-fast 0.7.0, pureini 0.8.0
+
+Headline: decoded MessagePath predicates can filter recording contents,
+`cat` can combine multiple projections from one topic, and bridge playback
+recovers cleanly from speed changes and rejected connections.
+
+### pymcap-cli 0.26.0
+
+- `process --where` filters decoded ROS 2 CDR and JSON messages with
+  topic-qualified MessagePath predicates. Repeated predicates for a topic are
+  ORed, `&&` combines conditions within one predicate, and `--var` values are
+  available to comparisons; topics without a predicate pass through unchanged.
+- `cat` and `bridge cat` accept multiple `--query` projections for the same
+  topic and combine them into one object per source message. Optional
+  `LABEL=/topic.path` names make projected output stable and readable, including
+  for stream transforms and reducers.
+- Grouped terminal projections retain schema-aware enum labels and ROS time
+  rendering instead of falling back to raw values.
+- Missing inputs now produce a concise `File not found` diagnostic instead of a
+  traceback and suggest the matching `.mcap` path when one exists.
+- Changing Foxglove playback speed restarts from the active playhead and reports
+  the resumed session as playing, avoiding jumps and stale buffering state.
+
+### mcap-codec-support 0.14.0
+
+- FFmpeg hardware-encoder probes use hardware-safe frame dimensions, so encoders
+  that reject 64×64 inputs are no longer incorrectly treated as unavailable.
+- Removed unused point-cloud compatibility aliases, specialized decoder
+  factories, and the PyAV `JpegEncoder`; use the unified compressed-point-cloud
+  decoder and the current Cloudini or Draco compressor classes.
+
+### small-mcap 0.14.0
+
+- The base package no longer has a runtime dependency on `typing-extensions`.
+
+### robo-ws-bridge 0.10.0
+
+- WebSocket clients treat close code 1008 (policy violation) as a terminal
+  server rejection and surface its reason instead of reconnecting forever.
+- Removed the unused soft-limit congestion API from `ConnectionOutbox` and
+  `WebSocketBridgeEndpoint`; hard outbox limits and delivery policies remain.
+
+### digitalis 0.12.0
+
+- Removed unused placeholder, timing, and exception helpers.
+  `InvalidFileFormatError` now derives directly from `Exception`.
+
+### mcap-ros2-support-fast 0.7.0
+
+- Removed unused generated-code comment switches and `CodeWriter` helpers; ROS 2
+  encoder and decoder behavior is unchanged.
+
+### pureini 0.8.0
+
+- Removed unused allocating varint and integer-conversion helpers plus
+  `sizeof_field_type`; the buffer-based encoding APIs remain.
+
+---
+
 ## pymcap-cli 0.25.0, mcap-codec-support 0.13.0, small-mcap 0.13.0, robo-ws-bridge 0.9.0
 
 Headline: `bridge serve` playback is now controlled directly from Foxglove,
