@@ -91,7 +91,13 @@ def test_bridge_dependency_requires_server_endpoint_api() -> None:
     requirements = metadata.requires("pymcap-cli") or []
 
     assert "robo-ws-bridge>=0.7.0 ; extra == 'bridge'" in requirements
-    assert "robo-ws-bridge>=0.7.0 ; extra == 'bridge-proxy'" in requirements
+
+
+def test_bridge_codecs_extra_composes_bridge_video_and_pointcloud() -> None:
+    requirements = metadata.requires("pymcap-cli") or []
+
+    assert "pymcap-cli[bridge,pointcloud,video] ; extra == 'bridge-codecs'" in requirements
+    assert "pymcap-cli[bridge-codecs] ; extra == 'bridge-proxy'" in requirements
 
 
 def test_unavailable_command_accepts_command_args(capsys) -> None:

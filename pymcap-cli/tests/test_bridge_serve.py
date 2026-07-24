@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from inspect import signature
 from typing import TYPE_CHECKING
@@ -80,6 +81,40 @@ def _patch_library_server(
 
 def test_serve_loops_by_default() -> None:
     assert signature(serve_module.serve).parameters["loop"].default is True
+
+
+def test_serve_avoids_the_standard_foxglove_bridge_port_by_default() -> None:
+    assert signature(serve_module.serve).parameters["port"].default == 8766
+
+
+def test_serve_stops_sessions_before_cancelling_serve_forever() -> None:
+    is_stopped = False
+    was_cancelled_after_stop: bool | None = None
+
+    class LibraryServer:
+        async def stop(self) -> None:
+            nonlocal is_stopped
+            is_stopped = True
+
+    async def serve_forever() -> None:
+        nonlocal was_cancelled_after_stop
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            was_cancelled_after_stop = is_stopped
+            raise
+
+    async def run() -> None:
+        serve_task = asyncio.create_task(serve_forever())
+        other_task = asyncio.create_task(asyncio.Event().wait())
+        await asyncio.sleep(0)
+        await serve_module._stop_library_server(
+            LibraryServer(),
+            (serve_task, other_task),
+        )
+
+    asyncio.run(run())
+    assert was_cancelled_after_stop is True
 
 
 def test_serve_single_file_uses_restricted_recording_library(

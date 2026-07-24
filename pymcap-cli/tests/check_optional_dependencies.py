@@ -17,6 +17,14 @@ class Scenario:
 
 SCENARIOS = (
     Scenario("bridge", ("pymcap-cli", "bridge", "--help")),
+    Scenario(
+        "bridge-codecs",
+        (
+            "python",
+            "-c",
+            "import mcap_codec_support.pointcloud, mcap_codec_support.video, robo_ws_bridge",
+        ),
+    ),
     Scenario("bridge-proxy", ("pymcap-cli", "bridge", "proxy", "--help")),
     Scenario("draco", ("python", "-c", "import DracoPy; import mcap_codec_support.pointcloud")),
     Scenario("image", ("pymcap-cli", "export-images", "--help")),

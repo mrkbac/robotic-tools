@@ -35,7 +35,8 @@ binary and web stacks remain optional:
 | Extra | Enables | Why it is optional |
 | --- | --- | --- |
 | `bridge` | Foxglove WebSocket client, playback, and serving | Network-specific workflow |
-| `bridge-proxy` | Live video and point-cloud transforming proxy | Includes both heavy codec stacks |
+| `bridge-codecs` | JIT video and point-cloud bridge presets | Composes `bridge`, `video`, and `pointcloud` |
+| `bridge-proxy` | Live video and point-cloud transforming proxy | Reuses `bridge-codecs` |
 | `video` | Video export, compression, and decompression | PyAV, NumPy, and Pillow binary wheels |
 | `pointcloud` | PCD export and Cloudini processing | NumPy, Numba/LLVM, and point-cloud codecs |
 | `draco` | Draco point-cloud processing | DracoPy and NumPy binary wheels |
@@ -937,13 +938,13 @@ pymcap-cli bridge play first.mcap second.mcap --target localhost --speed 2
 PYMCAP_BRIDGE=localhost pymcap-cli bridge play recording.mcap -t '/camera/.*'
 
 # Host an MCAP through the minimal Foxglove launcher
-pymcap-cli bridge serve recording.mcap --port 8765
+pymcap-cli bridge serve recording.mcap
 
 # Browse a directory and open one or more recordings in Foxglove
 pymcap-cli bridge serve /data/recordings --port 9090
 
 # Compress images and point clouds just in time while serving (no temporary MCAP)
-pymcap-cli bridge serve recording.mcap --transform roscompress --port 8765
+uvx "pymcap-cli[bridge-codecs]" bridge serve recording.mcap --preset fast
 
 # Publish a compressed recording as standard JPEG images and PointCloud2 messages
 pymcap-cli bridge play compressed.mcap --target localhost --transform rosdecompress
@@ -961,7 +962,15 @@ follow consumers dynamically and pauses playback while no selected topic has one
 files shows only those files; passing a directory discovers recordings beneath it.
 Opening one file or a multi-file selection launches Foxglove Desktop through
 `foxglove://open`. Pass `--no-browser` for headless operation. Playback loops by
-default; pass `--no-loop` to play each connection once.
+default; pass `--no-loop` to play each connection once. Its default port is 8766,
+avoiding the official Foxglove bridge default on 8765.
+
+The launcher loads indexed start/end time, duration, message count, and channel
+count after the file list appears. This reads and caches each MCAP footer/summary
+by file size and modification time; it does not scan message data, so the work
+scales with the number and summary sizes of files rather than their total payload
+size. An unindexed or incomplete file shows `No indexed summary` instead of
+triggering a potentially multi-gigabyte recovery scan.
 
 The launcher's links contain the raw WebSocket URL. Clicking one opens Foxglove,
 while copying its address produces a connection URL that can be shared or pasted

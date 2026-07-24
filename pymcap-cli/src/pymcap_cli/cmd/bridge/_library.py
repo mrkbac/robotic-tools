@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import os
+import re
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
@@ -120,6 +121,17 @@ _INDEX_HTML = """\
     <p class="muted">Open one recording, or select several to merge them by log time.</p>
     <div class="toolbar">
       <a id="open" class="button" aria-disabled="true">Open selected in Foxglove</a>
+      <label class="preset">
+        Playback
+        <select id="preset">
+          <option value="">Server default</option>
+          <option value="none">Original</option>
+          <option value="compress">Compressed</option>
+          <option value="fast">Fast</option>
+          <option value="low">Low bandwidth</option>
+          <option value="decompress">Decompressed</option>
+        </select>
+      </label>
       <span id="status" class="muted">No recording selected</span>
     </div>
     <div id="recordings" class="recordings"></div>
@@ -180,6 +192,19 @@ h1 { margin: 0; }
 }
 .button:hover { border-color: var(--accent); }
 .button[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+.preset {
+  display: flex;
+  gap: .4rem;
+  align-items: center;
+  color: var(--muted);
+}
+select {
+  padding: .4rem .5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--fg);
+}
 #status { margin-left: .5rem; }
 .recordings { display: grid; gap: .4rem; }
 .recording {
@@ -192,13 +217,16 @@ h1 { margin: 0; }
   border-radius: 7px;
   background: var(--card);
 }
+.recording-main { min-width: 0; }
 .path {
+  display: block;
   color: var(--fg);
   font: 13px/1.4 ui-monospace, monospace;
   overflow-wrap: anywhere;
   text-decoration: none;
 }
 .path:hover { color: var(--accent); text-decoration: underline; }
+.details { margin-top: .15rem; font-size: 12px; }
 .size { color: var(--muted); white-space: nowrap; }
 """
 
@@ -207,6 +235,7 @@ _APP_JS = """\
   const list = document.getElementById("recordings");
   const status = document.getElementById("status");
   const open = document.getElementById("open");
+  const preset = document.getElementById("preset");
 
   const selected = () =>
     [...document.querySelectorAll('input[name="recording"]:checked')].map((item) => item.value);
@@ -214,6 +243,7 @@ _APP_JS = """\
   const query = (files) => {
     const params = new URLSearchParams();
     for (const file of files) params.append("file", file);
+    if (preset.value) params.set("preset", preset.value);
     return params;
   };
 
@@ -240,7 +270,14 @@ _APP_JS = """\
 
   open.addEventListener("click", openFoxglove);
 
+  const updateRecordingLinks = () => {
+    for (const path of document.querySelectorAll("a.path")) {
+      path.href = websocketUrl([path.dataset.recording]).toString();
+    }
+  };
+
   const updateOpenLink = () => {
+    updateRecordingLinks();
     const files = selected();
     if (!files.length) {
       open.removeAttribute("href");
@@ -254,12 +291,60 @@ _APP_JS = """\
       ? "1 recording selected"
       : `${files.length} recordings selected`;
   };
+  preset.addEventListener("change", updateOpenLink);
 
   const formatSize = (bytes) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
     if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
     return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+  };
+
+  const formatDuration = (durationNs) => {
+    const seconds = Number(BigInt(durationNs)) / 1e9;
+    if (seconds < 60) {
+      const digits = seconds < 1 ? 3 : seconds < 10 ? 1 : 0;
+      return `${seconds.toFixed(digits)} s`;
+    }
+    if (seconds < 3600) return `${(seconds / 60).toFixed(1)} min`;
+    if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h`;
+    return `${(seconds / 86400).toFixed(1)} d`;
+  };
+
+  const formatTimestamp = (timestampNs) => {
+    const nanoseconds = BigInt(timestampNs);
+    if (nanoseconds < 946684800000000000n) {
+      return formatDuration(timestampNs);
+    }
+    return new Date(Number(nanoseconds / 1000000n)).toLocaleString();
+  };
+
+  const loadDetails = () => {
+    fetch("/api/recordings/details")
+      .then((response) => response.json())
+      .then((value) => {
+        for (const [recording, details] of Object.entries(value.details)) {
+          const target = document.querySelector(
+            `.details[data-recording="${CSS.escape(recording)}"]`
+          );
+          if (!target) continue;
+          if (!details) {
+            target.textContent = "No indexed summary";
+            continue;
+          }
+          if (!details.messageCount) {
+            target.textContent = "Empty recording";
+            continue;
+          }
+          target.textContent = [
+            `${formatTimestamp(details.startTimeNs)} → ${formatTimestamp(details.endTimeNs)}`,
+            formatDuration(details.durationNs),
+            `${details.messageCount.toLocaleString()} messages`,
+            `${details.channelCount.toLocaleString()} channels`,
+          ].join(" · ");
+        }
+      })
+      .catch(() => {});
   };
 
   fetch("/api/recordings")
@@ -277,18 +362,27 @@ _APP_JS = """\
         checkbox.name = "recording";
         checkbox.value = recording.path;
         checkbox.onchange = updateOpenLink;
+        const main = document.createElement("div");
+        main.className = "recording-main";
         const path = document.createElement("a");
         path.className = "path";
         path.textContent = recording.path;
+        path.dataset.recording = recording.path;
         path.href = websocketUrl([recording.path]).toString();
         path.addEventListener("click", openFoxglove);
+        const details = document.createElement("div");
+        details.className = "details muted";
+        details.dataset.recording = recording.path;
+        details.textContent = "Loading summary…";
+        main.append(path, details);
         const size = document.createElement("span");
         size.className = "size";
         size.textContent = formatSize(recording.sizeBytes);
-        label.append(checkbox, path, size);
+        label.append(checkbox, main, size);
         list.append(label);
       }
       updateOpenLink();
+      loadDetails();
     })
     .catch(() => { list.innerHTML = '<p class="muted">Could not load recordings.</p>'; });
 
@@ -301,6 +395,24 @@ _APP_JS = """\
 class RecordingEntry:
     path: str
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingDetails:
+    start_time_ns: int
+    end_time_ns: int
+    duration_ns: int
+    message_count: int
+    channel_count: int
+
+    def to_json(self) -> Mapping[str, JsonValue]:
+        return {
+            "startTimeNs": str(self.start_time_ns),
+            "endTimeNs": str(self.end_time_ns),
+            "durationNs": str(self.duration_ns),
+            "messageCount": self.message_count,
+            "channelCount": self.channel_count,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +429,9 @@ class RecordingLibrary:
             raise ValueError(f"{root} is not a directory")
         self.root = root.resolve()
         self._selected: _SelectedRecordings | None = None
+        self._details_cache: dict[
+            str, tuple[tuple[tuple[str, int, int], ...], RecordingDetails | None]
+        ] = {}
 
     @classmethod
     def from_paths(cls, paths: tuple[Path, ...]) -> Self:
@@ -386,7 +501,30 @@ class RecordingLibrary:
             relative = resolved.relative_to(self.root)
             path = relative.as_posix()
             entries[path] = RecordingEntry(path=path, size_bytes=resolved.stat().st_size)
-        return tuple(entries[path] for path in sorted(entries, key=str.casefold))
+        return tuple(entries[path] for path in sorted(entries, key=_natural_path_key))
+
+    def recording_details(
+        self,
+        requested: list[str] | None = None,
+    ) -> dict[str, RecordingDetails | None]:
+        paths = [entry.path for entry in self.recordings()] if requested is None else requested
+        details: dict[str, RecordingDetails | None] = {}
+        for logical_path in paths:
+            path = self.resolve([logical_path])[0]
+            files = find_bag_splits(path) if path.is_dir() else [path]
+            fingerprint = tuple(
+                (str(file), stat.st_size, stat.st_mtime_ns)
+                for file in files
+                for stat in (file.stat(),)
+            )
+            cached = self._details_cache.get(logical_path)
+            if cached is not None and cached[0] == fingerprint:
+                details[logical_path] = cached[1]
+                continue
+            value = _read_recording_details(files)
+            self._details_cache[logical_path] = (fingerprint, value)
+            details[logical_path] = value
+        return details
 
     def resolve(self, requested: list[str]) -> tuple[Path, ...]:
         if not requested:
@@ -849,8 +987,7 @@ class RecordingSessionManager:
         async with self._lock:
             sessions = tuple(self._sessions)
             self._sessions.clear()
-        for session in sessions:
-            await session.close()
+        await asyncio.gather(*(session.close() for session in sessions))
 
 
 class RecordingLibraryServer:
@@ -891,6 +1028,7 @@ class RecordingLibraryServer:
                 Subprotocol("foxglove.websocket.v1"),
             ],
             process_request=self._process_request,
+            close_timeout=1,
         )
         socket = next(iter(self._server.sockets), None)
         if socket is not None:
@@ -903,11 +1041,15 @@ class RecordingLibraryServer:
         await self._server.serve_forever()
 
     async def stop(self) -> None:
-        await self.manager.close()
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        server = self._server
+        self._server = None
+        if server is not None:
+            server.close(close_connections=False)
+        try:
+            await self.manager.close()
+        finally:
+            if server is not None:
+                await server.wait_closed()
 
     async def _handle_connection(self, websocket: ServerConnection) -> None:
         request = websocket.request
@@ -921,6 +1063,16 @@ class RecordingLibraryServer:
         try:
             request = self._resolve_query(parsed.query)
             session = await self.manager.create(request.files, preset=request.preset)
+        except ImportError as exc:
+            missing = exc.name or str(exc)
+            await websocket.close(
+                code=1008,
+                reason=(
+                    "Playback preset dependencies are missing; install "
+                    f"pymcap-cli[bridge-codecs] ({missing})"
+                )[:120],
+            )
+            return
         except (OSError, PlaybackError, ValueError) as exc:
             await websocket.close(code=1008, reason=str(exc)[:120])
             return
@@ -953,6 +1105,17 @@ class RecordingLibraryServer:
                     for entry in self.library.recordings()
                 ]
                 return _json_response(200, {"recordings": recordings})
+            if parsed.path == "/api/recordings/details":
+                details = await asyncio.to_thread(self.library.recording_details)
+                return _json_response(
+                    200,
+                    {
+                        "details": {
+                            path: None if value is None else value.to_json()
+                            for path, value in details.items()
+                        }
+                    },
+                )
         except (OSError, PlaybackError, ValueError) as exc:
             return _json_response(400, {"error": str(exc)})
         return _json_response(404, {"error": "not found"})
@@ -1014,3 +1177,47 @@ def _response(status: int, content_type: str, body: str) -> Response:
 
 def _json_response(status: int, body: Mapping[str, JsonValue]) -> Response:
     return _response(status, "application/json; charset=utf-8", json.dumps(body))
+
+
+def _natural_path_key(value: str) -> tuple[tuple[tuple[int, str, int], ...], str]:
+    parts = tuple(
+        (1, "", int(part)) if part.isdigit() else (0, part.casefold(), 0)
+        for part in re.split(r"(\d+)", value)
+        if part
+    )
+    return parts, value.casefold()
+
+
+def _read_recording_details(files: list[Path]) -> RecordingDetails | None:
+    starts: list[int] = []
+    ends: list[int] = []
+    message_count = 0
+    topics: set[str] = set()
+    for file in files:
+        with McapFile.open(file) as recording:
+            summary = recording.summary
+            if summary is None or summary.statistics is None:
+                return None
+            statistics = summary.statistics
+            message_count += statistics.message_count
+            topics.update(channel.topic for channel in summary.channels.values())
+            if statistics.message_count:
+                starts.append(statistics.message_start_time)
+                ends.append(statistics.message_end_time)
+    if not starts:
+        return RecordingDetails(
+            start_time_ns=0,
+            end_time_ns=0,
+            duration_ns=0,
+            message_count=0,
+            channel_count=len(topics),
+        )
+    start_time_ns = min(starts)
+    end_time_ns = max(ends)
+    return RecordingDetails(
+        start_time_ns=start_time_ns,
+        end_time_ns=end_time_ns,
+        duration_ns=end_time_ns - start_time_ns,
+        message_count=message_count,
+        channel_count=len(topics),
+    )

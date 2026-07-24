@@ -19,10 +19,12 @@ from pymcap_cli.cmd.bridge._library import (
     _APP_JS,
     _INDEX_HTML,
     _STYLE_CSS,
+    RecordingDetails,
     RecordingEntry,
     RecordingLibrary,
     RecordingLibraryServer,
     RecordingSession,
+    RecordingSessionManager,
     _session_transform_config,
 )
 from pymcap_cli.cmd.bridge._playback import (
@@ -46,6 +48,7 @@ from robo_ws_bridge import (
 from robo_ws_bridge.ws_types import BinaryOpCodes, ServerInfoMessage
 from small_mcap import McapFile, McapWriter
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -289,6 +292,22 @@ def test_recording_library_discovers_nested_mcap_files(tmp_path: Path) -> None:
     assert all(recording.size_bytes > 0 for recording in recordings)
 
 
+def test_recording_library_sorts_paths_naturally(tmp_path: Path) -> None:
+    for number in (400, 30, 3, 300, 40, 4):
+        _write_mcap(tmp_path / f"{number}.mcap", "/topic", number, b"message")
+
+    recordings = RecordingLibrary(tmp_path).recordings()
+
+    assert [recording.path for recording in recordings] == [
+        "3.mcap",
+        "4.mcap",
+        "30.mcap",
+        "40.mcap",
+        "300.mcap",
+        "400.mcap",
+    ]
+
+
 def test_recording_library_from_paths_exposes_only_selected_files(tmp_path: Path) -> None:
     selected = tmp_path / "selected.mcap"
     sibling = tmp_path / "sibling.mcap"
@@ -354,6 +373,54 @@ def test_library_ui_builds_multi_recording_foxglove_links() -> None:
     assert "new URL(`/ws/${encodeURIComponent(label)}`, window.location.href)" in _APP_JS
     assert "document.querySelectorAll" in _APP_JS
     assert 'input[name="recording"]:checked' in _APP_JS
+
+
+def test_library_ui_adds_selected_preset_to_foxglove_links() -> None:
+    assert 'id="preset"' in _INDEX_HTML
+    assert 'const preset = document.getElementById("preset")' in _APP_JS
+    assert 'params.set("preset", preset.value)' in _APP_JS
+    assert 'preset.addEventListener("change", updateOpenLink)' in _APP_JS
+
+
+def test_recording_library_reads_indexed_summary_metadata_without_recovery(
+    tmp_path: Path,
+) -> None:
+    _write_mcap_messages(
+        tmp_path / "recording.mcap",
+        "/topic",
+        [(1_000_000_000, b"first"), (4_000_000_000, b"last")],
+    )
+    library = RecordingLibrary(tmp_path)
+
+    details = library.recording_details(["recording.mcap"])
+
+    assert details == {
+        "recording.mcap": RecordingDetails(
+            start_time_ns=1_000_000_000,
+            end_time_ns=4_000_000_000,
+            duration_ns=3_000_000_000,
+            message_count=2,
+            channel_count=1,
+        )
+    }
+
+
+def test_recording_library_does_not_scan_unindexed_file_for_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_mcap(path, "/topic", 10, b"message")
+    path.write_bytes(path.read_bytes()[:-37])
+
+    def reject_recovery(*_args, **_kwargs):
+        raise AssertionError("recording metadata must not rebuild an absent summary")
+
+    monkeypatch.setattr(mcap_file_module, "rebuild_summary", reject_recovery)
+
+    assert RecordingLibrary(tmp_path).recording_details(["recording.mcap"]) == {
+        "recording.mcap": None
+    }
 
 
 def test_library_websocket_accepts_display_name_path(tmp_path: Path) -> None:
@@ -695,6 +762,85 @@ def test_library_server_removes_session_when_listener_disconnects(
             await server.stop()
 
     asyncio.run(run())
+
+
+def test_library_server_rejects_missing_preset_dependencies_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_mcap(tmp_path / "first.mcap", "/first", 1, b"first")
+    server = RecordingLibraryServer(
+        RecordingLibrary(tmp_path),
+        host="127.0.0.1",
+        port=0,
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+
+    async def fail_create(*_args, **_kwargs):
+        raise ModuleNotFoundError(
+            "No module named 'mcap_codec_support'",
+            name="mcap_codec_support",
+        )
+
+    monkeypatch.setattr(server.manager, "create", fail_create)
+
+    async def run() -> tuple[int, str]:
+        await server.start()
+        try:
+            async with connect(
+                f"ws://127.0.0.1:{server.port}/ws?file=first.mcap&preset=fast",
+                subprotocols=["foxglove.websocket.v1"],
+            ) as websocket:
+                with pytest.raises(ConnectionClosedError) as exc_info:
+                    await websocket.recv()
+                close_frame = exc_info.value.rcvd
+                assert close_frame is not None
+                return close_frame.code, close_frame.reason
+        finally:
+            await server.stop()
+
+    code, reason = asyncio.run(run())
+    assert code == 1008
+    assert "bridge-codecs" in reason
+    assert "mcap_codec_support" in reason
+
+
+def test_recording_session_manager_closes_sessions_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingSessionManager(
+        message_filter=MessageFilterOptions.from_args(),
+        transform_config=None,
+        speed=1,
+        loop=False,
+    )
+    first = object.__new__(RecordingSession)
+    second = object.__new__(RecordingSession)
+    manager._sessions.update((first, second))
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    started = 0
+
+    async def slow_close(_session: RecordingSession) -> None:
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await release.wait()
+
+    monkeypatch.setattr(RecordingSession, "close", slow_close)
+
+    async def run() -> None:
+        close_task = asyncio.create_task(manager.close())
+        await asyncio.wait_for(both_started.wait(), timeout=0.5)
+        release.set()
+        await close_task
+
+    asyncio.run(run())
+    assert manager.active_session_count == 0
 
 
 def test_library_server_logs_non_websocket_clients_without_traceback(

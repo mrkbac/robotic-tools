@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import signal
 import socket
 import sys
 import threading
@@ -9,7 +10,7 @@ import webbrowser
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, Protocol
 
 from cyclopts import Parameter
 from robo_ws_bridge import (
@@ -69,6 +70,25 @@ from pymcap_cli.log_setup import ERR
 _CLOCK_INTERVAL_SECONDS = 1 / 30
 _CLIENT_SETTLE_SECONDS = 0.05
 TimelineStartedHandler = Callable[[], Awaitable[None] | None]
+
+
+class _RecordingLibraryServer(Protocol):
+    async def stop(self) -> None: ...
+
+
+async def _stop_library_server(
+    library_server: _RecordingLibraryServer,
+    tasks: tuple[asyncio.Task[None], asyncio.Task[Literal[True]]],
+) -> None:
+    try:
+        await library_server.stop()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
 
 # A list-valued ``--host`` so the flag may be given bare (``--host`` -> bind all
 # interfaces, like ``vite --host``), with a value (``--host 0.0.0.0``), or omitted.
@@ -362,7 +382,7 @@ def serve(
     files: list[str],
     *,
     host: ServeHostOption = None,
-    port: ServerPortOption = 8765,
+    port: ServerPortOption = 8766,
     preset: OptionalPresetOption = None,
     image_format: OptionalImageFormatOption = None,
     codec: OptionalCodecOption = None,
@@ -405,7 +425,7 @@ def serve(
     pymcap-cli bridge serve recording.mcap --preset fast
     pymcap-cli bridge serve part1.mcap part2.mcap --speed 2 --loop
     pymcap-cli bridge serve /data/recordings --port 9090
-    pymcap-cli bridge serve recording.mcap --host 0.0.0.0 --port 8765
+    pymcap-cli bridge serve recording.mcap --host 0.0.0.0 --port 8766
     ```
     """
     if not 1 <= port <= 65535:
@@ -475,7 +495,10 @@ def serve(
             loop=loop,
         )
 
+        was_stopped = False
+
         async def run_library() -> None:
+            nonlocal was_stopped
             await library_server.start()
             hosts = _display_hosts(resolved_host)
             urls = [f"http://{h}:{library_server.port}/" for h in hosts]
@@ -489,17 +512,53 @@ def serve(
                 )
             if not no_browser:
                 _launch_url(urls[0])
+            stop_requested = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            installed_signals: list[signal.Signals] = []
+            previous_signal_handlers = {
+                signal_number: signal.getsignal(signal_number)
+                for signal_number in (signal.SIGINT, signal.SIGTERM)
+            }
+            for signal_number in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(signal_number, stop_requested.set)
+                except (NotImplementedError, RuntimeError):
+                    continue
+                installed_signals.append(signal_number)
+            serve_task = asyncio.create_task(library_server.serve_forever())
+            stop_task = asyncio.create_task(stop_requested.wait())
             try:
-                await library_server.serve_forever()
+                done, _pending = await asyncio.wait(
+                    (serve_task, stop_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if serve_task in done:
+                    await serve_task
+                else:
+                    was_stopped = True
             finally:
-                await library_server.stop()
+                try:
+                    await _stop_library_server(
+                        library_server,
+                        (serve_task, stop_task),
+                    )
+                finally:
+                    for signal_number in installed_signals:
+                        loop.remove_signal_handler(signal_number)
+                        signal.signal(
+                            signal_number,
+                            previous_signal_handlers[signal_number],
+                        )
 
         asyncio.run(run_library())
+        if was_stopped:
+            console.print("\n[dim]Server stopped.[/]")
     except ImportError as exc:
         missing = exc.name or str(exc)
         ERR.print(
             "[red]Error:[/] JIT ROS transform dependencies are missing. "
-            "Install the required pymcap-cli video, pointcloud, image, or draco extra.\n"
+            "Install `pymcap-cli[bridge-codecs]` for the bridge playback presets, "
+            "plus image or draco when explicitly requested.\n"
             f"Missing: {missing}"
         )
         return 1
