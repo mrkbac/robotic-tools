@@ -3,6 +3,7 @@
 import importlib
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated, TypeAlias, cast
 
 from cyclopts import App, Group, Parameter
@@ -287,6 +288,21 @@ def _normalize_time_filter_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _print_file_not_found(exc: FileNotFoundError) -> None:
+    if exc.filename is None:
+        ERR.print(f"[red]Error:[/red] {escape(str(exc))}", soft_wrap=True)
+        return
+
+    missing_path = Path(str(exc.filename))
+    ERR.print(
+        f"[red]Error:[/red] File not found: {escape(str(missing_path))}",
+        soft_wrap=True,
+    )
+    mcap_path = Path(f"{missing_path}.mcap")
+    if mcap_path.is_file():
+        ERR.print(f"Did you mean {escape(str(mcap_path))}?", soft_wrap=True)
+
+
 @app.meta.default
 def launcher(
     *tokens: Annotated[str, Parameter(allow_leading_hyphen=True)],
@@ -321,7 +337,11 @@ def launcher(
 
 def main() -> None:
     sys.argv[1:] = _normalize_time_filter_tokens(tuple(sys.argv[1:]))
-    app.meta()
+    try:
+        app.meta()
+    except FileNotFoundError as exc:
+        _print_file_not_found(exc)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

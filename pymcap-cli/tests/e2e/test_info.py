@@ -8,6 +8,26 @@ import pytest
 
 
 @pytest.mark.e2e
+def test_info_missing_suffix_suggests_existing_mcap(tmp_path: Path) -> None:
+    mcap_path = tmp_path / "recording.mcap"
+    mcap_path.touch()
+    entered_path = tmp_path / "recording"
+
+    result = subprocess.run(
+        ["pymcap-cli", "info", str(entered_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert f"Error: File not found: {entered_path}" in result.stderr
+    assert f"Did you mean {mcap_path}?" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.e2e
 class TestInfo:
     """Test info command functionality."""
 
