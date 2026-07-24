@@ -14,8 +14,8 @@ from unittest.mock import patch
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from pymcap_cli.cmd import cat_cmd as cat_cmd_module
 from pymcap_cli.cmd.cat_cmd import cat
-from pymcap_cli.core.named_message_path import query_result_is_empty
-from pymcap_cli.display.cat_helpers import plan_for_query
+from pymcap_cli.core.named_message_path import CatQuery, query_result_is_empty
+from pymcap_cli.display.cat_helpers import plan_for_queries, plan_for_query
 from pymcap_cli.display.message_render import (
     BytesMode,
     EnumField,
@@ -386,6 +386,66 @@ def test_cat_tty_shows_enum_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert "pymcap_test/msg/Wrapper" in output
 
 
+_HEADER_SCHEMA = (
+    b"std_msgs/Header header\n"
+    b"float64 points\n"
+    b"================================================================================\n"
+    b"MSG: std_msgs/msg/Header\n"
+    b"builtin_interfaces/Time stamp\n"
+    b"string frame_id\n"
+    b"================================================================================\n"
+    b"MSG: builtin_interfaces/msg/Time\n"
+    b"int32 sec\n"
+    b"uint32 nanosec\n"
+)
+
+
+def _build_header_mcap(path: Path) -> Path:
+    output = BytesIO()
+    writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
+    writer.start()
+    writer.add_schema(1, "pymcap_test/msg/PointSummary", "ros2msg", _HEADER_SCHEMA)
+    writer.add_channel(1, "/points", "cdr", 1)
+    writer.add_message_encode(
+        channel_id=1,
+        log_time=1_749_718_597_200_103_936,
+        data={
+            "header": {
+                "stamp": {"sec": 1_749_718_597, "nanosec": 200_103_936},
+                "frame_id": "radar_front_footprint",
+            },
+            "points": 1390.0,
+        },
+        publish_time=1_749_718_597_200_103_936,
+        sequence=0,
+    )
+    writer.finish()
+    path.write_bytes(output.getvalue())
+    return path
+
+
+def test_cat_tty_grouped_query_keeps_time_annotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcap_path = _build_header_mcap(tmp_path / "header.mcap")
+    buf = io.StringIO()
+    fake_console = Console(file=buf, force_terminal=True, width=200, color_system=None)
+    monkeypatch.setattr(cat_cmd_module, "console_out", fake_console)
+    with patch.object(sys.stdout, "isatty", return_value=True):
+        rc = cat(
+            str(mcap_path),
+            query=["header=/points.header", "points=/points.points"],
+            limit=1,
+        )
+    assert rc == 0
+    output = buf.getvalue()
+    assert "header" in output
+    assert "2025-06-12T08:56:37.200103936Z UTC" in output
+    assert "sec: 1749718597" in output
+    assert "nanosec: 200103936" in output
+    assert "points: 1390.0" in output
+
+
 def test_cat_jsonl_does_not_decorate_enums(tmp_path: Path) -> None:
     mcap_path = _build_separate_enum_mcap(tmp_path / "enum.mcap")
     out_file = tmp_path / "out.jsonl"
@@ -546,6 +606,44 @@ def test_plan_for_query_time_leaf_returns_none() -> None:
     # has nothing to attach there, so decoration is skipped (sec/nanosec still render).
     root = build_enum_plan("pkg/Command", _header_command_defs())
     assert plan_for_query(root, parse_message_path("/cmd.header.stamp")) is None
+
+
+def test_plan_for_queries_composes_labeled_and_unlabeled_projection_plans() -> None:
+    root = build_enum_plan("pkg/Command", _header_command_defs())
+    assert root is not None
+    header_path = parse_message_path("/cmd.header")
+    velocity_path = parse_message_path("/cmd.velocity")
+
+    for output_name in ("header", ".header"):
+        plan = plan_for_queries(
+            root,
+            (
+                CatQuery(
+                    source="/cmd.header",
+                    output_name=output_name,
+                    path=header_path,
+                ),
+                CatQuery(
+                    source="/cmd.velocity",
+                    output_name=".velocity",
+                    path=velocity_path,
+                ),
+            ),
+        )
+        assert plan is not None
+        assert set(plan.nested_plans) == {output_name}
+        assert plan.nested_plans[output_name].time_fields == {"stamp": TimeKind.TIME}
+
+
+def test_plan_for_queries_preserves_single_query_plan() -> None:
+    root = build_enum_plan("pkg/Command", _header_command_defs())
+    assert root is not None
+    query = CatQuery(
+        source="/cmd.header",
+        output_name=".header",
+        path=parse_message_path("/cmd.header"),
+    )
+    assert plan_for_queries(root, (query,)) is plan_for_query(root, query.path)
 
 
 def _quaternion_defs() -> dict[str, MessageDefinition]:

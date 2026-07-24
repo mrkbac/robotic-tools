@@ -18,10 +18,20 @@ from ros_parser.message_path import (
 from pymcap_cli.display.message_render import EnumPlan, build_enum_plan, resolve_msgdef_by_name
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ros_parser.message_path import MessagePath
     from ros_parser.models import MessageDefinition
 
 logger = logging.getLogger(__name__)
+
+
+class CatQueryLike(Protocol):
+    @property
+    def output_name(self) -> str: ...
+
+    @property
+    def path(self) -> MessagePath: ...
 
 
 def plan_for_query(root_plan: EnumPlan | None, parsed_query: MessagePath | None) -> EnumPlan | None:
@@ -46,6 +56,31 @@ def plan_for_query(root_plan: EnumPlan | None, parsed_query: MessagePath | None)
             continue
         return None
     return plan
+
+
+def plan_for_queries(
+    root_plan: EnumPlan | None,
+    queries: Sequence[CatQueryLike] | None,
+) -> EnumPlan | None:
+    """Return the render plan for unprojected, single-query, or grouped-query output."""
+    if queries is None:
+        return root_plan
+    if len(queries) == 1:
+        return plan_for_query(root_plan, queries[0].path)
+
+    nested_plans = {}
+    for query in queries:
+        query_plan = plan_for_query(root_plan, query.path)
+        if query_plan is not None:
+            nested_plans[query.output_name] = query_plan
+
+    if not nested_plans:
+        return None
+    return EnumPlan(
+        skip_fields=frozenset(),
+        enum_fields={},
+        nested_plans=nested_plans,
+    )
 
 
 class SchemaLike(Protocol):

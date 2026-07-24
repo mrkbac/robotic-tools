@@ -51,7 +51,7 @@ from pymcap_cli.core.named_message_path import (
     evaluate_cat_queries,
     parse_cat_queries,
 )
-from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_query
+from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_queries
 from pymcap_cli.display.message_render import (
     TTY_BYTES_TRUNCATE,
     BytesMode,
@@ -146,16 +146,7 @@ async def _cat_async(
         schema = decoder_cache.schema_for(channel["id"])
         root_plan = schema_cache.enum_plan(schema) if schema is not None else None
         queries_for_topic = parsed_queries.get(channel["topic"])
-        single_query = (
-            queries_for_topic[0]
-            if queries_for_topic is not None and len(queries_for_topic) == 1
-            else None
-        )
-        plan = (
-            plan_for_query(root_plan, single_query.path if single_query is not None else None)
-            if single_query is not None or queries_for_topic is None
-            else None
-        )
+        plan = plan_for_queries(root_plan, queries_for_topic)
 
         changed_paths = None
         if changed:
