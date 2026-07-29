@@ -403,15 +403,35 @@ def _codec_family(codec_name: str) -> str:
     return "h264"
 
 
+@lru_cache(maxsize=4)
+def _frame_sync_args(ffmpeg: str) -> list[str]:
+    try:
+        result = subprocess.run(  # noqa: S603
+            [ffmpeg, "-hide_banner", "-h", "full"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ["-vsync", "0"]
+    help_text = f"{result.stdout}\n{result.stderr}"
+    if "-fps_mode" in help_text:
+        return ["-fps_mode", "passthrough"]
+    return ["-vsync", "0"]
+
+
 def _build_output_args(
-    codec_fam: str, codec_name: str, gop_size: int, options: dict[str, str], bit_rate: int | None
+    ffmpeg: str,
+    codec_fam: str,
+    codec_name: str,
+    gop_size: int,
+    options: dict[str, str],
+    bit_rate: int | None,
 ) -> list[str]:
     """Build the shared encoder output arguments."""
     cmd: list[str] = [
-        # Modern replacement for the removed ``-vsync 0``: pass every frame
-        # through with its own timestamp. ``-vsync`` errors on ffmpeg 7+.
-        "-fps_mode",
-        "passthrough",
+        *_frame_sync_args(ffmpeg),
         "-c:v",
         codec_name,
         "-g",
@@ -622,7 +642,7 @@ class FFmpegVideoEncoder:
             sw, sh = scale
             cmd.extend(["-vf", f"scale={sw}:{sh}"])
 
-        cmd.extend(_build_output_args(codec_fam, codec_name, gop_size, options, bit_rate))
+        cmd.extend(_build_output_args(ffmpeg, codec_fam, codec_name, gop_size, options, bit_rate))
 
         self.config = EncoderConfig(width=width, height=height, codec_name=codec_name)
 

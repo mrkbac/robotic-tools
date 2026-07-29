@@ -141,6 +141,27 @@ class TestFfmpegDiscovery:
         result = find_ffmpeg()
         assert result is None or isinstance(result, str)
 
+    @pytest.mark.parametrize(
+        ("help_text", "expected"),
+        [
+            ("-fps_mode[:stream_specifier]  set framerate mode", ["-fps_mode", "passthrough"]),
+            ("-vsync parameter  video sync method", ["-vsync", "0"]),
+        ],
+    )
+    def test_frame_sync_args_match_ffmpeg_capabilities(
+        self, monkeypatch, help_text: str, expected: list[str]
+    ) -> None:
+        monkeypatch.setattr(
+            ffmpeg_module.subprocess,
+            "run",
+            lambda args, **_kwargs: subprocess.CompletedProcess(args, 0, help_text, ""),
+        )
+        ffmpeg_module._frame_sync_args.cache_clear()
+        try:
+            assert ffmpeg_module._frame_sync_args("/usr/bin/ffmpeg") == expected
+        finally:
+            ffmpeg_module._frame_sync_args.cache_clear()
+
     @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
     def test_check_encoder_cli_libx264(self) -> None:
         assert check_encoder_cli("libx264") is True
@@ -198,6 +219,9 @@ class TestFfmpegDiscovery:
 
 @pytest.mark.skipif(find_ffmpeg() is None, reason="ffmpeg not available")
 class TestImageDimensionProbe:
+    def test_probe_jpeg_keeps_legacy_ffmpeg_geometry(self) -> None:
+        assert probe_image_dimensions(PROBE_JPEG) == (32, 32)
+
     def test_probe_falls_back_to_ffprobe_with_binary_input(self) -> None:
         image_module = pytest.importorskip("PIL.Image")
         image_module.init()
@@ -236,8 +260,13 @@ class TestHwMjpegDecodeProbe:
     def test_encoder_accepts_forced_decode_codec(self) -> None:
         # Forcing the CPU mjpeg decoder exercises the decode_codec code path
         # end-to-end (the -c:v insertion must produce a valid command).
+        width, height = probe_image_dimensions(PROBE_JPEG)
         encoder = FFmpegVideoEncoder(
-            width=32, height=32, codec_name="libx264", quality=28, decode_codec="mjpeg"
+            width=width,
+            height=height,
+            codec_name="libx264",
+            quality=28,
+            decode_codec="mjpeg",
         )
         outputs: list[bytes] = []
         try:

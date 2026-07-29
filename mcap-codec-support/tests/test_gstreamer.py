@@ -8,9 +8,8 @@ import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.gstreamer as gstreamer_module
 import pytest
 from mcap_codec_support.video import EncoderMode, create_video_compression_backend
-from mcap_codec_support.video.common import VideoEncoderError
+from mcap_codec_support.video.common import PROBE_JPEG, VideoEncoderError
 from mcap_codec_support.video.gstreamer import (
-    PROBE_JPEG,
     GStreamerCompressionBackend,
     _codec_key,
     _gstreamer_env,
@@ -49,6 +48,18 @@ class TestDiscovery:
         assert _quality_to_qp(28) == 35
         assert _quality_to_qp(100) == 51
         assert _quality_to_qp(-10) == 0
+
+    def test_rate_control_uses_portable_fixed_qp_range(self) -> None:
+        assert gstreamer_module._rate_control_options(28) == [
+            "control-rate=0",
+            "qp-range=35,35:35,35:35,35",
+        ]
+
+    def test_hardware_probe_uses_orin_safe_jpeg_geometry(self) -> None:
+        assert gstreamer_module.probe_image_dimensions(gstreamer_module.GSTREAMER_PROBE_JPEG) == (
+            256,
+            256,
+        )
 
     def test_gstreamer_env_prepends_cuda_nvjpeg_dirs(self, monkeypatch) -> None:
         monkeypatch.setattr(
@@ -223,7 +234,7 @@ class TestGStreamerHardwareEncode:
         outputs: list[bytes] = []
         try:
             for _ in range(n):
-                result = encoder.encode(PROBE_JPEG)
+                result = encoder.encode(gstreamer_module.GSTREAMER_PROBE_JPEG)
                 if result is not None:
                     outputs.append(result)
             outputs.extend(encoder.flush_packets())
@@ -239,7 +250,7 @@ class TestGStreamerHardwareEncode:
         outputs: list[bytes] = []
         try:
             for _ in range(10):
-                result = encoder.encode(PROBE_JPEG)
+                result = encoder.encode(gstreamer_module.GSTREAMER_PROBE_JPEG)
                 if result is not None:
                     outputs.append(result)
             outputs.extend(encoder.flush_packets())

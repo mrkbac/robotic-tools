@@ -39,6 +39,7 @@ probe succeeds because throughput is the priority for roscompress; use explicit
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
 import shutil
@@ -54,7 +55,6 @@ from typing import TYPE_CHECKING
 from mcap_codec_support.video.common import (
     DEFAULT_FPS,
     DEFAULT_GOP_SIZE,
-    PROBE_JPEG,
     SOFTWARE_CODEC_CANDIDATES,
     EncoderConfig,
     VideoEncoderError,
@@ -92,6 +92,38 @@ _PIX_FMT_TO_RAW: dict[str, str] = {
 # child without an explicit flush. Tiny probe/live frames need the flush to keep
 # latency predictable and avoid buffered cleanup warnings during forced close.
 _SMALL_WRITE_FLUSH_BYTES = 64 * 1024
+
+# nvjpegdec on some Jetson releases rejects the shared 32x32 probe before
+# downstream scaling, so its full hardware pipeline uses a 256x256 baseline JPEG.
+GSTREAMER_PROBE_JPEG: bytes = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwX"
+    "ExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4e"
+    "Hh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAEAAQADASIAAhEBAxEB/8QAHwAAAQUBAQEB"
+    "AQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKB"
+    "kaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1"
+    "dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+    "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcF"
+    "BAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5"
+    "OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0"
+    "tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCrRRRX0R4I"
+    "UUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUU"
+    "AFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFF"
+    "FABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABR"
+    "RRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQA"
+    "UUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUU"
+    "AFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFF"
+    "FABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABR"
+    "RRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQA"
+    "UUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUU"
+    "AFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFF"
+    "FABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABR"
+    "RRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQA"
+    "UUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUU"
+    "AFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFF"
+    "FABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABR"
+    "RRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQA"
+    "UUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQB/9k="
+)
 
 
 def find_gst_launch() -> str | None:
@@ -220,6 +252,12 @@ def _quality_to_qp(quality: int) -> int:
     return max(0, min(51, quality + 7))
 
 
+def _rate_control_options(quality: int) -> list[str]:
+    qp = _quality_to_qp(quality)
+    fixed_range = f"{qp},{qp}:{qp},{qp}:{qp},{qp}"
+    return ["control-rate=0", f"qp-range={fixed_range}"]
+
+
 class GStreamerVideoEncoder:
     """Encode frames to H.264/H.265 via a single ``gst-launch-1.0`` process.
 
@@ -256,8 +294,6 @@ class GStreamerVideoEncoder:
         out_w, out_h = scale if scale is not None else (width, height)
         out_w -= out_w % 2
         out_h -= out_h % 2
-        qp = _quality_to_qp(quality)
-
         r_fd, w_fd = os.pipe()
         os.set_inheritable(w_fd, True)
         self._read_fd = r_fd
@@ -283,8 +319,7 @@ class GStreamerVideoEncoder:
 
         nvmm_caps = f"video/x-raw(memory:NVMM),format=NV12,width={out_w},height={out_h}"
         enc_opts = [
-            "control-rate=2",  # constant QP (bitrate modes are ignored on this path)
-            f"constqp={qp}:{qp}:{qp}",
+            *_rate_control_options(quality),
             f"iframeinterval={gop_size}",
             f"idrinterval={gop_size}",
             "num-B-Frames=0",  # packet order == frame order (like ffmpeg -bf 0)
@@ -458,16 +493,14 @@ def probe_hw_jpeg_pipeline(codec: str = "h264", timeout: float = 8.0) -> bool:
 
     encoder: GStreamerVideoEncoder | None = None
     try:
-        # Scale the tiny embedded JPEG up to 256x256: the V4L2 encoder rejects
-        # very small frames (S_FMT fails well below ~128px), which would be a
-        # false negative for a pipeline that is actually healthy.
+        width, height = probe_image_dimensions(GSTREAMER_PROBE_JPEG)
         encoder = GStreamerVideoEncoder(
-            32, 32, encoder_name, quality=28, gop_size=1, scale=(256, 256)
+            width, height, encoder_name, quality=28, gop_size=1, scale=(256, 256)
         )
         deadline = time.monotonic() + timeout
         got = False
         for _ in range(4):
-            if encoder.encode(PROBE_JPEG) is not None:
+            if encoder.encode(GSTREAMER_PROBE_JPEG) is not None:
                 got = True
                 break
         while not got and time.monotonic() < deadline:
