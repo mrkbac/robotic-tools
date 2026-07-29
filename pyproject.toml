@@ -144,6 +144,8 @@ ignore_imports = [
     "mcap_codec_support.video.factories -> small_mcap",
     "mcap_codec_support.pointcloud.compression -> pureini",
     "mcap_codec_support.pointcloud.factories -> pureini",
+    "mcap_codec_support.pointcloud.preprocess -> pureini",
+    "mcap_codec_support.pointcloud._pureini -> pureini",
     "mcap_codec_support.pointcloud._messages -> pointcloud2",
     "mcap_codec_support.pointcloud.compression -> pointcloud2",
     "mcap_codec_support.pointcloud.factories -> pointcloud2",
@@ -227,8 +229,9 @@ ignore_imports = [
     "mcap_codec_support.pointcloud.factories -> mcap_ros2_support_fast.decoder",
     "mcap_codec_support.pointcloud.factories -> pointcloud2",
     "mcap_codec_support.pointcloud.factories -> pureini",
-    "mcap_codec_support.pointcloud.preprocess -> numpy",
     "mcap_codec_support.pointcloud.preprocess -> pointcloud2",
+    "mcap_codec_support.pointcloud.preprocess -> pureini",
+    "mcap_codec_support.pointcloud._pureini -> pureini",
     "mcap_codec_support.video.common -> numpy",
     "mcap_codec_support.video.compression -> numpy",
     "mcap_codec_support.video.compression -> av",
@@ -271,7 +274,6 @@ allowed_importers = [
     "mcap_codec_support",
     "mcap_ros2_support_fast._dynamic_encoder",
     "pointcloud2",
-    "pureini",
     "pymcap_cli.exporters.parquet_exporter",
     "pymcap_cli.exporters.pcd_exporter",
 ]
@@ -320,23 +322,12 @@ allowed_importers = [
 [[tool.importlinter.contracts]]
 name = "Compression backend imports are owned by compression features"
 type = "protected"
-protected_modules = ["lz4", "zstandard"]
+protected_modules = ["lz4"]
 allowed_importers = [
-    "pureini.decoder",
-    "pureini.encoder",
     "pymcap_cli.doctor",
     "pymcap_cli.rosbag_reader._reader",
     "small_mcap.reader",
     "small_mcap.writer",
-]
-
-[[tool.importlinter.contracts]]
-name = "Numba imports are owned by compiled numeric features"
-type = "protected"
-protected_modules = ["numba"]
-allowed_importers = [
-    "mcap_codec_support.pointcloud.preprocess",
-    "pureini",
 ]
 
 [[tool.importlinter.contracts]]
@@ -412,6 +403,7 @@ ignore = [
 "*/tests/*" = ["T201", "SLF001", "ANN", "PTH123", "S603", "S607"]
 "*/benchmarks/*" = ["T201", "INP001", "PLC0415", "PTH123"]
 "*/examples/*" = ["T201", "INP001", "BLE001"]
+"scripts/*.py" = ["INP001"]
 # Typer commands - function call in defaults is required pattern
 "*/cmd/*_cmd.py" = ["B008", "B904", "TC003"]
 # jsonschema-gentypes emits `Literal["a"] | Literal["b"]`; collapsing it would dirty

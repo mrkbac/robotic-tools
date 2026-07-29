@@ -6,6 +6,50 @@ User-facing notes for releases.
 
 ## Unreleased
 
+### pymcap-cli
+
+- CloudINI point-cloud cleanup is fused into the native compression processor,
+  so invalid-point removal, stable ring grouping, and encoding happen through
+  one call without a separate Python preprocessing stage.
+- Point-cloud processing now reports the exact `uvx` extra needed when optional
+  dependencies are absent and normalizes big-endian fields before native
+  compression instead of failing or dropping messages.
+
+### mcap-codec-support
+
+- CloudINI compression can opt into native invalid-XYZ filtering and stable
+  grouping and returns the resulting point-cloud dimensions with the payload.
+- Standalone point-cloud cleanup now uses the same Rust implementation, so
+  workspace installs no longer require Numba or LLVM.
+- CloudINI compression preserves organized-cloud row layouts and PointField
+  arrays instead of treating row padding or array components as point data.
+
+### pureini
+
+- Replaced the Python/Numba implementation with a dependency-free Rust/PyO3
+  extension while preserving CloudINI V2-V5 compatibility and making V5 the
+  default output format.
+- `PointcloudEncoder.encode` now accepts optional invalid-XYZ filtering and
+  stable grouping. The allocation-minimal default returns bytes directly;
+  callers can request compact preprocessing metadata explicitly when they need
+  the transformed point count and XYZ-filter applicability. The redundant
+  `encode_preprocessed` method was removed.
+- Reduced the public Python API to the encoder, decoder, configuration types,
+  and enums. Compatibility submodules and low-level wire-format helpers are no
+  longer public.
+- Release CI now builds and verifies stable-ABI wheels for glibc and musl Linux
+  on x86-64/AArch64, macOS on Intel/Apple Silicon, and Windows x86-64, plus a
+  rebuildable source distribution.
+- Python project metadata is the single distribution-version authority; the
+  unpublished native crate has independent fixed metadata.
+- Point-cloud input byte order is explicit through `is_bigendian`; the native
+  path normalizes big-endian fields before preprocessing or encoding.
+- Native decoding rejects truncated, overflowing, or trailing field data
+  deterministically, and encoding validates point counts, field resolutions,
+  and integer deltas instead of producing malformed output or panicking.
+- V2 encoding uses its original binary header container and is byte-compatible
+  with the CloudINI C++ 0.5.0 reference.
+
 ---
 
 ## pymcap-cli 0.26.0, mcap-codec-support 0.14.0, small-mcap 0.14.0, robo-ws-bridge 0.10.0, digitalis 0.12.0, mcap-ros2-support-fast 0.7.0, pureini 0.8.0

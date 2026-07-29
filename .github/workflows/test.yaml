@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8
         with:
           python-version: "3.13"
           enable-cache: true
@@ -65,7 +65,7 @@ jobs:
           - { dir: mcap-codec-support, cov: true, submodules: false }
           - { dir: ros-parser, cov: true, submodules: false }
           - { dir: pointcloud2, cov: true, submodules: false }
-          - { dir: pureini, cov: true, submodules: false }
+          - { dir: pureini, cov: false, submodules: false }
           - { dir: digitalis, cov: false, submodules: false }
 
     name: test (${{ matrix.package.dir }}, ${{ matrix.python-version }})
@@ -97,7 +97,7 @@ jobs:
           git submodule foreach --recursive 'git lfs pull'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8
         with:
           python-version: ${{ matrix.python-version }}
           activate-environment: true
@@ -106,6 +106,14 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --frozen --all-groups --all-extras --all-packages
+
+      - name: Install PureINI minimum Rust toolchain
+        if: matrix.package.dir == 'pureini' && matrix.python-version == '3.13'
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Run PureINI Rust unit tests at MSRV
+        if: matrix.package.dir == 'pureini' && matrix.python-version == '3.13'
+        run: uv run --frozen cargo test --manifest-path pureini/rust/Cargo.toml
 
       - name: Install mcap CLI
         if: matrix.package.dir == 'pymcap-cli'
@@ -130,3 +138,112 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: ${{ matrix.package.dir }}
+
+  pureini-wheel:
+    name: pureini wheel (${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-24.04, target: linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, target: linux-aarch64 }
+          - { runner: macos-15-intel, target: macos-x86_64 }
+          - { runner: macos-15, target: macos-aarch64 }
+          - { runner: windows-2025, target: windows-x86_64 }
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-suffix: pureini-wheel-${{ matrix.platform.target }}
+
+      - name: Build native wheel
+        run: uv build --package pureini --wheel --out-dir dist/pureini
+
+      - name: Test exact wheel on oldest and newest Python
+        shell: bash
+        run: |
+          wheel=$(find dist/pureini -name 'pureini-*.whl' -print -quit)
+          test -n "$wheel"
+          for python_version in 3.10 3.14; do
+            uv run --isolated --no-project \
+              --python "$python_version" \
+              --with "$wheel" \
+              --with numpy \
+              --with pytest \
+              --with pytest-cov \
+              python -m pytest pureini/tests \
+              -m "not benchmark" \
+              --no-cov \
+              -q
+          done
+
+      - name: Test installed PyMcap CLI point-cloud integration
+        if: matrix.platform.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          uv build --package mcap-codec-support --wheel --out-dir dist/integration
+          uv build --package pymcap-cli --wheel --out-dir dist/integration
+          pureini_wheel=$(find dist/pureini -name 'pureini-*.whl' -print -quit)
+          codec_wheel=$(find dist/integration -name 'mcap_codec_support-*.whl' -print -quit)
+          cli_wheel=$(find dist/integration -name 'pymcap_cli-*.whl' -print -quit)
+          test -n "$pureini_wheel"
+          test -n "$codec_wheel"
+          test -n "$cli_wheel"
+          uv run --isolated --no-project \
+            --python 3.14 \
+            --with "$pureini_wheel" \
+            --with "${codec_wheel}[pointcloud]" \
+            --with "${cli_wheel}[pointcloud]" \
+            --with pillow \
+            --with portable-ffmpeg \
+            --with pytest \
+            --with pytest-cov \
+            python -m pytest \
+            mcap-codec-support/tests/test_compression.py \
+            pymcap-cli/tests/test_pointcloud_compress_processor.py \
+            --no-cov \
+            -q
+
+  pureini-sdist:
+    name: pureini sdist rebuild
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-suffix: pureini-sdist
+
+      - name: Build sdist and rebuild its wheel
+        shell: bash
+        run: |
+          uv build --package pureini --sdist --out-dir dist/sdist
+          sdist=$(find dist/sdist -name 'pureini-*.tar.gz' -print -quit)
+          test -n "$sdist"
+          uv build "$sdist" --wheel --out-dir dist/rebuilt
+
+      - name: Test rebuilt wheel
+        shell: bash
+        run: |
+          wheel=$(find dist/rebuilt -name 'pureini-*.whl' -print -quit)
+          test -n "$wheel"
+          uv run --isolated --no-project \
+            --python 3.14 \
+            --with "$wheel" \
+            --with numpy \
+            --with pytest \
+            --with pytest-cov \
+            python -m pytest pureini/tests \
+            -m "not benchmark" \
+            --no-cov \
+            -q

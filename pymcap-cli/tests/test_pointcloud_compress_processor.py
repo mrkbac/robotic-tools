@@ -65,7 +65,7 @@ def _pc_msg(data: bytes, width: int) -> dict:
     }
 
 
-def _write_input(path: Path) -> None:
+def _write_input(path: Path, *, is_bigendian: bool = False) -> None:
     with path.open("wb") as f:
         writer = McapWriter(
             f, encoder_factory=ROS2EncoderFactory(), compression=CompressionType.ZSTD
@@ -78,7 +78,16 @@ def _write_input(path: Path) -> None:
         writer.add_channel(3, "/status", "cdr", 2)
         for i in range(3):
             data, width = _cloud_payload(n_valid=6, n_zero=4)
-            writer.add_message_encode(1, 1000 + i, _pc_msg(data, width), 1000 + i)
+            if is_bigendian:
+                normalized = bytearray(data)
+                for point_offset in range(0, len(normalized), _POINT_STEP):
+                    for field_offset in (0, 4, 8):
+                        start = point_offset + field_offset
+                        normalized[start : start + 4] = reversed(normalized[start : start + 4])
+                data = bytes(normalized)
+            cloud = _pc_msg(data, width)
+            cloud["is_bigendian"] = is_bigendian
+            writer.add_message_encode(1, 1000 + i, cloud, 1000 + i)
             writer.add_message_encode(2, 1001 + i, {"data": f"noise {i}"}, 1001 + i)
             writer.add_message_encode(3, 1002 + i, {"data": f"ok {i}"}, 1002 + i)
         writer.finish()
@@ -163,6 +172,27 @@ def test_pointcloud_processor_compresses_without_cleanup(tmp_path: Path):
     assert _compressed_cloud_point_counts(out) == [10, 10, 10]
 
 
+def test_pointcloud_processor_compresses_big_endian_clouds(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src, is_bigendian=True)
+
+    _run(src, out, extra_processors=[PointcloudCompressProcessor()])
+
+    topics = _topics(out)
+    assert topics.count("/lidar/points") == 3
+    assert topics.count("/status") == 3
+    assert topics.count("/debug/noise") == 3
+    with out.open("rb") as f:
+        summary = get_summary(f)
+    assert summary is not None
+    cloud_channels = [
+        channel for channel in summary.channels.values() if channel.topic == "/lidar/points"
+    ]
+    assert len(cloud_channels) == 1
+    assert summary.schemas[cloud_channels[0].schema_id].name == COMPRESSED_POINTCLOUD2_SCHEMA
+    assert _compressed_cloud_point_counts(out) == [10, 10, 10]
+
+
 def test_pointcloud_clean_then_compress_drops_invalid_points(tmp_path: Path):
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_input(src)
@@ -171,6 +201,19 @@ def test_pointcloud_clean_then_compress_drops_invalid_points(tmp_path: Path):
         src,
         out,
         extra_processors=[PointcloudCleanProcessor(), PointcloudCompressProcessor()],
+    )
+
+    assert _compressed_cloud_point_counts(out) == [6, 6, 6]
+
+
+def test_pointcloud_fused_cleanup_and_compress_drops_invalid_points(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    _run(
+        src,
+        out,
+        extra_processors=[PointcloudCompressProcessor(drop_invalid=True, sort_field="line")],
     )
 
     assert _compressed_cloud_point_counts(out) == [6, 6, 6]

@@ -10,9 +10,15 @@ import random
 import struct
 
 import pytest
-from pureini import CompressionOption, EncodingInfo, EncodingOptions, FieldType, PointField
-from pureini.decoder import PointcloudDecoder
-from pureini.encoder import PointcloudEncoder
+from pureini import (
+    CompressionOption,
+    EncodingInfo,
+    EncodingOptions,
+    FieldType,
+    PointcloudDecoder,
+    PointcloudEncoder,
+    PointField,
+)
 
 
 def test_none_mode_uint32():

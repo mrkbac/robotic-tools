@@ -4,6 +4,9 @@ __pycache__/
 build/
 dist/
 wheels/
+target/
+pureini/python/pureini/_pureini*.so
+pureini/python/pureini/_pureini*.pyd
 *.egg-info
 
 # Virtual environments

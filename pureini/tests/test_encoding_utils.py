@@ -1,11 +1,15 @@
-"""Tests for pureini.encoding_utils — BufferView, varint encoding, field metadata."""
+"""Tests for private Rust buffer, varint, and field-metadata primitives."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-from pureini.encoding_utils import (
+from pureini._pureini import (
     BufferView,
+    EncodingInfo,
+    EncodingOptions,
+    FieldType,
+    PointField,
     build_field_metadata,
     decode,
     decode_string,
@@ -14,7 +18,6 @@ from pureini.encoding_utils import (
     encode_string,
     encode_varint64_to_buffer,
 )
-from pureini.types import EncodingInfo, EncodingOptions, FieldType, PointField
 
 # ---------------------------------------------------------------------------
 # BufferView
@@ -111,6 +114,10 @@ class TestVarintRoundtrip:
         encoded = self._encode(value)
         decoded, _ = decode_varint(encoded, 0)
         assert decoded == value
+
+    def test_unrepresentable_minimum_is_rejected(self):
+        with pytest.raises(ValueError, match="cannot represent"):
+            self._encode(-(2**63))
 
     def test_single_byte_values(self):
         # Small values should encode to few bytes

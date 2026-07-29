@@ -40,7 +40,7 @@ video = [
     "nvidia-nvjpeg==13.0.0.40 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
     "pillow>=10.0",
 ]
-pointcloud = ["mcap-ros2-support-fast", "pureini", "numpy>=1.24.0", "pointcloud2"]
+pointcloud = ["mcap-ros2-support-fast", "pureini>=0.8.0", "numpy>=1.24.0", "pointcloud2"]
 all = ["mcap-codec-support[ros2,video,pointcloud,draco]"]
 draco = [
     "dracopy>=1.7.0",

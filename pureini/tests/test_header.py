@@ -5,7 +5,7 @@ Ported from cloudini_lib/test/test_header.cpp
 """
 
 import pytest
-from pureini import (
+from pureini._pureini import (
     CompressionOption,
     EncodingInfo,
     EncodingOptions,

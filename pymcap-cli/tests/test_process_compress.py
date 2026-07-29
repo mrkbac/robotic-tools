@@ -149,10 +149,19 @@ def test_process_compress_video_and_pointcloud_with_drop(
     real_processor = pointcloud_compress.PointcloudCompressProcessor
 
     def recording_pointcloud_compress_processor(
-        *, resolution: float, workers: int
+        *,
+        resolution: float,
+        drop_invalid: bool,
+        sort_field: str | None,
+        workers: int,
     ) -> pointcloud_compress.PointcloudCompressProcessor:
         worker_counts.append(workers)
-        return real_processor(resolution=resolution, workers=workers)
+        return real_processor(
+            resolution=resolution,
+            drop_invalid=drop_invalid,
+            sort_field=sort_field,
+            workers=workers,
+        )
 
     monkeypatch.setattr(
         pointcloud_compress,

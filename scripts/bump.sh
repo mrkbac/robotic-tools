@@ -180,6 +180,56 @@ for pkg in "${to_bump[@]}"; do
     bumped_pkgs+=("$pkg")
 done
 
+package_was_bumped() {
+    local expected="$1"
+    local bumped
+
+    for bumped in "${bumped_pkgs[@]}"; do
+        if [ "$bumped" = "$expected" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+sync_internal_dependency_floor() {
+    local dependency="$1"
+    local dependent="$2"
+    local extra="$3"
+    local requirement_name="$4"
+    local dependency_version
+
+    if ! package_was_bumped "$dependency" || ! package_was_bumped "$dependent"; then
+        return
+    fi
+
+    dependency_version=$(uv version --short --package "$dependency")
+    echo "↪ Updating $dependent[$extra] to require $requirement_name>=$dependency_version..."
+    uv add \
+        --package "$dependent" \
+        --optional "$extra" \
+        --frozen \
+        "$requirement_name>=$dependency_version"
+}
+
+# Keep published workspace packages from resolving an older, API-incompatible internal release.
+# uv owns both the project version and its dependent requirement in the release commit.
+sync_internal_dependency_floor \
+    "pureini" \
+    "mcap-codec-support" \
+    "pointcloud" \
+    "pureini"
+sync_internal_dependency_floor \
+    "mcap-codec-support" \
+    "pymcap-cli" \
+    "pointcloud" \
+    "mcap-codec-support[pointcloud]"
+sync_internal_dependency_floor \
+    "mcap-codec-support" \
+    "pymcap-cli" \
+    "parquet" \
+    "mcap-codec-support[pointcloud]"
+
 echo
 echo "Done: ${#bumped_pkgs[@]} bumped, $skipped skipped"
 

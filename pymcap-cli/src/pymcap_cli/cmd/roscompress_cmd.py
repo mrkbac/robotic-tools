@@ -239,7 +239,8 @@ def roscompress(
                 )
             )
 
-        if cleanup.enabled:
+        use_fused_cloudini_cleanup = pointcloud and pc_format == "cloudini"
+        if cleanup.enabled and not use_fused_cloudini_cleanup:
             from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
                 PointcloudCleanProcessor,
             )
@@ -264,6 +265,8 @@ def roscompress(
                     pc_compression=pc_compression,
                     resolution=resolution,
                     draco_compression_level=draco_compression_level,
+                    drop_invalid=cleanup.drop_invalid if use_fused_cloudini_cleanup else False,
+                    sort_field=cleanup.sort_field if use_fused_cloudini_cleanup else None,
                     # Always parallelize point-cloud compression on its own pool.
                     # Profiling the video path showed the main thread is NOT idle
                     # (it drives reading + video dispatch/drain + writing), so

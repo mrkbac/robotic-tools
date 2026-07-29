@@ -7,12 +7,20 @@ Ported from cloudini_lib/test/test_field_encoders.cpp
 import math
 import random
 import struct
+import subprocess
+import sys
 
 import numpy as np
 import pytest
-from pureini import CompressionOption, EncodingInfo, EncodingOptions, FieldType, PointField
-from pureini.decoder import PointcloudDecoder
-from pureini.encoder import PointcloudEncoder
+from pureini import (
+    CompressionOption,
+    EncodingInfo,
+    EncodingOptions,
+    FieldType,
+    PointcloudDecoder,
+    PointcloudEncoder,
+    PointField,
+)
 
 
 def _roundtrip(info: EncodingInfo, point_cloud: bytes) -> bytes:
@@ -132,6 +140,70 @@ def test_int64_field():
     decompressed = _roundtrip(info, bytes(point_cloud))
     for i in range(num_points):
         assert struct.unpack_from("<q", decompressed, i * 8)[0] == input_data[i]
+
+
+@pytest.mark.parametrize(
+    ("field_type", "point"),
+    [
+        (FieldType.INT64, struct.pack("<q", -(2**63))),
+        (FieldType.UINT64, struct.pack("<Q", 2**63)),
+    ],
+)
+def test_unrepresentable_64_bit_integer_delta_is_rejected(field_type: FieldType, point: bytes):
+    info = EncodingInfo(
+        width=1,
+        height=1,
+        point_step=8,
+        encoding_opt=EncodingOptions.LOSSLESS,
+        compression_opt=CompressionOption.NONE,
+        fields=[PointField(name="value", offset=0, type=field_type)],
+    )
+
+    with pytest.raises(RuntimeError, match="varint cannot represent"):
+        PointcloudEncoder(info).encode(point)
+
+
+def test_lossy_float_saturation_does_not_emit_reserved_varint():
+    info = EncodingInfo(
+        width=2,
+        height=1,
+        point_step=4,
+        encoding_opt=EncodingOptions.LOSSY,
+        compression_opt=CompressionOption.NONE,
+        fields=[
+            PointField(
+                name="value",
+                offset=0,
+                type=FieldType.FLOAT32,
+                resolution=0.01,
+            )
+        ],
+    )
+
+    decoded = _roundtrip(info, struct.pack("<ff", -1e20, 0.0))
+
+    assert all(math.isfinite(value[0]) for value in struct.iter_unpack("<f", decoded))
+
+
+def test_lossy_float_rejects_non_finite_multiplier():
+    info = EncodingInfo(
+        width=1,
+        height=1,
+        point_step=4,
+        encoding_opt=EncodingOptions.LOSSY,
+        compression_opt=CompressionOption.NONE,
+        fields=[
+            PointField(
+                name="value",
+                offset=0,
+                type=FieldType.FLOAT32,
+                resolution=float.fromhex("0x0.000002p-126"),
+            )
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="resolution is too small"):
+        PointcloudEncoder(info).encode(struct.pack("<f", 1.0))
 
 
 def test_uint16_field():
@@ -400,6 +472,7 @@ def test_mixed_fields():
         dec_ring = struct.unpack_from("<H", decompressed, base + 16)[0]
         dec_ts = struct.unpack_from("<d", decompressed, base + 20)[0]
 
+        assert decompressed[base + 18 : base + 20] == b"\0\0"
         assert abs(dec_x - orig_x) <= xyz_res * 1.0001, f"x mismatch at {i}"
         assert abs(dec_y - orig_y) <= xyz_res * 1.0001, f"y mismatch at {i}"
         assert abs(dec_z - orig_z) <= xyz_res * 1.0001, f"z mismatch at {i}"
@@ -470,28 +543,32 @@ def test_multi_chunk_zstd():
         assert abs(out[i] - values[i]) <= tolerance, f"Mismatch at {i}"
 
 
-def test_zstd_compresses_jit_buffer_without_intermediate_bytes_copy():
-    info = EncodingInfo(
-        width=4,
-        height=1,
-        point_step=4,
-        encoding_opt=EncodingOptions.LOSSY,
-        compression_opt=CompressionOption.ZSTD,
-        fields=[PointField(name="val", offset=0, type=FieldType.FLOAT32, resolution=0.01)],
-    )
-    encoder = PointcloudEncoder(info)
-    seen: list[type] = []
+def test_zstd_native_backend_does_not_import_python_compression_or_jit_modules():
+    script = """
+import sys
+import pureini
 
-    class RecordingCompressor:
-        def compress(self, data: memoryview) -> bytes:
-            seen.append(type(data))
-            return bytes(data)
-
-    encoder._zstd_cctx = RecordingCompressor()
-
-    encoder.encode(np.arange(4, dtype=np.float32).tobytes())
-
-    assert seen == [memoryview]
+info = pureini.EncodingInfo(
+    width=4,
+    height=1,
+    point_step=4,
+    encoding_opt=pureini.EncodingOptions.LOSSY,
+    compression_opt=pureini.CompressionOption.ZSTD,
+    fields=[
+        pureini.PointField(
+            name="val",
+            offset=0,
+            type=pureini.FieldType.FLOAT32,
+            resolution=0.01,
+        )
+    ],
+)
+pureini.PointcloudEncoder(info).encode(bytes(16))
+assert "numba" not in sys.modules
+assert "llvmlite" not in sys.modules
+assert "zstandard" not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 if __name__ == "__main__":

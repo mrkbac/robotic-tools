@@ -1,0 +1,25 @@
+[package]
+name = "pureini-native"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0"
+description = "PyO3 bindings for CloudINI-compatible point cloud compression"
+repository = "https://github.com/mrkbac/robotic-tools"
+homepage = "https://github.com/mrkbac/robotic-tools/tree/main/pureini"
+documentation = "https://github.com/mrkbac/robotic-tools/tree/main/pureini"
+publish = false
+
+[lib]
+name = "pureini"
+crate-type = ["cdylib"]
+
+[dependencies]
+lz4_flex = "0.13"
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
+rayon = "1"
+zstd = "0.13"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

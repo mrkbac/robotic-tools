@@ -246,7 +246,7 @@ def create_transformer(config: RoscompressConfig, channel: ChannelInfo) -> LiveT
     if config.pointcloud and schema_name in _POINTCLOUD2_SCHEMAS:
         preprocessors: tuple[MessageTransformProcessor, ...] = ()
         cleanup = resolve_cleanup(config)
-        if cleanup.enabled:
+        if cleanup.enabled and config.pc_format != "cloudini":
             cleaner = create_pointcloud_cleanup_processor(config)
             assert cleaner is not None
             preprocessors = (cleaner,)

@@ -36,7 +36,7 @@ jobs:
     secrets: inherit
 
   publish:
-    needs: [lint, test]
+    needs: [lint, test, publish-pureini]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -52,8 +52,6 @@ jobs:
           - mcap-codec-support
           - mcap-ros2-support-fast
           - pointcloud2
-          - pureini
-          - pymcap-cli
           - ros-parser
           - small-mcap
           - robo-ws-bridge
@@ -96,13 +94,37 @@ jobs:
 
       - name: Install uv
         if: steps.check.outputs.skip != 'true'
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8
         with:
           enable-cache: false
 
       - name: Build package
         if: steps.check.outputs.skip != 'true'
         run: uv build --package ${{ matrix.package }}
+
+      - name: Verify native PureINI dependency is published
+        if: >-
+          matrix.package == 'mcap-codec-support' &&
+          steps.check.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        shell: bash
+        run: |
+          version=$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('pureini/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          for attempt in 1 2 3 4 5 6; do
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+              "https://pypi.org/pypi/pureini/${version}/json")
+            if [[ "$http_code" == "200" ]]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "pureini==${version} is not available on PyPI" >&2
+          exit 1
 
       - name: Publish to PyPI
         if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
@@ -112,5 +134,354 @@ jobs:
         if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
         run: |
           tag="${{ matrix.package }}@${{ steps.check.outputs.version }}"
+          git tag "$tag"
+          git push origin "$tag"
+
+  pureini-check:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      version: ${{ steps.check.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check if pureini needs publishing
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.package }}" != "all" ]] && [[ "${{ inputs.package }}" != "pureini" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "reason=not selected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          version=$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('pureini/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/pureini/${version}/json")
+
+          if [[ "$http_code" == "200" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=pureini==${version} already on PyPI" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log skip reason
+        if: steps.check.outputs.skip == 'true'
+        run: echo "Skipping — ${{ steps.check.outputs.reason }}"
+
+  build-pureini-wheels:
+    needs: pureini-check
+    if: needs.pureini-check.outputs.skip != 'true'
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: manylinux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64
+            manylinux: "2014"
+            test: true
+          - name: manylinux-aarch64
+            runner: ubuntu-24.04
+            target: aarch64
+            manylinux: "2014"
+            test: false
+          - name: musllinux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64
+            manylinux: musllinux_1_2
+            test: false
+          - name: musllinux-aarch64
+            runner: ubuntu-24.04
+            target: aarch64
+            manylinux: musllinux_1_2
+            test: false
+          - name: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64
+            manylinux: "off"
+            test: true
+          - name: macos-aarch64
+            runner: macos-15
+            target: aarch64
+            manylinux: "off"
+            test: true
+          - name: windows-x86_64
+            runner: windows-2025
+            target: x64
+            manylinux: "off"
+            test: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --manifest-path pureini/rust/Cargo.toml
+          manylinux: ${{ matrix.platform.manylinux }}
+
+      - name: Test native release wheel
+        if: matrix.platform.test
+        shell: bash
+        run: |
+          wheel=$(find dist -name 'pureini-*.whl' -print -quit)
+          test -n "$wheel"
+          uv run --isolated --no-project \
+            --python 3.14 \
+            --with "$wheel" \
+            --with numpy \
+            --with pytest \
+            --with pytest-cov \
+            python -m pytest pureini/tests \
+            -m "not benchmark" \
+            --no-cov \
+            -q
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: pureini-dist-${{ matrix.platform.name }}
+          path: dist
+          if-no-files-found: error
+
+  build-pureini-sdist:
+    needs: pureini-check
+    if: needs.pureini-check.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path pureini/rust/Cargo.toml
+
+      - name: Rebuild and test sdist
+        shell: bash
+        run: |
+          sdist=$(find dist -name 'pureini-*.tar.gz' -print -quit)
+          test -n "$sdist"
+          uv build "$sdist" --wheel --out-dir rebuilt
+          wheel=$(find rebuilt -name 'pureini-*.whl' -print -quit)
+          test -n "$wheel"
+          uv run --isolated --no-project \
+            --python 3.14 \
+            --with "$wheel" \
+            --with numpy \
+            --with pytest \
+            --with pytest-cov \
+            python -m pytest pureini/tests \
+            -m "not benchmark" \
+            --no-cov \
+            -q
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: pureini-dist-sdist
+          path: dist
+          if-no-files-found: error
+
+  publish-pureini:
+    needs:
+      - pureini-check
+      - build-pureini-wheels
+      - build-pureini-sdist
+    if: >-
+      always() &&
+      (
+        needs.pureini-check.outputs.skip == 'true' ||
+        (
+          needs.build-pureini-wheels.result == 'success' &&
+          needs.build-pureini-sdist.result == 'success'
+        )
+      )
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pureini/
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        if: needs.pureini-check.outputs.skip != 'true'
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: false
+
+      - name: Download distributions
+        if: needs.pureini-check.outputs.skip != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pureini-dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete distribution set
+        if: needs.pureini-check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          patterns=(
+            'pureini-*-manylinux*_x86_64.whl'
+            'pureini-*-manylinux*_aarch64.whl'
+            'pureini-*-musllinux*_x86_64.whl'
+            'pureini-*-musllinux*_aarch64.whl'
+            'pureini-*-macosx*_x86_64.whl'
+            'pureini-*-macosx*_arm64.whl'
+            'pureini-*-win_amd64.whl'
+            'pureini-*.tar.gz'
+          )
+          for pattern in "${patterns[@]}"; do
+            compgen -G "dist/$pattern" >/dev/null
+          done
+          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" = "${#patterns[@]}"
+          uv publish --dry-run dist/*
+
+      - name: Generate artifact attestations
+        if: >-
+          needs.pureini-check.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+      - name: Publish to PyPI
+        if: >-
+          needs.pureini-check.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: uv publish dist/*
+
+      - name: Create release tag
+        if: >-
+          needs.pureini-check.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          tag="pureini@${{ needs.pureini-check.outputs.version }}"
+          git tag "$tag"
+          git push origin "$tag"
+
+  publish-pymcap-cli:
+    needs: publish
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pymcap-cli/
+    permissions:
+      id-token: write
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check if version needs publishing
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.package }}" != "all" ]] && [[ "${{ inputs.package }}" != "pymcap-cli" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "reason=not selected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          version=$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('pymcap-cli/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/pymcap-cli/${version}/json")
+          if [[ "$http_code" == "200" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=pymcap-cli==${version} already on PyPI" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log skip reason
+        if: steps.check.outputs.skip == 'true'
+        run: echo "Skipping — ${{ steps.check.outputs.reason }}"
+
+      - name: Install uv
+        if: steps.check.outputs.skip != 'true'
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: false
+
+      - name: Verify codec dependency is published
+        if: >-
+          steps.check.outputs.skip != 'true' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        shell: bash
+        run: |
+          version=$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('mcap-codec-support/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          for attempt in 1 2 3 4 5 6; do
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+              "https://pypi.org/pypi/mcap-codec-support/${version}/json")
+            if [[ "$http_code" == "200" ]]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "mcap-codec-support==${version} is not available on PyPI" >&2
+          exit 1
+
+      - name: Build package
+        if: steps.check.outputs.skip != 'true'
+        run: uv build --package pymcap-cli
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: uv publish dist/*
+
+      - name: Create release tag
+        if: steps.check.outputs.skip != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          tag="pymcap-cli@${{ steps.check.outputs.version }}"
           git tag "$tag"
           git push origin "$tag"

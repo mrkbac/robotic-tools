@@ -2,9 +2,9 @@
 
 Transcodes ``sensor_msgs/PointCloud2`` messages to Cloudini
 ``CompressedPointCloud2`` or Draco ``CompressedPointCloud`` in-place on the
-same topic, via :class:`MessageTransformProcessor`. Cleanup is intentionally
-separate; compose :class:`PointcloudCleanProcessor` before this processor when
-invalid points should be removed before compression. Per-channel and
+same topic, via :class:`MessageTransformProcessor`. Cloudini can fuse invalid
+point removal and field grouping into its native encode call; Draco and
+cleanup-only workflows use :class:`PointcloudCleanProcessor`. Per-channel and
 per-message order are preserved by the base. Composes with the rest of the
 pipeline (topic drop, rechunk, per-schema compression split, splitting, …).
 """
@@ -46,6 +46,8 @@ def _make_compressor(
     pc_compression: str,
     resolution: float,
     draco_compression_level: int,
+    drop_invalid: bool,
+    sort_field: str | None,
 ) -> PointCloudCompressorProtocol:
     """Build the point-cloud compressor. Mirrors roscompress's factory.
 
@@ -61,7 +63,11 @@ def _make_compressor(
     from mcap_codec_support.pointcloud import CloudiniPointCloudCompressor  # noqa: PLC0415
 
     return CloudiniPointCloudCompressor(
-        encoding=pc_encoding, compression=pc_compression, resolution=resolution
+        encoding=pc_encoding,
+        compression=pc_compression,
+        resolution=resolution,
+        drop_invalid=drop_invalid,
+        sort_field=sort_field,
     )
 
 
@@ -77,6 +83,8 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         pc_compression: Literal["zstd", "lz4", "none"] = "zstd",
         resolution: float = 0.01,
         draco_compression_level: int = 7,
+        drop_invalid: bool = False,
+        sort_field: str | None = None,
         workers: int = 0,
     ) -> None:
         super().__init__(workers=workers)
@@ -86,6 +94,8 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
             pc_compression,
             resolution,
             draco_compression_level,
+            drop_invalid,
+            sort_field,
         )
         # The native compressor is not thread-safe, so with workers > 0 each
         # worker thread keeps its own (via thread-local). Build one eagerly on
@@ -124,16 +134,21 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         self, channel: Channel, schema: Schema, decoded: Any
     ) -> list[TransformOutput] | None:
         try:
-            compressed = self._compressor().compress(decoded)
+            result = self._compressor().compress_result(decoded)
         except PointCloudCompressionError as exc:
             logger.warning("Skipping point cloud compression for %s: %s", channel.topic, exc)
             return None  # keep the raw message rather than drop it
         if self._foxglove:
             data = build_foxglove_compressed_pointcloud_message(
-                decoded, compressed, fmt=self._pc_format
+                decoded, result.data, fmt=self._pc_format
             )
         else:
-            data = build_compressed_pointcloud2_message(decoded, compressed, fmt=self._pc_format)
+            data = build_compressed_pointcloud2_message(
+                decoded,
+                result.data,
+                fmt=self._pc_format,
+                result=result,
+            )
         return [
             TransformOutput(
                 topic=channel.topic,

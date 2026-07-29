@@ -80,7 +80,11 @@ def create_pointcloud_processors(
     workers: int = 0,
 ) -> tuple[MessageTransformProcessor, ...]:
     processors: list[MessageTransformProcessor] = []
-    cleanup_processor = create_pointcloud_cleanup_processor(config)
+    cleanup_processor = (
+        None
+        if config.pointcloud and config.pc_format == "cloudini"
+        else create_pointcloud_cleanup_processor(config)
+    )
     if cleanup_processor is not None:
         processors.append(cleanup_processor)
     if config.pointcloud:
@@ -113,6 +117,8 @@ def create_pointcloud_compress_processor(
         PointcloudCompressProcessor,
     )
 
+    cleanup = resolve_cleanup(config)
+    use_fused_cleanup = config.pc_format == "cloudini"
     return PointcloudCompressProcessor(
         pc_format=config.pc_format,
         pc_schema=config.pc_schema,
@@ -120,5 +126,7 @@ def create_pointcloud_compress_processor(
         pc_compression=config.pc_compression,
         resolution=config.resolution,
         draco_compression_level=config.draco_compression_level,
+        drop_invalid=cleanup.drop_invalid if use_fused_cleanup else False,
+        sort_field=cleanup.sort_field if use_fused_cleanup else None,
         workers=workers,
     )

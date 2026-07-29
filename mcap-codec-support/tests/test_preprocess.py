@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import mcap_codec_support.pointcloud.preprocess as preprocess_module
 import numpy as np
 import pytest
 from mcap_codec_support.pointcloud import drop_invalid_and_reorder
@@ -87,11 +86,46 @@ def test_drop_invalid_and_reorder_noop_returns_same_object():
     assert drop_invalid_and_reorder(cloud) is cloud
 
 
-def test_drop_invalid_and_reorder_bigendian_skipped():
+def test_drop_invalid_and_reorder_sorts_cloud_without_xyz():
+    fields = [
+        PointField(name="intensity", offset=0, datatype=PointField.FLOAT32),
+        PointField(name="line", offset=4, datatype=PointField.UINT8),
+    ]
+    dtype = np.dtype(
+        {
+            "names": ["intensity", "line"],
+            "formats": ["<f4", "u1"],
+            "itemsize": 8,
+        }
+    )
+    points = np.zeros(3, dtype=dtype)
+    points["intensity"] = [20.0, 10.0, 30.0]
+    points["line"] = [2, 1, 3]
+    cloud = create_cloud(_Header(), fields, points, step=8)
+
+    out = drop_invalid_and_reorder(cloud)
+
+    assert list(read_points(out)["line"]) == [1, 2, 3]
+    assert out.is_dense is False
+
+
+def test_drop_invalid_and_reorder_normalizes_bigendian():
     xyz = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float32)
     cloud = _make_cloud(xyz, np.array([0, 1], dtype=np.uint8))
+    data = bytearray(cloud.data)
+    for point_offset in range(0, len(data), cloud.point_step):
+        for field_offset in (0, 4, 8):
+            start = point_offset + field_offset
+            data[start : start + 4] = reversed(data[start : start + 4])
+    cloud.data = bytes(data)
     cloud.is_bigendian = True
-    assert drop_invalid_and_reorder(cloud) is cloud
+
+    out = drop_invalid_and_reorder(cloud)
+
+    points = read_points(out)
+    assert out.is_bigendian is False
+    assert out.width == 1
+    assert float(points[0]["x"]) == 1.0
 
 
 @pytest.mark.parametrize("sort_field", [None, "line"])
@@ -105,13 +139,7 @@ def test_drop_invalid_preserves_all_field_values(sort_field):
     assert mapping == {1.0: 5, 2.0: 3}
 
 
-def test_drop_invalid_sort_none_falls_back_without_numba(monkeypatch):
-    def raise_import_error():
-        raise ImportError("numba unavailable")
-
-    monkeypatch.setattr(preprocess_module, "_copy_valid_word_points_numba", raise_import_error)
-    monkeypatch.setattr(preprocess_module, "_invalid_xyz_mask_numba", raise_import_error)
-
+def test_drop_invalid_sort_none_needs_no_numba():
     xyz = np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [2.0, 2.0, 2.0]], dtype=np.float32)
     line = np.array([5, 9, 3], dtype=np.uint8)
     out = drop_invalid_and_reorder(_make_cloud(xyz, line), sort_field=None)

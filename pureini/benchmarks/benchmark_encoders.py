@@ -9,9 +9,15 @@ import random
 import struct
 import time
 
-from pureini import CompressionOption, EncodingInfo, EncodingOptions, FieldType, PointField
-from pureini.decoder import PointcloudDecoder
-from pureini.encoder import PointcloudEncoder
+from pureini import (
+    CompressionOption,
+    EncodingInfo,
+    EncodingOptions,
+    FieldType,
+    PointcloudDecoder,
+    PointcloudEncoder,
+    PointField,
+)
 
 
 def format_time(seconds: float) -> str:

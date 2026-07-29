@@ -100,6 +100,15 @@ def test_bridge_codecs_extra_composes_bridge_video_and_pointcloud() -> None:
     assert "pymcap-cli[bridge-codecs] ; extra == 'bridge-proxy'" in requirements
 
 
+def test_pointcloud_extra_requires_native_codec_release() -> None:
+    requirements = metadata.requires("pymcap-cli") or []
+    codec_version = metadata.version("mcap-codec-support")
+
+    assert (
+        f"mcap-codec-support[pointcloud]>={codec_version} ; extra == 'pointcloud'" in requirements
+    )
+
+
 def test_unavailable_command_accepts_command_args(capsys) -> None:
     app = App(default_parameter=Parameter(negative_iterable=""))
     app.command(name="video")(

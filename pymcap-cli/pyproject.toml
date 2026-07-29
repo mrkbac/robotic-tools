@@ -53,12 +53,12 @@ bridge-codecs = ["pymcap-cli[bridge,pointcloud,video]"]
 bridge-proxy = ["pymcap-cli[bridge-codecs]"]
 draco = ["mcap-codec-support[draco]"]
 image = ["pillow>=10.0"]
-parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]"]
+parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]>=0.14.0"]
 plot = [
     "kaleido>=1.0.0",
     "plotly>=6.0.0",
 ]
-pointcloud = ["mcap-codec-support[pointcloud]"]
+pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]
 video = ["mcap-codec-support[video]"]
 xxhash = ["xxhash>=3.0.0"]
 # `index serve` web UI. datasette<1 pin: datasette-dashboards 500s on the 1.0

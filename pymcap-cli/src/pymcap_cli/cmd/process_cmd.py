@@ -738,7 +738,25 @@ def process(
     # so upstream relabel/alias/dedup see the original messages first. Imported
     # lazily so a plain `process` run pays none of the codec import cost.
     if compress_video or compress_pointcloud or pointcloud_cleanup.enabled:
-        from mcap_codec_support.video import VideoEncoderError  # noqa: PLC0415
+        if compress_video and (compress_pointcloud or pointcloud_cleanup.enabled):
+            feature_name = "Video and point-cloud"
+            extra_spec = "video,pointcloud"
+        elif compress_video:
+            feature_name = "Video"
+            extra_spec = "video"
+        else:
+            feature_name = "Point-cloud"
+            extra_spec = "pointcloud"
+        try:
+            from mcap_codec_support.video import VideoEncoderError  # noqa: PLC0415
+        except ImportError:
+            logger.error(  # noqa: TRY400
+                "%s processing requires optional dependencies. "
+                "Run PyMcap CLI through `uvx 'pymcap-cli[%s]' ...`.",
+                feature_name,
+                extra_spec,
+            )
+            return 1
 
         try:
             if compress_video:
@@ -757,7 +775,8 @@ def process(
                         encoder=video_encoder,
                     )
                 )
-            if pointcloud_cleanup.enabled:
+            use_fused_cloudini_cleanup = compress_pointcloud
+            if pointcloud_cleanup.enabled and not use_fused_cloudini_cleanup:
                 from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
                     PointcloudCleanProcessor,
                 )
@@ -776,10 +795,20 @@ def process(
                 extras.append(
                     PointcloudCompressProcessor(
                         resolution=pc_resolution,
+                        drop_invalid=pointcloud_cleanup.drop_invalid,
+                        sort_field=pointcloud_cleanup.sort_field,
                         workers=pointcloud_worker_count(),
                     )
                 )
-        except (ImportError, VideoEncoderError) as e:
+        except ImportError:
+            logger.error(  # noqa: TRY400
+                "%s processing requires optional dependencies. "
+                "Run PyMcap CLI through `uvx 'pymcap-cli[%s]' ...`.",
+                feature_name,
+                extra_spec,
+            )
+            return 1
+        except VideoEncoderError as e:
             logger.error(str(e))  # noqa: TRY400
             return 1
 

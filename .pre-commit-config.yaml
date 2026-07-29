@@ -98,6 +98,27 @@ repos:
         types_or: [ts, tsx]
         pass_filenames: false
 
+      - id: cargo-fmt-pureini
+        name: cargo fmt (pureini)
+        entry: cargo fmt --manifest-path pureini/rust/Cargo.toml
+        language: system
+        files: ^pureini/rust/.*\.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy-pureini
+        name: cargo clippy (pureini)
+        entry: uv run --frozen cargo clippy --manifest-path pureini/rust/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: ^pureini/rust/
+        pass_filenames: false
+
+      - id: cargo-test-pureini
+        name: cargo test (pureini)
+        entry: uv run --frozen cargo test --manifest-path pureini/rust/Cargo.toml
+        language: system
+        files: ^pureini/rust/
+        pass_filenames: false
+
       - id: pytest-fast
         name: pytest (fast tests only)
         entry: uv run --frozen --all-groups --all-extras --all-packages bash scripts/pytest_fast.sh

@@ -42,7 +42,7 @@ The workspace also ships the libraries pymcap-cli is built on. Each is usable st
 | [`ros-parser`](ros-parser/) | Parser for ROS 1 / ROS 2 message definitions and Foxglove message path syntax. |
 | [`mcap-codec-support`](mcap-codec-support/) | Reusable MCAP encoder/decoder factories for video and point-cloud codecs. |
 | [`pointcloud2`](pointcloud2/) | Helpers for `sensor_msgs/PointCloud2` access and conversion. |
-| [`pureini`](pureini/) | Pure-Python implementation of the Cloudini point-cloud compression format. |
+| [`pureini`](pureini/) | Rust/PyO3 implementation of the CloudINI point-cloud compression format. |
 | [`robo-ws-bridge`](robo-ws-bridge/) | Python implementation of the Foxglove WebSocket protocol for streaming robotics data. |
 
 ## License & credits

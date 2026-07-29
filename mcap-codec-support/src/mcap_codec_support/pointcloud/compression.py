@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
+
+from mcap_codec_support.pointcloud._pureini import pointcloud2_data, pointcloud2_to_encoding_info
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     from pointcloud2 import Pointcloud2Msg, PointFieldMsg
-    from pureini import CompressionOption, EncodingInfo, EncodingOptions
+    from pureini import EncodingInfo
 
 DRACO_MAX_QUANTIZATION_BITS = 30
 
@@ -22,35 +25,20 @@ class PointCloudCompressorProtocol(Protocol):
     """Common interface implemented by Cloudini and Draco point cloud compressors."""
 
     def compress(self, msg: Pointcloud2Msg) -> bytes: ...
+    def compress_result(self, msg: Pointcloud2Msg) -> PointCloudCompressionResult: ...
 
 
-def _build_encoding_info(
-    msg: Pointcloud2Msg,
-    encoding_opt: EncodingOptions,
-    compression_opt: CompressionOption,
-    resolution: float,
-) -> EncodingInfo:
-    """Build pureini EncodingInfo from a decoded ROS2 PointCloud2 message."""
-    from pureini import EncodingInfo, FieldType, PointField  # noqa: PLC0415
+@dataclass(frozen=True, slots=True)
+class PointCloudCompressionResult:
+    """Compressed payload with the point-cloud layout represented by that payload."""
 
-    info = EncodingInfo()
-    info.width = msg.width
-    info.height = msg.height
-    info.point_step = msg.point_step
-    info.encoding_opt = encoding_opt
-    info.compression_opt = compression_opt
-
-    info.fields = []
-    for ros_field in msg.fields:
-        field = PointField(
-            name=ros_field.name,
-            offset=ros_field.offset,
-            type=FieldType(ros_field.datatype),
-            resolution=resolution if ros_field.datatype == 7 else None,
-        )
-        info.fields.append(field)
-
-    return info
+    data: bytes
+    width: int
+    height: int
+    point_step: int
+    row_step: int
+    is_dense: bool
+    is_bigendian: bool = False
 
 
 class CloudiniPointCloudCompressor:
@@ -61,6 +49,9 @@ class CloudiniPointCloudCompressor:
         encoding: str = "lossy",
         compression: str = "zstd",
         resolution: float = 0.01,
+        *,
+        drop_invalid: bool = False,
+        sort_field: str | None = None,
     ) -> None:
         from pureini import CompressionOption, EncodingOptions, PointcloudEncoder  # noqa: PLC0415
 
@@ -87,6 +78,8 @@ class CloudiniPointCloudCompressor:
         self._encoding_opt = encoding_map[encoding]
         self._compression_opt = compression_map[compression]
         self._resolution = resolution
+        self._drop_invalid = drop_invalid
+        self._sort_field = sort_field
         self._PointcloudEncoder = PointcloudEncoder
 
         self._cached_info: EncodingInfo | None = None
@@ -94,15 +87,55 @@ class CloudiniPointCloudCompressor:
 
     def compress(self, msg: Pointcloud2Msg) -> bytes:
         """Compress a decoded ROS2 PointCloud2 message and return raw bytes."""
-        info = _build_encoding_info(
-            msg, self._encoding_opt, self._compression_opt, self._resolution
+        return self.compress_result(msg).data
+
+    def compress_result(self, msg: Pointcloud2Msg) -> PointCloudCompressionResult:
+        """Compress and return the layout after optional native preprocessing."""
+        try:
+            info = pointcloud2_to_encoding_info(
+                msg,
+                encoding_opt=self._encoding_opt,
+                compression_opt=self._compression_opt,
+                resolution=self._resolution,
+            )
+            encoder = self._cached_encoder
+            if self._cached_info != info or encoder is None:
+                self._cached_info = info
+                encoder = self._PointcloudEncoder(info)
+                self._cached_encoder = encoder
+            cloud_data = pointcloud2_data(msg)
+            should_preprocess = self._drop_invalid or self._sort_field is not None
+            if should_preprocess:
+                data, transformed_point_count, did_filter_invalid_xyz = encoder.encode(
+                    cloud_data,
+                    drop_invalid=self._drop_invalid,
+                    sort_field=self._sort_field,
+                    is_bigendian=msg.is_bigendian,
+                    return_metadata=True,
+                )
+            else:
+                data = encoder.encode(cloud_data, is_bigendian=msg.is_bigendian)
+                transformed_point_count = None
+                did_filter_invalid_xyz = False
+        except (NotImplementedError, RuntimeError, ValueError) as exc:
+            raise PointCloudCompressionError(str(exc)) from exc
+
+        if transformed_point_count is None:
+            width = int(msg.width)
+            height = int(msg.height)
+            row_step = width * int(msg.point_step)
+        else:
+            width = transformed_point_count
+            height = 1
+            row_step = transformed_point_count * int(msg.point_step)
+        return PointCloudCompressionResult(
+            data=data,
+            width=width,
+            height=height,
+            point_step=int(msg.point_step),
+            row_step=row_step,
+            is_dense=bool(msg.is_dense) or did_filter_invalid_xyz,
         )
-        encoder = self._cached_encoder
-        if self._cached_info != info or encoder is None:
-            self._cached_info = info
-            encoder = self._PointcloudEncoder(info)
-            self._cached_encoder = encoder
-        return encoder.encode(bytes(msg.data))
 
 
 def _compute_position_quantization(
@@ -247,9 +280,15 @@ def build_compressed_pointcloud2_message(
     compressed_data: bytes,
     *,
     fmt: str,
+    result: PointCloudCompressionResult | None = None,
 ) -> dict[str, Any]:
     """Build a ``CompressedPointCloud2`` ROS2 message dict."""
     stamp = msg.header.stamp
+    width = int(msg.width) if result is None else result.width
+    height = int(msg.height) if result is None else result.height
+    point_step = int(msg.point_step) if result is None else result.point_step
+    row_step = int(msg.row_step) if result is None else result.row_step
+    is_dense = bool(msg.is_dense) if result is None else result.is_dense
     return {
         "header": {
             "stamp": {
@@ -258,8 +297,8 @@ def build_compressed_pointcloud2_message(
             },
             "frame_id": msg.header.frame_id,
         },
-        "height": msg.height,
-        "width": msg.width,
+        "height": height,
+        "width": width,
         "fields": [
             {
                 "name": field.name,
@@ -269,11 +308,11 @@ def build_compressed_pointcloud2_message(
             }
             for field in msg.fields
         ],
-        "is_bigendian": msg.is_bigendian,
-        "point_step": msg.point_step,
-        "row_step": msg.row_step,
+        "is_bigendian": msg.is_bigendian if result is None else result.is_bigendian,
+        "point_step": point_step,
+        "row_step": row_step,
         "compressed_data": compressed_data,
-        "is_dense": msg.is_dense,
+        "is_dense": is_dense,
         "format": fmt,
     }
 
@@ -332,6 +371,18 @@ class DracoPointCloudCompressor:
             create_metadata=False,
             preserve_order=True,
             generic_attributes=generic_attributes,
+        )
+
+    def compress_result(self, msg: Pointcloud2Msg) -> PointCloudCompressionResult:
+        """Compress while preserving the source PointCloud2 layout metadata."""
+        return PointCloudCompressionResult(
+            data=self.compress(msg),
+            width=int(msg.width),
+            height=int(msg.height),
+            point_step=int(msg.point_step),
+            row_step=int(msg.row_step),
+            is_dense=bool(msg.is_dense),
+            is_bigendian=bool(msg.is_bigendian),
         )
 
     def compress_message(self, msg: Pointcloud2Msg) -> dict[str, Any]:
