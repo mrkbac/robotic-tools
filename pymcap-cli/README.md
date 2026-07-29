@@ -915,8 +915,8 @@ pymcap-cli export-geo data.mcap -o ./geo --include-no-fix
 
 ### `bridge` — Live Foxglove Bridge
 
-Inspect, stream, or record live topics from a Foxglove WebSocket bridge. Requires
-the `bridge` extra.
+Inspect, monitor, stream, or record live topics from a Foxglove WebSocket bridge.
+Requires the `bridge` extra.
 
 ```bash
 # Inspect advertised channels
@@ -926,7 +926,16 @@ pymcap-cli bridge localhost:8765
 pymcap-cli bridge check localhost --spec recording.yaml --duration 5
 
 # Stream decoded messages
-pymcap-cli bridge cat localhost:8765 --topics /tf --limit 10
+pymcap-cli bridge cat localhost:8765 --topic /tf --limit 10
+
+# Monitor one or more topic rates
+pymcap-cli bridge hz localhost:8765 -t /imu/data -t '/camera/.*'
+
+# Monitor received payload bandwidth
+pymcap-cli bridge bw localhost:8765 -t /camera/image
+
+# Combined rate, payload bandwidth, and corrected message delay
+pymcap-cli bridge stats localhost:8765 --all
 
 # Record all advertised topics to MCAP
 pymcap-cli bridge record localhost:8765 --all -o live.mcap
@@ -953,6 +962,19 @@ pymcap-cli bridge play compressed.mcap --target localhost --transform rosdecompr
 pymcap-cli bridge play recording.mcap --target localhost \
   --transform roscompress --only-subscribed
 ```
+
+`bridge hz`, `bridge bw`, and `bridge stats` subscribe once and receive selected
+messages continuously. They print the heading once, then append one compact,
+timestamped row per topic every second so each update remains in terminal
+scrollback. Measurements use a 10-second rolling time window by default; use
+`--interval` and `--window` to change those independent values. They run until
+Ctrl+C unless `--duration` is set. With `--json`, they emit one JSON object per
+interval.
+`bridge bw` reports Foxglove message payload bytes, excluding WebSocket, TLS, and
+other transport framing. `bridge stats` corrects message timestamp age using bridge
+time frames; delay is unavailable when no clock-offset samples arrive. Use
+`bridge delay` for detailed bridge-clock and decoded ROS `header.stamp`
+measurements.
 
 `bridge serve` only transforms messages on channels that currently have subscribers,
 and releases per-channel codec state after the last subscriber leaves. For

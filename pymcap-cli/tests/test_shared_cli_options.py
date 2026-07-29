@@ -40,7 +40,7 @@ def _help(capsys: pytest.CaptureFixture[str], *command: str) -> str:
     return captured.out + captured.err
 
 
-@pytest.mark.parametrize("command", ["cat", "record", "delay", "diag"])
+@pytest.mark.parametrize("command", ["cat", "record", "delay", "diag", "hz", "bw", "stats"])
 def test_bridge_topic_filters_use_canonical_names(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -48,6 +48,25 @@ def test_bridge_topic_filters_use_canonical_names(
 
     assert "--topic " in output
     assert "--topics" not in output
+
+
+@pytest.mark.parametrize("command", ["hz", "bw", "stats"])
+def test_bridge_topic_monitor_commands_share_live_measurement_options(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = _help(capsys, "bridge", command)
+
+    for option in (
+        "--topic",
+        "--all",
+        "--exclude-topic",
+        "--window",
+        "--interval",
+        "--duration",
+        "--json",
+        "--connect-timeout",
+    ):
+        assert option in output
 
 
 def test_bridge_cat_uses_file_cat_filter_and_render_options(
@@ -176,6 +195,7 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--host",
         "--include-blobs",
         "--incompressible-schema-pattern",
+        "--interval",
         "--latch",
         "--latch-from-metadata",
         "--metadata",
@@ -192,6 +212,7 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--split-at",
         "--start",
         "--var",
+        "--window",
     }
     # Sanctioned overrides: commands that deliberately redeclare a shared name with different
     # semantics the central scalar alias cannot express. `bridge serve` uses a list-valued

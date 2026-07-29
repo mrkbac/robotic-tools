@@ -6,12 +6,15 @@ import asyncio
 import json
 import socket
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cmd.bridge._shared import fetch_bridge_info
 from pymcap_cli.cmd.bridge.check import check as bridge_check
+from pymcap_cli.cmd.bridge.hz import hz
 from pymcap_cli.cmd.bridge.info import info
+from pymcap_cli.cmd.bridge.stats import stats
 from robo_ws_bridge import WebSocketBridgeServer
 from robo_ws_bridge.server import Channel
 
@@ -31,8 +34,9 @@ def _pick_free_port() -> int:
 class _ServerThread:
     """Run a `WebSocketBridgeServer` on a background thread with its own event loop."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, *, publish_messages: bool = False) -> None:
         self.port = port
+        self.publish_messages = publish_messages
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
         self._ready = threading.Event()
@@ -76,9 +80,23 @@ class _ServerThread:
         await server.start()
         self._stop = asyncio.Event()
         self._ready.set()
+        publisher: asyncio.Task[None] | None = None
+        if self.publish_messages:
+
+            async def publish_periodically() -> None:
+                while True:
+                    server_time_ns = time.time_ns() - 10_000_000
+                    await server.publish_time(server_time_ns)
+                    await server.publish_message(1, b"x" * 100, timestamp_ns=server_time_ns)
+                    await asyncio.sleep(0.02)
+
+            publisher = asyncio.create_task(publish_periodically())
         try:
             await self._stop.wait()
         finally:
+            if publisher is not None:
+                publisher.cancel()
+                await asyncio.gather(publisher, return_exceptions=True)
             await server.stop()
 
     def start(self) -> None:
@@ -95,6 +113,16 @@ class _ServerThread:
 @pytest.fixture
 def bridge_server() -> Iterator[_ServerThread]:
     server = _ServerThread(_pick_free_port())
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+@pytest.fixture
+def publishing_bridge_server() -> Iterator[_ServerThread]:
+    server = _ServerThread(_pick_free_port(), publish_messages=True)
     server.start()
     try:
         yield server
@@ -135,6 +163,54 @@ def test_bridge_cmd_json_output(
     assert payload["server"]["supportedEncodings"] == ["cdr", "json"]
     topics = sorted(c["topic"] for c in payload["channels"])
     assert topics == ["/bar", "/foo"]
+
+
+@pytest.mark.e2e
+def test_bridge_stats_streams_json_snapshots_from_real_server(
+    publishing_bridge_server: _ServerThread,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = stats(
+        target=f"ws://127.0.0.1:{publishing_bridge_server.port}",
+        all_topics=True,
+        duration=0.2,
+        interval=0.1,
+        window=1.0,
+        json_output=True,
+    )
+
+    assert rc == 0
+    snapshots = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(snapshots) == 2
+    final_topics = {topic["topic"]: topic for topic in snapshots[-1]["topics"]}
+    assert final_topics["/foo"]["hz"] > 0
+    assert final_topics["/foo"]["payload_bytes_per_second"] > 0
+    assert final_topics["/foo"]["message_size_bytes"]["mean"] == 100
+    assert snapshots[-1]["bridge_clock_offset_ms"] is not None
+    assert final_topics["/foo"]["message_delay_ms"] is not None
+    assert abs(final_topics["/foo"]["message_delay_ms"]) < 100
+    assert final_topics["/bar"]["hz"] == 0
+
+
+@pytest.mark.e2e
+def test_bridge_hz_prints_each_snapshot_instead_of_redrawing(
+    publishing_bridge_server: _ServerThread,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = hz(
+        target=f"ws://127.0.0.1:{publishing_bridge_server.port}",
+        all_topics=True,
+        duration=0.2,
+        interval=0.1,
+        window=1.0,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert output.count("Topic frequency") == 1
+    assert output.count("Time") == 1
+    assert output.count("/foo") == 2
+    assert output.count("/bar") == 2
 
 
 @pytest.mark.e2e

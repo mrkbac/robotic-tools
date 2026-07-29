@@ -106,7 +106,11 @@ MessageLimitOption = Annotated[
 ]
 LiveDurationOption = Annotated[
     float | None,
-    Parameter(name=["-d", "--duration"], group=OUTPUT_GROUP),
+    Parameter(
+        name=["-d", "--duration"],
+        group=OUTPUT_GROUP,
+        help="Stop after this many seconds instead of running until interrupted.",
+    ),
 ]
 SampleDurationOption = Annotated[
     float,
@@ -114,6 +118,22 @@ SampleDurationOption = Annotated[
         name=["-d", "--duration"],
         group=OUTPUT_GROUP,
         help="Seconds to sample live messages.",
+    ),
+]
+MonitorWindowOption = Annotated[
+    float,
+    Parameter(
+        name=["-w", "--window"],
+        group=OUTPUT_GROUP,
+        help="Rolling measurement window in seconds.",
+    ),
+]
+RefreshIntervalOption = Annotated[
+    float,
+    Parameter(
+        name=["--interval"],
+        group=OUTPUT_GROUP,
+        help="Seconds between live statistics updates.",
     ),
 ]
 OptionalOutputPathOption = Annotated[

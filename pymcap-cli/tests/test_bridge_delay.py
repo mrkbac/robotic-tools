@@ -8,7 +8,9 @@ import struct
 from dataclasses import dataclass
 
 import pytest
+from pymcap_cli.cmd.bridge import delay as delay_module
 from pymcap_cli.cmd.bridge._shared import BridgeFetchError
+from pymcap_cli.cmd.bridge._topic_monitor import BridgeMonitorSession, RunningTimeStats
 from pymcap_cli.cmd.bridge.delay import (
     DelayReference,
     DelayReport,
@@ -52,6 +54,42 @@ def _json_channel(channel_id: int, topic: str, schema: str = _JSON_STRING_SCHEMA
         schema=schema,
         schema_encoding="jsonschema",
     )
+
+
+def test_collect_delay_async_uses_shared_bridge_monitor_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_config: dict[str, object] = {}
+    run_config: dict[str, object] = {}
+
+    class FakeSession:
+        def __init__(self, url: str, **kwargs: object) -> None:
+            session_config["url"] = url
+            session_config.update(kwargs)
+            self.time_offset = RunningTimeStats()
+            self.delay_channels = ()
+
+        async def run(self, **kwargs: object) -> None:
+            run_config.update(kwargs)
+
+    assert delay_module.BridgeMonitorSession is BridgeMonitorSession
+    monkeypatch.setattr(delay_module, "BridgeMonitorSession", FakeSession)
+
+    report = asyncio.run(
+        _collect_delay_async(
+            "ws://test:8765",
+            message_filter=MessageFilterOptions.from_args(topic=["/imu"]),
+            against=DelayReference.BRIDGE,
+            duration=2.0,
+            connect_timeout=3.0,
+        )
+    )
+
+    assert report.channels == ()
+    assert session_config["subscribe_messages"] is True
+    assert session_config["decode_header_stamps"] is True
+    assert session_config["collect_time"] is True
+    assert run_config["duration_seconds"] == 2.0
 
 
 def test_collect_delay_async_without_topics_uses_time_updates_without_subscribing() -> None:

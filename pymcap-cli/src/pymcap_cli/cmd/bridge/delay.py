@@ -3,22 +3,16 @@
 import asyncio
 import json
 import logging
-import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Annotated, Any
+from dataclasses import dataclass
+from typing import Annotated
 
 from cyclopts import Group as CycloptsGroup
 from cyclopts import Parameter
-from mcap_ros2_support_fast.decoder import DecoderFactory
 from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
-from robo_ws_bridge import WebSocketBridgeClient
-from robo_ws_bridge.ws_types import ChannelInfo, ServerCapabilities
-from small_mcap import JSONDecoderFactory
 
 from pymcap_cli.cmd._arg_constraints import constraint_group, requires
 from pymcap_cli.cmd._cli_options import (
@@ -31,16 +25,19 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd.bridge._shared import (
     BridgeFetchError,
-    ChannelSubscriptionManager,
-    channel_to_schema,
     console,
     to_ws_url,
+)
+from pymcap_cli.cmd.bridge._topic_monitor import (
+    BridgeMonitorSession,
+    ChannelDelayStats,
+    RunningTimeStats,
+    TimeReference,
 )
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.display.display_utils import _format_parts_with_colors
 from pymcap_cli.log_setup import ERR
-from pymcap_cli.types.to_plain import to_plain
 
 logger = logging.getLogger(__name__)
 
@@ -49,55 +46,8 @@ FILTER_GROUP = CycloptsGroup("Filtering")
 # --against only affects header-age mode, which is only entered when topics are supplied.
 _AGAINST_CONSTRAINT = constraint_group(requires("--against", "--topic"))
 
-
-class DelayReference(str, Enum):
-    LOCAL = "local"
-    BRIDGE = "bridge"
-
-
-@dataclass
-class RunningDelayStats:
-    count: int = 0
-    latest_ns: int = 0
-    min_ns: int = 0
-    max_ns: int = 0
-    _mean_ns: float = 0.0
-    _m2_ns: float = 0.0
-
-    def add(self, value_ns: int) -> None:
-        self.latest_ns = value_ns
-        if self.count == 0:
-            self.min_ns = value_ns
-            self.max_ns = value_ns
-        else:
-            self.min_ns = min(self.min_ns, value_ns)
-            self.max_ns = max(self.max_ns, value_ns)
-
-        self.count += 1
-        delta = value_ns - self._mean_ns
-        self._mean_ns += delta / self.count
-        self._m2_ns += delta * (value_ns - self._mean_ns)
-
-    @property
-    def mean_ns(self) -> float:
-        return self._mean_ns
-
-    @property
-    def stddev_ns(self) -> float:
-        if self.count < 2:
-            return 0.0
-        return math.sqrt(self._m2_ns / self.count)
-
-
-@dataclass
-class ChannelDelayStats:
-    channel: ChannelInfo
-    clock_offset: RunningDelayStats = field(default_factory=RunningDelayStats)
-    header_age: RunningDelayStats = field(default_factory=RunningDelayStats)
-    payload_bytes: int = 0
-    undecodable_messages: int = 0
-    decode_errors: int = 0
-    missing_header_stamp: int = 0
+DelayReference = TimeReference
+RunningDelayStats = RunningTimeStats
 
 
 @dataclass(frozen=True)
@@ -114,29 +64,6 @@ class DelayReport:
         return sum(stats.clock_offset.count for stats in self.channels)
 
 
-def _header_stamp_ns(decoded_message: object) -> int | None:
-    plain = to_plain(decoded_message)
-    if not isinstance(plain, dict):
-        return None
-    header = plain.get("header")
-    if not isinstance(header, dict):
-        return None
-    stamp = header.get("stamp")
-    if isinstance(stamp, bool):
-        return None
-    if isinstance(stamp, int):
-        return stamp
-    if not isinstance(stamp, dict):
-        return None
-    sec = stamp.get("sec")
-    nanosec = stamp.get("nanosec")
-    if isinstance(sec, bool) or isinstance(nanosec, bool):
-        return None
-    if isinstance(sec, int) and isinstance(nanosec, int):
-        return sec * NS_TO_SEC + nanosec
-    return None
-
-
 async def _collect_delay_async(
     url: str,
     *,
@@ -147,130 +74,31 @@ async def _collect_delay_async(
     now_ns: Callable[[], int] = time.time_ns,
 ) -> DelayReport:
     wants_header_age = message_filter.has_positive_topics
-    client = WebSocketBridgeClient(url, min_retry_delay=0.2, max_retry_delay=2.0)
-    server_info_event = asyncio.Event()
-    client.on_server_info(lambda *_: server_info_event.set())
-    time_offset = RunningDelayStats()
-
-    factories = [JSONDecoderFactory(), DecoderFactory()]
-    decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-    stats_by_channel: dict[int, ChannelDelayStats] = {}
-
-    def _topic_matches(topic: str) -> bool:
-        return message_filter.matches_topic(topic)
-
-    def _stats_for(channel: ChannelInfo) -> ChannelDelayStats:
-        channel_id = channel["id"]
-        stats = stats_by_channel.get(channel_id)
-        if stats is None:
-            stats = ChannelDelayStats(channel=channel)
-            stats_by_channel[channel_id] = stats
-        return stats
-
-    def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
-        channel_id = channel["id"]
-        if channel_id in decoders:
-            return decoders[channel_id]
-        schema = channel_to_schema(channel)
-        decoder: Callable[[bytes | memoryview], Any] | None = None
-        for factory in factories:
-            try:
-                decoder = factory.decoder_for(channel["encoding"], schema)
-            except Exception:
-                logger.exception(
-                    f"Decoder construction failed for {channel['topic']} "
-                    f"(schema={schema.name!r}, encoding={channel['encoding']!r})"
-                )
-                decoder = None
-            if decoder is not None:
-                break
-        decoders[channel_id] = decoder
-        return decoder
-
-    def _should_subscribe(channel: ChannelInfo) -> bool:
-        if not _topic_matches(channel["topic"]):
-            return False
-        _stats_for(channel)
-        return True
-
-    def _on_message(channel: ChannelInfo, bridge_timestamp_ns: int, payload: bytes) -> None:
-        local_receive_ns = now_ns()
-        stats = _stats_for(channel)
-        stats.payload_bytes += len(payload)
-        stats.clock_offset.add(local_receive_ns - bridge_timestamp_ns)
-
-        if not wants_header_age:
-            return
-
-        decoder = _decoder_for(channel)
-        if decoder is None:
-            stats.undecodable_messages += 1
-            return
-        try:
-            decoded = decoder(payload)
-        except Exception:
-            stats.decode_errors += 1
-            logger.exception(f"Failed to decode message on {channel['topic']}")
-            return
-
-        stamp_ns = _header_stamp_ns(decoded)
-        if stamp_ns is None:
-            stats.missing_header_stamp += 1
-            return
-
-        reference_ns = local_receive_ns if against is DelayReference.LOCAL else bridge_timestamp_ns
-        stats.header_age.add(reference_ns - stamp_ns)
-
-    def _on_time_update(server_time_ns: int) -> None:
-        time_offset.add(now_ns() - server_time_ns)
-
-    subscriber: ChannelSubscriptionManager | None = None
-    if wants_header_age:
-        subscriber = ChannelSubscriptionManager(client, _should_subscribe)
-        subscriber.install()
-    client.on_time_update(_on_time_update)
-    client.on_message(_on_message)
-
-    await client.connect()
-    try:
-        try:
-            await asyncio.wait_for(server_info_event.wait(), timeout=connect_timeout)
-        except asyncio.TimeoutError as exc:
-            raise BridgeFetchError(
-                f"Timed out after {connect_timeout:.1f}s waiting for serverInfo from {url}"
-            ) from exc
-        server_info = client.server_info
-        if server_info is None:
-            raise BridgeFetchError(f"No serverInfo received from {url}")
-        if (
-            not wants_header_age
-            and ServerCapabilities.TIME.value not in server_info["capabilities"]
-        ):
-            raise BridgeFetchError(
-                f"{url} does not advertise the '{ServerCapabilities.TIME.value}' capability. "
-                "Pass topic regexes to measure delay from message timestamps instead."
-            )
-
-        if subscriber is not None:
-            await subscriber.subscribe_existing()
-        await asyncio.sleep(duration)
-
-        channels = tuple(
-            sorted(
-                stats_by_channel.values(),
-                key=lambda stats: (stats.channel["topic"], stats.channel["id"]),
-            )
-        )
-        return DelayReport(
-            url=url,
-            duration=duration,
-            against=against,
-            wants_header_age=wants_header_age,
-            time_offset=time_offset,
-            channels=channels,
-        )
-    finally:
-        await client.disconnect()
+    session = BridgeMonitorSession(
+        url,
+        message_filter=message_filter,
+        window_seconds=duration,
+        connect_timeout=connect_timeout,
+        subscribe_messages=wants_header_age,
+        collect_time=True,
+        require_time_capability=not wants_header_age,
+        decode_header_stamps=wants_header_age,
+        header_reference=against,
+        wall_time_ns=now_ns,
+    )
+    await session.run(
+        interval_seconds=duration,
+        duration_seconds=duration,
+        on_snapshot=lambda _snapshot: None,
+    )
+    return DelayReport(
+        url=url,
+        duration=duration,
+        against=against,
+        wants_header_age=wants_header_age,
+        time_offset=session.time_offset,
+        channels=session.delay_channels,
+    )
 
 
 def _ms(value_ns: float) -> float:
