@@ -39,11 +39,12 @@ jobs:
           git submodule foreach --recursive 'git lfs pull'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.10"
           activate-environment: true
           enable-cache: true
+          prune-cache: true
       - name: Install pip (required by pre-commit action)
         run: uv pip install pip
       - name: Install bun

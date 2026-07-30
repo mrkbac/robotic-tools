@@ -2430,6 +2430,7 @@ dev = [
     { name = "pytest-benchmark" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "ty" },
 ]
 
@@ -2446,6 +2447,7 @@ dev = [
     { name = "pytest-benchmark", specifier = ">=5.2.3" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "ty", specifier = ">=0.0.49" },
 ]
 
