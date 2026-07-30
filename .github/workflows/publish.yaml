@@ -37,6 +37,11 @@ jobs:
 
   publish:
     needs: [lint, test, publish-pureini]
+    if: >-
+      always() &&
+      needs.lint.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs.publish-pureini.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: pypi
