@@ -4,57 +4,38 @@ User-facing notes for releases.
 
 ---
 
-## Unreleased
+## pymcap-cli 0.27.0, mcap-codec-support 0.15.0, pureini 0.9.0
 
-### pymcap-cli
+Headline: Rust CloudINI compression reached 92.8× real time for 1 cm lossy
+point clouds on a representative 6 GiB recording, while new live bridge
+monitors make field diagnostics easier.
 
-- Removed the built-in Parquet exporter and Datasette index browser along with
-  their large optional dependency stacks.
-- Video and ordinary point-cloud workflows no longer install or import NumPy.
-  NumPy remains only in the optional Draco stack.
-- Raw video and PCD export now honor organized-message row strides; PCD export
-  also preserves big-endian fields and multi-value PointField definitions.
-- CloudINI point-cloud cleanup is fused into the native compression processor,
-  so invalid-point removal, stable ring grouping, and encoding happen through
-  one call without a separate Python preprocessing stage.
-- Point-cloud processing now reports the exact `uvx` extra needed when optional
-  dependencies are absent and normalizes big-endian fields before native
-  compression instead of failing or dropping messages.
+### pymcap-cli 0.27.0
 
-### mcap-codec-support
+- Added `bridge hz`, `bridge bw`, and `bridge stats` for continuous,
+  scrollback-friendly topic rate, bandwidth, and delay monitoring.
+- `bridge serve` now shows cached indexed recording metadata without scanning
+  payloads, uses port 8766 by default, and offers codec transforms through the
+  composable `bridge-codecs` extra.
+- Point-cloud cleanup and compression are fused through the Rust backend, with
+  correct big-endian, organized-row, and multi-value field handling. PCD and raw
+  video export also honor row strides.
+- Removed the built-in Parquet exporter and Datasette browser. Ordinary video
+  and point-cloud workflows no longer require NumPy.
 
-- CloudINI compression can opt into native invalid-XYZ filtering and stable
-  grouping and returns the resulting point-cloud dimensions with the payload.
-- Standalone point-cloud cleanup now uses the same Rust implementation, so
-  workspace installs no longer require Numba or LLVM.
-- CloudINI compression preserves organized-cloud row layouts and PointField
-  arrays instead of treating row padding or array components as point data.
+### mcap-codec-support 0.15.0
 
-### pureini
+- CloudINI compression now performs invalid-point filtering and stable grouping
+  natively while preserving organized layouts and returning updated dimensions.
+- Video encoding supports legacy Jetson FFmpeg and GStreamer stacks.
 
-- Replaced the Python/Numba implementation with a dependency-free Rust/PyO3
-  extension while preserving CloudINI V2-V5 compatibility and making V5 the
-  default output format.
-- `PointcloudEncoder.encode` now accepts optional invalid-XYZ filtering and
-  stable grouping. The allocation-minimal default returns bytes directly;
-  callers can request compact preprocessing metadata explicitly when they need
-  the transformed point count and XYZ-filter applicability. The redundant
-  `encode_preprocessed` method was removed.
-- Reduced the public Python API to the encoder, decoder, configuration types,
-  and enums. Compatibility submodules and low-level wire-format helpers are no
-  longer public.
-- Release CI now builds and verifies stable-ABI wheels for glibc and musl Linux
-  on x86-64/AArch64, macOS on Intel/Apple Silicon, and Windows x86-64, plus a
-  rebuildable source distribution.
-- Python project metadata is the single distribution-version authority; the
-  unpublished native crate has independent fixed metadata.
-- Point-cloud input byte order is explicit through `is_bigendian`; the native
-  path normalizes big-endian fields before preprocessing or encoding.
-- Native decoding rejects truncated, overflowing, or trailing field data
-  deterministically, and encoding validates point counts, field resolutions,
-  and integer deltas instead of producing malformed output or panicking.
-- V2 encoding uses its original binary header container and is byte-compatible
-  with the CloudINI C++ 0.5.0 reference.
+### pureini 0.9.0
+
+- Replaced the Python/Numba codec with a Rust/PyO3 extension that has no Python
+  runtime dependencies, preserves CloudINI V2-V5 compatibility, defaults to
+  V5, and ships stable-ABI wheels for major desktop and Linux platforms.
+- Native validation now rejects malformed data deterministically instead of
+  producing invalid output or panicking.
 
 ---
 
