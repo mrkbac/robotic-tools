@@ -8,6 +8,12 @@ User-facing notes for releases.
 
 ### pymcap-cli
 
+- Removed the built-in Parquet exporter and Datasette index browser along with
+  their large optional dependency stacks.
+- Video and ordinary point-cloud workflows no longer install or import NumPy.
+  NumPy remains only in the optional Draco stack.
+- Raw video and PCD export now honor organized-message row strides; PCD export
+  also preserves big-endian fields and multi-value PointField definitions.
 - CloudINI point-cloud cleanup is fused into the native compression processor,
   so invalid-point removal, stable ring grouping, and encoding happen through
   one call without a separate Python preprocessing stage.

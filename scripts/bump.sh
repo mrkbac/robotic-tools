@@ -224,11 +224,6 @@ sync_internal_dependency_floor \
     "pymcap-cli" \
     "pointcloud" \
     "mcap-codec-support[pointcloud]"
-sync_internal_dependency_floor \
-    "mcap-codec-support" \
-    "pymcap-cli" \
-    "parquet" \
-    "mcap-codec-support[pointcloud]"
 
 echo
 echo "Done: ${#bumped_pkgs[@]} bumped, $skipped skipped"

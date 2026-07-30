@@ -1,6 +1,6 @@
 # Robotic Tools
 
-A workspace of pure-Python tools for working with MCAP files, ROS 1/2 messages, and robotics data — built around a fast, batteries-included CLI.
+A workspace of tools for working with MCAP files, ROS 1/2 messages, and robotics data — built around a fast, batteries-included CLI.
 
 ## pymcap-cli
 
@@ -26,7 +26,7 @@ uv add pymcap-cli
 - **Smart chunk copying** — up to 10× faster filtering by copying compressed chunks without decompressing
 - **Unified `process` command** — recovery, filtering, and recompression in a single optimized pass
 - **Precise filtering** — regex topics, time ranges, and content-type filters with deferred schema/channel writing
-- **Broad format coverage** — converts ROS 1 `.bag` and ROS 2 `.db3` to MCAP; exports to NDJSON, CSV, Parquet, PCD, GeoJSON / KML / GPX, image folders, and MP4
+- **Broad format coverage** — converts ROS 1 `.bag` and ROS 2 `.db3` to MCAP; exports to NDJSON, CSV, PCD, GeoJSON / KML / GPX, image folders, and MP4
 - **Rich terminal output** — colored topics, Unicode distribution histograms, tree views, responsive layouts
 
 See the full command reference in [pymcap-cli/README.md](pymcap-cli/README.md).

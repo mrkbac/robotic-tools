@@ -28,11 +28,25 @@ SCENARIOS = (
     Scenario("bridge-proxy", ("pymcap-cli", "bridge", "proxy", "--help")),
     Scenario("draco", ("python", "-c", "import DracoPy; import mcap_codec_support.pointcloud")),
     Scenario("image", ("pymcap-cli", "export-images", "--help")),
-    Scenario("parquet", ("pymcap-cli", "export-parquet", "--help")),
     Scenario("plot", ("pymcap-cli", "plot", "--help")),
-    Scenario("pointcloud", ("pymcap-cli", "export-pcd", "--help")),
-    Scenario("serve", ("pymcap-cli", "index", "serve", "--help")),
-    Scenario("video", ("pymcap-cli", "video", "--help")),
+    Scenario(
+        "pointcloud",
+        (
+            "python",
+            "-c",
+            "import importlib.util; import pymcap_cli.exporters.pcd_exporter; "
+            "assert importlib.util.find_spec('numpy') is None",
+        ),
+    ),
+    Scenario(
+        "video",
+        (
+            "python",
+            "-c",
+            "import importlib.util; import mcap_codec_support.video; "
+            "assert importlib.util.find_spec('numpy') is None",
+        ),
+    ),
     Scenario("xxhash", ("pymcap-cli", "index", "--help")),
     Scenario("lite", ("pymcap-cli", "bridge", "--help")),
     Scenario("all", ("pymcap-cli", "--help")),

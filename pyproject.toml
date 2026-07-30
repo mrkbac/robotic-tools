@@ -185,7 +185,7 @@ layers = [
     "exporters",
     "core",
     "display",
-    "encoding | types | rosbag_reader",
+    "types | rosbag_reader",
 ]
 # `core` sits above `display` because core.mcap_transform uses display.osc_utils.
 # These render helpers legitimately consume core domain types the other way, so the
@@ -232,9 +232,6 @@ ignore_imports = [
     "mcap_codec_support.pointcloud.preprocess -> pointcloud2",
     "mcap_codec_support.pointcloud.preprocess -> pureini",
     "mcap_codec_support.pointcloud._pureini -> pureini",
-    "mcap_codec_support.video.common -> numpy",
-    "mcap_codec_support.video.compression -> numpy",
-    "mcap_codec_support.video.compression -> av",
     "mcap_codec_support.video.pyav -> av",
     "mcap_codec_support.video.factories -> mcap_ros2_support_fast.decoder",
     "mcap_codec_support.video.common -> PIL",
@@ -259,7 +256,6 @@ allowed_importers = [
     "pymcap_cli.core.processors.pointcloud_clean",
     "pymcap_cli.core.processors.pointcloud_compress",
     "pymcap_cli.core.processors.video_compress",
-    "pymcap_cli.exporters.parquet_exporter",
     "pymcap_cli.exporters.pcd_exporter",
     "pymcap_cli.exporters.video_exporter",
     "pymcap_cli.exporters.video_file_writer",
@@ -274,8 +270,6 @@ allowed_importers = [
     "mcap_codec_support",
     "mcap_ros2_support_fast._dynamic_encoder",
     "pointcloud2",
-    "pymcap_cli.exporters.parquet_exporter",
-    "pymcap_cli.exporters.pcd_exporter",
 ]
 
 [[tool.importlinter.contracts]]
@@ -291,12 +285,10 @@ allowed_importers = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Data export imports are owned by their exporters"
+name = "Plot imports are owned by the plot exporter"
 type = "protected"
-protected_modules = ["plotly", "pyarrow"]
+protected_modules = ["plotly"]
 allowed_importers = [
-    "pymcap_cli.encoding.arrow_schema",
-    "pymcap_cli.exporters.parquet_exporter",
     "pymcap_cli.exporters.plot_exporter",
 ]
 

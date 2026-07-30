@@ -10,7 +10,6 @@ COMMANDS = (
     "plot",
     "export-csv",
     "export-json",
-    "export-parquet",
     "export-pcd",
     "export-images",
     "export-geo",

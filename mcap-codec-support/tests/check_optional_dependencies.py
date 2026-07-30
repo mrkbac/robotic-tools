@@ -22,12 +22,15 @@ SCENARIOS = (
     ),
     Scenario(
         "video",
-        "from mcap_codec_support.video import VideoDecompressFactory; VideoDecompressFactory()",
+        "import importlib.util; "
+        "from mcap_codec_support.video import VideoDecompressFactory; "
+        "VideoDecompressFactory(); assert importlib.util.find_spec('numpy') is None",
     ),
     Scenario(
         "pointcloud",
+        "import importlib.util; "
         "from mcap_codec_support.pointcloud import PointCloudDecompressFactory; "
-        "PointCloudDecompressFactory()",
+        "PointCloudDecompressFactory(); assert importlib.util.find_spec('numpy') is None",
     ),
     Scenario(
         "draco",

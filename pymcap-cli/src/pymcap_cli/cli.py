@@ -132,12 +132,9 @@ def _load_optional_app(
 # Modules that go missing together when a given extra is absent. Used by the
 # optional-command loader to suppress ImportError for the *expected* shape of
 # "extra not installed."
-_VIDEO_MODULES: tuple[str, ...] = ("av", "mcap_codec_support", "numpy")
+_VIDEO_MODULES: tuple[str, ...] = ("av", "mcap_codec_support")
 _POINTCLOUD_MODULES: tuple[str, ...] = (
-    "DracoPy",
     "mcap_codec_support",
-    "numpy",
-    "pointcloud2",
     "pureini",
 )
 _VIDEO_AND_POINTCLOUD_MODULES: tuple[str, ...] = tuple(
@@ -172,13 +169,6 @@ roscompress = _load_optional_command(
     expected_missing_modules=_VIDEO_AND_POINTCLOUD_MODULES,
     message="ROS compression requires the 'video' and 'pointcloud' extras.",
     install_command="uv add 'pymcap-cli[video,pointcloud]'",
-)
-export_parquet = _load_optional_command(
-    "pymcap_cli.cmd.export_parquet_cmd",
-    "export_parquet",
-    expected_missing_modules=(*_POINTCLOUD_MODULES, "pyarrow"),
-    message="Parquet export requires the 'parquet' extra.",
-    install_command="uv add 'pymcap-cli[parquet]'",
 )
 export_pcd = _load_optional_command(
     "pymcap_cli.cmd.export_pcd_cmd",
@@ -268,7 +258,6 @@ app.command(name="export-geo", group=transform_group)(export_geo_cmd.export_geo)
 app.command(name="export-json", group=transform_group)(export_json_cmd.export_json)
 app.command(name="export-pcd", group=transform_group)(export_pcd)
 app.command(name="export-images", group=transform_group)(export_images)
-app.command(name="export-parquet", group=transform_group)(export_parquet)
 app.command(name="roscompress", group=transform_group)(roscompress)
 app.command(name="rosdecompress", group=transform_group)(rosdecompress)
 app.command(name="tf-export", group=transform_group)(tf_export_cmd.tf_export)

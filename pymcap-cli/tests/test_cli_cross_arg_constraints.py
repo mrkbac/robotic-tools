@@ -16,7 +16,6 @@ from pymcap_cli.cli import app
         (["cat", "x.mcap", "--var", "a=1"], "--var requires --query"),
         (["export-csv", "x.mcap", "out", "--var", "a=1"], "--var requires --select"),
         (["export-json", "x.mcap", "out", "--var", "a=1"], "--var requires --select"),
-        (["export-parquet", "x.mcap", "out", "--var", "a=1"], "--var requires --select"),
         (["info", "x.mcap", "--compress"], "--compress requires --json"),
         (["info", "x.mcap", "--watch", "--json"], "--watch is incompatible with --json"),
         (["info", "x.mcap", "--watch-interval", "1"], "--watch-interval requires --watch"),

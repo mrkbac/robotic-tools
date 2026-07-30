@@ -74,8 +74,7 @@ def _create_internal_dependency_repo(tmp_path: Path) -> tuple[Path, Path]:
         "pymcap-cli": (
             "0.26.0",
             "\n[project.optional-dependencies]\n"
-            'pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]\n'
-            'parquet = ["mcap-codec-support[pointcloud]>=0.14.0"]\n',
+            'pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]\n',
         ),
     }
     for package_name, (version, extra_metadata) in packages.items():
@@ -334,9 +333,6 @@ def test_bump_updates_internal_dependency_floors(tmp_path: Path) -> None:
     cli_pyproject = tomllib.loads((repo / "pymcap-cli" / "pyproject.toml").read_text())
     assert cli_pyproject["project"]["version"] == "0.27.0"
     assert cli_pyproject["project"]["optional-dependencies"]["pointcloud"] == [
-        "mcap-codec-support[pointcloud]>=0.15.0"
-    ]
-    assert cli_pyproject["project"]["optional-dependencies"]["parquet"] == [
         "mcap-codec-support[pointcloud]>=0.15.0"
     ]
     assert not _git_status(repo)

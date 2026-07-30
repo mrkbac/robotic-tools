@@ -37,16 +37,14 @@ binary and web stacks remain optional:
 | `bridge` | Foxglove WebSocket client, playback, and serving | Network-specific workflow |
 | `bridge-codecs` | JIT video and point-cloud bridge presets | Composes `bridge`, `video`, and `pointcloud` |
 | `bridge-proxy` | Live video and point-cloud transforming proxy | Reuses `bridge-codecs` |
-| `video` | Video export, compression, and decompression | PyAV, NumPy, and Pillow binary wheels |
-| `pointcloud` | PCD export and Cloudini processing | NumPy, Numba/LLVM, and point-cloud codecs |
+| `video` | Video export, compression, and decompression | PyAV and Pillow binary wheels |
+| `pointcloud` | PCD export and CloudINI processing | Native CloudINI codec |
 | `draco` | Draco point-cloud processing | DracoPy and NumPy binary wheels |
 | `image` | Image export | Pillow is only needed by image workflows |
-| `parquet` | Parquet export | PyArrow plus the point-cloud stack |
 | `plot` | Interactive and static plots | Plotly and Kaleido |
 | `xxhash` | Stable index fingerprints | Only index and hashing features require it |
-| `serve` | Datasette index browser, including `xxhash` | Large web application/plugin stack |
-| `lite` | Image, Draco, bridge, and index features | Compatibility bundle without video, Cloudini, plotting, Parquet, or Datasette |
-| `all` | Every optional feature | Full feature set |
+| `lite` | Image, Draco, bridge, and index features | Compact bundle without video, CloudINI, or plotting |
+| `all` | Every supported optional feature | Full feature set |
 
 Each extra is tested from the built wheel in an isolated environment. Adding a
 new optional dependency requires assigning it to a feature module in the import
@@ -58,7 +56,7 @@ contracts and adding its promised command to that wheel matrix.
 - **Smart Chunk Copying** — fast chunk copying without decompression when possible, up to 10x faster for filtering operations
 - **Unified Processing** — single `process` command combines recovery + filtering + compression in one optimized pass
 - **Precise Filtering** — regex topic filtering, time range filtering, and content type filtering with deferred schema/channel writing
-- **Broad Format Coverage** — converts ROS 1 `.bag` and ROS 2 `.db3` to MCAP, exports to NDJSON, CSV, Parquet, PCD, GeoJSON/KML/GPX, and image/video files
+- **Broad Format Coverage** — converts ROS 1 `.bag` and ROS 2 `.db3` to MCAP, exports to NDJSON, CSV, PCD, GeoJSON/KML/GPX, and image/video files
 - **Rich Terminal Output** — colored topics, Unicode distribution histograms, tree views, and responsive layouts
 - **Robust Error Handling** — graceful degradation with detailed error reporting and recovery statistics
 
@@ -747,22 +745,7 @@ pymcap-cli index topics /camera --sort-by messages
 
 # Apply pending schema migrations to an existing catalog
 pymcap-cli index migrate
-
-# Browse the catalog in a local Datasette web UI (dashboards, charts, cross-links)
-pymcap-cli index serve
 ```
-
-`index serve` launches [Datasette](https://datasette.io/) against the sidecar DB
-with bundled dashboards, canned queries, and a render plugin. It needs the
-`serve` extra:
-
-```bash
-uvx --from 'pymcap-cli[serve]' pymcap-cli index serve
-```
-
-Datasette runs from the same environment so the plugin resolves. Use `--db` to
-point at a non-default catalog, `--port` to change the port (default 8001), and
-`--no-browser` to skip auto-open.
 
 ### `records` — Raw Record Dump
 
@@ -872,16 +855,6 @@ pymcap-cli export-json data.mcap -o ./ndjson
 
 # One JSON file per message
 pymcap-cli export-json data.mcap -o ./json --per-message
-```
-
-### `export-parquet` — Parquet Files
-
-Export an MCAP file to a directory of Parquet files (one per topic). Requires
-the `parquet` extra.
-
-```bash
-pymcap-cli export-parquet data.mcap -o ./parquet
-pymcap-cli export-parquet data.mcap -o ./parquet --compression snappy
 ```
 
 ### `export-pcd` — Point Cloud Files

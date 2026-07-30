@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +17,34 @@ from pymcap_cli.exporters import video_exporter
 from pymcap_cli.exporters import video_file_writer as video_file_writer_module
 from pymcap_cli.exporters.video_exporter import _VideoTopicWriter
 from pymcap_cli.exporters.video_file_writer import VideoFileWriterSession
+
+
+def test_video_file_writer_imports_without_pyav() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class BlockPyAV(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "av" or fullname.startswith("av."):
+                    raise ModuleNotFoundError("No module named 'av'", name="av")
+                return None
+
+        sys.meta_path.insert(0, BlockPyAV())
+
+        import pymcap_cli.exporters.video_file_writer
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_video_topic_writer_close_reraises_flush_failure(monkeypatch, tmp_path) -> None:
@@ -99,3 +130,44 @@ def test_ffmpeg_cli_raw_odd_dimensions_are_cropped_to_even_frame(monkeypatch, tm
     expected = b"".join(bytes(range(row * 15, row * 15 + 12)) for row in range(4))
     assert written == [expected]
     assert writer.close() == 1
+
+
+@pytest.mark.parametrize(
+    ("encoding", "pixel"),
+    [
+        ("rgb8", b"\x20\x80\xe0"),
+        ("bgr8", b"\xe0\x80\x20"),
+        ("mono8", b"\x80"),
+    ],
+)
+def test_pyav_raw_padded_odd_dimensions_encode_to_even_frame(
+    encoding: str, pixel: bytes, tmp_path
+) -> None:
+    av = pytest.importorskip("av")
+    width = 5
+    height = 3
+    row = pixel * width
+    step = len(row) + 2
+    decoded = SimpleNamespace(
+        width=width,
+        height=height,
+        encoding=encoding,
+        step=step,
+        data=b"".join(row + bytes((index, index + 1)) for index in range(height)),
+    )
+    output = tmp_path / f"{encoding}.mp4"
+    writer = VideoFileWriterSession(
+        output,
+        codec=VideoCodec.H264,
+        encoder_backend=EncoderBackend.SOFTWARE,
+        quality=20,
+        mode=EncoderMode.PYAV,
+    )
+
+    writer.write_message(decoded, "sensor_msgs/Image", 0)
+
+    assert writer.close() == 1
+    with av.open(output) as container:
+        frames = list(container.decode(video=0))
+    assert len(frames) == 1
+    assert (frames[0].width, frames[0].height) == (4, 2)

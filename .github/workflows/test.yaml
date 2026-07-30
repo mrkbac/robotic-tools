@@ -200,6 +200,8 @@ jobs:
             --with "$pureini_wheel" \
             --with "${codec_wheel}[pointcloud]" \
             --with "${cli_wheel}[pointcloud]" \
+            --with numpy \
+            --with pointcloud2 \
             --with pillow \
             --with portable-ffmpeg \
             --with pytest \

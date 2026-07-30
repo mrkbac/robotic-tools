@@ -46,14 +46,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-all = ["pymcap-cli[video,pointcloud,plot,parquet,image,draco,bridge,xxhash,serve]"]
+all = ["pymcap-cli[video,pointcloud,plot,image,draco,bridge,xxhash]"]
 lite = ["pymcap-cli[image,draco,bridge,xxhash]"]
 bridge = ["robo-ws-bridge>=0.7.0"]
 bridge-codecs = ["pymcap-cli[bridge,pointcloud,video]"]
 bridge-proxy = ["pymcap-cli[bridge-codecs]"]
 draco = ["mcap-codec-support[draco]"]
 image = ["pillow>=10.0"]
-parquet = ["pyarrow>=15.0.0", "numpy>=1.24.0", "mcap-codec-support[pointcloud]>=0.14.0"]
 plot = [
     "kaleido>=1.0.0",
     "plotly>=6.0.0",
@@ -61,17 +60,6 @@ plot = [
 pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]
 video = ["mcap-codec-support[video]"]
 xxhash = ["xxhash>=3.0.0"]
-# `index serve` web UI. datasette<1 pin: datasette-dashboards 500s on the 1.0
-# pre-release. Run from the same env so the bundled pymcap_render plugin imports.
-serve = [
-    "pymcap-cli[xxhash]",
-    "datasette>=0.65.2,<1",
-    "datasette-block-robots>=1.1,<2",
-    "datasette-copyable>=0.3.2,<1",
-    "datasette-dashboards>=0.8.0,<1",
-    "datasette-export-notebook>=1.0.1,<2",
-    "datasette-vega>=0.6.2,<1",
-]
 
 
 [project.urls]

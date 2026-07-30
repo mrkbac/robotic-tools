@@ -78,7 +78,7 @@ class _StructuredTopicWriter:
 
 
 class StructuredExporter(Exporter, ABC):
-    """Base for CSV, JSON, Parquet, and other record-oriented formats."""
+    """Base for CSV, JSON, and other record-oriented formats."""
 
     def __init__(
         self,

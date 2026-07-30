@@ -16,10 +16,9 @@ from mcap_codec_support.video.common import (
     VideoEncoderError,
     build_encoder_options,
     get_encoder_options,
-    raw_image_to_array,
+    raw_image_to_buffer,
     resolve_encoder_for_backend,
 )
-from mcap_codec_support.video.compression import decode_compressed_image_to_rgb_array
 from mcap_codec_support.video.ffmpeg import (
     ROS_ENCODING_TO_PIX_FMT,
     check_encoder_cli,
@@ -33,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    import numpy as np
+    from av import VideoFrame
     from mcap_codec_support._protocols import CompressedImageMsg, RawImageMessage
 
 
@@ -44,7 +43,7 @@ class _VideoFileStrategy(Protocol):
 
     def write_raw(self, data: bytes, log_time_ns: int) -> None: ...
 
-    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None: ...
+    def write_frame(self, frame: VideoFrame, log_time_ns: int) -> None: ...
 
     def close(self) -> int: ...
 
@@ -63,51 +62,38 @@ def _bitrate_for(quality: int) -> int:
     return _TARGET_BITRATE_BY_QUALITY[-1][1]
 
 
-_RAW_BYTES_PER_PIXEL: dict[str, int] = {
-    "rgb": 3,
-    "rgb8": 3,
-    "bgr": 3,
-    "bgr8": 3,
-    "mono": 1,
-    "mono8": 1,
-    "8uc1": 1,
-}
+def _decode_compressed_frame(data: bytes) -> VideoFrame:
+    from mcap_codec_support.video.pyav import decode_compressed_frame  # noqa: PLC0415
+
+    return decode_compressed_frame(data)
+
+
+def _raw_image_to_frame(decoded: RawImageMessage) -> VideoFrame:
+    from mcap_codec_support.video.pyav import raw_image_to_frame  # noqa: PLC0415
+
+    return raw_image_to_frame(decoded)
 
 
 def _pack_raw_image_bytes(decoded: RawImageMessage, *, width: int, height: int) -> bytes:
     """Pack raw ROS Image bytes to the exact frame size expected by ffmpeg."""
-    encoding = str(decoded.encoding).lower()
-    bytes_per_pixel = _RAW_BYTES_PER_PIXEL.get(encoding)
-    if bytes_per_pixel is None:
-        raise VideoEncoderError(f"Unsupported image encoding: {decoded.encoding}")
-
-    src_width = int(decoded.width)
-    src_height = int(decoded.height)
-    if width > src_width or height > src_height:
+    buffer = raw_image_to_buffer(decoded)
+    if width > buffer.width or height > buffer.height:
         raise VideoEncoderError(
-            f"Cannot pack {src_width}x{src_height} frame as larger {width}x{height}"
+            f"Cannot pack {buffer.width}x{buffer.height} frame as larger {width}x{height}"
         )
 
-    src_row_bytes = src_width * bytes_per_pixel
+    bytes_per_pixel = buffer.row_bytes // buffer.width
     dst_row_bytes = width * bytes_per_pixel
-    step = int(decoded.step)
-    if step < src_row_bytes:
-        raise VideoEncoderError(f"Image step {step} is smaller than row size {src_row_bytes}")
 
-    data = bytes(decoded.data)
-    required = step * src_height
-    if len(data) < required:
-        raise VideoEncoderError(f"Image data has {len(data)} bytes, expected at least {required}")
-
-    if width == src_width and height == src_height and step == dst_row_bytes:
-        return data
+    if width == buffer.width and height == buffer.height and buffer.step == dst_row_bytes:
+        return buffer.data[: dst_row_bytes * height]
 
     packed = bytearray(dst_row_bytes * height)
     offset = 0
     for row in range(height):
-        start = row * step
+        start = row * buffer.step
         end = start + dst_row_bytes
-        packed[offset : offset + dst_row_bytes] = data[start:end]
+        packed[offset : offset + dst_row_bytes] = buffer.data[start:end]
         offset += dst_row_bytes
     return bytes(packed)
 
@@ -301,21 +287,24 @@ class _PyAVMp4Strategy:
         self._stream = stream
 
     def write_compressed(self, data: bytes, log_time_ns: int) -> None:
-        self.write_rgb(decode_compressed_image_to_rgb_array(data), log_time_ns)
+        self.write_frame(_decode_compressed_frame(data), log_time_ns)
 
     def write_raw(self, data: bytes, log_time_ns: int) -> None:
         del data, log_time_ns
         raise VideoEncoderError("PyAV MP4 writer needs decoded RGB for raw frames")
 
-    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None:
-        import av  # noqa: PLC0415
+    def write_frame(self, frame: VideoFrame, log_time_ns: int) -> None:
         import av.error  # noqa: PLC0415
 
         if self._first_timestamp_ns is None:
             self._first_timestamp_ns = log_time_ns
 
         try:
-            frame = av.VideoFrame.from_ndarray(rgb, format="rgb24").reformat(format="yuv420p")
+            frame = frame.reformat(
+                width=self.config.width,
+                height=self.config.height,
+                format="yuv420p",
+            )
         except (av.error.FFmpegError, ValueError) as exc:
             raise VideoEncoderError(f"Frame conversion failed: {exc}") from exc
 
@@ -376,9 +365,11 @@ class _FfmpegMp4Strategy:
         del log_time_ns
         self._encoder.write_frame(data)
 
-    def write_rgb(self, rgb: np.ndarray, log_time_ns: int) -> None:
+    def write_frame(self, frame: VideoFrame, log_time_ns: int) -> None:
+        from mcap_codec_support.video.pyav import video_frame_to_rgb_bytes  # noqa: PLC0415
+
         del log_time_ns
-        self._encoder.write_frame(rgb.tobytes())
+        self._encoder.write_frame(video_frame_to_rgb_bytes(frame))
 
     def close(self) -> int:
         frames = self._encoder.frames_fed
@@ -419,26 +410,22 @@ class VideoFileWriterSession:
 
         if schema_name in COMPRESSED_SCHEMAS:
             data = bytes(decoded.data)
-            first_rgb = self._ensure_open_for_compressed(data)
+            first_frame = self._ensure_open_for_compressed(data)
             assert self._strategy is not None
             if self._input_kind == "pyav":
-                rgb = (
-                    first_rgb
-                    if first_rgb is not None
-                    else decode_compressed_image_to_rgb_array(data)
-                )
-                self._strategy.write_rgb(rgb, log_time_ns)
+                frame = first_frame if first_frame is not None else _decode_compressed_frame(data)
+                self._strategy.write_frame(frame, log_time_ns)
             else:
                 self._strategy.write_compressed(data, log_time_ns)
             return
 
         if schema_name in RAW_SCHEMAS:
             raw = cast("RawImageMessage", decoded)
-            first_rgb = self._ensure_open_for_raw(raw)
+            first_frame = self._ensure_open_for_raw(raw)
             assert self._strategy is not None
             if self._input_kind == "pyav":
-                rgb = first_rgb if first_rgb is not None else raw_image_to_array(raw)
-                self._strategy.write_rgb(rgb, log_time_ns)
+                frame = first_frame if first_frame is not None else _raw_image_to_frame(raw)
+                self._strategy.write_frame(frame, log_time_ns)
             else:
                 data = _pack_raw_image_bytes(
                     raw,
@@ -450,24 +437,24 @@ class VideoFileWriterSession:
 
         raise VideoEncoderError(f"Unexpected image schema {schema_name!r}")
 
-    def _ensure_open_for_compressed(self, data: bytes) -> np.ndarray | None:
+    def _ensure_open_for_compressed(self, data: bytes) -> VideoFrame | None:
         return self._open_with_fallback(
-            decode_pyav=lambda: decode_compressed_image_to_rgb_array(data),
+            decode_pyav=lambda: _decode_compressed_frame(data),
             open_ffmpeg=lambda: self._open_ffmpeg_compressed(data),
         )
 
-    def _ensure_open_for_raw(self, decoded: RawImageMessage) -> np.ndarray | None:
+    def _ensure_open_for_raw(self, decoded: RawImageMessage) -> VideoFrame | None:
         return self._open_with_fallback(
-            decode_pyav=lambda: raw_image_to_array(decoded),
+            decode_pyav=lambda: _raw_image_to_frame(decoded),
             open_ffmpeg=lambda: self._open_ffmpeg_raw(decoded),
         )
 
     def _open_with_fallback(
         self,
         *,
-        decode_pyav: Callable[[], np.ndarray],
+        decode_pyav: Callable[[], VideoFrame],
         open_ffmpeg: Callable[[], None],
-    ) -> np.ndarray | None:
+    ) -> VideoFrame | None:
         if self._strategy is not None:
             return None
 
@@ -476,9 +463,8 @@ class VideoFileWriterSession:
             return None
 
         try:
-            rgb = decode_pyav()
-            height, width = rgb.shape[:2]
-            self._open_pyav(width, height)
+            frame = decode_pyav()
+            self._open_pyav(frame.width, frame.height)
         except (ImportError, VideoEncoderError) as exc:
             if self._mode is EncoderMode.PYAV:
                 raise
@@ -488,7 +474,7 @@ class VideoFileWriterSession:
                 )
             open_ffmpeg()
             return None
-        return rgb
+        return frame
 
     def _open_pyav(self, width: int, height: int) -> None:
         width, height = _even_dimensions(width, height)

@@ -1,8 +1,4 @@
-"""PyAV-based video compression and decompression backend.
-
-All ``av`` (PyAV) usage is confined to this module. Importing this file
-requires PyAV and numpy to be installed.
-"""
+"""PyAV-based video compression and decompression backend."""
 
 from __future__ import annotations
 
@@ -21,6 +17,7 @@ from mcap_codec_support.video.common import (
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
+    raw_image_to_buffer,
 )
 from mcap_codec_support.video.common import (
     resolve_encoder as _resolve_encoder,
@@ -32,6 +29,8 @@ from mcap_codec_support.video.common import (
 if TYPE_CHECKING:
     from av.container import InputContainer
     from av.video.codeccontext import VideoCodecContext
+
+    from mcap_codec_support._protocols import RawImageMessage
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +126,56 @@ def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
         raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
 
     raise VideoEncoderError("Decoder produced no frames")
+
+
+_RAW_IMAGE_FORMATS: dict[str, str] = {
+    "rgb": "rgb24",
+    "rgb8": "rgb24",
+    "bgr": "bgr24",
+    "bgr8": "bgr24",
+    "mono": "gray",
+    "mono8": "gray",
+    "8uc1": "gray",
+}
+
+
+def raw_image_to_frame(message: RawImageMessage) -> VideoFrame:
+    """Convert a ROS Image message to a PyAV frame without NumPy."""
+    buffer = raw_image_to_buffer(message)
+    pixel_format = _RAW_IMAGE_FORMATS[buffer.encoding]
+    frame = VideoFrame(buffer.width, buffer.height, pixel_format)
+    plane = frame.planes[0]
+    if plane.line_size < buffer.row_bytes:
+        raise VideoEncoderError(
+            f"PyAV plane stride {plane.line_size} is smaller than row size {buffer.row_bytes}"
+        )
+
+    if buffer.step == plane.line_size:
+        plane.update(buffer.data[: plane.buffer_size])
+        return frame
+
+    packed = bytearray(plane.buffer_size)
+    for row in range(buffer.height):
+        source_start = row * buffer.step
+        target_start = row * plane.line_size
+        packed[target_start : target_start + buffer.row_bytes] = buffer.data[
+            source_start : source_start + buffer.row_bytes
+        ]
+    plane.update(packed)
+    return frame
+
+
+def video_frame_to_rgb_bytes(frame: VideoFrame) -> bytes:
+    """Return tightly packed RGB24 bytes for a PyAV frame."""
+    rgb = frame.reformat(format="rgb24")
+    plane = rgb.planes[0]
+    row_bytes = rgb.width * 3
+    raw = bytes(plane)
+    if plane.line_size == row_bytes:
+        return raw[: row_bytes * rgb.height]
+    return b"".join(
+        raw[row * plane.line_size : row * plane.line_size + row_bytes] for row in range(rgb.height)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +367,7 @@ class PyAVVideoDecompressor:
             return self._frame_to_jpeg(frame)
 
         rgb_frame = frame.reformat(format="rgb24")
-        raw_data = rgb_frame.to_ndarray().tobytes()
+        raw_data = video_frame_to_rgb_bytes(rgb_frame)
         return DecompressedFrame(
             data=raw_data,
             width=rgb_frame.width,
@@ -347,7 +396,7 @@ class PyAVVideoDecompressor:
                 results.append(self._frame_to_jpeg(frame))
             else:
                 rgb_frame = frame.reformat(format="rgb24")
-                raw_data = rgb_frame.to_ndarray().tobytes()
+                raw_data = video_frame_to_rgb_bytes(rgb_frame)
                 results.append(
                     DecompressedFrame(
                         data=raw_data,

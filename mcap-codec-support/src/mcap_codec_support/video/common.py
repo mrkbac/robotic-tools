@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    import numpy as np
     from PIL.Image import Image as PILImage
 
     from mcap_codec_support._protocols import RawImageMessage
@@ -67,6 +66,62 @@ class DecompressedFrame:
 
 DEFAULT_FPS: float = 30.0
 DEFAULT_GOP_SIZE: int = 30
+
+_RAW_IMAGE_BYTES_PER_PIXEL: dict[str, int] = {
+    "rgb": 3,
+    "rgb8": 3,
+    "bgr": 3,
+    "bgr8": 3,
+    "mono": 1,
+    "mono8": 1,
+    "8uc1": 1,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RawImageBuffer:
+    width: int
+    height: int
+    encoding: str
+    step: int
+    row_bytes: int
+    data: bytes
+
+
+def raw_image_to_buffer(message: RawImageMessage) -> RawImageBuffer:
+    """Validate a ROS Image message and return its byte layout."""
+    width = int(message.width)
+    height = int(message.height)
+    if width <= 0 or height <= 0:
+        raise VideoEncoderError(f"Image dimensions must be positive, got {width}x{height}")
+
+    encoding = str(message.encoding).lower()
+    try:
+        bytes_per_pixel = _RAW_IMAGE_BYTES_PER_PIXEL[encoding]
+    except KeyError as exc:
+        raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}") from exc
+
+    data = bytes(message.data)
+    if not data:
+        raise VideoEncoderError("Image has no data")
+
+    row_bytes = width * bytes_per_pixel
+    step = int(message.step)
+    if step < row_bytes:
+        raise VideoEncoderError(f"Image step {step} is smaller than row size {row_bytes}")
+    required = step * height
+    if len(data) < required:
+        raise VideoEncoderError(f"Image data has {len(data)} bytes, expected at least {required}")
+
+    return RawImageBuffer(
+        width=width,
+        height=height,
+        encoding=encoding,
+        step=step,
+        row_bytes=row_bytes,
+        data=data,
+    )
+
 
 # A 32x32 baseline JPEG used by the hardware capability probes (GStreamer nv
 # decode/encode, ffmpeg hardware-MJPEG decode). Self-contained so probing needs
@@ -209,31 +264,6 @@ def calculate_downscale_dimensions(width: int, height: int, max_dimension: int) 
     return ensure_even(new_width), ensure_even(new_height)
 
 
-def raw_image_to_array(message: RawImageMessage) -> np.ndarray:
-    """Convert a ROS Image message to an RGB numpy array."""
-    import numpy as np  # noqa: PLC0415
-
-    if not message.data:
-        raise VideoEncoderError("Image has no data")
-
-    width = message.width
-    height = message.height
-    encoding = str(message.encoding).lower()
-    data = bytes(message.data)
-
-    if encoding in {"rgb", "rgb8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array.copy()
-    if encoding in {"bgr", "bgr8"}:
-        array = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
-        return array[..., ::-1].copy()
-    if encoding in {"mono", "mono8", "8uc1"}:
-        mono_array = np.frombuffer(data, dtype=np.uint8).reshape(height, width)
-        return np.repeat(mono_array[:, :, None], 3, axis=2)
-
-    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
-
-
 def raw_image_to_pil(message: RawImageMessage) -> PILImage:
     """Convert a ROS Image message to a PIL ``Image`` (RGB)."""
     try:
@@ -244,22 +274,24 @@ def raw_image_to_pil(message: RawImageMessage) -> PILImage:
             "Install with: uv add 'mcap-codec-support[video]'"
         ) from exc
 
-    if not message.data:
-        raise VideoEncoderError("Image has no data")
+    buffer = raw_image_to_buffer(message)
+    if buffer.encoding in {"rgb", "rgb8"}:
+        image_mode, raw_mode = "RGB", "RGB"
+    elif buffer.encoding in {"bgr", "bgr8"}:
+        image_mode, raw_mode = "RGB", "BGR"
+    else:
+        image_mode, raw_mode = "L", "L"
 
-    width = message.width
-    height = message.height
-    encoding = str(message.encoding).lower()
-    data = bytes(message.data)
-
-    if encoding in {"rgb", "rgb8"}:
-        return Image.frombytes("RGB", (width, height), data)
-    if encoding in {"bgr", "bgr8"}:
-        return Image.frombytes("RGB", (width, height), data, "raw", "BGR")
-    if encoding in {"mono", "mono8", "8uc1"}:
-        return Image.frombytes("L", (width, height), data).convert("RGB")
-
-    raise VideoEncoderError(f"Unsupported image encoding: {message.encoding}")
+    image = Image.frombytes(
+        image_mode,
+        (buffer.width, buffer.height),
+        buffer.data,
+        "raw",
+        raw_mode,
+        buffer.step,
+        1,
+    )
+    return image.convert("RGB") if image_mode == "L" else image
 
 
 # ---------------------------------------------------------------------------

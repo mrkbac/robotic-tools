@@ -7,8 +7,6 @@ import os
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
-
 from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.video.common import (
     DEFAULT_FPS,
@@ -17,7 +15,6 @@ from mcap_codec_support.video.common import (
     EncoderMode,
     VideoEncoderError,
     calculate_downscale_dimensions,
-    raw_image_to_array,
     raw_image_to_pil,
 )
 from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS
@@ -33,7 +30,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from concurrent.futures import Future, ThreadPoolExecutor
 
-    import numpy.typing as npt
     from av import VideoFrame
     from small_mcap import DecodedMessage
 
@@ -73,10 +69,9 @@ class _PyAVCompressionBackend:
         if schema_name in COMPRESSED_SCHEMAS:
             return self.decode_compressed(bytes(msg.decoded_message.data))
 
-        import av  # noqa: PLC0415
+        from mcap_codec_support.video.pyav import raw_image_to_frame  # noqa: PLC0415
 
-        rgb_array = raw_image_to_array(msg.decoded_message)
-        frame = av.VideoFrame.from_ndarray(rgb_array, format="rgb24")
+        frame = raw_image_to_frame(msg.decoded_message)
         return frame, frame.width, frame.height
 
     def create_encoder(
@@ -373,14 +368,6 @@ def encode_raw_image_to_jpeg(
     return encode_raw_image_to_compressed(
         decoded_message, image_format="jpeg", jpeg_quality=jpeg_quality, scale=scale
     )
-
-
-def decode_compressed_image_to_rgb_array(data: bytes) -> npt.NDArray[np.uint8]:
-    """Decode JPEG/PNG compressed image bytes to an RGB (uint8) numpy array."""
-    from mcap_codec_support.video.pyav import decode_compressed_frame  # noqa: PLC0415
-
-    rgb = decode_compressed_frame(data).to_ndarray(format="rgb24")
-    return np.asarray(rgb, dtype=np.uint8)
 
 
 def create_video_decompressor(

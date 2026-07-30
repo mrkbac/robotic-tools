@@ -2,8 +2,8 @@
 
 The CLI's ``--output`` is a directory; each topic writes to
 ``<output>/<safe_topic>.mp4``. This matches the rest of the export family
-(images / pcd / csv / json / parquet) — every exporter writes per-topic
-files into a single directory and the default
+(images / pcd / csv / json) — every exporter writes per-topic files into a
+single directory and the default
 :meth:`Exporter.validate_output` handles directory creation + ``--force``.
 
 Cross-topic grid composition (the legacy ``video`` behaviour for >1 topic)

@@ -72,13 +72,24 @@ def test_command_help_does_not_import_unrelated_optional_dependencies(
     assert f"pymcap-cli {args[0]}" in result.stdout
 
 
-def test_serve_extra_reuses_xxhash_extra() -> None:
-    requirements = metadata.requires("pymcap-cli") or []
-    serve_requirements = [
-        requirement for requirement in requirements if "extra == 'serve'" in requirement
-    ]
+@pytest.mark.parametrize(
+    ("args", "removed_command"),
+    [
+        (["--help"], "export-parquet"),
+        (["index", "--help"], "serve"),
+    ],
+)
+def test_removed_command_is_not_registered(
+    args: list[str],
+    removed_command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.app(args)
 
-    assert any(requirement.startswith("pymcap-cli[xxhash]") for requirement in serve_requirements)
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 0
+    assert removed_command not in captured.out + captured.err
 
 
 def test_ros_parser_dependency_requires_stream_modifier_api() -> None:

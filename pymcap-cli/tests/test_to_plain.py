@@ -1,11 +1,11 @@
-"""Regression tests for ``to_plain`` — decoded ROS2 value → DuckDB-ready dict.
+"""Regression tests for ``to_plain`` — decoded ROS2 value → structured data.
 
 The bug this guards against: the ROS2 decoder returns ``memoryview.cast('d')``
 (or 'f', 'i', 'h' …) for primitive fixed-size arrays. Those memoryviews have
 ``len == N`` (number of elements) but ``.tobytes()`` returns ``N * itemsize``
 raw bytes. An earlier version of ``to_plain`` unconditionally called
-``.tobytes()`` on every memoryview, silently turning ``float64[9]`` into 72
-bytes and making pyarrow reject the column with "expected 9 but got 72".
+``.tobytes()`` on every memoryview, silently turning ``float64[9]`` into
+72 bytes instead of preserving its nine values.
 """
 
 from __future__ import annotations
