@@ -1872,10 +1872,12 @@ fn decoder_for_field(field: &PointField, encoding: EncodingOptions, version: u8)
                     resolution: resolution as f64,
                     previous: 0,
                 }
-            } else if field.resolution.is_some() && encoding != EncodingOptions::Lossless {
+            } else if let Some(resolution) = field.resolution
+                && encoding != EncodingOptions::Lossless
+            {
                 FieldDecoder::Float64Lossy {
                     offset,
-                    resolution: field.resolution.unwrap() as f64,
+                    resolution: resolution as f64,
                     previous: 0,
                 }
             } else if field.resolution.is_none() && version >= 4 {
