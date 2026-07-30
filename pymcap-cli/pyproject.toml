@@ -1,6 +1,6 @@
 [project]
 name = "pymcap-cli"
-version = "0.26.0"
+version = "0.27.0"
 description = "High-performance Python CLI for MCAP file processing with advanced recovery, filtering, and optimization capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -57,7 +57,9 @@ plot = [
     "kaleido>=1.0.0",
     "plotly>=6.0.0",
 ]
-pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]
+pointcloud = [
+    "mcap-codec-support[pointcloud]>=0.15.0",
+]
 video = ["mcap-codec-support[video]"]
 xxhash = ["xxhash>=3.0.0"]
 
@@ -80,5 +82,5 @@ mcap-ros2-support-fast = { workspace = true }
 ros-parser = { workspace = true }
 pureini = { workspace = true }
 pointcloud2 = { workspace = true }
-mcap-codec-support = { workspace = true }
 robo-ws-bridge = { workspace = true }
+mcap-codec-support = { workspace = true }
