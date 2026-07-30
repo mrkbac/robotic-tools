@@ -1216,13 +1216,7 @@ fn decode_integer_points_dense_u32(
     let mut value = *previous as u32;
     for bytes in output.chunks_exact_mut(4) {
         value = value.wrapping_add(varint::decode_at(input, &mut cursor)? as u32);
-        // Every exact chunk has space for one unaligned u32 value.
-        unsafe {
-            bytes
-                .as_mut_ptr()
-                .cast::<u32>()
-                .write_unaligned(value.to_le());
-        }
+        bytes.copy_from_slice(&value.to_le_bytes());
     }
     *position = cursor;
     *previous = i64::from(value);

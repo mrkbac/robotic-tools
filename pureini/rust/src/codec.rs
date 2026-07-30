@@ -1273,13 +1273,7 @@ fn decode_adaptive_delta_dense_u32(
     let end = start + point_count * 4;
     for bytes in output[start..end].chunks_exact_mut(4) {
         previous = previous.wrapping_add(decode_varint_at(stage, &mut cursor)? as u32);
-        // Every exact chunk has space for one unaligned u32 value.
-        unsafe {
-            bytes
-                .as_mut_ptr()
-                .cast::<u32>()
-                .write_unaligned(previous.to_le());
-        }
+        bytes.copy_from_slice(&previous.to_le_bytes());
     }
     *position = cursor;
     Ok(())
