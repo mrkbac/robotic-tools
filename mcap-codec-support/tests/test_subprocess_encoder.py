@@ -10,7 +10,7 @@ import mcap_codec_support.video.compression as compression_module
 import mcap_codec_support.video.ffmpeg as ffmpeg_module
 import pytest
 from mcap_codec_support.video import EncoderMode, create_video_compression_backend
-from mcap_codec_support.video.common import PROBE_JPEG, resolve_encoder
+from mcap_codec_support.video.common import HW_PROBE_JPEG, PROBE_JPEG, resolve_encoder
 from mcap_codec_support.video.ffmpeg import (
     AnnexBParser,
     FFmpegVideoEncoder,
@@ -221,6 +221,9 @@ class TestFfmpegDiscovery:
 class TestImageDimensionProbe:
     def test_probe_jpeg_keeps_legacy_ffmpeg_geometry(self) -> None:
         assert probe_image_dimensions(PROBE_JPEG) == (32, 32)
+
+    def test_hardware_probe_jpeg_has_decoder_safe_geometry(self) -> None:
+        assert probe_image_dimensions(HW_PROBE_JPEG) == (256, 256)
 
     def test_probe_falls_back_to_ffprobe_with_binary_input(self) -> None:
         image_module = pytest.importorskip("PIL.Image")

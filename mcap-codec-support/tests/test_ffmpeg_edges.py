@@ -114,8 +114,8 @@ def test_probe_hw_mjpeg_decoder_handles_failures_and_success(monkeypatch) -> Non
     monkeypatch.setattr(ffmpeg, "check_decoder_cli", lambda _name: True)
     calls = []
 
-    def run(args, **_kwargs):
-        calls.append(args)
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
         if args[args.index("-c:v") + 1] == "first":
             raise subprocess.TimeoutExpired("ffmpeg", 2)
         return subprocess.CompletedProcess(args, 0, b"", b"")
@@ -125,6 +125,7 @@ def test_probe_hw_mjpeg_decoder_handles_failures_and_success(monkeypatch) -> Non
     try:
         assert ffmpeg.probe_hw_mjpeg_decoder() == "second"
         assert len(calls) == 2
+        assert calls[1][1]["input"] == ffmpeg.HW_PROBE_JPEG
     finally:
         ffmpeg.probe_hw_mjpeg_decoder.cache_clear()
 
@@ -329,6 +330,97 @@ def test_ffmpeg_encoder_builds_raw_and_image_pipe_commands(monkeypatch) -> None:
     finally:
         raw.close()
         image.close()
+
+
+def test_ffmpeg_encoder_uses_cuda_range_pipeline_for_nvenc(monkeypatch) -> None:
+    commands: list[list[str]] = []
+
+    def popen(command, **_kwargs):
+        commands.append(command)
+        return _FakeProcess()
+
+    monkeypatch.setattr(ffmpeg, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(ffmpeg.subprocess, "Popen", popen)
+    monkeypatch.setattr(ffmpeg.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(ffmpeg, "_frame_sync_args", lambda _: [])
+
+    encoder = ffmpeg.FFmpegVideoEncoder(
+        16,
+        8,
+        "hevc_nvenc",
+        decode_codec="mjpeg_cuvid",
+        scale=(8, 4),
+    )
+    try:
+        command = commands[0]
+        assert command[command.index("-hwaccel") : command.index("-hwaccel") + 4] == [
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+        ]
+        assert command[command.index("-vf") : command.index("-vf") + 2] == [
+            "-vf",
+            "scale_cuda=w=8:h=4,colorspace_cuda=range=tv",
+        ]
+
+        output_pix_fmt = command.index("-pix_fmt", command.index("hevc_nvenc"))
+        assert command[output_pix_fmt : output_pix_fmt + 2] == ["-pix_fmt", "cuda"]
+        assert command[command.index("-color_range") : command.index("-color_range") + 2] == [
+            "-color_range",
+            "tv",
+        ]
+        assert command[command.index("-colorspace") : command.index("-colorspace") + 2] == [
+            "-colorspace",
+            "bt470bg",
+        ]
+    finally:
+        encoder.close()
+
+
+@pytest.mark.parametrize(
+    ("codec_name", "decode_codec", "input_pix_fmt"),
+    [
+        ("libx264", "mjpeg_cuvid", None),
+        ("h264_nvenc", "mjpeg_cuvid", None),
+        ("hevc_nvenc", "mjpeg", None),
+        ("hevc_nvenc", None, "rgb24"),
+    ],
+)
+def test_ffmpeg_encoder_keeps_cuda_path_narrow(
+    monkeypatch,
+    codec_name: str,
+    decode_codec: str | None,
+    input_pix_fmt: str | None,
+) -> None:
+    commands: list[list[str]] = []
+
+    def popen(command, **_kwargs):
+        commands.append(command)
+        return _FakeProcess()
+
+    monkeypatch.setattr(ffmpeg, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(ffmpeg.subprocess, "Popen", popen)
+    monkeypatch.setattr(ffmpeg.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(ffmpeg, "_frame_sync_args", lambda _: [])
+
+    encoder = ffmpeg.FFmpegVideoEncoder(
+        16,
+        8,
+        codec_name,
+        decode_codec=decode_codec,
+        input_pix_fmt=input_pix_fmt,
+    )
+    try:
+        command = commands[0]
+        assert "-hwaccel" not in command
+        assert "colorspace_cuda=range=tv" not in command
+        output_pix_fmt = command.index("-pix_fmt", command.index(codec_name))
+        assert command[output_pix_fmt : output_pix_fmt + 2] == ["-pix_fmt", "yuv420p"]
+        assert "-color_range" not in command
+        assert "-colorspace" not in command
+    finally:
+        encoder.close()
 
 
 def test_ffmpeg_encoder_reports_popen_error(monkeypatch) -> None:

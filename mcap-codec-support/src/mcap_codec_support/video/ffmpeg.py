@@ -18,7 +18,7 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from mcap_codec_support.video.common import (
-    PROBE_JPEG,
+    HW_PROBE_JPEG,
     DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
@@ -200,7 +200,7 @@ def probe_hw_mjpeg_decoder(timeout: float = 2.5) -> str | None:
                     "null",
                     "-",
                 ],
-                input=PROBE_JPEG,
+                input=HW_PROBE_JPEG,
                 capture_output=True,
                 timeout=timeout,
                 check=False,
@@ -429,6 +429,8 @@ def _build_output_args(
     gop_size: int,
     options: dict[str, str],
     bit_rate: int | None,
+    *,
+    use_cuda: bool = False,
 ) -> list[str]:
     """Build the shared encoder output arguments."""
     cmd: list[str] = [
@@ -440,10 +442,13 @@ def _build_output_args(
         "-bf",
         "0",
         "-pix_fmt",
-        "yuv420p",
-        "-fflags",
-        "+flush_packets",
+        "cuda" if use_cuda else "yuv420p",
     ]
+    if use_cuda:
+        # JPEG/MJPEG is full-range BT.470 B/G. Convert the range on the GPU
+        # before NVENC, then keep matching metadata on the output stream.
+        cmd.extend(["-color_range", "tv", "-colorspace", "bt470bg"])
+    cmd.extend(["-fflags", "+flush_packets"])
     if bit_rate is not None:
         cmd.extend(["-b:v", str(bit_rate)])
     for key, value in options.items():
@@ -469,6 +474,20 @@ def _require_ffmpeg() -> str:
 _JPEG_MAGIC = b"\xff\xd8"
 # PNG magic bytes.
 _PNG_MAGIC = b"\x89PNG"
+
+_CUDA_MJPEG_DECODER = "mjpeg_cuvid"
+_CUDA_NVENC_ENCODERS = frozenset({"hevc_nvenc"})
+
+
+def _use_cuda_mjpeg_path(
+    *, codec_name: str, decode_codec: str | None, input_pix_fmt: str | None
+) -> bool:
+    """Return whether the tested CUDA-resident MJPEG→NVENC path is safe."""
+    return (
+        input_pix_fmt is None
+        and decode_codec == _CUDA_MJPEG_DECODER
+        and codec_name in _CUDA_NVENC_ENCODERS
+    )
 
 
 def probe_image_dimensions(data: bytes) -> tuple[int, int]:
@@ -583,6 +602,8 @@ class FFmpegVideoEncoder:
     *decode_codec* (JPEG path only) forces the input decoder — pass a hardware
     MJPEG decoder from :func:`probe_hw_mjpeg_decoder` to offload JPEG decode off
     the CPU inside this same process; ``None`` lets ffmpeg pick the CPU decoder.
+    The tested ``mjpeg_cuvid`` → ``hevc_nvenc`` combination also keeps frames
+    on CUDA and performs the JPEG full-range conversion with CUDA filters.
     """
 
     def __init__(
@@ -603,6 +624,11 @@ class FFmpegVideoEncoder:
         codec_fam = _codec_family(codec_name)
         fps_int = max(round(target_fps), 1)
         options, bit_rate = build_encoder_options(codec_name, quality, width, height, preset=preset)
+        use_cuda = _use_cuda_mjpeg_path(
+            codec_name=codec_name,
+            decode_codec=decode_codec,
+            input_pix_fmt=input_pix_fmt,
+        )
 
         if input_pix_fmt is not None:
             # Raw pixel data (rgb24, bgr24, gray, etc.).
@@ -635,15 +661,32 @@ class FFmpegVideoEncoder:
                 "-probesize",
                 "32",
             ]
+            if use_cuda:
+                cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
             if decode_codec is not None:
                 cmd.extend(["-c:v", decode_codec])
             cmd.extend(["-r", str(fps_int), "-i", "pipe:0"])
 
+        filters: list[str] = []
         if scale is not None:
             sw, sh = scale
-            cmd.extend(["-vf", f"scale={sw}:{sh}"])
+            filters.append(f"scale_cuda=w={sw}:h={sh}" if use_cuda else f"scale={sw}:{sh}")
+        if use_cuda:
+            filters.append("colorspace_cuda=range=tv")
+        if filters:
+            cmd.extend(["-vf", ",".join(filters)])
 
-        cmd.extend(_build_output_args(ffmpeg, codec_fam, codec_name, gop_size, options, bit_rate))
+        cmd.extend(
+            _build_output_args(
+                ffmpeg,
+                codec_fam,
+                codec_name,
+                gop_size,
+                options,
+                bit_rate,
+                use_cuda=use_cuda,
+            )
+        )
 
         self.config = EncoderConfig(width=width, height=height, codec_name=codec_name)
 
