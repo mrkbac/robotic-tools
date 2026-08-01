@@ -304,6 +304,17 @@ class McapWriterRaw:
 
         self._started = True
 
+    def _validate_message(self, channel_id: int) -> None:
+        if not self._started:
+            raise WriterNotStartedError
+        if self._finished:
+            raise RuntimeError("Writer already finished")
+        if channel_id not in self.channels:
+            raise ValueError(
+                f"Channel ID {channel_id} does not exist. "
+                f"Add the channel using add_channel() before adding messages to it."
+            )
+
     def add_schema(self, schema_id: int, name: str, encoding: str, data: bytes) -> None:
         """Add a schema to the file."""
         if not self._started:
@@ -314,6 +325,9 @@ class McapWriterRaw:
             raise ValueError("Schema ID cannot be 0")
 
         schema = Schema(id=schema_id, name=name, encoding=encoding, data=data)
+        existing = self.schemas.get(schema.id)
+        if existing is not None and existing != schema:
+            raise ValueError(f"Conflicting schema ID {schema.id}")
         self.schemas[schema.id] = schema
 
         self._write_record(schema)
@@ -346,6 +360,9 @@ class McapWriterRaw:
             message_encoding=message_encoding,
             metadata=metadata or {},
         )
+        existing = self.channels.get(channel.id)
+        if existing is not None and existing != channel:
+            raise ValueError(f"Conflicting channel ID {channel.id}")
         self.channels[channel.id] = channel
 
         self._write_record(channel)
@@ -359,17 +376,7 @@ class McapWriterRaw:
         sequence: int = 0,
     ) -> None:
         """Add a message to the file."""
-        if not self._started:
-            raise WriterNotStartedError
-        if self._finished:
-            raise RuntimeError("Writer already finished")
-
-        # Validate channel_id exists
-        if channel_id not in self.channels:
-            raise ValueError(
-                f"Channel ID {channel_id} does not exist. "
-                f"Add the channel using add_channel() before adding messages to it."
-            )
+        self._validate_message(channel_id)
 
         message = Message(
             channel_id=channel_id,
@@ -956,6 +963,7 @@ class McapWriter(McapWriterRaw):
     ) -> None:
         """Add a message to the file."""
         if self.use_chunking and self.chunk_builder is not None:
+            self._validate_message(channel_id)
             # Check if chunk is ready to be written *before* adding the new message
             if (
                 self.chunk_builder.buf_pos >= self.chunk_builder.chunk_size

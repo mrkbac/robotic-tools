@@ -1,6 +1,7 @@
 """Tests for rebuild.py - rebuilding MCAP summary sections from data."""
 
 import io
+import struct
 from pathlib import Path
 
 import pytest
@@ -11,13 +12,74 @@ from small_mcap import (
     rebuild_summary,
     stream_reader,
 )
-from small_mcap.exceptions import McapError
+from small_mcap.exceptions import (
+    CRCValidationError,
+    EndOfFileError,
+    McapError,
+    UnsupportedCompressionError,
+)
 from small_mcap.rebuild import MESSAGE_RECORD_OVERHEAD, _estimate_size_from_indexes
-from small_mcap.records import LazyChunk, MessageIndex
+from small_mcap.records import (
+    MAGIC,
+    OPCODE_AND_LEN_STRUCT,
+    Chunk,
+    DataEnd,
+    Header,
+    LazyChunk,
+    Message,
+    MessageIndex,
+    Opcode,
+)
 from small_mcap.writer import CompressionType, IndexType
 
 # Path to conformance test data
 CONFORMANCE_DIR = Path(__file__).parent.parent.parent / "data" / "conformance"
+
+
+def _write_multi_chunk_file(path: Path) -> list[LazyChunk]:
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, chunk_size=160, compression=CompressionType.NONE)
+        writer.start(profile="test", library="small-mcap-test")
+        writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+        writer.add_channel(channel_id=1, topic="/test", message_encoding="json", schema_id=1)
+        for index in range(24):
+            writer.add_message(
+                channel_id=1,
+                log_time=index + 1,
+                publish_time=index + 1,
+                data=bytes([index]) * 48,
+            )
+        writer.finish()
+
+    with path.open("rb") as stream:
+        chunks = [
+            record
+            for record in stream_reader(stream, emit_chunks=True, lazy_chunks=True)
+            if isinstance(record, LazyChunk)
+        ]
+
+    assert len(chunks) >= 2
+    return chunks
+
+
+def _write_file_truncated_inside_final_chunk(path: Path) -> list[LazyChunk]:
+    chunks = _write_multi_chunk_file(path)
+    final_chunk = chunks[-1]
+    chunk_data_start = (
+        final_chunk.record_start
+        + OPCODE_AND_LEN_STRUCT.size
+        + 8
+        + 8
+        + 8
+        + 4
+        + 4
+        + len(final_chunk.compression.encode())
+        + 8
+    )
+    assert final_chunk.data_len > 1
+    truncate_at = chunk_data_start + final_chunk.data_len // 2
+    path.write_bytes(path.read_bytes()[:truncate_at])
+    return chunks
 
 
 def test_read_info_approximate_reports_message_index_progress():
@@ -420,54 +482,335 @@ def test_rebuild_invalid_magic_raises_error():
         )
 
 
-def test_rebuild_pending_chunk_rebuilds_missing_indexes():
-    """Rebuild should decompress final pending chunk and rebuild missing message indexes."""
+@pytest.mark.parametrize(
+    ("chunk", "validate_crc", "expected_error"),
+    [
+        (
+            Chunk(0, 1, 0, 0, "bzip2", b""),
+            False,
+            UnsupportedCompressionError,
+        ),
+        (
+            Chunk(0, 1, 3, 1, "", b"bad"),
+            True,
+            CRCValidationError,
+        ),
+        (
+            Chunk(0, 1, 10, 0, "", struct.pack("<BQ", Opcode.MESSAGE, 22) + b"\0"),
+            False,
+            struct.error,
+        ),
+    ],
+)
+@pytest.mark.parametrize("allow_incomplete_tail_only", [False, True])
+def test_rebuild_propagates_complete_chunk_errors(
+    chunk, validate_crc, expected_error, allow_incomplete_tail_only
+):
     buffer = io.BytesIO()
-    writer = McapWriter(buffer, chunk_size=1024)
-    writer.start()
-    writer.add_schema(1, "Test", "json", b"{}")
-    writer.add_channel(1, "/test", "json", 1)
-    for i in range(3):
-        writer.add_message(1, i, f"msg{i}".encode(), i)
-    writer.finish()
+    buffer.write(MAGIC)
+    Header(profile="test", library="test").write_record_to(buffer)
+    chunk.write_record_to(buffer)
+    buffer.seek(0)
 
-    data = buffer.getvalue()
-    stream = io.BytesIO(data)
-    prev_pos = 0
-    chunk_start_offset = None
-    message_index_start_offset = None
-    for record in stream_reader(stream, emit_chunks=True, lazy_chunks=True):
-        record_start = prev_pos
-        current_pos = stream.tell()
-        if isinstance(record, LazyChunk):
-            chunk_start_offset = record_start
-            message_index_start_offset = current_pos
-            break
-        prev_pos = current_pos
+    with pytest.raises(expected_error):
+        rebuild_summary(
+            buffer,
+            validate_crc=validate_crc,
+            calculate_channel_sizes=False,
+            exact_sizes=True,
+            allow_incomplete_tail_only=allow_incomplete_tail_only,
+        )
 
-    assert chunk_start_offset is not None
-    assert message_index_start_offset is not None
 
-    truncated_stream = io.BytesIO(data[:message_index_start_offset])
-    rebuild_info = rebuild_summary(
-        truncated_stream, validate_crc=False, calculate_channel_sizes=False, exact_sizes=False
+class _NonSeekableStream(io.BytesIO):
+    def seekable(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "rebuild_options",
+    [{}, {"allow_incomplete_tail_only": True}],
+    ids=["default", "tail-only"],
+)
+@pytest.mark.parametrize("exact_sizes", [False, True], ids=["estimated", "exact"])
+@pytest.mark.parametrize("is_seekable", [True, False], ids=["seekable", "nonseekable"])
+def test_rebuild_rolls_back_chunk_truncated_inside_data(
+    tmp_path: Path, rebuild_options: dict[str, bool], exact_sizes: bool, is_seekable: bool
+) -> None:
+    path = tmp_path / "truncated-final-chunk.mcap"
+    chunks = _write_file_truncated_inside_final_chunk(path)
+    final_chunk = chunks[-1]
+
+    with path.open("rb") as stream:
+        assert get_summary(stream) is None
+        raw = path.read_bytes()
+
+    opened = io.BytesIO(raw) if is_seekable else _NonSeekableStream(raw)
+    rebuilt = rebuild_summary(
+        opened,
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=exact_sizes,
+        **rebuild_options,
     )
 
-    stats = rebuild_info.summary.statistics
-    assert stats is not None
-    assert stats.message_count == 3
-    assert stats.channel_message_counts[1] == 3
+    statistics = rebuilt.summary.statistics
+    assert statistics is not None
+    assert statistics.chunk_count == len(chunks) - 1
+    assert 0 < statistics.message_count < 24
+    assert statistics.message_end_time < final_chunk.message_end_time
+    assert len(rebuilt.summary.chunk_indexes) == len(chunks) - 1
+    assert all(
+        chunk_index.chunk_start_offset < final_chunk.record_start
+        for chunk_index in rebuilt.summary.chunk_indexes
+    )
+    assert rebuilt.next_offset == final_chunk.record_start
 
-    chunk_indexes = rebuild_info.summary.chunk_indexes
-    assert len(chunk_indexes) == 1
-    assert chunk_indexes[0].message_index_length == 0
 
-    assert rebuild_info.chunk_information is not None
-    rebuilt_indexes = rebuild_info.chunk_information[chunk_start_offset]
-    assert len(rebuilt_indexes) == 1
-    rebuilt_idx = rebuilt_indexes[0]
-    assert rebuilt_idx.timestamps == [0, 1, 2]
-    assert rebuilt_idx.offsets == sorted(rebuilt_idx.offsets)
+def test_lazy_chunk_short_content_raises_mcap_end_of_file(tmp_path: Path) -> None:
+    path = tmp_path / "truncated-final-chunk.mcap"
+    chunks = _write_file_truncated_inside_final_chunk(path)
+
+    with path.open("rb") as stream:
+        original_position = stream.tell()
+        with pytest.raises(EndOfFileError):
+            chunks[-1].to_chunk(stream)
+        assert stream.tell() == original_position
+
+
+def test_lazy_chunk_short_metadata_raises_mcap_end_of_file(tmp_path: Path) -> None:
+    path = tmp_path / "truncated-final-chunk.mcap"
+    chunks = _write_file_truncated_inside_final_chunk(path)
+    final_chunk = chunks[-1]
+    path.write_bytes(path.read_bytes()[: final_chunk.record_start + OPCODE_AND_LEN_STRUCT.size + 5])
+
+    with path.open("rb") as stream, pytest.raises(EndOfFileError):
+        list(stream_reader(stream, emit_chunks=True, lazy_chunks=True))
+
+
+def test_lazy_chunk_rejects_compression_length_past_record_boundary() -> None:
+    fixed_metadata = struct.pack("<QQQII", 0, 0, 0, 0, 100)
+    follower = OPCODE_AND_LEN_STRUCT.pack(Opcode.HEADER, 0)
+    stream = io.BytesIO(fixed_metadata + follower)
+
+    with pytest.raises(struct.error, match="compression length exceeds"):
+        LazyChunk.read_from_stream(
+            stream,
+            record_start=0,
+            record_length=len(fixed_metadata) + 8,
+        )
+
+    assert stream.tell() == len(fixed_metadata)
+
+
+@pytest.mark.parametrize(
+    ("content", "record_length", "expected_error", "message"),
+    [
+        (
+            struct.pack("<QQQII", 0, 0, 0, 0, 3) + b"ab",
+            32 + 3 + 8,
+            EndOfFileError,
+            "Chunk compression",
+        ),
+        (
+            struct.pack("<QQQII", 0, 0, 0, 0, 0) + b"\0" * 4,
+            32 + 8,
+            EndOfFileError,
+            "Chunk data length",
+        ),
+        (
+            struct.pack("<QQQIIQ", 0, 0, 0, 0, 0, 2) + b"x",
+            32 + 8 + 1,
+            struct.error,
+            "data length exceeds",
+        ),
+    ],
+)
+def test_lazy_chunk_rejects_truncated_length_prefixed_fields(
+    content: bytes,
+    record_length: int,
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    with pytest.raises(expected_error, match=message):
+        LazyChunk.read_from_stream(io.BytesIO(content), 0, record_length)
+
+
+def test_failed_incremental_rebuild_does_not_mutate_initial_state() -> None:
+    prefix = io.BytesIO()
+    prefix.write(MAGIC)
+    Header(profile="test", library="test").write_record_to(prefix)
+    initial = rebuild_summary(
+        io.BytesIO(prefix.getvalue()),
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=True,
+    )
+
+    corrupt_continuation = io.BytesIO(prefix.getvalue())
+    corrupt_continuation.seek(0, io.SEEK_END)
+    Chunk(100, 200, 0, 0, "bzip2", b"").write_record_to(corrupt_continuation)
+    corrupt_continuation.seek(initial.next_offset)
+    with pytest.raises(UnsupportedCompressionError):
+        rebuild_summary(
+            corrupt_continuation,
+            validate_crc=False,
+            calculate_channel_sizes=True,
+            exact_sizes=True,
+            initial_state=initial,
+            skip_magic=True,
+        )
+
+    initial_statistics = initial.summary.statistics
+    assert initial_statistics is not None
+    assert initial_statistics.chunk_count == 0
+    assert initial_statistics.message_count == 0
+    assert initial_statistics.message_start_time == 0
+    assert initial_statistics.message_end_time == 0
+    assert initial.summary.chunk_indexes == []
+    assert initial.channel_sizes == {}
+
+    corrected_continuation = io.BytesIO(prefix.getvalue())
+    corrected_continuation.seek(0, io.SEEK_END)
+    Message(1, 1, 300, 300, b"ok").write_record_to(corrected_continuation)
+    corrected_continuation.seek(initial.next_offset)
+    rebuilt = rebuild_summary(
+        corrected_continuation,
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=True,
+        initial_state=initial,
+        skip_magic=True,
+    )
+
+    rebuilt_statistics = rebuilt.summary.statistics
+    assert rebuilt_statistics is not None
+    assert rebuilt_statistics.message_count == 1
+    assert rebuilt_statistics.channel_message_counts == {1: 1}
+    assert rebuilt.channel_sizes == {1: 2}
+    assert initial_statistics.message_count == 0
+
+
+def test_incremental_rebuild_uses_absolute_chunk_offsets(tmp_path: Path) -> None:
+    path = tmp_path / "incremental.mcap"
+    chunks = _write_multi_chunk_file(path)
+    data = path.read_bytes()
+    resume_offset = chunks[1].record_start
+
+    initial = rebuild_summary(
+        io.BytesIO(data[: resume_offset + OPCODE_AND_LEN_STRUCT.size + 5]),
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+    )
+    assert initial.next_offset == resume_offset
+    initial_chunk_offsets = [index.chunk_start_offset for index in initial.summary.chunk_indexes]
+
+    resumed_stream = io.BytesIO(data)
+    resumed_stream.seek(initial.next_offset)
+    resumed = rebuild_summary(
+        resumed_stream,
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+        initial_state=initial,
+        skip_magic=True,
+    )
+    complete = rebuild_summary(
+        io.BytesIO(data),
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+    )
+
+    assert resumed.summary.statistics == complete.summary.statistics
+    assert resumed.summary.chunk_indexes == complete.summary.chunk_indexes
+    assert resumed.chunk_information == complete.chunk_information
+    assert resumed.channel_sizes == complete.channel_sizes
+    assert [index.chunk_start_offset for index in initial.summary.chunk_indexes] == (
+        initial_chunk_offsets
+    )
+
+
+def test_rebuild_chunk_offset_ignores_unknown_extension_records() -> None:
+    buffer = io.BytesIO()
+    buffer.write(MAGIC)
+    Header(profile="test", library="test").write_record_to(buffer)
+    buffer.write(OPCODE_AND_LEN_STRUCT.pack(0x80, 3))
+    buffer.write(b"ext")
+    chunk_start = buffer.tell()
+    Chunk(0, 0, 0, 0, "", b"").write_record_to(buffer)
+    DataEnd(0).write_record_to(buffer)
+
+    rebuilt = rebuild_summary(
+        io.BytesIO(buffer.getvalue()),
+        validate_crc=False,
+        calculate_channel_sizes=False,
+        exact_sizes=True,
+    )
+
+    assert rebuilt.summary.chunk_indexes[0].chunk_start_offset == chunk_start
+
+
+@pytest.mark.parametrize("cut_kind", ["chunk-end", "message-index"])
+def test_incremental_rebuild_retries_unterminated_chunk_group(
+    tmp_path: Path, cut_kind: str
+) -> None:
+    path = tmp_path / "incremental-index.mcap"
+    chunks = _write_multi_chunk_file(path)
+    data = path.read_bytes()
+    final_chunk = chunks[-1]
+
+    initial = rebuild_summary(
+        io.BytesIO(data[: final_chunk.record_start + OPCODE_AND_LEN_STRUCT.size + 5]),
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+    )
+    assert initial.next_offset == final_chunk.record_start
+
+    complete = rebuild_summary(
+        io.BytesIO(data),
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+    )
+    final_index = complete.summary.chunk_indexes[-1]
+    message_index_offset = next(iter(final_index.message_index_offsets.values()))
+    cut_offset = (
+        final_index.chunk_start_offset + final_index.chunk_length
+        if cut_kind == "chunk-end"
+        else message_index_offset + 10
+    )
+    truncated_stream = io.BytesIO(data[:cut_offset])
+    truncated_stream.seek(initial.next_offset)
+    partial = rebuild_summary(
+        truncated_stream,
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+        initial_state=initial,
+        skip_magic=True,
+    )
+
+    assert partial.next_offset == final_chunk.record_start
+    assert partial.summary == initial.summary
+    assert partial.channel_sizes == initial.channel_sizes
+    assert partial.chunk_information == initial.chunk_information
+
+    retry_stream = io.BytesIO(data)
+    retry_stream.seek(partial.next_offset)
+    retried = rebuild_summary(
+        retry_stream,
+        validate_crc=False,
+        calculate_channel_sizes=True,
+        exact_sizes=False,
+        initial_state=partial,
+        skip_magic=True,
+    )
+    assert retried.summary.statistics == complete.summary.statistics
+    assert retried.summary.chunk_indexes == complete.summary.chunk_indexes
+    assert retried.chunk_information == complete.chunk_information
 
 
 def test_rebuild_no_index_file_does_not_rebuild_indexes():

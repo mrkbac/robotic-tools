@@ -5,11 +5,12 @@ from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
 
-from ._cdr import CDR_BIG_ENDIAN, CDR_HEADER_SIZE
+from ._cdr import CDR_BIG_ENDIAN, CDR_HEADER_SIZE, CDR_LITTLE_ENDIAN
 from ._plans import (
     TYPE_INFO,
     ActionType,
     DecoderFunction,
+    McapROS2DecodeError,
     PlanAction,
     PlanActions,
     PlanList,
@@ -470,28 +471,28 @@ class DecoderGeneratorFactory:
         func_name: str,
         *,
         be_fallback: str | None = None,
-        validate_endianness: int | None = None,
     ) -> str:
         """Generate Python source code for a decoder function.
 
         Args:
             be_fallback: If set, add LE guard that dispatches to this BE function
                 for non-LE data (Opt 1: inline LE dispatcher).
-            validate_endianness: If set, add a check that _raw[0] matches this value.
         """
         # Pre-scan to determine if memoryview is needed
         self.needs_memoryview = self._plan_needs_memoryview(self.plan)
 
         with self.code.indent(f"def {func_name}(_raw):"):
-            # Opt 1: Validity check (for BE decoder)
-            if validate_endianness is not None:
-                with self.code.indent(f"if _raw[0] != {validate_endianness}:"):
-                    self.code.append('raise ValueError(f"Invalid CDR header: {_raw[0]:#x}")')
-
-            # Opt 1: LE decoder with BE fallback guard
             if be_fallback:
-                with self.code.indent("if _raw[0]:"):
-                    self.code.append(f"return {be_fallback}(_raw)")
+                guard = f"_raw[0] | (_raw[1] ^ {CDR_LITTLE_ENDIAN})"
+                with self.code.indent(f"if {guard}:"):
+                    with self.code.indent(f"if _raw[0] == 0 and _raw[1] == {CDR_BIG_ENDIAN}:"):
+                        self.code.append(f"return {be_fallback}(_raw)")
+                    self.code.append("_kind = (_raw[0] << 8) | _raw[1]")
+                    self.code.append(
+                        "raise McapROS2DecodeError("
+                        "f'unsupported CDR encapsulation kind: {_kind:#06x}'"
+                        ")"
+                    )
 
             # Opt 2: bytes slice for speed; memoryview only when .cast() needed
             if self.needs_memoryview:
@@ -524,10 +525,10 @@ def create_decoder(plan: PlanList) -> DecoderFunction:
     - Opt 2: bytes slice (_data = _raw[4:]) instead of memoryview, unless .cast() needed
     - Opt 5: Returns constructor result directly (no temp variable)
     """
-    # Generate BE decoder with validity check (separate function, cold path)
+    # Generate the BE decoder without a duplicate header check (cold path).
     factory_be = DecoderGeneratorFactory(plan, endianness=">")
     decoder_be_name = f"decoder_{plan[0].__name__}_be"
-    code_be = factory_be.generate_decoder_code(decoder_be_name, validate_endianness=CDR_BIG_ENDIAN)
+    code_be = factory_be.generate_decoder_code(decoder_be_name)
 
     # Generate LE decoder inlined as main with BE fallback guard (hot path)
     factory_le = DecoderGeneratorFactory(plan, endianness="<")
@@ -537,9 +538,11 @@ def create_decoder(plan: PlanList) -> DecoderFunction:
     # Create combined namespace with both decoders
     namespace: dict[str, Any] = {
         "array": array,
+        "McapROS2DecodeError": McapROS2DecodeError,
         "__builtins__": {
             "memoryview": memoryview,
             "list": list,
+            "len": len,
             "range": range,
             "str": str,
             "ValueError": ValueError,

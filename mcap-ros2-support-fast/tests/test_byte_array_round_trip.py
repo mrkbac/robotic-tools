@@ -1,11 +1,14 @@
 """Round-trip and byte-equivalence tests for byte-array input types.
 
-The byte branch in ``_dynamic_encoder.py`` (TypeId.UINT8 / BYTE / CHAR) accepts:
+The byte branch in ``_dynamic_encoder.py`` (TypeId.UINT8 / BYTE) accepts:
 
 - ``bytes`` / ``bytearray`` / ``memoryview`` (zero-copy buffer concat)
 - ``list`` / ``tuple`` of ints in [0, 255] (``bytes(value)`` constructor)
 - numpy ``ndarray`` (cast to uint8 via ``_to_packed_bytes``)
 - any other iterable of ints (``array.array`` fallback)
+
+``char`` arrays share ROS2's unsigned 8-bit wire/value contract and are also
+covered at their boundary values by the CDR interoperability tests.
 
 All input types are required to produce *byte-identical* CDR output for the same
 logical values — that is what these tests verify, in addition to round-trip
@@ -17,9 +20,15 @@ from collections.abc import Sequence
 from io import BytesIO
 
 import pytest
+from mcap_ros2._cdr import CdrWriter, EncapsulationKind
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from mcap_ros2_support_fast._dynamic_encoder import create_encoder
-from mcap_ros2_support_fast._planner import generate_plans, optimize_plan
+from mcap_ros2_support_fast._planner import (
+    create_decoder_function,
+    create_encoder_function,
+    generate_plans,
+    optimize_plan,
+)
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap.reader import read_message_decoded
 from small_mcap.writer import McapWriter
@@ -60,7 +69,7 @@ class _IntSequence(Sequence):
         return self._items[idx]
 
 
-_DYNAMIC_INPUTS = pytest.mark.parametrize(
+_ARRAY_INPUTS = pytest.mark.parametrize(
     "value",
     [
         b"\x01\x02\x03\x04\x05",
@@ -75,27 +84,35 @@ _DYNAMIC_INPUTS = pytest.mark.parametrize(
 )
 
 
-@_DYNAMIC_INPUTS
-def test_dynamic_uint8_round_trip(value):
-    decoded = _round_trip(b"uint8[] xs", "test_msgs/U8", {"xs": value})
-    assert list(decoded.xs) == [1, 2, 3, 4, 5]
+def _reference_primitive_array(_type_name: str, value, is_fixed: bool) -> bytes:
+    values = list(value)
+    output = BytesIO()
+    writer = CdrWriter(output, kind=EncapsulationKind.CDR_LE)
+    if not is_fixed:
+        writer.write_uint32(len(values))
+    writer.write_uint8_array(values)
+    return output.getvalue()
 
 
-@_DYNAMIC_INPUTS
-def test_dynamic_byte_round_trip(value):
-    decoded = _round_trip(b"byte[] xs", "test_msgs/B", {"xs": value})
-    assert list(decoded.xs) == [1, 2, 3, 4, 5]
+@_ARRAY_INPUTS
+@pytest.mark.parametrize(
+    ("type_name", "array_type", "is_fixed"),
+    [("uint8", "[]", False), ("byte", "[]", False), ("char", "[]", False), ("uint8", "[5]", True)],
+    ids=["uint8-dynamic", "byte-dynamic", "char-dynamic", "uint8-fixed"],
+)
+def test_primitive_array_input_types_match_reference(
+    value, type_name: str, array_type: str, is_fixed: bool
+) -> None:
+    schema = f"{type_name}{array_type} xs"
+    schema_name = f"test_msgs/{type_name}_{'fixed' if is_fixed else 'dynamic'}"
+    expected = _reference_primitive_array(type_name, value, is_fixed)
+    encoder = create_encoder_function(schema_name, schema)
+    decoder = create_decoder_function(schema_name, schema)
 
+    encoded = bytes(encoder({"xs": value}))
+    decoded = decoder(expected)
 
-@_DYNAMIC_INPUTS
-def test_dynamic_char_round_trip(value):
-    decoded = _round_trip(b"char[] xs", "test_msgs/C", {"xs": value})
-    assert list(decoded.xs) == [1, 2, 3, 4, 5]
-
-
-@_DYNAMIC_INPUTS
-def test_fixed_uint8_round_trip(value):
-    decoded = _round_trip(b"uint8[5] xs", "test_msgs/U8F", {"xs": value})
+    assert encoded == expected
     assert list(decoded.xs) == [1, 2, 3, 4, 5]
 
 

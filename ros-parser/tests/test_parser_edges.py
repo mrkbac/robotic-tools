@@ -19,8 +19,7 @@ def test_ros1_transformer_rejects_invalid_callback_values() -> None:
     with pytest.raises(TypeError, match="Expected bool"):
         transformer.constant_tail([[]])
     assert transformer.constant_tail([]) == ""
-    with pytest.raises(ValueError, match="consecutive underscores"):
-        transformer.identifier([Token("IDENTIFIER", "bad__name")])
+    assert transformer.identifier([Token("IDENTIFIER", "bad__name")]) == "bad__name"
     with pytest.raises(TypeError, match="tuple of length 2"):
         transformer.array_spec([1])
     with pytest.raises(TypeError, match="Expected bool"):
@@ -87,8 +86,7 @@ def test_ros2_transformer_rejects_invalid_callback_values() -> None:
         transformer.field_or_const_tail([1])
     assert transformer.constant_tail([]) == (True, None)
     assert transformer.default_tail([]) == (False, None)
-    with pytest.raises(ValueError, match="consecutive underscores"):
-        transformer.identifier([Token("IDENTIFIER", "bad__name")])
+    assert transformer.identifier([Token("IDENTIFIER", "bad__name")]) == "bad__name"
     assert transformer.local_type([Token("TYPE", "Nested")]) == Type("Nested", "example")
     with pytest.raises(TypeError, match="tuple of length 3"):
         transformer.array_spec([1])
@@ -106,6 +104,11 @@ def test_ros2_transformer_rejects_invalid_callback_values() -> None:
     assert transformer.line([]) is None
     with pytest.raises(TypeError, match="Expected Field"):
         transformer.line([1])
+
+
+def test_ros2_parse_string_reports_syntax_errors_as_definition_errors() -> None:
+    with pytest.raises(ValueError, match="Invalid ROS2 message definition"):
+        ros2_parser.parse_message_string("int32")
 
 
 def test_ros2_transformer_rejects_complex_and_array_constants() -> None:

@@ -12,6 +12,7 @@ import small_mcap.records as records_module
 from small_mcap.exceptions import (
     ChannelNotFoundError,
     CRCValidationError,
+    EndOfFileError,
     InvalidMagicError,
     RecordLengthLimitExceededError,
     SchemaNotFoundError,
@@ -107,8 +108,9 @@ def test_chunk_validation_and_indexed_opcode_errors() -> None:
         _get_chunk_data_stream(bad_compression)
 
     chunk = Chunk(0, 0, 1, 123, "", b"x")
+    predecompressed = _predecompress_chunk(chunk, validate_crc=True)
     with pytest.raises(CRCValidationError):
-        _predecompress_chunk(chunk, validate_crc=True)
+        _get_chunk_data_stream(predecompressed, validate_crc=True)
 
     schema_buffer = io.BytesIO()
     Schema(1, "example/Message", "ros2msg", b"").write_record_to(schema_buffer)
@@ -120,6 +122,23 @@ def test_chunk_validation_and_indexed_opcode_errors() -> None:
                 reverse=False,
             )
         )
+
+
+def test_indexed_chunk_decode_rejects_truncated_record_envelopes() -> None:
+    message_buffer = io.BytesIO()
+    Message(1, 0, 10, 10, b"x").write_record_to(message_buffer)
+    malformed = bytearray(message_buffer.getvalue())
+    struct.pack_into("<Q", malformed, 1, 100)
+    index = MessageIndex(1, timestamps=[10], offsets=[0])
+
+    with pytest.raises(struct.error, match="record length exceeds"):
+        list(_breakup_chunk_data_with_indexes(malformed, [index]))
+
+    incomplete_header = MessageIndex(
+        1, timestamps=[10], offsets=[len(message_buffer.getvalue()) - 1]
+    )
+    with pytest.raises(struct.error):
+        list(_breakup_chunk_data_with_indexes(message_buffer.getvalue(), [incomplete_header]))
 
 
 def test_read_inner_reports_missing_references() -> None:
@@ -296,6 +315,17 @@ def test_breakup_chunk_with_offsets_handles_schema_and_channel() -> None:
     assert [type(record) for _, record in records] == [Schema, Channel]
 
 
+def test_breakup_chunk_with_offsets_rejects_truncated_record_envelopes() -> None:
+    payload = io.BytesIO()
+    Message(1, 0, 10, 10, b"x").write_record_to(payload)
+    malformed = bytearray(payload.getvalue())
+    struct.pack_into("<Q", malformed, 1, 100)
+    chunk = Chunk(0, 0, len(malformed), 0, "", bytes(malformed))
+
+    with pytest.raises(struct.error, match="record length exceeds"):
+        list(_breakup_chunk_with_offsets(chunk))
+
+
 def test_mcap_file_open_and_read_edges(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-negative"):
         McapFile.open(tmp_path / "missing.mcap", chunk_cache_bytes=-1)
@@ -354,6 +384,29 @@ def test_rebuild_strict_mode_reraises_stream_and_finish_errors(monkeypatch) -> N
             calculate_channel_sizes=False,
             exact_sizes=True,
             allow_incomplete_tail_only=True,
+        )
+
+
+def test_rebuild_strict_mode_reraises_incomplete_finish_error(monkeypatch) -> None:
+    lazy = LazyChunk(0, 10, 100, 0, "", 0, 0)
+
+    monkeypatch.setattr(
+        rebuild_module,
+        "stream_reader",
+        lambda *_args, **_kwargs: iter([Header("", "test"), lazy]),
+    )
+
+    def broken_to_chunk(*_args, **_kwargs):
+        raise EndOfFileError("truncated final chunk")
+
+    monkeypatch.setattr(LazyChunk, "to_chunk", broken_to_chunk)
+    with pytest.raises(EndOfFileError, match="truncated final chunk"):
+        rebuild_summary(
+            io.BytesIO(),
+            validate_crc=False,
+            calculate_channel_sizes=False,
+            exact_sizes=True,
+            allow_incomplete_tail_only=False,
         )
 
 

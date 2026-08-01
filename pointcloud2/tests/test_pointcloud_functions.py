@@ -1,5 +1,6 @@
 """Tests for point cloud processing functions."""
 
+import struct
 import sys
 
 import numpy as np
@@ -75,6 +76,61 @@ class TestReadPoints:
         np.testing.assert_array_equal(points["x"], [1.0, 4.0, 7.0])
         np.testing.assert_array_equal(points["y"], [2.0, 5.0, 8.0])
         np.testing.assert_array_equal(points["z"], [3.0, 6.0, 9.0])
+
+    def test_read_points_uses_padded_rows_and_organized_shape(self):
+        """Read externally packed rectangular rows without exposing row padding."""
+        fields = [
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+        ]
+        row_values = [
+            [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)],
+            [(4.0, 40.0), (5.0, 50.0), (6.0, 60.0)],
+        ]
+        data = b"".join(
+            b"".join(struct.pack("<ff", x, y) for x, y in row) + b"\xa5" * 8 for row in row_values
+        )
+        cloud = MockPointCloud2(
+            header=None,
+            height=2,
+            width=3,
+            fields=fields,
+            is_bigendian=False,
+            point_step=8,
+            row_step=32,
+            data=data,
+            is_dense=True,
+        )
+
+        points = read_points(cloud)
+        organized = read_points(cloud, reshape_organized_cloud=True)
+
+        assert points.dtype.names == ("x", "y")
+        np.testing.assert_array_equal(points["x"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        np.testing.assert_array_equal(points["y"], [10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+        assert organized.shape == (2, 3)
+        np.testing.assert_array_equal(organized["x"], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        np.testing.assert_array_equal(organized["y"], [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
+
+    @pytest.mark.parametrize(
+        ("row_step", "data_length"),
+        [(7, 16), (16, 15), (16, 17)],
+    )
+    def test_read_points_rejects_impossible_row_layout(self, row_step, data_length):
+        cloud = MockPointCloud2(
+            header=None,
+            height=1,
+            width=2,
+            fields=[PointField("x", 0, PointField.FLOAT32)],
+            is_bigendian=False,
+            point_step=4,
+            row_step=row_step,
+            data=b"\0" * data_length,
+            is_dense=True,
+        )
+
+        with pytest.raises(ValueError, match=r"row_step|data"):
+            read_points(cloud)
 
     def test_read_points_swaps_non_native_byte_order(self):
         is_host_bigendian = sys.byteorder == "big"
@@ -227,6 +283,7 @@ class TestReadPoints:
 
         assert points.shape == (2, 2)
         assert points.dtype.names == ("x", "y", "z")
+        np.testing.assert_array_equal(points["x"], [[1.0, 4.0], [7.0, 10.0]])
 
 
 class TestCreateCloud:
@@ -297,12 +354,33 @@ class TestCreateCloud:
         assert cloud.height == 1
         assert cloud.fields == fields
 
+    def test_create_cloud_materializes_generator_fields_once(self):
+        fields = [
+            PointField("x", 0, PointField.FLOAT32),
+            PointField("y", 4, PointField.FLOAT32),
+        ]
+        points = np.array([(1.0, 2.0), (3.0, 4.0)], dtype=[("x", "<f4"), ("y", "<f4")])
+
+        cloud = create_cloud(header=None, fields=(field for field in fields), points=points)
+
+        assert cloud.fields == fields
+        assert (cloud.width, cloud.height, cloud.point_step, cloud.row_step) == (2, 1, 8, 16)
+        assert cloud.data == struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
+
     def test_create_organized_cloud(self):
         """Test creating organized (2D) cloud."""
         points = np.array(
             [
-                [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)],
-                [(7.0, 8.0, 9.0), (10.0, 11.0, 12.0)],
+                [
+                    (1.0, 2.0, 3.0),
+                    (4.0, 5.0, 6.0),
+                    (7.0, 8.0, 9.0),
+                ],
+                [
+                    (10.0, 11.0, 12.0),
+                    (13.0, 14.0, 15.0),
+                    (16.0, 17.0, 18.0),
+                ],
             ],
             dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4")],
         )
@@ -315,9 +393,31 @@ class TestCreateCloud:
 
         cloud = create_cloud(header=None, fields=fields, points=points)
 
-        assert cloud.width == 2
+        assert cloud.width == 3
         assert cloud.height == 2
         assert cloud.fields == fields
+        assert cloud.row_step == 36
+        assert cloud.data == struct.pack(
+            "<ffffffffffffffffff",
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+            8.0,
+            9.0,
+            10.0,
+            11.0,
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0,
+            17.0,
+            18.0,
+        )
 
     def test_create_cloud_with_custom_step(self):
         """Test creating cloud with custom point step."""

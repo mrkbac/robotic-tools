@@ -1,7 +1,9 @@
 """Tests for small_mcap.data module - record serialization and deserialization."""
 
 import io
+import struct
 
+import pytest
 from small_mcap import (
     MAGIC,
     MAGIC_SIZE,
@@ -274,6 +276,22 @@ class TestChannel:
 class TestMessage:
     """Test Message record serialization."""
 
+    def test_message_write_matches_handwritten_wire_oracle(self):
+        message = Message(
+            channel_id=7,
+            sequence=3,
+            log_time=100,
+            publish_time=101,
+            data=b"abc",
+        )
+        content = struct.pack("<HIQQ", 7, 3, 100, 101) + b"abc"
+        expected = struct.pack("<BQ", Opcode.MESSAGE, len(content)) + content
+
+        output = io.BytesIO()
+        message.write_record_to(output)
+
+        assert output.getvalue() == expected
+
     def test_message_write_read_roundtrip(self):
         """Test Message write and read roundtrip."""
         original = Message(
@@ -367,6 +385,13 @@ class TestChunk:
 
         assert deserialized == original
         assert deserialized.compression == ""
+
+    def test_chunk_rejects_data_length_past_record_boundary(self):
+        serialized = bytearray(write_content(Chunk(0, 0, 1, 0, "", b"x")))
+        struct.pack_into("<Q", serialized, 32, 100)
+
+        with pytest.raises(struct.error, match="data length exceeds"):
+            Chunk.read(serialized)
 
     def test_chunk_opcode(self):
         """Test Chunk has correct opcode."""

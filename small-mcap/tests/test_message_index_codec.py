@@ -122,3 +122,28 @@ def test_malformed_records_length_raises_on_decode() -> None:
     index = MessageIndex.read(payload)
     with pytest.raises(struct.error):
         _ = index.timestamps
+
+
+def test_truncated_declared_entry_raises_on_decode() -> None:
+    payload = _HEADER.pack(1, 16) + _ENTRY.pack(123, 456)[:8]
+    index = MessageIndex.read(payload)
+
+    with pytest.raises(struct.error):
+        _ = index.timestamps
+
+
+def test_message_index_num_entries_rejects_mismatched_pairs() -> None:
+    index = MessageIndex(1, timestamps=[1], offsets=[])
+
+    with pytest.raises(ValueError, match="equal lengths"):
+        _ = index.num_entries
+
+
+def test_message_index_write_rejects_mismatched_pairs_before_output() -> None:
+    index = MessageIndex(1, timestamps=[1], offsets=[])
+    output = io.BytesIO()
+
+    with pytest.raises(ValueError, match="equal lengths"):
+        index.write_record_to(output)
+
+    assert output.getvalue() == b""

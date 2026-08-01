@@ -1,5 +1,6 @@
 """Tests for small_mcap.writer module."""
 
+import io
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,24 @@ class TestMcapWriterBasics:
 
             with pytest.raises(RuntimeError, match="Writer already finished"):
                 writer.add_schema(schema_id=1, name="Test", encoding="json", data=b"{}")
+
+    @pytest.mark.parametrize("chunk_size", [0, 1024])
+    def test_add_message_lifecycle_and_channel_validation_match_modes(self, chunk_size):
+        writer = McapWriter(io.BytesIO(), chunk_size=chunk_size)
+
+        with pytest.raises(WriterNotStartedError):
+            writer.add_message(1, 1, b"before", 1)
+
+        writer.start()
+        with pytest.raises(ValueError, match="Channel ID 1 does not exist"):
+            writer.add_message(1, 1, b"unknown", 1)
+
+        writer.add_channel(1, "/test", "json", 0)
+        writer.add_message(1, 1, b"valid", 1)
+        writer.finish()
+
+        with pytest.raises(RuntimeError, match="Writer already finished"):
+            writer.add_message(1, 2, b"after", 2)
 
 
 class TestMcapWriterChunking:

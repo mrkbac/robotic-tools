@@ -10,12 +10,13 @@ the registry is always complete.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Integral, Real
 from operator import neg
 from typing import Any
 
 from ros_parser.message_path.models import (
-    _ARRAY_TYPES,
     _FLOAT64_TYPE,
     _MISSING,
     MessagePathError,
@@ -64,19 +65,19 @@ def _get_field(obj: Any, name: str) -> Any:
     raise MessagePathError(_field_not_found_message(obj, name))
 
 
-@modifier("add")
+@modifier("add", min_args=1)
 def _add(value: float, *args: float) -> float:
     """Add multiple values."""
     return value + sum(args)
 
 
-@modifier("sub")
+@modifier("sub", min_args=1)
 def _sub(value: float, *args: float) -> float:
     """Subtract multiple values from the initial value."""
     return value - sum(args)
 
 
-@modifier("mul")
+@modifier("mul", min_args=1)
 def _mul(value: float, *args: float) -> float:
     """Multiply by multiple values."""
     result = value
@@ -85,7 +86,7 @@ def _mul(value: float, *args: float) -> float:
     return result
 
 
-@modifier("div")
+@modifier("div", min_args=1, max_args=1)
 def _div(value: float, divisor: float) -> float:
     """Divide by multiple values with zero check."""
     if divisor == 0:
@@ -93,7 +94,7 @@ def _div(value: float, divisor: float) -> float:
     return value / divisor
 
 
-@modifier("round")
+@modifier("round", min_args=0, max_args=1)
 def _round_with_arg(value: float, precision: float | None = None) -> int | float:
     """Round with optional precision argument."""
     if precision is None:
@@ -102,13 +103,17 @@ def _round_with_arg(value: float, precision: float | None = None) -> int | float
 
 
 def _numeric_array(obj: Any, operation: str) -> list[int | float]:
-    if not isinstance(obj, _ARRAY_TYPES):
+    try:
+        iterator = iter(obj)
+    except TypeError as exc:
+        raise MessagePathError(f"{operation} requires a numeric array") from exc
+    if isinstance(obj, (str, Mapping)):
         raise MessagePathError(f"{operation} requires a numeric array")
     values: list[int | float] = []
-    for value in obj:
-        if type(value) not in (int, float) or (isinstance(value, float) and math.isnan(value)):
+    for value in iterator:
+        if isinstance(value, bool) or not isinstance(value, Real) or math.isnan(float(value)):
             raise MessagePathError(f"{operation} requires a numeric array without NaN values")
-        values.append(value)
+        values.append(int(value) if isinstance(value, Integral) else float(value))
     return values
 
 
@@ -153,6 +158,8 @@ def _argument_product(values: list[int | float]) -> float:
     array_reducer=_array_min,
     argument_reducer=_argument_min,
     preserves_element_type=True,
+    min_args=0,
+    max_args=None,
 )
 def _min(*args: float) -> float:
     """Return minimum of a scalar and its arguments, or reduce a bare array."""
@@ -164,26 +171,49 @@ def _min(*args: float) -> float:
     array_reducer=_array_max,
     argument_reducer=_argument_max,
     preserves_element_type=True,
+    min_args=0,
+    max_args=None,
 )
 def _max(*args: float) -> float:
     """Return maximum of a scalar and its arguments, or reduce a bare array."""
     return max(args)
 
 
-@modifier("sum", kind="aggregate", argument_reducer=_argument_sum, return_type=_FLOAT64_TYPE)
+@modifier(
+    "sum",
+    kind="aggregate",
+    argument_reducer=_argument_sum,
+    return_type=_FLOAT64_TYPE,
+    min_args=0,
+    max_args=None,
+)
 def _aggregate_sum(obj: Any) -> float:
     """Return the floating-point sum of an array."""
     return math.fsum(_numeric_array(obj, "sum"))
 
 
-@modifier("mean", kind="aggregate", argument_reducer=_argument_mean, return_type=_FLOAT64_TYPE)
+@modifier(
+    "mean",
+    kind="aggregate",
+    argument_reducer=_argument_mean,
+    return_type=_FLOAT64_TYPE,
+    min_args=0,
+    max_args=None,
+)
 def _aggregate_mean(obj: Any) -> float | None:
     """Return the arithmetic mean, or None for an empty array."""
     values = _numeric_array(obj, "mean")
     return math.fsum(values) / len(values) if values else None
 
 
-@modifier("rms", kind="aggregate", argument_reducer=_argument_rms, return_type=_FLOAT64_TYPE)
+@modifier(
+    "rms",
+    kind="aggregate",
+    argument_reducer=_argument_rms,
+    return_type=_FLOAT64_TYPE,
+    min_args=0,
+    max_args=None,
+)
 def _aggregate_rms(obj: Any) -> float | None:
     """Return the root mean square, or None for an empty array."""
     values = _numeric_array(obj, "rms")
@@ -196,19 +226,20 @@ def _aggregate_rms(obj: Any) -> float | None:
     argument_reducer=_argument_product,
     return_type=_FLOAT64_TYPE,
     min_args=1,
+    max_args=None,
 )
 def _product(_obj: Any, *values: float) -> float:
     """Multiply numeric field references, variables, and literal arguments."""
     return float(math.prod(values))
 
 
-@modifier("wrap_angle")
+@modifier("wrap_angle", min_args=0, max_args=0)
 def _wrap_angle(value: float) -> float:
     """Wrap angle to [-pi, pi] range."""
     return (value + math.pi) % (2 * math.pi) - math.pi
 
 
-@modifier("sign")
+@modifier("sign", min_args=0, max_args=0)
 def _sign(value: float) -> int:
     """Return the sign of a numeric value: 1, -1, or 0."""
     if value > 0:
@@ -218,7 +249,7 @@ def _sign(value: float) -> int:
     return 0
 
 
-@modifier("clamp")
+@modifier("clamp", min_args=2, max_args=2)
 def _clamp(value: float, lo: float, hi: float) -> float:
     """Clamp a value to the inclusive [lo, hi] range."""
     if lo > hi:
@@ -251,10 +282,17 @@ for _name, _builtin in {
     "degrees": math.degrees,
     "radians": math.radians,
 }.items():
-    modifier(_name)(_builtin)
+    modifier(_name, min_args=0, max_args=0)(_builtin)
 
 
-@modifier("length", kind="object", requires_array=True, return_type=_INT64_TYPE)
+@modifier(
+    "length",
+    kind="object",
+    requires_array=True,
+    return_type=_INT64_TYPE,
+    min_args=0,
+    max_args=0,
+)
 def _length(obj: Any) -> int:
     """Return the number of elements in an array or typed array."""
     return len(obj)
@@ -266,11 +304,17 @@ def _length(obj: Any) -> int:
     requires_fields=("x", "y"),
     accepts_array=True,
     return_type=_FLOAT64_TYPE,
+    min_args=0,
+    max_args=0,
+    numeric_fields=("x", "y", "z"),
 )
 def _norm(obj: Any) -> float:
     """Euclidean norm of a numeric array or object with x/y and optional z fields."""
-    if isinstance(obj, _ARRAY_TYPES):
-        return math.sqrt(sum(value * value for value in obj))
+    try:
+        values = _numeric_array(obj, "norm")
+        return math.sqrt(sum(value * value for value in values))
+    except MessagePathError:
+        pass
 
     try:
         x = _get_field(obj, "x")
@@ -285,7 +329,15 @@ def _norm(obj: Any) -> float:
     return math.sqrt(x * x + y * y + z * z)
 
 
-@modifier("rpy", kind="object", requires_fields=("x", "y", "z", "w"), return_def=_EULER_RETURN_DEF)
+@modifier(
+    "rpy",
+    kind="object",
+    requires_fields=("x", "y", "z", "w"),
+    return_def=_EULER_RETURN_DEF,
+    min_args=0,
+    max_args=0,
+    numeric_fields=("x", "y", "z", "w"),
+)
 def _quaternion_to_euler(obj: Any) -> EulerAngles:
     """Convert quaternion (x,y,z,w) to EulerAngles(roll, pitch, yaw)."""
     try:
@@ -315,6 +367,9 @@ def _quaternion_to_euler(obj: Any) -> EulerAngles:
     kind="object",
     requires_fields=("roll", "pitch", "yaw"),
     return_def=_QUAT_RETURN_DEF,
+    min_args=0,
+    max_args=0,
+    numeric_fields=("roll", "pitch", "yaw"),
 )
 def _euler_to_quaternion(obj: Any) -> Quaternion:
     """Convert roll/pitch/yaw fields to Quaternion(x, y, z, w)."""
@@ -337,20 +392,30 @@ def _euler_to_quaternion(obj: Any) -> Quaternion:
     return Quaternion(x=qx, y=qy, z=qz, w=qw)
 
 
-@modifier("magnitude", kind="object", requires_array=True, return_type=_FLOAT64_TYPE)
+@modifier(
+    "magnitude",
+    kind="object",
+    requires_array=True,
+    requires_numeric_array=True,
+    return_type=_FLOAT64_TYPE,
+    min_args=0,
+    max_args=0,
+)
 def _magnitude(obj: Any) -> float:
     """L2 norm of a list/array/sequence of numbers."""
-    if isinstance(obj, (list, tuple)):
-        return math.sqrt(sum(v * v for v in obj))
-    # Try to iterate (numpy arrays, etc.)
-    try:
-        values = list(obj)
-        return math.sqrt(sum(v * v for v in values))
-    except TypeError as e:
-        raise MessagePathError("magnitude requires a list or array of numbers") from e
+    values = _numeric_array(obj, "magnitude")
+    return math.sqrt(sum(value * value for value in values))
 
 
-@modifier("to_sec", kind="object", requires_fields=("sec", "nanosec"), return_type=_FLOAT64_TYPE)
+@modifier(
+    "to_sec",
+    kind="object",
+    requires_fields=("sec", "nanosec"),
+    return_type=_FLOAT64_TYPE,
+    min_args=0,
+    max_args=0,
+    numeric_fields=("sec", "nanosec"),
+)
 def _to_sec(obj: Any) -> float:
     """Convert a Time/Duration {sec, nanosec} to float seconds."""
     try:
@@ -361,7 +426,15 @@ def _to_sec(obj: Any) -> float:
     return sec + nanosec * 1e-9
 
 
-@modifier("to_nsec", kind="object", requires_fields=("sec", "nanosec"), return_type=_INT64_TYPE)
+@modifier(
+    "to_nsec",
+    kind="object",
+    requires_fields=("sec", "nanosec"),
+    return_type=_INT64_TYPE,
+    min_args=0,
+    max_args=0,
+    numeric_fields=("sec", "nanosec"),
+)
 def _to_nsec(obj: Any) -> int:
     """Convert a Time/Duration {sec, nanosec} to int nanoseconds."""
     try:

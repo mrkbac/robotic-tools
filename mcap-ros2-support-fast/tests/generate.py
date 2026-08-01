@@ -13,7 +13,7 @@ class String:
         self.data = data
 
     def serialize(self, buff: BytesIO) -> None:
-        buff.write(b"\x00\x03")  # CDR header (little-endian, 3)
+        buff.write(b"\x00\x01")  # Plain CDR, little-endian
         buff.write(b"\x00\x00")  # Alignment padding
         buff.write((len(self.data) + 1).to_bytes(4, "little"))  # String length
         buff.write(self.data.encode())  # String data
@@ -28,7 +28,7 @@ class Empty:
         pass
 
     def serialize(self, buff: BytesIO) -> None:
-        buff.write(b"\x00\x03")  # CDR header (little-endian, 3)
+        buff.write(b"\x00\x01")  # Plain CDR, little-endian
         buff.write(b"\x00\x00")  # Alignment padding
         buff.write(b"\x00")  # uint8 structure_needs_at_least_one_member
 

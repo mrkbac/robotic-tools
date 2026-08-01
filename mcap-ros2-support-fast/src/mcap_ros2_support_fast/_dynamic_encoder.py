@@ -1,5 +1,6 @@
 import array
 import struct
+import sys
 from typing import Any, Literal, cast
 
 from mcap_ros2_support_fast.code_writer import CodeWriter
@@ -29,6 +30,7 @@ _NP_DTYPE_FOR_CODE: dict[str, str] = {
     "d": "f8",
     "?": "?",
 }
+_NATIVE_ENDIANNESS = "<" if sys.byteorder == "little" else ">"
 
 # Numpy availability is fixed at import time, so we specialize the helpers once
 # rather than checking `_np is not None` on every call.
@@ -37,9 +39,23 @@ try:
 except ImportError:
     _np: Any = None
 
-    def _to_packed_bytes(value: Any, code: str) -> bytes:
+    def _to_packed_bytes(
+        value: Any, code: str, endianness: str = "<", expected_length: int | None = None
+    ) -> bytes:
         """Pack an array-like value into raw bytes for `code` (no-numpy build)."""
-        return array.array(code, value).tobytes()
+        if code == "?":
+            packed_bytes = bytes(1 if item else 0 for item in value)
+            if expected_length is not None and len(packed_bytes) != expected_length:
+                raise ValueError(
+                    f"fixed array expected {expected_length} elements, got {len(packed_bytes)}"
+                )
+            return packed_bytes
+        packed = array.array(code, value)
+        if expected_length is not None and len(packed) != expected_length:
+            raise ValueError(f"fixed array expected {expected_length} elements, got {len(packed)}")
+        if code not in {"b", "B"} and endianness != _NATIVE_ENDIANNESS:
+            packed.byteswap()
+        return packed.tobytes()
 
     def _array_length(value: Any) -> int:
         """Return the number of serialized primitive elements (no-numpy build)."""
@@ -49,16 +65,40 @@ else:
     _np = np
     _ndarray: type = np.ndarray
 
-    def _to_packed_bytes(value: Any, code: str) -> bytes:
-        """Pack an array-like value into raw little/native-endian bytes for `code`.
+    def _to_packed_bytes(
+        value: Any, code: str, endianness: str = "<", expected_length: int | None = None
+    ) -> bytes:
+        """Pack an array-like value into bytes for `code` and `endianness`.
 
         Fast path for `numpy.ndarray` (any shape/dtype): cast to matching dtype,
         flatten, then `tobytes()`. Falls back to `array.array(code, value).tobytes()`,
         which accepts list, tuple, and any duck-typed iterable.
         """
         if isinstance(value, _ndarray):
-            return np.ascontiguousarray(value, dtype=_NP_DTYPE_FOR_CODE[code]).ravel().tobytes()
-        return array.array(code, value).tobytes()
+            actual_length = int(value.size)
+            if expected_length is not None and actual_length != expected_length:
+                raise ValueError(
+                    f"fixed array expected {expected_length} elements, got {actual_length}"
+                )
+            packed_array = np.ascontiguousarray(value, dtype=_NP_DTYPE_FOR_CODE[code]).ravel()
+            if endianness == _NATIVE_ENDIANNESS:
+                return packed_array.tobytes()
+            if code not in {"b", "B", "?"}:
+                packed_array = packed_array.byteswap()
+            return packed_array.tobytes()
+        if code == "?":
+            packed_bytes = bytes(1 if item else 0 for item in value)
+            if expected_length is not None and len(packed_bytes) != expected_length:
+                raise ValueError(
+                    f"fixed array expected {expected_length} elements, got {len(packed_bytes)}"
+                )
+            return packed_bytes
+        packed = array.array(code, value)
+        if expected_length is not None and len(packed) != expected_length:
+            raise ValueError(f"fixed array expected {expected_length} elements, got {len(packed)}")
+        if code not in {"b", "B"} and endianness != _NATIVE_ENDIANNESS:
+            packed.byteswap()
+        return packed.tobytes()
 
     def _array_length(value: Any) -> int:
         """Return the number of serialized primitive elements in an array-like value."""
@@ -73,7 +113,8 @@ def _get_field(obj: Any, f: str, default: Any) -> Any:
     Returns default when the attribute is missing or None.
     """
     if isinstance(obj, dict):
-        return obj.get(f, default)
+        value = obj.get(f, default)
+        return default if value is None else value
     value = getattr(obj, f, default)
     return default if value is None else value
 
@@ -130,7 +171,7 @@ class EncoderGeneratorFactory:
             self.code.append(f"_offset = {self.static_offset}")
             self.static_offset = None
 
-    def generate_alignment(self, size: int) -> None:
+    def generate_alignment(self, size: int, condition: str | None = None) -> None:
         """Generate optimized alignment code for a given size requirement.
 
         Alignment is calculated from the start of the CDR payload (after the 4-byte header),
@@ -152,9 +193,18 @@ class EncoderGeneratorFactory:
                     self.static_offset += pad
             else:
                 # Align based on payload offset (subtract 4 for CDR header)
-                self.code.append(f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}")
-                self.code.append("_buffer += _PADS[_pad]")
-                self.code.append("_offset += _pad")
+                lines = [
+                    f"_pad = ({size} - ((_offset - 4) & {mask})) & {mask}",
+                    "_buffer += _PADS[_pad]",
+                    "_offset += _pad",
+                ]
+                if condition is None:
+                    for line in lines:
+                        self.code.append(line)
+                else:
+                    with self.code.indent(f"if {condition}:"):
+                        for line in lines:
+                            self.code.append(line)
 
     def reset_alignment(self, initial: int = 0) -> None:
         """Reset the current alignment to zero."""
@@ -237,6 +287,8 @@ class EncoderGeneratorFactory:
             self.generate_primitive_writer(len_var, TypeId.UINT32)
 
         if type_id == TypeId.STRING:
+            if fixed_size is not None:
+                self._emit_fixed_length_check(value_expr, fixed_size)
             random_i = self.generate_var_name()
 
             self.reset_alignment()  # After string unknown position readjustment
@@ -247,13 +299,25 @@ class EncoderGeneratorFactory:
                 self.code.append("_buffer += _str_bytes")
                 self.code.append("_buffer.append(0)")  # null terminator
                 self.code.append("_offset += _str_size")
+            self.reset_alignment()
         elif type_id == TypeId.WSTRING:
             self.code.append("raise NotImplementedError('wstring not implemented')")
 
         elif is_byte_like:
             if fixed_size is not None:
                 self._emit_fixed_length_check(value_expr, fixed_size)
-            with self.code.indent(f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"):
+            with self.code.indent(f"if isinstance({value_expr}, memoryview):"):
+                with self.code.indent(
+                    f"if {value_expr}.itemsize != 1 or {value_expr}.ndim != 1 "
+                    f"or not {value_expr}.contiguous:"
+                ):
+                    self.code.append(
+                        "raise ValueError("
+                        "'byte-array memoryview must be contiguous with itemsize 1'"
+                        ")"
+                    )
+                self.code.append(f"_buffer += {value_expr}")
+            with self.code.indent(f"elif isinstance({value_expr}, (bytes, bytearray)):"):
                 self.code.append(f"_buffer += {value_expr}")
             with self.code.indent(f"elif isinstance({value_expr}, (list, tuple)):"):
                 self.code.append(f"_buffer += bytes({value_expr})")
@@ -267,16 +331,27 @@ class EncoderGeneratorFactory:
         else:
             struct_name = TYPE_INFO[type_id]
             struct_size = struct.calcsize(struct_name)
-            self.generate_alignment(struct_size)
 
             if fixed_size is not None:
-                self._emit_fixed_length_check(value_expr, fixed_size)
+                self.generate_alignment(struct_size)
                 pattern = f"{self.endianness}{fixed_size}{struct_name}"
                 pattern_var = self.get_struct_pattern_var_name(pattern)
-                with self.code.indent(f"if isinstance({value_expr}, (list, tuple)):"):
+                with self.code.indent(
+                    f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"
+                ):
+                    self.code.append(
+                        "raise ValueError("
+                        "'raw byte buffers are only supported for uint8, byte, and char arrays'"
+                        ")"
+                    )
+                with self.code.indent(f"elif isinstance({value_expr}, (list, tuple)):"):
+                    self._emit_fixed_length_check(value_expr, fixed_size)
                     self.code.append(f"_buffer += {pattern_var}(*{value_expr})")
                 with self.code.indent("else:"):
-                    self.code.append(f"_buffer += _to_packed_bytes({value_expr}, '{struct_name}')")
+                    self.code.append(
+                        f"_buffer += _to_packed_bytes({value_expr}, "
+                        f"'{struct_name}', {self.endianness!r}, {fixed_size})"
+                    )
                 if self.static_offset is not None:
                     self.static_offset += fixed_size * struct_size
                 else:
@@ -284,22 +359,31 @@ class EncoderGeneratorFactory:
             else:
                 array_len_var = self.generate_var_name()
                 self.code.append(f"{array_len_var} = _array_length({value_expr})")
+                self.generate_alignment(struct_size, condition=f"{array_len_var} > 0")
                 with self.code.indent(f"if {array_len_var} > 0:"):
                     with self.code.indent(
                         f"if isinstance({value_expr}, (bytes, bytearray, memoryview)):"
                     ):
-                        self.code.append(f"_buffer += {value_expr}")
+                        self.code.append(
+                            "raise ValueError("
+                            "'raw byte buffers are only supported for uint8, byte, and char arrays'"
+                            ")"
+                        )
                     with self.code.indent("else:"):
                         self.code.append(
-                            f"_buffer += _to_packed_bytes({value_expr}, '{struct_name}')"
+                            f"_buffer += _to_packed_bytes({value_expr}, "
+                            f"'{struct_name}', {self.endianness!r})"
                         )
                 self.code.append(f"_offset += {array_len_var} * {struct_size}")
+                self.reset_alignment()
 
     def generate_complex_array_writer(
         self, array_var: str, plan: PlanList, array_size: int | None, is_upper_bound: bool = False
     ) -> None:
         """Generate code for complex array fields."""
         # Complex arrays always need dynamic offset tracking
+        if array_size is not None and not is_upper_bound:
+            self._emit_fixed_length_check(array_var, array_size)
         self._ensure_dynamic()
 
         # Bounded arrays (<=N) and dynamic arrays ([]) both write length prefix

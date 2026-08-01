@@ -31,6 +31,15 @@ def test_fixed_array():
     assert not msg.fields[0].type.is_upper_bound
 
 
+def test_zero_length_fixed_array_matches_ros1_genmsg_contract():
+    msg = parse_message_string("int32[0] values")
+    reference = reference_parse("int32[0] values")
+
+    assert msg.fields[0].type.is_fixed_array
+    assert msg.fields[0].type.array_size == 0
+    assert reference.fields[0].type.array_size == 0
+
+
 def test_string_array():
     """Test parsing string array types."""
     msg = parse_message_string("string[] names\nstring[5] labels")
@@ -95,9 +104,21 @@ def test_comparison_with_reference_parser():
     assert len(our_msg.fields) == len(ref_msg.fields)
 
     for our_field, ref_field in zip(our_msg.fields, ref_msg.fields, strict=True):
-        assert our_field.name == ref_field.name
-        # Reference parser includes array syntax in field_type
-        assert our_field.type.type_name in ref_field.field_type
+        assert (
+            our_field.name,
+            our_field.type.type_name,
+            our_field.type.package_name,
+            our_field.type.is_array,
+            our_field.type.array_size,
+            our_field.type.is_upper_bound,
+        ) == (
+            ref_field.name,
+            ref_field.type.base_type,
+            ref_field.type.package_name,
+            ref_field.type.is_array,
+            ref_field.type.array_size,
+            ref_field.type.is_upper_bound,
+        )
 
 
 def test_mixed_arrays_and_scalars():

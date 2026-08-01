@@ -1,6 +1,5 @@
 """Tests for basic ROS2 primitive types."""
 
-import pytest
 from ros_parser import Type
 from ros_parser.ros2_msg import parse_message_string
 
@@ -113,20 +112,16 @@ def test_empty_lines_ignored():
     assert len(msg.fields) == 2
 
 
-@pytest.mark.xfail(reason="Field name validation not implemented")
-def test_field_name_validation():
-    """Test that field names follow the correct pattern."""
-    # Valid field names
-    valid_names = ["name", "field_name", "field123", "a", "value_1"]
-    for name in valid_names:
-        msg = parse_message_string(f"string {name}")
-        assert msg.fields[0].name == name
+def test_recorded_schema_field_names_preserve_spelling():
+    msg = parse_message_string("string Name\nint32 Foo\nuint8 field__status")
 
-    # Invalid field names should fail
-    invalid_names = ["Name", "FIELD", "_field", "field_", "field__name", "123field"]
-    for name in invalid_names:
-        with pytest.raises(Exception):  # noqa: B017, PT011
-            parse_message_string(f"string {name}")
+    assert [field.name for field in msg.fields] == ["Name", "Foo", "field__status"]
+
+
+def test_recorded_schema_constant_names_preserve_spelling():
+    msg = parse_message_string("int32 Status=1\nint32 status__code=2")
+
+    assert [constant.name for constant in msg.constants] == ["Status", "status__code"]
 
 
 def test_type_string_representation():

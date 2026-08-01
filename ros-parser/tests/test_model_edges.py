@@ -23,6 +23,41 @@ def test_type_properties_and_string_representations() -> None:
     assert str(fixed) == "geometry_msgs/Point[2]"
 
 
+def test_type_constructor_preserves_explicit_shape_metadata() -> None:
+    sized_scalar = Type("int32", array_size=3)
+    negative_array = Type("int32", is_array=True, array_size=-1)
+    incomplete_bound = Type("int32", is_array=True, is_upper_bound=True)
+    zero_string_bound = Type("string", string_upper_bound=0)
+    numeric_string_bound = Type("int32", string_upper_bound=3)
+
+    assert sized_scalar.array_size == 3
+    assert negative_array.array_size == -1
+    assert incomplete_bound.is_upper_bound
+    assert zero_string_bound.string_upper_bound == 0
+    assert numeric_string_bound.string_upper_bound == 3
+
+
+def test_type_distinguishes_unbounded_bounded_and_fixed_arrays() -> None:
+    unbounded = Type("int32", is_array=True)
+    bounded = Type("int32", is_array=True, array_size=1, is_upper_bound=True)
+    fixed = Type("int32", is_array=True, array_size=1)
+
+    assert unbounded.is_dynamic_array
+    assert not unbounded.is_fixed_array
+    assert bounded.is_dynamic_array
+    assert not bounded.is_fixed_array
+    assert fixed.is_fixed_array
+    assert not fixed.is_dynamic_array
+
+
+def test_models_preserve_caller_supplied_primitive_values() -> None:
+    field = Field(Type("string"), "value", 1)
+    constant = Constant(Type("uint8"), "VALUE", 256)
+
+    assert field.default_value == 1
+    assert constant.value == 256
+
+
 def test_field_and_constant_validation_and_strings() -> None:
     assert str(Field(Type("string"), "label", "robot")) == "string label 'robot'"
     assert str(Field(Type("int32"), "count", 3)) == "int32 count 3"

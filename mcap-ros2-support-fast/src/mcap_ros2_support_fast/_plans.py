@@ -142,7 +142,7 @@ STRING_TO_TYPE_ID = {
 TYPE_INFO: dict[TypeId, str] = {
     TypeId.BOOL: "?",
     TypeId.BYTE: "B",
-    TypeId.CHAR: "b",  # signed byte, not unsigned
+    TypeId.CHAR: "B",
     TypeId.FLOAT32: "f",
     TypeId.FLOAT64: "d",
     TypeId.INT8: "b",

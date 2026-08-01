@@ -39,6 +39,10 @@ PrimitiveValue = bool | int | float | str
 ArrayValue = list[PrimitiveValue]
 
 
+class MessageDefinitionError(ValueError):
+    """Raised when a ROS message definition violates its interface contract."""
+
+
 @dataclass(frozen=True)
 class Type:
     """Represents a ROS2 type (primitive or complex, with optional array and bounds)."""
@@ -65,7 +69,7 @@ class Type:
     @property
     def is_dynamic_array(self) -> bool:
         """Check if this is a dynamic/unbounded array."""
-        return self.is_array and (not self.array_size or self.is_upper_bound)
+        return self.is_array and (self.array_size is None or self.is_upper_bound)
 
     @property
     def is_fixed_array(self) -> bool:
@@ -78,7 +82,7 @@ class Type:
             result = f"{self.package_name}/{self.type_name}"
         else:
             result = self.type_name
-            if self.string_upper_bound:
+            if self.string_upper_bound is not None:
                 result += f"<={self.string_upper_bound}"
 
         if self.is_array:

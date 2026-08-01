@@ -2,6 +2,8 @@
 
 import io
 import struct
+import zlib
+from pathlib import Path
 
 import pytest
 import small_mcap.reader as reader_module
@@ -28,6 +30,7 @@ from small_mcap import (
 from small_mcap.reader import _get_chunk_data_stream, _read_summary_from_iterable, breakup_chunk
 from small_mcap.records import (
     Attachment,
+    AttachmentIndex,
     Channel,
     Chunk,
     DataEnd,
@@ -41,6 +44,7 @@ from small_mcap.records import (
 )
 
 # Test constants
+CONFORMANCE_DATA = Path(__file__).parents[2] / "data" / "conformance"
 WRONG_CRC_CHUNK = 12345
 WRONG_CRC_DATA_END = 99999
 UNKNOWN_OPCODE = 255
@@ -643,6 +647,118 @@ def test_read_attachment_from_index():
     assert attachment.data == b"hello world"
     assert attachment.log_time == 1000
     assert attachment.create_time == 2000
+    validated_attachment = read_attachment(buffer, summary.attachment_indexes[0], validate_crc=True)
+    assert validated_attachment.data == b"hello world"
+
+
+def test_attachment_crc_validation_accepts_conformance_record_padding():
+    path = CONFORMANCE_DATA / "OneAttachment" / "OneAttachment-ax-pad-st-sum.mcap"
+
+    with path.open("rb") as stream:
+        attachments = [
+            record
+            for record in stream_reader(stream, validate_crc=True)
+            if isinstance(record, Attachment)
+        ]
+    with path.open("rb") as stream:
+        summary = get_summary(stream)
+        assert summary is not None
+        attachment = read_attachment(stream, summary.attachment_indexes[0], validate_crc=True)
+
+    assert [record.data for record in attachments] == [b"\x01\x02\x03"]
+    assert attachment.data == b"\x01\x02\x03"
+
+
+def test_attachment_crc_is_validated_when_requested():
+    buffer = io.BytesIO()
+    writer = McapWriter(buffer)
+    writer.start()
+    writer.add_attachment(
+        log_time=1000,
+        create_time=2000,
+        name="test.txt",
+        media_type="text/plain",
+        data=b"hello world",
+    )
+    writer.finish()
+
+    original = buffer.getvalue()
+    summary = get_summary(io.BytesIO(original))
+    assert summary is not None
+    index = summary.attachment_indexes[0]
+    corrupted = bytearray(original)
+    _opcode, record_length = struct.unpack_from("<BQ", corrupted, index.offset)
+    content_start = index.offset + 9
+    corrupted[content_start + record_length - 1] ^= 1
+
+    data_end_offset = content_start + record_length
+    data_end_content = data_end_offset + 9
+    data_section_crc = zlib.crc32(corrupted[8:data_end_offset])
+    struct.pack_into("<I", corrupted, data_end_content, data_section_crc)
+
+    with pytest.raises(CRCValidationError):
+        list(stream_reader(io.BytesIO(corrupted), validate_crc=True))
+    with pytest.raises(CRCValidationError):
+        read_attachment(io.BytesIO(corrupted), index, validate_crc=True)
+
+
+def test_attachment_crc_validation_accepts_specified_zero_crc():
+    attachment = Attachment(1000, 2000, "test.txt", "text/plain", b"hello")
+    output = io.BytesIO()
+    output.write(MAGIC)
+    Header(profile="test", library="test").write_record_to(output)
+    attachment.write_record_to(output)
+    data = bytearray(output.getvalue())
+    data[-4:] = b"\0" * 4
+
+    records = list(stream_reader(io.BytesIO(data), validate_crc=True, allow_incomplete=True))
+
+    assert isinstance(records[-1], Attachment)
+    assert records[-1].data == b"hello"
+
+
+def _attachment_index(raw: bytes) -> AttachmentIndex:
+    return AttachmentIndex(0, len(raw), 0, 0, 0, "", "")
+
+
+def test_attachment_crc_validation_rejects_missing_crc_field():
+    body = struct.pack("<QQIIQ", 1, 2, 0, 0, 0)
+    raw = struct.pack("<BQ", Opcode.ATTACHMENT, len(body)) + body
+
+    with pytest.raises(EndOfFileError):
+        read_attachment(io.BytesIO(raw), _attachment_index(raw), validate_crc=True)
+
+
+def test_attachment_crc_validation_rejects_data_length_spilling_into_crc():
+    prefix = struct.pack("<QQIIQ", 1, 2, 0, 0, 5) + b"a"
+    body = prefix + struct.pack("<I", zlib.crc32(prefix))
+    raw = struct.pack("<BQ", Opcode.ATTACHMENT, len(body)) + body
+
+    with pytest.raises(EndOfFileError):
+        read_attachment(io.BytesIO(raw), _attachment_index(raw), validate_crc=True)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_error"),
+    [
+        (b"", EndOfFileError),
+        (struct.pack("<BQ", Opcode.ATTACHMENT, 4) + b"\0" * 3, EndOfFileError),
+        (struct.pack("<BQ", Opcode.MESSAGE, 0), ValueError),
+    ],
+)
+def test_read_attachment_crc_validation_rejects_bad_record_envelope(raw, expected_error):
+    index = AttachmentIndex(
+        offset=0,
+        length=len(raw),
+        log_time=0,
+        create_time=0,
+        data_size=0,
+        name="",
+        media_type="",
+    )
+
+    with pytest.raises(expected_error):
+        read_attachment(io.BytesIO(raw), index, validate_crc=True)
 
 
 def test_read_metadata_from_index():

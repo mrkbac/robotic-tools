@@ -36,6 +36,7 @@
 
 """
 
+import math
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -236,9 +237,15 @@ def fields_from_dtype(dtype: np.dtype) -> list[PointField]:
 
     fields: list[PointField] = []
     for name, field_data in dtype.fields.items():
-        dt = field_data[0]
+        field_dtype = np.dtype(field_data[0])
         offset = field_data[1]
-        fields.append(PointField(name, offset, NP_TO_FIELD_TYPE[np.dtype(dt.type)]))
+        if field_dtype.subdtype is None:
+            base_dtype = field_dtype
+            count = 1
+        else:
+            base_dtype, shape = field_dtype.subdtype
+            count = math.prod(shape)
+        fields.append(PointField(name, offset, NP_TO_FIELD_TYPE[np.dtype(base_dtype.type)], count))
 
     return fields
 
@@ -265,11 +272,24 @@ def read_points(
     Returns:
         Structured NumPy array containing points.
     """
+    dtype = dtype_from_fields(cloud.fields, point_step=cloud.point_step)
+    packed_row_step = cloud.width * cloud.point_step
+    expected_data_length = cloud.row_step * cloud.height
+    if cloud.row_step < packed_row_step:
+        raise ValueError(
+            f"row_step ({cloud.row_step}) is smaller than packed row size ({packed_row_step})"
+        )
+    if len(cloud.data) != expected_data_length:
+        raise ValueError(
+            f"data length ({len(cloud.data)}) does not match row_step * height "
+            f"({expected_data_length})"
+        )
     points = np.ndarray(
-        shape=(cloud.width * cloud.height,),
-        dtype=dtype_from_fields(cloud.fields, point_step=cloud.point_step),
+        shape=(cloud.height, cloud.width),
+        dtype=dtype,
         buffer=cloud.data,
-    )
+        strides=(cloud.row_step, cloud.point_step),
+    ).reshape(-1)
 
     # Keep only the requested fields
     if field_names is not None:
@@ -304,7 +324,7 @@ def read_points(
 
     # Cast into 2d array if cloud is 'organized'
     if reshape_organized_cloud and cloud.height > 1:
-        points = points.reshape(cloud.width, cloud.height)
+        points = points.reshape(cloud.height, cloud.width)
 
     return points
 
@@ -331,6 +351,8 @@ def create_cloud(
     Returns:
         The point cloud as PointCloud2 message.
     """
+    fields = list(fields)
+
     # Check if input is numpy array
     if isinstance(points, np.ndarray):
         # Check if this is an unstructured array
@@ -360,9 +382,9 @@ def create_cloud(
         )
     height = 1
     width = points.shape[0]
-    # Check if input points are an organized cloud (2D array of points)
+    # Check if input points are an organized cloud (2D array of points).
     if len(points.shape) == 2:
-        height = points.shape[1]
+        height, width = points.shape
 
     # Convert fields to PointField objects if they are dictionaries
     converted_fields = _normalize_fields(fields)

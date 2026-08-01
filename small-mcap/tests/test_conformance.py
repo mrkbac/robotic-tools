@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from small_mcap import McapRecord, stream_reader
+from small_mcap import Attachment, McapRecord, get_summary, read_attachment, stream_reader
 
 
 def normalize_value(value: Any) -> Any:
@@ -116,3 +116,38 @@ class TestConformanceValidation:
                 f"Expected: {expected_fields}\n"
                 f"Got: {actual_fields}"
             )
+
+
+@pytest.mark.conformance
+def test_padded_attachment_validates_crc_for_streaming_and_indexed_reads():
+    mcap_file = (
+        Path(__file__).parent.parent.parent
+        / "data"
+        / "conformance"
+        / "OneAttachment"
+        / "OneAttachment-ax-pad-st-sum.mcap"
+    )
+
+    with open(mcap_file, "rb") as stream:
+        summary = get_summary(stream)
+        assert summary is not None
+        assert len(summary.attachment_indexes) == 1
+        indexed_attachment = read_attachment(
+            stream, summary.attachment_indexes[0], validate_crc=True
+        )
+
+    with open(mcap_file, "rb") as stream:
+        streamed_attachments = [
+            record
+            for record in stream_reader(stream, validate_crc=True)
+            if isinstance(record, Attachment)
+        ]
+
+    assert indexed_attachment == Attachment(
+        log_time=2,
+        create_time=1,
+        name="myFile",
+        media_type="application/octet-stream",
+        data=b"\x01\x02\x03",
+    )
+    assert streamed_attachments == [indexed_attachment]

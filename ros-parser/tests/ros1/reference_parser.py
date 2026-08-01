@@ -38,10 +38,21 @@ BUILTIN_TYPES = [*PRIMITIVE_TYPES, TIME, DURATION]
 
 
 @dataclass
+class ReferenceType:
+    """Normalized type shape produced independently of ros_parser."""
+
+    base_type: str
+    package_name: str | None
+    is_array: bool
+    array_size: int | None
+    is_upper_bound: bool = False
+
+
+@dataclass
 class ReferenceField:
     """Represents a field in the reference parser."""
 
-    field_type: str
+    type: ReferenceType
     name: str
 
 
@@ -49,7 +60,7 @@ class ReferenceField:
 class ReferenceConstant:
     """Represents a constant in the reference parser."""
 
-    field_type: str
+    type: ReferenceType
     name: str
     value: bool | int | float | str
 
@@ -75,15 +86,66 @@ def is_builtin(msg_type_name: str) -> bool:
 
 
 def _strip_comments(line: str) -> str:
-    """Strip comments from a line."""
-    return line.split(COMMENTCHAR, maxsplit=1)[0].strip()
+    """Strip comments while preserving a hash inside a quoted string."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote is not None:
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char == COMMENTCHAR and quote is None:
+            return line[:index].strip()
+    return line.strip()
 
 
-def _convert_constant_value(field_type: str, val: str) -> bool | int | float | str:
+def _parse_type(type_text: str, package_context: str | None = None) -> ReferenceType:
+    """Parse a ROS1 type token into an independent normalized shape."""
+    base_type = type_text
+    is_array = False
+    array_size = None
+    if "[" in type_text:
+        if not type_text.endswith("]"):
+            raise ValueError(f"Invalid array type: {type_text}")
+        base_type, array_suffix = type_text[:-1].split("[", maxsplit=1)
+        is_array = True
+        if array_suffix:
+            array_size = int(array_suffix)
+
+    if base_type == HEADER:
+        package_name = "std_msgs"
+        base_type = HEADER
+    elif base_type in BUILTIN_TYPES:
+        package_name = None
+    elif SEP in base_type:
+        package_name, base_type = base_type.split(SEP, maxsplit=1)
+    else:
+        package_name = package_context
+
+    return ReferenceType(
+        base_type=base_type,
+        package_name=package_name,
+        is_array=is_array,
+        array_size=array_size,
+    )
+
+
+def _convert_constant_value(type_: ReferenceType, val: str) -> bool | int | float | str:
     """Convert constant value string to proper type."""
     val = val.strip()
+    field_type = type_.base_type
 
     if field_type == "string":
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            return val[1:-1]
         return val
     if field_type == "bool":
         # ROS1 accepts 0/1 or true/false
@@ -103,7 +165,23 @@ def _convert_constant_value(field_type: str, val: str) -> bool | int | float | s
             return int(val, 2)
         if val.lower().startswith("0o"):
             return int(val, 8)
-        return int(val)
+        result = int(val)
+        ranges = {
+            "byte": (-128, 127),
+            "char": (0, 255),
+            "uint8": (0, 255),
+            "int8": (-128, 127),
+            "uint16": (0, 65_535),
+            "int16": (-32_768, 32_767),
+            "uint32": (0, 4_294_967_295),
+            "int32": (-2_147_483_648, 2_147_483_647),
+            "uint64": (0, 18_446_744_073_709_551_615),
+            "int64": (-9_223_372_036_854_775_808, 9_223_372_036_854_775_807),
+        }
+        lower, upper = ranges[field_type]
+        if not lower <= result <= upper:
+            raise ValueError(f"Integer constant out of range for {field_type}: {result}")
+        return result
     raise ValueError(f"Unknown constant type: {field_type}")
 
 
@@ -111,9 +189,10 @@ def _load_constant_line(orig_line: str) -> ReferenceConstant:
     """Parse a constant line."""
     clean_line = _strip_comments(orig_line)
     line_splits = [s for s in [x.strip() for x in clean_line.split(" ")] if s]
-    field_type = line_splits[0]
+    field_type_text = line_splits[0]
+    type_ = _parse_type(field_type_text)
 
-    if field_type == "string":
+    if field_type_text == "string":
         # strings contain anything to the right of the equals sign
         idx = orig_line.find(CONSTCHAR)
         name = orig_line[orig_line.find(" ") + 1 : idx].strip()
@@ -125,28 +204,20 @@ def _load_constant_line(orig_line: str) -> ReferenceConstant:
         name = line_splits[0]
         val = line_splits[1]
 
-    val_converted = _convert_constant_value(field_type, val)
-    return ReferenceConstant(field_type, name, val_converted)
+    if type_.is_array or type_.package_name is not None:
+        raise ValueError("ROS1 constants must be primitive, non-array types")
+    val_converted = _convert_constant_value(type_, val)
+    return ReferenceConstant(type_, name, val_converted)
 
 
-def _load_field_line(orig_line: str, package_context: str | None) -> tuple[str, str]:
-    """Parse a field line and return (field_type, name)."""
+def _load_field_line(orig_line: str, package_context: str | None) -> ReferenceField:
+    """Parse a field line into its normalized type and name."""
     clean_line = _strip_comments(orig_line)
     line_splits = [s for s in [x.strip() for x in clean_line.split(" ")] if s]
     if len(line_splits) != 2:
         raise ValueError(f"Invalid declaration: {orig_line}")
     field_type, name = line_splits
-
-    # Resolve type based on context
-    if package_context and SEP not in field_type:
-        if field_type == HEADER:
-            field_type = HEADER_FULL_NAME
-        elif not is_builtin(bare_msg_type(field_type)):
-            field_type = f"{package_context}/{field_type}"
-    elif field_type == HEADER:
-        field_type = HEADER_FULL_NAME
-
-    return field_type, name
+    return ReferenceField(_parse_type(field_type, package_context), name)
 
 
 def parse_message_string(text: str, package_context: str | None = None) -> ReferenceMessageDef:
@@ -170,7 +241,6 @@ def parse_message_string(text: str, package_context: str | None = None) -> Refer
         if CONSTCHAR in clean_line:
             constants.append(_load_constant_line(orig_line))
         else:
-            field_type, name = _load_field_line(orig_line, package_context)
-            fields.append(ReferenceField(field_type, name))
+            fields.append(_load_field_line(orig_line, package_context))
 
     return ReferenceMessageDef(fields, constants)

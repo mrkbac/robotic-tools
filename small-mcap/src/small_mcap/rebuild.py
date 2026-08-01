@@ -1,6 +1,7 @@
 """Rebuild MCAP summary section from data section."""
 
 import io
+import struct
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -208,6 +209,8 @@ def _breakup_chunk_with_offsets(
         opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
         pos += _RECORD_HEADER_SIZE
         record_data_end = pos + length
+        if record_data_end > len(view):
+            raise struct.error("Chunk record length exceeds decompressed chunk data")
 
         if opcode == Opcode.MESSAGE:
             yield (record_start, Message.read(view[pos:record_data_end]))
@@ -236,7 +239,8 @@ def rebuild_summary(
     as message reading to efficiently handle channel definitions.
 
     Args:
-        stream: Input stream to read from (must be non-seekable or at start of file)
+        stream: Seekable input stream positioned at the start of the file, or at
+            ``initial_state.next_offset`` when resuming.
         validate_crc: Whether to validate CRC checksums when processing chunks
         calculate_channel_sizes: Whether to calculate per-channel message data sizes.
         exact_sizes: When True, decompresses all chunks for exact sizes. When False, estimates
@@ -266,11 +270,33 @@ def rebuild_summary(
     if initial_state is not None:
         # Resume from previous state
         header = initial_state.header
-        summary = initial_state.summary
-        statistics = summary.statistics
-        assert statistics is not None, "Initial state's summary must have statistics"
+        previous_summary = initial_state.summary
+        previous_statistics = previous_summary.statistics
+        assert previous_statistics is not None, "Initial state's summary must have statistics"
+        statistics = Statistics(
+            message_count=previous_statistics.message_count,
+            schema_count=previous_statistics.schema_count,
+            channel_count=previous_statistics.channel_count,
+            attachment_count=previous_statistics.attachment_count,
+            metadata_count=previous_statistics.metadata_count,
+            chunk_count=previous_statistics.chunk_count,
+            message_start_time=previous_statistics.message_start_time,
+            message_end_time=previous_statistics.message_end_time,
+            channel_message_counts=defaultdict(int, previous_statistics.channel_message_counts),
+        )
+        summary = Summary(
+            statistics=statistics,
+            schemas=dict(previous_summary.schemas),
+            channels=dict(previous_summary.channels),
+            chunk_indexes=list(previous_summary.chunk_indexes),
+            attachment_indexes=list(previous_summary.attachment_indexes),
+            metadata_indexes=list(previous_summary.metadata_indexes),
+        )
         channel_sizes = defaultdict(int, initial_state.channel_sizes or {})
-        chunk_information = dict(initial_state.chunk_information or {})
+        chunk_information = {
+            offset: list(indexes)
+            for offset, indexes in (initial_state.chunk_information or {}).items()
+        }
     else:
         # Start fresh
         header = None
@@ -294,6 +320,9 @@ def rebuild_summary(
     pending_chunk_start_offset: int = 0
     pending_indexes: list[MessageIndex] = []
     pending_message_index_offsets: dict[int, int] = {}
+    pending_prior_message_start_time = 0
+    pending_prior_message_end_time = 0
+    next_offset = stream.tell()
 
     def update_message(record: Message) -> None:
         # Update message time statistics
@@ -380,12 +409,22 @@ def rebuild_summary(
         pending_message_index_offsets.clear()
         pending_chunk = None
 
-    message_index_start_offset: int = 0
-    prev_pos: int = 0
-    last_message_index_end_offset: int = 0
+    def discard_pending_chunk() -> None:
+        nonlocal next_offset, pending_chunk
+        assert pending_chunk is not None
+        statistics.chunk_count -= 1
+        statistics.message_start_time = pending_prior_message_start_time
+        statistics.message_end_time = pending_prior_message_end_time
+        next_offset = pending_chunk_start_offset
+        pending_indexes.clear()
+        pending_message_index_offsets.clear()
+        pending_chunk = None
 
-    # Track position for resumable reads
-    next_offset = stream.tell()
+    message_index_start_offset: int = 0
+    prev_pos = stream.tell()
+    last_message_index_end_offset: int = 0
+    scan_ended_incomplete = False
+    tail_opcode: int | None = None
 
     try:
         for record in stream_reader(
@@ -432,7 +471,9 @@ def rebuild_summary(
             elif isinstance(record, Message):
                 update_message(record)
             elif isinstance(record, LazyChunk):
-                pending_chunk_start_offset = record_start_pos
+                pending_prior_message_start_time = statistics.message_start_time
+                pending_prior_message_end_time = statistics.message_end_time
+                pending_chunk_start_offset = record.record_start
                 message_index_start_offset = current_pos
                 last_message_index_end_offset = message_index_start_offset
 
@@ -468,7 +509,12 @@ def rebuild_summary(
             elif isinstance(record, MetadataIndex):
                 summary.metadata_indexes.append(record)
     except EndOfFileError:
-        tail_opcode: int | None = None
+        scan_ended_incomplete = True
+        if stream_end is None and stream.seekable():
+            failed_position = stream.tell()
+            stream.seek(0, io.SEEK_END)
+            stream_end = stream.tell()
+            stream.seek(failed_position)
         if stream_end is not None and next_offset < stream_end:
             failed_position = stream.tell()
             stream.seek(next_offset)
@@ -480,9 +526,27 @@ def rebuild_summary(
             pending_indexes.clear()
             pending_message_index_offsets.clear()
             last_message_index_end_offset = message_index_start_offset
-    except Exception:
-        if allow_incomplete_tail_only:
-            raise
+
+    pending_chunk_is_provisional = (
+        scan_ended_incomplete
+        and pending_chunk is not None
+        and tail_opcode in (None, Opcode.MESSAGE_INDEX)
+    )
+    if pending_chunk_is_provisional:
+        assert pending_chunk is not None
+        # Read the chunk so corruption in a *complete* record propagates in both modes; a short
+        # read means the chunk record itself is incomplete.
+        chunk_is_complete = True
+        try:
+            for _record in breakup_chunk(pending_chunk.to_chunk(stream), validate_crc=validate_crc):
+                pass
+        except EndOfFileError:
+            chunk_is_complete = False
+        # Strict mode rolls back the whole unterminated group so a later pass re-reads it. Tail-only
+        # mode keeps a complete chunk (its indexes were already dropped above) and only rolls back
+        # when the chunk itself is truncated, which would otherwise index bytes past end-of-file.
+        if not allow_incomplete_tail_only or not chunk_is_complete:
+            discard_pending_chunk()
 
     if pending_chunk is not None:
         message_index_length = last_message_index_end_offset - message_index_start_offset
@@ -499,21 +563,17 @@ def rebuild_summary(
                 uncompressed_size=pending_chunk.uncompressed_size,
             )
         )
-    try:
-        prior_chunks = summary.chunk_indexes[:-1]
-        # Only skip index rebuilding if there are prior chunks and none have indexes
-        # (i.e., the file was written without message indexes). With no prior chunks
-        # or with any prior chunk having indexes, default to rebuilding.
-        should_rebuild_indexes = not prior_chunks or any(
-            ci.message_index_length > 0 for ci in prior_chunks
-        )
-        if allow_incomplete_tail_only:
-            finish_chunk()
-        else:
-            finish_chunk(force=True, rebuild_indexes=should_rebuild_indexes)
-    except Exception:
-        if allow_incomplete_tail_only:
-            raise
+    prior_chunks = summary.chunk_indexes[:-1]
+    # Only skip index rebuilding if there are prior chunks and none have indexes
+    # (i.e., the file was written without message indexes). With no prior chunks
+    # or with any prior chunk having indexes, default to rebuilding.
+    should_rebuild_indexes = not prior_chunks or any(
+        ci.message_index_length > 0 for ci in prior_chunks
+    )
+    if allow_incomplete_tail_only:
+        finish_chunk()
+    else:
+        finish_chunk(force=True, rebuild_indexes=should_rebuild_indexes)
 
     # Finalize statistics
     statistics.schema_count = len(summary.schemas)

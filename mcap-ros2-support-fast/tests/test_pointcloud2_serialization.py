@@ -4,7 +4,9 @@ from io import BytesIO
 
 import numpy as np
 import pytest
+from mcap_ros2._cdr import CdrWriter, EncapsulationKind
 from mcap_ros2_support_fast import ROS2EncoderFactory
+from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap.reader import read_message_decoded
 from small_mcap.writer import McapWriter
@@ -268,37 +270,13 @@ def test_pointcloud2_large():
 
 
 def test_pointfield_padding():
-    """Test that PointField struct correctly handles padding between uint8 and uint32.
-
-    The PointField struct has:
-    - string name
-    - uint32 offset
-    - uint8 datatype
-    - uint32 count
-
-    Between datatype (uint8) and count (uint32), there must be 3 padding bytes
-    for proper CDR alignment.
-    """
-    output = BytesIO()
-    ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
-    ros_writer.start()
-
-    # Create message with specific field values to test padding
-    msg = {
-        "header": {
-            "stamp": {"sec": 0, "nanosec": 0},
-            "frame_id": "",
-        },
+    """Match an independently encoded PointCloud2 payload, including PointField padding."""
+    schema_name = "sensor_msgs/msg/PointCloud2"
+    message = {
+        "header": {"stamp": {"sec": 0, "nanosec": 0}, "frame_id": ""},
         "height": 1,
         "width": 0,
-        "fields": [
-            {
-                "name": "test",
-                "offset": 123,  # Specific value to detect misalignment
-                "datatype": 7,  # uint8
-                "count": 456,  # Should be aligned after 3 bytes of padding
-            }
-        ],
+        "fields": [{"name": "test", "offset": 123, "datatype": 7, "count": 456}],
         "is_bigendian": False,
         "point_step": 0,
         "row_step": 0,
@@ -306,28 +284,31 @@ def test_pointfield_padding():
         "is_dense": False,
     }
 
-    # Register schema and channel
-    schema_id = 1
-    channel_id = 1
-    ros_writer.add_schema(
-        schema_id, "sensor_msgs/msg/PointCloud2", "ros2msg", POINTCLOUD2_SCHEMA.encode()
-    )
-    ros_writer.add_channel(channel_id, "/points", "cdr", schema_id)
+    output = BytesIO()
+    reference_writer = CdrWriter(output, kind=EncapsulationKind.CDR_LE)
+    reference_writer.write_int32(0)
+    reference_writer.write_uint32(0)
+    reference_writer.write_string("")
+    reference_writer.write_uint32(1)
+    reference_writer.write_uint32(0)
+    reference_writer.write_uint32(1)
+    reference_writer.write_string("test")
+    reference_writer.write_uint32(123)
+    reference_writer.write_uint8(7)
+    reference_writer.write_uint32(456)
+    reference_writer.write_boolean(False)
+    reference_writer.write_uint32(0)
+    reference_writer.write_uint32(0)
+    reference_writer.write_uint32(0)
+    reference_writer.write_boolean(False)
+    expected = output.getvalue()
 
-    ros_writer.add_message_encode(
-        channel_id=channel_id,
-        log_time=0,
-        data=msg,
-        publish_time=0,
-        sequence=0,
-    )
-    ros_writer.finish()
+    encoder = create_encoder_function(schema_name, POINTCLOUD2_SCHEMA)
+    decoder = create_decoder_function(schema_name, POINTCLOUD2_SCHEMA)
+    encoded = bytes(encoder(message))
+    decoded = decoder(expected)
 
-    output.seek(0)
-    messages = read_ros2_messages(output)
-    decoded = messages[0].decoded_message
-
-    # Verify the PointField was correctly encoded and decoded
+    assert encoded == expected
     assert len(decoded.fields) == 1
     assert decoded.fields[0].name == "test"
     assert decoded.fields[0].offset == 123, f"offset should be 123, got {decoded.fields[0].offset}"

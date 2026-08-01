@@ -5,11 +5,68 @@ from typing import Any, cast
 
 # Import from standalone parser (pre-compiled grammar)
 from .._lark_standalone_runtime import Token, Transformer
-from .._utils import unescape_string
+from .._utils import (
+    FloatLiteral,
+    IntegerLiteral,
+    UnquotedLiteral,
+    integer_type_range,
+    unescape_string,
+)
 
 # Import models (shared between ROS1 and ROS2)
-from ..models import Constant, Field, MessageDefinition, ServiceDefinition, Type
+from ..models import (
+    Constant,
+    Field,
+    MessageDefinition,
+    MessageDefinitionError,
+    ServiceDefinition,
+    Type,
+)
 from ._standalone_parser import Lark_StandAlone
+
+
+def _validate_constant_value(
+    type_spec: Type, value: bool | float | str
+) -> bool | int | float | str:
+    """Validate and normalize a ROS1 constant at the parser boundary."""
+    type_name = type_spec.type_name
+    if type_name == "bool":
+        if isinstance(value, UnquotedLiteral) and value.lower() in {"true", "false"}:
+            return value.lower() == "true"
+        if isinstance(value, IntegerLiteral) and value.source in {"0", "1"}:
+            return bool(value)
+        raise MessageDefinitionError(f"Invalid bool constant value {value!r}")
+
+    integer_range = integer_type_range(type_name, is_ros1=True)
+    if integer_range is not None:
+        lower, upper = integer_range
+        if not isinstance(value, int) or isinstance(value, bool) or not lower <= value <= upper:
+            raise MessageDefinitionError(
+                f"Integer range for ROS1 {type_name} is {lower}..{upper}; got {value!r}"
+            )
+        return int(value)
+
+    if type_name in {"float32", "float64"}:
+        if isinstance(value, UnquotedLiteral) and value.lower() in {
+            "nan",
+            "+nan",
+            "-nan",
+            "inf",
+            "+inf",
+            "-inf",
+        }:
+            return float(value)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise MessageDefinitionError(f"Invalid {type_name} constant value {value!r}")
+        return float(value)
+
+    if type_name == "string":
+        if isinstance(value, (IntegerLiteral, FloatLiteral)):
+            return value.source
+        if isinstance(value, str):
+            return str(value)
+
+    raise MessageDefinitionError(f"Invalid constant value {value!r} for ROS1 type '{type_spec}'")
 
 
 class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
@@ -66,6 +123,10 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
                         f"Constant '{name}' uses array type '{type_spec}'. "
                         "Constants must use primitive types only (no arrays)."
                     )
+                try:
+                    constant_value = _validate_constant_value(type_spec, constant_value)
+                except MessageDefinitionError as exc:
+                    raise MessageDefinitionError(f"Constant '{name}': {exc}") from exc
             return Constant(type=type_spec, name=name, value=constant_value)
         # is_field (no default value in ROS1)
         return Field(type=type_spec, name=name, default_value=None)
@@ -84,12 +145,8 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         return ""
 
     def identifier(self, items: list[Token]) -> str:
-        """Return identifier after validation."""
-        name = str(items[0])
-        # Validate no consecutive underscores
-        if "__" in name:
-            raise ValueError(f"Identifier '{name}' contains consecutive underscores")
-        return name
+        """Return the identifier exactly as recorded in the schema."""
+        return str(items[0])
 
     def type_spec(self, items: list[Any]) -> Type:
         """Build a Type from primitive/complex type and optional array."""
@@ -113,7 +170,7 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
             type_obj = Type(type_name=str(base_type))
 
         # Apply array specification if present
-        if array_spec:
+        if array_spec is not None:
             is_array, array_size = array_spec
             type_obj = Type(
                 type_name=type_obj.type_name,
@@ -194,10 +251,9 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
         # Use custom unescaping for ROS-specific escape sequences
         return unescape_string(string_content)
 
-    def boolean_literal(self, items: list[Token]) -> bool:
-        """Parse boolean value - returns True for 'true'/'True'/'1', False otherwise."""
-        value = str(items[0])
-        return value.lower() in ("true", "1")
+    def boolean_literal(self, items: list[Token]) -> str:
+        """Retain a boolean word until its declared constant type is known."""
+        return UnquotedLiteral(str(items[0]))
 
     def numeric_literal(self, items: list[Token]) -> int | float:
         """
@@ -209,23 +265,23 @@ class Ros1MessageTransformer(Transformer[Any, MessageDefinition]):
 
         # Handle different number bases using Python's int() base parameter
         if "x" in value_str.lower():
-            return int(value_str, 16)
+            return IntegerLiteral(int(value_str, 16), value_str)
         if "b" in value_str.lower():
-            return int(value_str, 2)
+            return IntegerLiteral(int(value_str, 2), value_str)
         if "o" in value_str.lower():
-            return int(value_str, 8)
+            return IntegerLiteral(int(value_str, 8), value_str)
 
         # Handle decimal integers and floats
         # If contains '.', 'e', or 'E', it's a float
         if "." in value_str or "e" in value_str.lower():
-            return float(value_str)
-        return int(value_str)
+            return FloatLiteral(float(value_str), value_str)
+        return IntegerLiteral(int(value_str), value_str)
 
     def unquoted_string(self, items: list[Token]) -> str:
         """Parse unquoted string."""
         string_content = str(items[0]).strip()
         # Handle escape sequences even in unquoted strings
-        return unescape_string(string_content)
+        return UnquotedLiteral(unescape_string(string_content))
 
     # Line filtering - return None for lines we want to filter out
     def line(self, items: list[Any]) -> Field | Constant | str | None:

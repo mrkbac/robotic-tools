@@ -86,9 +86,9 @@ PACKAGE_NAME: /[a-z]([a-z0-9_]*[a-z0-9])?/
 // Type identifiers start with uppercase letter
 TYPE_IDENTIFIER: /[A-Z][A-Za-z0-9]*/
 
-// General identifier for field/constant names
-// Pattern: letter optionally followed by alphanumeric/underscores (no trailing underscore)
-IDENTIFIER: /[A-Za-z]([A-Za-z0-9_]*[A-Za-z0-9])?/
+// General identifier for field/constant names. Preserve the spelling found in
+// recorded schemas instead of enforcing authoring-time naming conventions.
+IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
 
 // Special base numeric literals - highest priority to match before plain integers
 HEX_NUMBER.2: /[+-]?0[xX][0-9a-fA-F]+/

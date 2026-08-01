@@ -61,19 +61,11 @@ class TestBooleanConstants:
         msg = parse_string("bool FLAG=False")
         assert msg.constants[0].value is False
 
-    def test_bool_one_parsed_as_int(self):
-        """1 for bool is parsed as numeric integer, not boolean True."""
-        msg = parse_string("bool FLAG=1")
-        assert msg.constants[0].value == 1
-        assert isinstance(msg.constants[0].value, int)
-        assert not isinstance(msg.constants[0].value, bool)
-
-    def test_bool_zero_parsed_as_int(self):
-        """0 for bool is parsed as numeric integer, not boolean False."""
-        msg = parse_string("bool FLAG=0")
-        assert msg.constants[0].value == 0
-        assert isinstance(msg.constants[0].value, int)
-        assert not isinstance(msg.constants[0].value, bool)
+    @pytest.mark.parametrize(("literal", "expected"), [("1", True), ("0", False)])
+    def test_numeric_bool_constants_are_booleans(self, literal, expected):
+        msg = parse_string(f"bool FLAG={literal}")
+        assert type(msg.constants[0].value) is bool
+        assert msg.constants[0].value is expected
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +115,14 @@ class TestNumericConstants:
         assert msg.constants[0].value == 0b11001100
 
     def test_octal_constant(self):
-        msg = parse_string("uint8 PERM=0o755")
+        msg = parse_string("uint16 PERM=0o755")
         assert msg.constants[0].value == 0o755
+
+
+def test_ros1_recorded_schema_identifier_conventions_are_not_rejected() -> None:
+    msg = parse_string("int32 _field\nint32 field__status")
+
+    assert [field.name for field in msg.fields] == ["_field", "field__status"]
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@ from typing import cast
 import pytest
 import small_mcap.writer as writer_module
 from small_mcap.exceptions import WriterNotStartedError
-from small_mcap.records import Chunk, LazyChunk, Message, MessageIndex, Opcode
+from small_mcap.reader import stream_reader
+from small_mcap.records import Channel, Chunk, LazyChunk, Message, MessageIndex, Opcode, Schema
 from small_mcap.writer import (
     CompressionType,
     McapWriter,
@@ -106,6 +107,40 @@ def test_raw_writer_validates_state_and_references() -> None:
     ):
         with pytest.raises(RuntimeError, match="already finished"):
             operation()
+
+
+@pytest.mark.parametrize("chunk_size", [0, 1024])
+def test_writer_accepts_identical_but_rejects_conflicting_duplicate_ids(chunk_size) -> None:
+    output = io.BytesIO()
+    writer = McapWriter(
+        output,
+        chunk_size=chunk_size,
+        repeat_schemas=False,
+        repeat_channels=False,
+    )
+    writer.start()
+
+    writer.add_schema(1, "schema", "json", b"{}")
+    writer.add_schema(1, "schema", "json", b"{}")
+    with pytest.raises(ValueError, match="Conflicting schema ID 1"):
+        writer.add_schema(1, "different", "json", b"{}")
+
+    writer.add_channel(1, "/topic", "json", 1)
+    writer.add_channel(1, "/topic", "json", 1)
+    with pytest.raises(ValueError, match="Conflicting channel ID 1"):
+        writer.add_channel(1, "/other", "json", 1)
+
+    writer.finish()
+    records = list(stream_reader(io.BytesIO(output.getvalue()), emit_chunks=True))
+
+    assert [record.name for record in records if isinstance(record, Schema)] == [
+        "schema",
+        "schema",
+    ]
+    assert [record.topic for record in records if isinstance(record, Channel)] == [
+        "/topic",
+        "/topic",
+    ]
 
 
 def test_raw_chunk_copy_preserves_input_position_and_reuses_buffer() -> None:

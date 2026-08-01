@@ -1,6 +1,9 @@
 """Tests for advanced ROS2 parsing: defaults, bounded arrays/strings, services, actions."""
 
+import math
+
 import pytest
+from ros_parser import MessageDefinitionError
 from ros_parser.ros2_msg import parse_action_string, parse_message_string, parse_service_string
 
 
@@ -257,3 +260,125 @@ string message"""
         assert len(msg.constants) == 2
         assert len(msg.fields) == 2
         assert len(msg.fields_all) == 4
+
+
+class TestSemanticValidation:
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            "string<=0 label",
+            "int32[0] values",
+            "int32[<=0] values",
+        ],
+    )
+    def test_bounds_must_be_positive(self, definition):
+        with pytest.raises(ValueError, match="greater than zero"):
+            parse_message_string(definition)
+
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            "uint8 value 256",
+            "int8 value -129",
+            "int32 value 1.5",
+            "bool value 2",
+            'float64 value "not a number"',
+            'string<=2 value "abc"',
+            "time timestamp 0",
+        ],
+    )
+    def test_field_defaults_match_declared_type(self, definition):
+        with pytest.raises(MessageDefinitionError, match="default"):
+            parse_message_string(definition)
+
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            "uint8 MASK=256",
+            "int32 COUNT=1.5",
+            "bool ENABLED=2",
+            "string<=2 LABEL='abc'",
+        ],
+    )
+    def test_constants_match_declared_type(self, definition):
+        with pytest.raises(MessageDefinitionError, match="Constant"):
+            parse_message_string(definition)
+
+    def test_ros2_byte_uses_unsigned_octet_range(self):
+        field = parse_message_string("byte value 255").fields[0]
+        assert field.default_value == 255
+
+        with pytest.raises(MessageDefinitionError, match="default"):
+            parse_message_string("byte value -1")
+
+        constants = parse_message_string("byte MIN=0\nbyte MAX=255").constants
+        assert [constant.value for constant in constants] == [0, 255]
+        for value in (-1, 256):
+            with pytest.raises(MessageDefinitionError, match="default"):
+                parse_message_string(f"byte VALUE={value}")
+
+    @pytest.mark.parametrize(
+        ("definition", "expected"),
+        [("bool enabled 0", False), ("bool enabled 1", True)],
+    )
+    def test_bool_numeric_domain_is_normalized(self, definition, expected):
+        field = parse_message_string(definition).fields[0]
+        assert field.default_value is expected
+        assert type(field.default_value) is bool
+
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            "int32[3] values [1, 2]",
+            "int32[<=2] values [1, 2, 3]",
+            "int32[2] values 1",
+        ],
+    )
+    def test_array_defaults_match_declared_cardinality(self, definition):
+        with pytest.raises(MessageDefinitionError, match="array"):
+            parse_message_string(definition)
+
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            "geometry_msgs/Pose pose 1",
+            "geometry_msgs/Pose[] poses [1]",
+        ],
+    )
+    def test_prohibited_defaults_are_rejected(self, definition):
+        with pytest.raises(MessageDefinitionError, match="default"):
+            parse_message_string(definition)
+
+    @pytest.mark.parametrize(
+        ("definition", "expected"),
+        [
+            ("string label hello", "hello"),
+            ("string value 1", "1"),
+            ("string value 1.5", "1.5"),
+            ("string value true", "true"),
+            ("string value 0x1", "0x1"),
+            ('string[] values ["hello", "a,b"]', ["hello", "a,b"]),
+            ("string[] values [1, true, 1.5]", ["1", "true", "1.5"]),
+            ("wstring[2] values [hello, world]", ["hello", "world"]),
+            ("string[<=2] values [hello]", ["hello"]),
+        ],
+    )
+    def test_string_defaults_match_rosidl_accepted_forms(self, definition, expected):
+        assert parse_message_string(definition).fields[0].default_value == expected
+
+    @pytest.mark.parametrize(("spelling", "expected"), [("TRUE", True), ("FALSE", False)])
+    def test_bool_defaults_accept_case_insensitive_words(self, spelling, expected):
+        value = parse_message_string(f"bool value {spelling}").fields[0].default_value
+        assert value is expected
+
+    @pytest.mark.parametrize("spelling", ["0x1", "+1", "-0"])
+    def test_bool_defaults_reject_noncanonical_numeric_spellings(self, spelling):
+        with pytest.raises(MessageDefinitionError, match="default"):
+            parse_message_string(f"bool value {spelling}")
+
+    def test_nonfinite_float_literals_and_string_constant_public_type(self):
+        msg = parse_message_string('float32 value nan\nfloat64 NEG=-inf\nstring LABEL="x"')
+
+        assert math.isnan(msg.fields[0].default_value)
+        assert msg.constants[0].value == -math.inf
+        assert type(msg.constants[1].value) is str

@@ -22,6 +22,7 @@ from ros_parser.message_path import (
     StreamModifier,
     ValidationError,
     modifiers,
+    parse_message_path,
 )
 from ros_parser.message_path.models import (
     _FLOAT64_TYPE,
@@ -141,6 +142,9 @@ def test_math_modifier_wraps_registered_operation_errors(monkeypatch) -> None:
 def test_modifier_error_paths_and_non_list_iterables() -> None:
     with pytest.raises(MessagePathError, match="numeric array"):
         modifiers._numeric_array(1, "sum")
+    for non_numeric_iterable in ("123", {"value": 1}):
+        with pytest.raises(MessagePathError, match="numeric array"):
+            modifiers._numeric_array(non_numeric_iterable, "sum")
 
     assert (
         MathModifier(
@@ -151,12 +155,26 @@ def test_modifier_error_paths_and_non_list_iterables() -> None:
     )
     assert MathModifier("product", [2, 3]).apply({}, {}) == 6
     assert modifiers._magnitude(array("d", [3, 4])) == 5
+    assert modifiers._magnitude(range(3, 5)) == 5
+    assert parse_message_path("/topic.values.@norm").apply({"values": range(3, 5)}) == 5
+    with pytest.raises(MessagePathError, match="numeric array"):
+        MathModifier("magnitude", []).apply(UserDict({3: "x", 4: "y"}), {})
+
     with pytest.raises(MessagePathError, match="magnitude requires"):
         modifiers._magnitude(1)
+    with pytest.raises(MessagePathError, match="accepts at most 0 arguments"):
+        MathModifier("abs", [1]).apply(1, {})
     with pytest.raises(MessagePathError, match="to_sec requires"):
         modifiers._to_sec({"sec": 1})
     with pytest.raises(MessagePathError, match="to_nsec requires"):
         modifiers._to_nsec({"sec": 1})
+
+
+def test_magnitude_accepts_numpy_numeric_scalars() -> None:
+    np = pytest.importorskip("numpy")
+
+    assert MathModifier("magnitude", []).apply(np.array([3, 4], dtype=np.int64), {}) == 5
+    assert MathModifier("magnitude", []).apply(np.array([3.0, 4.0]), {}) == 5
 
 
 def test_math_modifier_validation_edges(monkeypatch) -> None:
@@ -166,6 +184,8 @@ def test_math_modifier_validation_edges(monkeypatch) -> None:
     with pytest.raises(ValidationError, match="Unknown math modifier"):
         MathModifier("unknown", []).validate(Type("int32"), None, {})
     with pytest.raises(ValidationError, match="does not accept field references"):
+        MathModifier("add", [ModifierFieldRef("left")]).validate(pair_type, pair, {})
+    with pytest.raises(ValidationError, match="accepts at most 0 arguments"):
         MathModifier("abs", [ModifierFieldRef("left")]).validate(pair_type, pair, {})
     with pytest.raises(ValidationError, match="requires a numeric array"):
         MathModifier("min", []).validate(Type("string", is_array=True), None, {})
@@ -210,6 +230,141 @@ def test_math_modifier_validation_edges(monkeypatch) -> None:
     )
     assert result_type == Type("int32")
     assert result_definition is None
+
+
+@pytest.mark.parametrize(
+    ("path_text", "message_definition"),
+    [
+        (
+            "/topic.value.@abs(1)",
+            MessageDefinition("pkg/Scalar", [Field(Type("float64"), "value")]),
+        ),
+        (
+            "/topic.value.@div",
+            MessageDefinition("pkg/Scalar", [Field(Type("float64"), "value")]),
+        ),
+        (
+            "/topic.value.@clamp(1)",
+            MessageDefinition("pkg/Scalar", [Field(Type("float64"), "value")]),
+        ),
+        (
+            "/topic.@norm(1)",
+            MessageDefinition(
+                "pkg/Point",
+                [Field(Type("float64"), "x"), Field(Type("float64"), "y")],
+            ),
+        ),
+        (
+            "/topic.values.@length(1)",
+            MessageDefinition("pkg/Values", [Field(Type("string", is_array=True), "values")]),
+        ),
+    ],
+)
+def test_validate_rejects_modifier_arity(path_text, message_definition) -> None:
+    with pytest.raises(ValidationError):
+        parse_message_path(path_text).validate(message_definition, {})
+
+
+@pytest.mark.parametrize(
+    ("path_text", "message_definition", "message", "expected"),
+    [
+        (
+            "/topic.value.@abs",
+            MessageDefinition("pkg/Scalar", [Field(Type("float64"), "value")]),
+            {"value": -3.0},
+            3.0,
+        ),
+        (
+            "/topic.value.@div(2)",
+            MessageDefinition("pkg/Scalar", [Field(Type("float64"), "value")]),
+            {"value": 6.0},
+            3.0,
+        ),
+        (
+            "/topic.@norm",
+            MessageDefinition(
+                "pkg/Point",
+                [Field(Type("float64"), "x"), Field(Type("float64"), "y")],
+            ),
+            {"x": 3.0, "y": 4.0},
+            5.0,
+        ),
+        (
+            "/topic.values.@length",
+            MessageDefinition("pkg/Values", [Field(Type("string", is_array=True), "values")]),
+            {"values": ["a", "b"]},
+            2,
+        ),
+        (
+            "/topic.values.@sum",
+            MessageDefinition("pkg/Values", [Field(Type("int32", is_array=True), "values")]),
+            {"values": [1, 2, 3]},
+            6.0,
+        ),
+    ],
+)
+def test_valid_modifier_categories_validate_and_apply(
+    path_text, message_definition, message, expected
+) -> None:
+    path = parse_message_path(path_text)
+    path.validate(message_definition, {})
+    assert path.apply(message) == expected
+
+
+@pytest.mark.parametrize(
+    "type_name",
+    [
+        "byte",
+        "char",
+        "float32",
+        "float64",
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+    ],
+)
+def test_magnitude_accepts_numeric_primitive_arrays(type_name: str) -> None:
+    message_definition = MessageDefinition(
+        "pkg/Values", [Field(Type(type_name, is_array=True), "values")]
+    )
+    path = parse_message_path("/topic.values.@magnitude")
+
+    path.validate(message_definition, {})
+    assert path.apply({"values": [3, 4]}) == 5
+
+
+def test_validate_magnitude_requires_numeric_array() -> None:
+    message_definition = MessageDefinition(
+        "pkg/Values", [Field(Type("string", is_array=True), "values")]
+    )
+
+    with pytest.raises(ValidationError, match="numeric array"):
+        parse_message_path("/topic.values.@magnitude").validate(message_definition, {})
+
+
+@pytest.mark.parametrize(
+    ("operation", "fields"),
+    [
+        ("norm", [("x", "string"), ("y", "float64")]),
+        ("rpy", [("x", "string"), ("y", "float64"), ("z", "float64"), ("w", "float64")]),
+        ("quat", [("roll", "string"), ("pitch", "float64"), ("yaw", "float64")]),
+        ("to_sec", [("sec", "string"), ("nanosec", "uint32")]),
+        ("to_nsec", [("sec", "string"), ("nanosec", "uint32")]),
+    ],
+)
+def test_validate_object_modifiers_require_numeric_members(operation, fields) -> None:
+    message_definition = MessageDefinition(
+        "pkg/Object",
+        [Field(Type(type_name), name) for name, type_name in fields],
+    )
+
+    with pytest.raises(ValidationError, match="numeric"):
+        parse_message_path(f"/topic.@{operation}").validate(message_definition, {})
 
 
 def test_stream_modifier_validation_and_evaluator_errors() -> None:

@@ -3,7 +3,8 @@
 import io
 
 import pytest
-from small_mcap import McapWriter, include_topics, read_message
+from small_mcap import McapWriter, include_topics, read_message, stream_reader
+from small_mcap.records import LazyChunk
 from small_mcap.writer import CompressionType
 
 
@@ -143,6 +144,75 @@ class TestPrefetchFallback:
 
 class TestNonSeekablePrefetch:
     """Verify that num_workers > 0 on non-seekable streams produces identical output."""
+
+    @pytest.mark.parametrize("num_workers", [0, 2])
+    def test_single_chunk_multi_channel_messages_are_globally_ordered(
+        self, num_workers: int
+    ) -> None:
+        buffer = io.BytesIO()
+        writer = McapWriter(buffer, chunk_size=10_000)
+        writer.start()
+        writer.add_schema(1, "Test", "json", b"{}")
+        writer.add_channel(1, "/one", "json", 1)
+        writer.add_channel(2, "/two", "json", 1)
+        for channel_id, log_time in [(1, 10), (1, 30), (2, 20), (2, 40)]:
+            writer.add_message(channel_id, log_time, b"{}", log_time)
+        writer.finish()
+
+        messages = _collect_messages(_make_nonseekable(buffer), num_workers=num_workers)
+
+        assert [log_time for _channel_id, log_time, _data in messages] == [10, 20, 30, 40]
+
+    @pytest.mark.parametrize("num_workers", [0, 2])
+    @pytest.mark.parametrize("has_terminating_record", [True, False])
+    def test_time_excluded_chunk_is_not_crc_validated(
+        self, num_workers: int, has_terminating_record: bool
+    ) -> None:
+        buffer = io.BytesIO()
+        writer = McapWriter(
+            buffer,
+            chunk_size=10_000,
+            compression=CompressionType.NONE,
+            enable_crcs=False,
+        )
+        writer.start()
+        writer.add_schema(1, "Test", "json", b"{}")
+        writer.add_channel(1, "/test", "json", 1)
+        writer.add_message(1, 10, b"{}", 10)
+        writer.finish()
+
+        data = buffer.getvalue()
+        chunk = next(
+            record
+            for record in stream_reader(io.BytesIO(data), emit_chunks=True, lazy_chunks=True)
+            if isinstance(record, LazyChunk)
+        )
+        corrupted = bytearray(data)
+        crc_offset = chunk.record_start + 9 + 8 + 8 + 8
+        corrupted[crc_offset : crc_offset + 4] = (1).to_bytes(4, "little")
+        if not has_terminating_record:
+            chunk_end = (
+                chunk.record_start
+                + 9
+                + 8
+                + 8
+                + 8
+                + 4
+                + 4
+                + len(chunk.compression.encode())
+                + 8
+                + chunk.data_len
+            )
+            del corrupted[chunk_end:]
+
+        messages = _collect_messages(
+            _make_nonseekable(io.BytesIO(corrupted)),
+            start_time_ns=100,
+            validate_crc=True,
+            num_workers=num_workers,
+        )
+
+        assert messages == []
 
     def test_basic_identity(self):
         """Non-seekable: prefetch output matches sequential output."""

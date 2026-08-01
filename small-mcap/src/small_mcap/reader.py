@@ -2,6 +2,7 @@ import bisect
 import heapq
 import io
 import itertools
+import struct
 import sys
 import threading
 import zlib
@@ -155,7 +156,27 @@ def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | 
     return data
 
 
-def _breakup_chunk_data(data: bytes | memoryview) -> Iterable[McapRecord]:
+def _validate_attachment_crc(record_data: bytes | memoryview, record: Attachment) -> None:
+    crc_offset = (
+        16
+        + 4
+        + len(record.name.encode())
+        + 4
+        + len(record.media_type.encode())
+        + 8
+        + len(record.data)
+    )
+    expected = struct.unpack_from("<I", record_data, crc_offset)[0]
+    if expected == 0:
+        return
+    actual = zlib.crc32(record_data[:crc_offset])
+    if actual != expected:
+        raise CRCValidationError(expected=expected, actual=actual, record=record)
+
+
+def _iter_chunk_record_data(
+    data: bytes | memoryview,
+) -> Iterable[tuple[int, memoryview]]:
     view = memoryview(data)
     pos = 0
 
@@ -163,17 +184,24 @@ def _breakup_chunk_data(data: bytes | memoryview) -> Iterable[McapRecord]:
         opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
         pos += _RECORD_HEADER_SIZE
         record_data_end = pos + length
+        if record_data_end > len(view):
+            raise struct.error("Chunk record length exceeds decompressed chunk data")
+        yield opcode, view[pos:record_data_end]
+        pos = record_data_end
 
+
+def _breakup_chunk_data(data: bytes | memoryview) -> Iterable[McapRecord]:
+    for opcode, record_data in _iter_chunk_record_data(data):
         if opcode == Opcode.MESSAGE:
-            yield Message.read(view[pos:record_data_end])
+            yield Message.read(record_data)
         elif opcode == Opcode.CHANNEL:
-            yield Channel.read(view[pos:record_data_end])
+            yield Channel.read(record_data)
         elif opcode == Opcode.SCHEMA:
-            yield Schema.read(view[pos:record_data_end])
+            yield Schema.read(record_data)
+        elif opcode not in OPCODE_TO_RECORD:
+            continue
         else:
             raise IllegalOpcodeInChunkError(opcode)
-
-        pos = record_data_end
 
 
 def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapRecord]:
@@ -196,6 +224,26 @@ def breakup_chunk(chunk: Chunk, validate_crc: bool = False) -> Iterable[McapReco
     yield from _breakup_chunk_data(_get_chunk_data_stream(chunk, validate_crc=validate_crc))
 
 
+def _breakup_chunk_definitions(
+    chunk: Chunk, validate_crc: bool = False
+) -> Iterable[Schema | Channel]:
+    """Decode definitions without materializing skipped Message records."""
+    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+    yield from _breakup_chunk_definition_data(data)
+
+
+def _breakup_chunk_definition_data(data: bytes | memoryview) -> Iterable[Schema | Channel]:
+    for opcode, record_data in _iter_chunk_record_data(data):
+        if opcode == Opcode.SCHEMA:
+            yield Schema.read(record_data)
+        elif opcode == Opcode.CHANNEL:
+            yield Channel.read(record_data)
+        elif opcode not in OPCODE_TO_RECORD:
+            continue
+        elif opcode != Opcode.MESSAGE:
+            raise IllegalOpcodeInChunkError(opcode)
+
+
 def _breakup_chunk_data_with_indexes(
     data: bytes | memoryview,
     message_indexes: Iterable[MessageIndex],
@@ -209,7 +257,22 @@ def _breakup_chunk_data_with_indexes(
     view = memoryview(data)
 
     offsets_iter: Iterable[int]
-    if len(message_indexes) == 1:
+    has_nonmonotonic_index = reverse and any(
+        any(left > right for left, right in itertools.pairwise(index.timestamps))
+        for index in message_indexes
+    )
+    if has_nonmonotonic_index:
+        offsets_iter = (
+            offset
+            for _timestamp, offset in sorted(
+                itertools.chain.from_iterable(
+                    zip(index.timestamps, index.offsets, strict=True) for index in message_indexes
+                ),
+                key=itemgetter(0),
+                reverse=True,
+            )
+        )
+    elif len(message_indexes) == 1:
         # Fast path: single channel - direct iteration, no heap needed
         idx = message_indexes[0]
         offsets_iter = reversed(idx.offsets) if reverse else idx.offsets
@@ -239,8 +302,13 @@ def _breakup_chunk_data_with_indexes(
         opcode, length = OPCODE_AND_LEN_STRUCT.unpack_from(view, pos)
         pos += _RECORD_HEADER_SIZE
         record_data_end = pos + length
+        record_data = view[pos:record_data_end]
+        try:
+            record_data[length - 1]
+        except IndexError as exc:
+            raise struct.error("Chunk record length exceeds decompressed chunk data") from exc
         if opcode == Opcode.MESSAGE:
-            yield Message.read(view[pos:record_data_end])
+            yield Message.read(record_data)
         else:
             raise IllegalOpcodeInChunkError(opcode)
 
@@ -253,6 +321,26 @@ def _breakup_chunk_with_indexes(
 ) -> Iterable[McapRecord]:
     data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
     yield from _breakup_chunk_data_with_indexes(data, message_indexes, reverse)
+
+
+def _breakup_chunk_definitions_and_indexes(
+    chunk: Chunk,
+    message_indexes: Iterable[MessageIndex],
+    known_channel_ids: set[int],
+    validate_crc: bool = False,
+) -> Iterable[McapRecord]:
+    """Decode all definitions and only the indexed Message records requested."""
+    data = _get_chunk_data_stream(chunk, validate_crc=validate_crc)
+    available_channel_ids = set(known_channel_ids)
+    for opcode, record_data in _iter_chunk_record_data(data):
+        if opcode == Opcode.CHANNEL:
+            available_channel_ids.add(Channel.read(record_data).id)
+        elif opcode == Opcode.MESSAGE:
+            channel_id = struct.unpack_from("<H", record_data)[0]
+            if channel_id not in available_channel_ids:
+                raise ChannelNotFoundError(channel_id)
+    yield from _breakup_chunk_definition_data(data)
+    yield from _breakup_chunk_data_with_indexes(data, message_indexes)
 
 
 def _read_chunk_and_indexes(data: bytes | memoryview) -> tuple[Chunk, list[MessageIndex]]:
@@ -335,7 +423,7 @@ def stream_reader(
         stream: A readable binary stream positioned at the start of the MCAP data
             (or just after the magic bytes if ``skip_magic`` is True).
         skip_magic: If True, skip validation of the leading magic bytes.
-        validate_crc: If True, validate CRC checksums on chunks and the data section.
+        validate_crc: If True, validate CRC checksums on attachments, chunks, and the data section.
         emit_chunks: If True, yield Chunk (or LazyChunk) and MessageIndex records
             directly instead of breaking them up into their contents.
         lazy_chunks: If True (requires ``emit_chunks=True``), yield LazyChunk records
@@ -396,6 +484,8 @@ def stream_reader(
 
             if record_cls := OPCODE_TO_RECORD.get(opcode):
                 record = record_cls.read(record_data)
+                if validate_crc and opcode == Opcode.ATTACHMENT:
+                    _validate_attachment_crc(record_data, cast("Attachment", record))
             else:
                 record = None  # Unknown record type, skip it.
 
@@ -484,18 +574,38 @@ def get_header(stream: IO[bytes]) -> Header:
     return header
 
 
-def read_attachment(stream: IO[bytes], index: AttachmentIndex) -> Attachment:
+def read_attachment(
+    stream: IO[bytes], index: AttachmentIndex, *, validate_crc: bool = False
+) -> Attachment:
     """Read a full Attachment record given its index.
 
     Args:
         stream: A seekable binary stream containing the MCAP data.
         index: The AttachmentIndex obtained from :func:`get_summary`.
+        validate_crc: Whether to validate a nonzero attachment CRC.
 
     Returns:
         The deserialized Attachment record.
     """
     stream.seek(index.offset)
-    return Attachment.read_record(stream)
+    if not validate_crc:
+        return Attachment.read_record(stream)
+
+    header = stream.read(9)
+    if len(header) < 9:
+        raise EndOfFileError("Not enough data to read attachment record header")
+    opcode, length = OPCODE_AND_LEN_STRUCT.unpack(header)
+    record_data = stream.read(length)
+    if len(record_data) < length:
+        raise EndOfFileError("Not enough data to read attachment record content")
+    if opcode != Opcode.ATTACHMENT:
+        raise ValueError(f"Expected opcode {Opcode.ATTACHMENT}, got {opcode}")
+    try:
+        attachment = Attachment.read(record_data)
+    except struct.error as exc:
+        raise EndOfFileError("Invalid or truncated attachment record content") from exc
+    _validate_attachment_crc(record_data, attachment)
+    return attachment
 
 
 def read_metadata(stream: IO[bytes], index: MetadataIndex) -> Metadata:
@@ -565,9 +675,22 @@ def _filter_message_index_by_time(
     if not message_index.timestamps:
         return message_index
 
+    timestamps = message_index.timestamps
+    if any(left > right for left, right in itertools.pairwise(timestamps)):
+        selected = [
+            (timestamp, offset)
+            for timestamp, offset in zip(timestamps, message_index.offsets, strict=True)
+            if start_time_ns <= timestamp < end_time_ns
+        ]
+        return MessageIndex(
+            message_index.channel_id,
+            [timestamp for timestamp, _offset in selected],
+            [offset for _timestamp, offset in selected],
+        )
+
     # Check if we need to filter at all
-    first_time = message_index.timestamps[0]
-    last_time = message_index.timestamps[-1]
+    first_time = timestamps[0]
+    last_time = timestamps[-1]
 
     if first_time >= start_time_ns and last_time < end_time_ns:
         # All records are within range, no filtering needed
@@ -578,15 +701,15 @@ def _filter_message_index_by_time(
         return MessageIndex(message_index.channel_id, [], [])
 
     # Binary search for start index (first record >= start_time_ns)
-    start_idx = bisect.bisect_left(message_index.timestamps, start_time_ns)
+    start_idx = bisect.bisect_left(timestamps, start_time_ns)
 
     # Binary search for end index (first record >= end_time_ns)
-    end_idx = bisect.bisect_left(message_index.timestamps, end_time_ns)
+    end_idx = bisect.bisect_left(timestamps, end_time_ns)
 
     # Return filtered MessageIndex
     return MessageIndex(
         message_index.channel_id,
-        message_index.timestamps[start_idx:end_idx],
+        timestamps[start_idx:end_idx],
         message_index.offsets[start_idx:end_idx],
     )
 
@@ -681,22 +804,14 @@ def _yield_loaded_chunk_messages(
 
 
 def _predecompress_chunk(chunk: Chunk, validate_crc: bool) -> Chunk:
-    """Decompress a Chunk record, validate CRC, return a clean Chunk with uncompressed data."""
+    """Decompress a Chunk record and defer optional CRC validation until consumption."""
     decompressed = _decompress_data_threadsafe(chunk)
-    if validate_crc and chunk.uncompressed_crc != 0:
-        calculated_crc = zlib.crc32(decompressed)
-        if calculated_crc != chunk.uncompressed_crc:
-            raise CRCValidationError(
-                expected=chunk.uncompressed_crc,
-                actual=calculated_crc,
-                record=chunk,
-            )
     return Chunk(
         compression="",
         data=decompressed,
         message_start_time=chunk.message_start_time,
         message_end_time=chunk.message_end_time,
-        uncompressed_crc=0,
+        uncompressed_crc=chunk.uncompressed_crc if validate_crc else 0,
         uncompressed_size=chunk.uncompressed_size,
     )
 
@@ -758,6 +873,7 @@ def _prefetch_chunks(
     flush: Callable[[Chunk, list[MessageIndex]], Iterable[McapRecord]],
     *,
     flush_last: Callable[[Chunk, list[MessageIndex]], Iterable[McapRecord]] | None = None,
+    should_predecompress: Callable[[Chunk], bool] | None = None,
 ) -> Iterable[McapRecord]:
     """Decompress chunks in parallel using a thread pool.
 
@@ -782,15 +898,22 @@ def _prefetch_chunks(
         for item in items:
             if isinstance(item, tuple):
                 chunk, message_indexes = cast("tuple[Chunk, list[MessageIndex]]", item)
+                if should_predecompress is not None and not should_predecompress(chunk):
+                    future: Future[Chunk] = Future()
+                    future.set_result(chunk)
+                else:
+                    future = pool.submit(_predecompress_chunk, chunk, validate_crc)
                 pending.append(
                     (
-                        pool.submit(_predecompress_chunk, chunk, validate_crc),
+                        future,
                         message_indexes,
                     )
                 )
                 while len(pending) > num_workers:
                     yield from _drain(*pending.pop(0))
             else:
+                while pending:
+                    yield from _drain(*pending.pop(0))
                 yield item
 
         # Drain remaining — last item gets flush_last if provided
@@ -955,6 +1078,8 @@ def _read_message_indexed(
         key=attrgetter("message_end_time") if reverse else attrgetter("message_start_time"),
         reverse=reverse,
     )
+    if reverse and any(not chunk.message_index_offsets for chunk in sorted_chunks):
+        raise SeekRequiredError("reverse=True requires MessageIndex records")
 
     # Check if chunks are non-overlapping
     # This is a common case for well-formed MCAP files
@@ -995,7 +1120,7 @@ def _read_message_indexed(
                 exclude_channels,
                 start_time_ns,
                 end_time_ns,
-                validate_crc=False,
+                validate_crc=validate_crc,
                 reverse=reverse,
             ),
         )
@@ -1094,30 +1219,33 @@ def _read_message_non_seeking(
         Args:
             chunk: The chunk to flush.
             message_indexes: Associated message indexes (may be empty).
-            force_full: If True, always use full decompression (for final chunks
-                where we can't guarantee all indexes were received).
+            force_full: If True, fully decode an included chunk because its indexes
+                may be incomplete. An excluded terminal chunk is still skipped because
+                it cannot define records used later in the stream.
         """
         if not in_time_range(chunk.message_start_time, chunk.message_end_time):
+            if force_full:
+                return
+            channel_ids = {index.channel_id for index in message_indexes}
+            if not message_indexes or channel_ids - seen_channels:
+                yield from _breakup_chunk_definitions(chunk, validate_crc=validate_crc)
             return
 
         if force_full or not message_indexes:
             yield from breakup_chunk(chunk, validate_crc=validate_crc)
             return
 
-        channel_ids = {mi.channel_id for mi in message_indexes}
-        new_channels = bool(channel_ids - seen_channels)
-
-        if new_channels:
-            # Chunk may contain Schema/Channel records for unseen channels.
-            # Use full decompression to yield them.
-            yield from breakup_chunk(chunk, validate_crc=validate_crc)
-        elif not channel_ids.issubset(exclude_channels):
-            # All channels known — safe to use indexed message lookup.
-            filtered = _filter_message_indices_by_time(
-                (mi for mi in message_indexes if mi.channel_id not in exclude_channels),
-                start_time_ns,
-                end_time_ns,
+        channel_ids = {index.channel_id for index in message_indexes}
+        filtered = _filter_message_indices_by_time(
+            (mi for mi in message_indexes if mi.channel_id not in exclude_channels),
+            start_time_ns,
+            end_time_ns,
+        )
+        if channel_ids - seen_channels:
+            yield from _breakup_chunk_definitions_and_indexes(
+                chunk, filtered, seen_channels, validate_crc
             )
+        elif not channel_ids.issubset(exclude_channels):
             yield from _breakup_chunk_with_indexes(chunk, filtered, validate_crc)
 
     def _inner() -> Iterable[McapRecord]:
@@ -1145,8 +1273,8 @@ def _read_message_non_seeking(
                 yield record
 
         if pending_chunk:
-            # Final chunk: always decompress fully since we can't ensure we
-            # got all message indexes
+            # The stream ended immediately after a chunk or its partial index tail,
+            # so we cannot know whether every MessageIndex arrived.
             yield from _flush_pending_chunk(pending_chunk, pending_message_indexes, force_full=True)
 
     def _inner_prefetch() -> Iterable[McapRecord]:
@@ -1156,6 +1284,9 @@ def _read_message_non_seeking(
             num_workers,
             flush=_flush_pending_chunk,
             flush_last=lambda c, mi: _flush_pending_chunk(c, mi, force_full=True),
+            should_predecompress=lambda chunk: in_time_range(
+                chunk.message_start_time, chunk.message_end_time
+            ),
         )
 
     def _should_include_wrapper(channel: Channel, schema: Schema | None) -> bool:

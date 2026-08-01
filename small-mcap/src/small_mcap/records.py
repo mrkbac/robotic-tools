@@ -249,7 +249,10 @@ class Attachment(McapRecord):
         media_type, offset = _read_string(data, offset)
         data_len = cls._DATA_LEN_STRUCT.unpack_from(data, offset)[0]
         offset += 8
-        return cls(log_time, create_time, name, media_type, data[offset : offset + data_len])
+        data_end = offset + data_len
+        if data_end + cls._CRC_STRUCT.size > len(data):
+            raise struct.error("Attachment content length does not match its declared data length")
+        return cls(log_time, create_time, name, media_type, data[offset:data_end])
 
 
 @dataclass(slots=True)
@@ -410,13 +413,17 @@ class Chunk(McapRecord):
         )
         compression, offset = _read_string(data, 28)
         data_len = cls._DATA_LEN_STRUCT.unpack_from(data, offset)[0]
+        data_start = offset + 8
+        data_end = data_start + data_len
+        if data_end > len(data):
+            raise struct.error("Chunk data length exceeds its record content")
         return cls(
             message_start_time,
             message_end_time,
             uncompressed_size,
             uncompressed_crc,
             compression,
-            data[offset + 8 : offset + 8 + data_len],
+            data[data_start:data_end],
         )
 
 
@@ -703,10 +710,9 @@ class MessageIndex(McapRecord):
     def _decode(self) -> None:
         raw = self._raw_content
         assert raw is not None
+        self._validated_num_entries()
         records_len = self._HEADER_STRUCT.unpack_from(raw, 0)[1]
         payload = memoryview(raw)[6 : 6 + records_len]
-        if records_len % 16:
-            raise struct.error("MessageIndex entries must be a multiple of 16 bytes")
         values = array("Q")
         values.frombytes(payload)
         if sys.byteorder != "little":
@@ -714,6 +720,17 @@ class MessageIndex(McapRecord):
         self._timestamps = values[0::2].tolist()
         self._offsets = values[1::2].tolist()
         self._raw_content = None
+
+    def _validated_num_entries(self) -> int:
+        raw = self._raw_content
+        assert raw is not None
+        records_len = self._HEADER_STRUCT.unpack_from(raw, 0)[1]
+        available_len = len(raw) - self._HEADER_STRUCT.size
+        if records_len > available_len:
+            raise struct.error("MessageIndex records length exceeds its content")
+        if records_len % self._ENTRY_STRUCT.size:
+            raise struct.error("MessageIndex entries must be a multiple of 16 bytes")
+        return records_len // self._ENTRY_STRUCT.size
 
     @property
     def timestamps(self) -> list[int]:
@@ -737,9 +754,10 @@ class MessageIndex(McapRecord):
     def num_entries(self) -> int:
         """Entry count without forcing a decode of the timestamp/offset lists."""
         if self._timestamps is not None:
+            if self._offsets is None or len(self._timestamps) != len(self._offsets):
+                raise ValueError("MessageIndex timestamps and offsets must have equal lengths")
             return len(self._timestamps)
-        assert self._raw_content is not None
-        return self._HEADER_STRUCT.unpack_from(self._raw_content, 0)[1] // 16
+        return self._validated_num_entries()
 
     def write_record_to(self, out: WritableBuffer) -> int:
         raw = self._raw_content
@@ -749,8 +767,8 @@ class MessageIndex(McapRecord):
             out.write(raw)
             return len(header) + len(raw)
 
+        num_records = self.num_entries
         timestamps = self.timestamps
-        num_records = len(timestamps)
         records_size = num_records * 16  # 2 * 8 bytes per record
         content_size = 2 + 4 + records_size  # channel_id + length prefix + records
 
@@ -1098,15 +1116,31 @@ class LazyChunk:
         cls, stream: IO[bytes], record_start: int, record_length: int
     ) -> "LazyChunk":
         """Read chunk metadata from stream without loading the compressed data."""
-        data = stream.read(8 + 8 + 8 + 4 + 4)
+        from small_mcap.exceptions import EndOfFileError  # noqa: PLC0415
+
+        fixed_header_size = 8 + 8 + 8 + 4 + 4
+        data = stream.read(fixed_header_size)
+        if len(data) < fixed_header_size:
+            raise EndOfFileError("Not enough data to read Chunk metadata")
         message_start_time, message_end_time, uncompressed_size, uncompressed_crc, str_len = (
             struct.unpack("<QQQII", data)
         )
-        compression = stream.read(str_len).decode("utf-8")
-        data_len = struct.unpack("<Q", stream.read(8))[0]
+        if str_len + 8 > record_length - fixed_header_size:
+            raise struct.error("Chunk compression length exceeds its record content")
+        compression_data = stream.read(str_len)
+        if len(compression_data) < str_len:
+            raise EndOfFileError("Not enough data to read Chunk compression")
+        compression = compression_data.decode("utf-8")
+        data_len_bytes = stream.read(8)
+        if len(data_len_bytes) < 8:
+            raise EndOfFileError("Not enough data to read Chunk data length")
+        data_len = struct.unpack("<Q", data_len_bytes)[0]
         # message_start_time + message_end_time + uncompressed_size + uncompressed_crc +
         # str_len + compression + data_len
-        stream.seek(record_length - (8 + 8 + 8 + 4 + 4 + str_len + 8), os.SEEK_CUR)
+        remaining = record_length - (fixed_header_size + str_len + 8)
+        if data_len > remaining:
+            raise struct.error("Chunk data length exceeds its record content")
+        stream.seek(remaining, os.SEEK_CUR)
         return cls(
             message_start_time,
             message_end_time,
@@ -1119,8 +1153,13 @@ class LazyChunk:
 
     def to_chunk(self, stream: IO[bytes]) -> Chunk:
         """Convert to a full Chunk by reading from the stream."""
+        from small_mcap.exceptions import EndOfFileError  # noqa: PLC0415
+
         current_pos = stream.tell()
-        stream.seek(self.record_start)
-        chunk = Chunk.read_record(stream)
-        stream.seek(current_pos)
-        return chunk
+        try:
+            stream.seek(self.record_start)
+            return Chunk.read_record(stream)
+        except EOFError as exc:
+            raise EndOfFileError("Not enough data to read Chunk record") from exc
+        finally:
+            stream.seek(current_pos)

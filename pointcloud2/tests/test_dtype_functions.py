@@ -202,11 +202,28 @@ class TestFieldsFromDtype:
         converted_fields = fields_from_dtype(dtype)
 
         # Check that we get the same field information
-        assert len(converted_fields) == len(original_fields)
-        for original, converted in zip(original_fields, converted_fields, strict=True):
-            assert original.name == converted.name
-            assert original.datatype == converted.datatype
-            # Note: offsets might differ due to dtype structure, but datatypes should match
+        assert converted_fields == original_fields
+
+    def test_subarray_fields_preserve_count_offsets_and_itemsize(self):
+        dtype = np.dtype(
+            {
+                "names": ["x", "normal", "intensity"],
+                "formats": ["<f4", ("<f4", (3,)), "<u1"],
+                "offsets": [0, 8, 20],
+                "itemsize": 24,
+            }
+        )
+
+        fields = fields_from_dtype(dtype)
+
+        assert fields == [
+            PointField("x", 0, PointField.FLOAT32, 1),
+            PointField("normal", 8, PointField.FLOAT32, 3),
+            PointField("intensity", 20, PointField.UINT8, 1),
+        ]
+        converted = dtype_from_fields(fields, point_step=dtype.itemsize)
+        assert converted.itemsize == dtype.itemsize
+        assert [converted.fields[name][1] for name in converted.names or ()] == [0, 8, 12, 16, 20]
 
 
 class TestNormalizeFields:

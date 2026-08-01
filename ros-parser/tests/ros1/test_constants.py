@@ -1,5 +1,7 @@
 """Tests for ROS1 constant definitions."""
 
+import math
+
 import pytest
 from ros_parser.ros1_msg import parse_message_string
 
@@ -30,6 +32,12 @@ def test_string_constant_with_spaces():
     assert msg.constants[0].value == "Hello World"
 
 
+def test_numeric_string_constants_preserve_source_spelling() -> None:
+    msg = parse_message_string("string INT=1\nstring FLOAT=1.5\nstring HEX=0x1")
+
+    assert [constant.value for constant in msg.constants] == ["1", "1.5", "0x1"]
+
+
 def test_bool_constants():
     """Test parsing boolean constants."""
     definition = """
@@ -42,10 +50,30 @@ def test_bool_constants():
     assert len(msg.constants) == 4
     assert msg.constants[0].value is True
     assert msg.constants[1].value is False
-    # Note: 1 and 0 are parsed as integers, not converted to bool
-    # This matches ROS1 genmsg behavior
-    assert msg.constants[2].value == 1
-    assert msg.constants[3].value == 0
+    assert msg.constants[2].value is True
+    assert msg.constants[3].value is False
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "bool FLAG=2",
+        "float64 VALUE=not-a-number",
+        "time STAMP=0",
+    ],
+)
+def test_invalid_primitive_constants_are_rejected(definition: str) -> None:
+    with pytest.raises(ValueError, match="Constant"):
+        parse_message_string(definition)
+
+
+def test_ros1_byte_uses_signed_int8_range():
+    msg = parse_message_string("byte MIN=-128\nbyte MAX=127")
+    assert [constant.value for constant in msg.constants] == [-128, 127]
+
+    for value in (-129, 128):
+        with pytest.raises(ValueError, match=r"ROS1 byte is -128\.\.127"):
+            parse_message_string(f"byte VALUE={value}")
 
 
 def test_float_constants():
@@ -60,6 +88,20 @@ def test_float_constants():
     assert abs(msg.constants[0].value - 3.14159) < 0.00001
     assert msg.constants[1].name == "E"
     assert abs(msg.constants[1].value - 2.71828) < 0.00001
+
+
+def test_nonfinite_float_constants_match_genmsg() -> None:
+    msg = parse_message_string("float32 not_a_number=nan\nfloat64 NEGATIVE=-inf")
+
+    assert math.isnan(msg.constants[0].value)
+    assert msg.constants[1].value == -math.inf
+
+
+def test_ros1_preserves_mixed_case_field_and_lowercase_constant_names() -> None:
+    msg = parse_message_string("string Name\nint32 Foo\nint32 status=1")
+
+    assert [field.name for field in msg.fields] == ["Name", "Foo"]
+    assert msg.constants[0].name == "status"
 
 
 def test_hex_constant():
@@ -133,6 +175,7 @@ def test_comparison_with_reference_parser():
 int32 MAX=100
 bool FLAG=true
 float64 RATE=10.5
+string LABEL=hello
     """
 
     our_msg = parse_message_string(definition)
@@ -141,8 +184,22 @@ float64 RATE=10.5
     assert len(our_msg.constants) == len(ref_msg.constants)
 
     for our_const, ref_const in zip(our_msg.constants, ref_msg.constants, strict=True):
-        assert our_const.name == ref_const.name
-        assert our_const.type.type_name == ref_const.field_type
+        assert (
+            our_const.name,
+            our_const.type.type_name,
+            our_const.type.package_name,
+            our_const.type.is_array,
+            our_const.type.array_size,
+            our_const.type.is_upper_bound,
+        ) == (
+            ref_const.name,
+            ref_const.type.base_type,
+            ref_const.type.package_name,
+            ref_const.type.is_array,
+            ref_const.type.array_size,
+            ref_const.type.is_upper_bound,
+        )
+        assert type(our_const.value) is type(ref_const.value)
         assert our_const.value == ref_const.value
 
 

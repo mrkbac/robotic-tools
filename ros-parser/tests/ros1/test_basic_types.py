@@ -125,5 +125,18 @@ def test_comparison_with_reference_parser():
 
     # Compare each field
     for our_field, ref_field in zip(our_msg.fields, ref_msg.fields, strict=True):
-        assert our_field.name == ref_field.name
-        assert our_field.type.type_name == ref_field.field_type
+        assert (
+            our_field.name,
+            our_field.type.type_name,
+            our_field.type.package_name,
+            our_field.type.is_array,
+            our_field.type.array_size,
+            our_field.type.is_upper_bound,
+        ) == (
+            ref_field.name,
+            ref_field.type.base_type,
+            ref_field.type.package_name,
+            ref_field.type.is_array,
+            ref_field.type.array_size,
+            ref_field.type.is_upper_bound,
+        )

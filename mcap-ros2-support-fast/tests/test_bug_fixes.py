@@ -59,10 +59,9 @@ def test_parameter_event_empty_primitive_arrays_preserve_sequence_alignment() ->
 
 
 class TestCharTypeBugFix:
-    """Test that char type is correctly mapped to signed byte."""
+    """Test ROS2 char's unsigned 8-bit contract."""
 
-    def test_char_type_negative_values(self):
-        """Test char fields with negative values."""
+    def test_char_type_unsigned_boundaries(self):
         schema = """
 int8 field1
 char field2
@@ -70,10 +69,9 @@ char field2
         decoder = create_decoder_function("my_msgs/TestChar", schema)
         encoder = create_encoder_function("my_msgs/TestChar", schema)
 
-        # Create a message with a negative char value
         msg = type("TestChar", (), {})()
         msg.field1 = -5
-        msg.field2 = -10  # Negative char value
+        msg.field2 = 255
 
         # Encode
         encoded = encoder(msg)
@@ -81,28 +79,8 @@ char field2
         # Decode
         decoded = decoder(encoded)
 
-        # Verify char field preserved negative value
         assert decoded.field1 == -5
-        assert decoded.field2 == -10, "Char should preserve negative values (signed byte)"
-
-    def test_char_array_negative_values(self):
-        """Test char arrays with negative values."""
-        schema = """
-char[3] field
-"""
-        decoder = create_decoder_function("my_msgs/TestCharArray", schema)
-        encoder = create_encoder_function("my_msgs/TestCharArray", schema)
-
-        msg = type("TestCharArray", (), {})()
-        # Encode negative values as unsigned bytes (twos complement)
-        msg.field = bytes([246, 236, 226])  # These are -10, -20, -30 as unsigned bytes
-
-        encoded = encoder(msg)
-        decoded = decoder(encoded)
-
-        # Convert to signed integers for comparison
-        result = [b if b < 128 else b - 256 for b in decoded.field]
-        assert result == [-10, -20, -30], "Char array should preserve negative values"
+        assert decoded.field2 == 255
 
 
 class TestBoundedArrays:

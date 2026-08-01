@@ -15,7 +15,9 @@ from array import array
 from io import BytesIO
 
 import pytest
+from mcap_ros2._cdr import CdrWriter, EncapsulationKind
 from mcap_ros2_support_fast import ROS2EncoderFactory
+from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap.reader import read_message_decoded
 from small_mcap.writer import McapWriter
@@ -26,41 +28,34 @@ def read_ros2_messages(stream: BytesIO):
 
 
 def test_primitive_arrays_with_tuples() -> None:
-    """Test that primitive arrays accept tuple inputs (int32[], float64[], etc.)."""
-    output = BytesIO()
-    ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
-    ros_writer.start()
-
+    """Tuple inputs produce exact CDR bytes and decode independently."""
     schema_name = "test_msgs/PrimitiveArrays"
-    schema_data = b"int32[] ints\nfloat64[] floats\nuint16[] uints"
+    schema = "int32[] ints\nfloat64[] floats\nuint16[] uints"
+    message = {
+        "ints": (1, 2, 3, -4, 5),
+        "floats": (1.5, 2.5, 3.5, -4.5),
+        "uints": (100, 200, 300),
+    }
 
-    schema_id = 1
-    channel_id = 1
-    ros_writer.add_schema(schema_id, schema_name, "ros2msg", schema_data)
-    ros_writer.add_channel(channel_id, "/test", "cdr", schema_id)
+    output = BytesIO()
+    writer = CdrWriter(output, kind=EncapsulationKind.CDR_LE)
+    writer.write_uint32(5)
+    writer.write_int32_array([1, 2, 3, -4, 5])
+    writer.write_uint32(4)
+    writer.write_float64_array([1.5, 2.5, 3.5, -4.5])
+    writer.write_uint32(3)
+    writer.write_uint16_array([100, 200, 300])
+    expected = output.getvalue()
 
-    # Use tuples instead of lists
-    ros_writer.add_message_encode(
-        channel_id=channel_id,
-        log_time=0,
-        data={
-            "ints": (1, 2, 3, -4, 5),  # tuple of ints
-            "floats": (1.5, 2.5, 3.5, -4.5),  # tuple of floats
-            "uints": (100, 200, 300),  # tuple of unsigned ints
-        },
-        publish_time=0,
-        sequence=0,
-    )
-    ros_writer.finish()
+    encoder = create_encoder_function(schema_name, schema)
+    decoder = create_decoder_function(schema_name, schema)
+    encoded = bytes(encoder(message))
+    decoded = decoder(expected)
 
-    output.seek(0)
-    messages = list(read_ros2_messages(output))
-    assert len(messages) == 1
-
-    msg = messages[0].decoded_message
-    assert list(msg.ints) == [1, 2, 3, -4, 5]
-    assert list(msg.floats) == [1.5, 2.5, 3.5, -4.5]
-    assert list(msg.uints) == [100, 200, 300]
+    assert encoded == expected
+    assert list(decoded.ints) == [1, 2, 3, -4, 5]
+    assert list(decoded.floats) == [1.5, 2.5, 3.5, -4.5]
+    assert list(decoded.uints) == [100, 200, 300]
 
 
 def test_primitive_arrays_with_array_module() -> None:

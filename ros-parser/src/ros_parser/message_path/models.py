@@ -648,6 +648,8 @@ class Filter(Action):
 
 _FLOAT64_TYPE = Type(type_name="float64", package_name=None)
 _NUMERIC_TYPE_NAMES = {
+    "byte",
+    "char",
     "int8",
     "uint8",
     "int16",
@@ -682,6 +684,9 @@ class _Modifier:
     return_type: "Type | None" = None
     return_def: "MessageDefinition | None" = None
     min_args: int = 0
+    max_args: int | None = None
+    requires_numeric_array: bool = False
+    numeric_fields: tuple[str, ...] = ()
 
 
 _MODIFIERS: dict[str, _Modifier] = {}
@@ -700,6 +705,9 @@ def modifier(
     return_type: "Type | None" = None,
     return_def: "MessageDefinition | None" = None,
     min_args: int = 0,
+    max_args: int | None = None,
+    requires_numeric_array: bool = False,
+    numeric_fields: tuple[str, ...] = (),
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a math modifier and its metadata, co-located with the function."""
 
@@ -716,6 +724,9 @@ def modifier(
             return_type=return_type,
             return_def=return_def,
             min_args=min_args,
+            max_args=max_args,
+            requires_numeric_array=requires_numeric_array,
+            numeric_fields=numeric_fields,
         )
         return func
 
@@ -738,10 +749,15 @@ class MathModifier(Action):
     def apply(self, obj: Any, variables: _VariableStore) -> Any:
         """Apply the math operation to the object, supporting element-wise array operations."""
         spec = self._spec()
-        if spec.min_args and len(self.arguments) < spec.min_args:
+        if len(self.arguments) < spec.min_args:
             raise MessagePathError(
                 f"Math modifier '{self.operation}' requires at least {spec.min_args} argument"
                 f"{'s' if spec.min_args != 1 else ''}"
+            )
+        if spec.max_args is not None and len(self.arguments) > spec.max_args:
+            raise MessagePathError(
+                f"Math modifier '{self.operation}' accepts at most {spec.max_args} argument"
+                f"{'s' if spec.max_args != 1 else ''}"
             )
 
         has_field_refs = False
@@ -853,6 +869,12 @@ class MathModifier(Action):
                 raise ValidationError(
                     f"Math modifier '{op}' requires an array, got '{current_type}'"
                 )
+            if spec.requires_numeric_array and (
+                not current_type.is_primitive or current_type.type_name not in _NUMERIC_TYPE_NAMES
+            ):
+                raise ValidationError(
+                    f"Math modifier '{op}' requires a numeric array, got '{current_type}'"
+                )
             return
         if current_type.is_array:
             if spec.accepts_array:
@@ -884,6 +906,19 @@ class MathModifier(Action):
                     f"Math modifier '{op}' requires fields {', '.join(required)}; "
                     f"'{current_type}' is missing {', '.join(missing)}"
                 )
+            for field_name in spec.numeric_fields:
+                field = next((f for f in current_msgdef.fields if f.name == field_name), None)
+                if field is None:
+                    continue
+                if (
+                    field.type.is_array
+                    or not field.type.is_primitive
+                    or field.type.type_name not in _NUMERIC_TYPE_NAMES
+                ):
+                    raise ValidationError(
+                        f"Math modifier '{op}' requires numeric fields; "
+                        f"'{field_name}' has type '{field.type}'"
+                    )
 
     def validate(
         self,
@@ -900,6 +935,11 @@ class MathModifier(Action):
             raise ValidationError(
                 f"Math modifier '{self.operation}' requires at least {spec.min_args} argument"
                 f"{'s' if spec.min_args != 1 else ''}"
+            )
+        if spec.max_args is not None and len(self.arguments) > spec.max_args:
+            raise ValidationError(
+                f"Math modifier '{self.operation}' accepts at most {spec.max_args} argument"
+                f"{'s' if spec.max_args != 1 else ''}"
             )
 
         field_refs = [arg for arg in self.arguments if isinstance(arg, ModifierFieldRef)]

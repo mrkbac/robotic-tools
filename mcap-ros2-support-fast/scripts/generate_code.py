@@ -74,12 +74,14 @@ def main() -> None:
             # Create dispatcher that checks CDR header
             dispatcher = f"""def decode_{safe_name}(_raw):
     '''Decoder that dispatches based on CDR header endianness.'''
-    if _raw[0] == 0x00:  # Little-endian
-        return {decoder_func_name_le}(_raw)
-    elif _raw[0] == 0x01:  # Big-endian
-        return {decoder_func_name_be}(_raw)
-    else:
-        raise ValueError(f"Invalid CDR header: {{_raw[0]:#x}}")
+    if _raw[0] | (_raw[1] ^ 0x01):
+        if _raw[0] == 0 and _raw[1] == 0x00:
+            return {decoder_func_name_be}(_raw)
+        _kind = (_raw[0] << 8) | _raw[1]
+        raise McapROS2DecodeError(
+            f"unsupported CDR encapsulation kind: {{_kind:#06x}}"
+        )
+    return {decoder_func_name_le}(_raw)
 """
             decoder_dispatchers.append(dispatcher)
 
@@ -117,6 +119,7 @@ def main() -> None:
         "import array",
         "import dataclasses",
         "import struct",
+        "import sys",
         "import typing",
         "import collections.abc",
         "",
@@ -130,12 +133,59 @@ def main() -> None:
             "         b'\\x00\\x00\\x00\\x00', b'\\x00\\x00\\x00\\x00\\x00',",
             "         b'\\x00\\x00\\x00\\x00\\x00\\x00', b'\\x00\\x00\\x00\\x00\\x00\\x00\\x00')",
             "",
+            "class McapROS2DecodeError(Exception):",
+            "    '''Raised when a CDR envelope cannot be decoded.'''",
+            "",
             "_SENTINEL = object()",
+            "",
+            "def _iter_array_values(value):",
+            "    '''Yield scalar values from a potentially nested array-like value.'''",
+            "    for item in value:",
+            "        if isinstance(item, collections.abc.Iterable) and not isinstance(",
+            "            item, (bytes, bytearray, str, memoryview)",
+            "        ):",
+            "            yield from _iter_array_values(item)",
+            "        else:",
+            "            yield item",
+            "",
+            "def _to_packed_bytes(value, code, endianness='<', expected_length=None):",
+            "    '''Pack an array-like value into raw bytes using only the stdlib.'''",
+            "    if code == '?':",
+            "        packed_bytes = bytes(1 if item else 0 for item in _iter_array_values(value))",
+            "        if expected_length is not None and len(packed_bytes) != expected_length:",
+            "            raise ValueError(",
+            (
+                "                f'fixed array expected {expected_length} elements, "
+                "got {len(packed_bytes)}'"
+            ),
+            "            )",
+            "        return packed_bytes",
+            "    try:",
+            "        packed = array.array(code, value)",
+            "    except (TypeError, ValueError):",
+            "        packed = array.array(code, _iter_array_values(value))",
+            "    if expected_length is not None and len(packed) != expected_length:",
+            "        raise ValueError(",
+            "            f'fixed array expected {expected_length} elements, got {len(packed)}'",
+            "        )",
+            "    native_endianness = '<' if sys.byteorder == 'little' else '>'",
+            "    if code not in {'b', 'B'} and endianness != native_endianness:",
+            "        packed.byteswap()",
+            "    return packed.tobytes()",
+            "",
+            "def _array_length(value):",
+            "    '''Return the number of serialized primitive elements.'''",
+            "    try:",
+            "        view = memoryview(value)",
+            "    except TypeError:",
+            "        return len(value)",
+            "    return view.nbytes // view.itemsize",
             "",
             "def _get_field(obj, f, default):",
             "    '''Get field from object (dict or attribute) with default.'''",
             "    if isinstance(obj, dict):",
-            "        return obj.get(f, default)",
+            "        value = obj.get(f, default)",
+            "        return default if value is None else value",
             "    value = getattr(obj, f, _SENTINEL)",
             "    if value is _SENTINEL:",
             "        return default",

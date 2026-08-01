@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from ros_parser._utils import add_msgdef_to_dict, for_each_msgdef_in_schema, unescape_string
-from ros_parser.models import MessageDefinition
+from ros_parser.models import MessageDefinition, Type
+from ros_parser.ros2_msg.schema_parser import parse_schema_to_definitions
 
 # ---------------------------------------------------------------------------
 # unescape_string
@@ -17,6 +19,12 @@ class TestUnescapeString:
     def test_empty(self):
         assert unescape_string("") == ""
 
+    def test_trailing_backslash_is_preserved(self):
+        assert unescape_string("trailing\\") == "trailing\\"
+
+    def test_unknown_escape_is_preserved(self):
+        assert unescape_string(r"unknown\q") == r"unknown\q"
+
     def test_newline(self):
         assert unescape_string("line1\\nline2") == "line1\nline2"
 
@@ -27,9 +35,6 @@ class TestUnescapeString:
         assert unescape_string("a\\rb") == "a\rb"
 
     def test_backslash(self):
-        # Note: the function processes escapes sequentially, so \\\\
-        # becomes \\ first, then if followed by a known escape letter it
-        # gets processed again.  Test the simple case.
         assert unescape_string("end\\\\") == "end\\"
 
     def test_single_quote(self):
@@ -75,54 +80,87 @@ class TestUnescapeString:
     def test_combined(self):
         assert unescape_string("\\t\\x41\\n") == "\tA\n"
 
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            (r"\\n", r"\n"),
+            (r"\\x41", r"\x41"),
+            (r"\\'", r"\'"),
+            (r"\\\\", r"\\"),
+        ],
+    )
+    def test_escaped_backslash_protects_following_escape(self, source, expected):
+        assert unescape_string(source) == expected
+
 
 # ---------------------------------------------------------------------------
 # for_each_msgdef_in_schema
 # ---------------------------------------------------------------------------
 
 
+def _recording_parse(
+    calls: list[tuple[str, str | None]],
+):
+    """Return a parser stub that records the exact callback inputs."""
+
+    def parse(text: str, package: str | None) -> MessageDefinition:
+        calls.append((text, package))
+        return MessageDefinition(name="", fields_all=[])
+
+    return parse
+
+
 def _dummy_parse(text: str, package: str | None) -> MessageDefinition:  # noqa: ARG001
-    """Minimal parser that creates a MessageDefinition from raw text."""
+    """Minimal parser retained for tests that only inspect callback names."""
     return MessageDefinition(name="", fields_all=[])
 
 
 class TestForEachMsgdefInSchema:
     def test_single_section(self):
         results: list[tuple[str, str, MessageDefinition]] = []
+        calls: list[tuple[str, str | None]] = []
         for_each_msgdef_in_schema(
             "std_msgs/msg/String",
             "string data",
-            _dummy_parse,
+            _recording_parse(calls),
             lambda full, short, md: results.append((full, short, md)),
         )
         assert len(results) == 1
         assert results[0][0] == "std_msgs/msg/String"
         assert results[0][1] == "std_msgs/String"
+        assert calls == [("string data", "std_msgs")]
 
     def test_multiple_sections(self):
         schema = "string data\n===\nMSG: geometry_msgs/msg/Point\nfloat64 x\nfloat64 y\nfloat64 z"
         results: list[tuple[str, str]] = []
+        calls: list[tuple[str, str | None]] = []
         for_each_msgdef_in_schema(
             "geometry_msgs/msg/Pose",
             schema,
-            _dummy_parse,
+            _recording_parse(calls),
             lambda full, short, _md: results.append((full, short)),
         )
         assert len(results) == 2
         assert results[0] == ("geometry_msgs/msg/Pose", "geometry_msgs/Pose")
         assert results[1] == ("geometry_msgs/msg/Point", "geometry_msgs/Point")
+        assert calls == [
+            ("string data", "geometry_msgs"),
+            ("float64 x\nfloat64 y\nfloat64 z", "geometry_msgs"),
+        ]
 
     def test_msg_header_parsed(self):
         schema = "float64 x\n=====\nMSG: pkg/msg/Sub\nint32 val"
         results: list[tuple[str, str]] = []
+        calls: list[tuple[str, str | None]] = []
         for_each_msgdef_in_schema(
             "pkg/msg/Main",
             schema,
-            _dummy_parse,
+            _recording_parse(calls),
             lambda full, short, _md: results.append((full, short)),
         )
         assert results[1][0] == "pkg/msg/Sub"
         assert results[1][1] == "pkg/Sub"
+        assert calls == [("float64 x", "pkg"), ("int32 val", "pkg")]
 
     def test_ros1_style_name(self):
         """ROS1 names use package/Message without /msg/."""
@@ -139,13 +177,27 @@ class TestForEachMsgdefInSchema:
     def test_empty_lines_stripped(self):
         schema = "\n\nstring data\n\n"
         results: list[tuple[str, str]] = []
+        calls: list[tuple[str, str | None]] = []
         for_each_msgdef_in_schema(
             "std_msgs/msg/String",
             schema,
-            _dummy_parse,
+            _recording_parse(calls),
             lambda full, short, _md: results.append((full, short)),
         )
         assert len(results) == 1
+        assert calls == [("string data", "std_msgs")]
+
+    def test_ros2_schema_nested_message_is_parsed_with_package_context(self):
+        schema = (
+            "Point position\n===\nMSG: geometry_msgs/msg/Point\nfloat64 x\nfloat64 y\nfloat64 z\n"
+        )
+
+        definitions = parse_schema_to_definitions("geometry_msgs/msg/Pose", schema.encode())
+
+        assert definitions["geometry_msgs/msg/Pose"].fields[0].type == Type(
+            "Point", package_name="geometry_msgs"
+        )
+        assert definitions["geometry_msgs/msg/Point"].fields[2].type == Type("float64")
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,48 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from small_mcap import McapWriter, stream_reader
+from small_mcap.records import OPCODE_AND_LEN_STRUCT, LazyChunk
+from small_mcap.writer import CompressionType
+
+
+def _write_file_truncated_inside_final_chunk(path: Path) -> int:
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, chunk_size=160, compression=CompressionType.NONE)
+        writer.start(profile="test", library="pymcap-cli-test")
+        writer.add_schema(schema_id=1, name="test", encoding="json", data=b"{}")
+        writer.add_channel(channel_id=1, topic="/test", message_encoding="json", schema_id=1)
+        for index in range(24):
+            writer.add_message(
+                channel_id=1,
+                log_time=index + 1,
+                publish_time=index + 1,
+                data=bytes([index]) * 48,
+            )
+        writer.finish()
+
+    with path.open("rb") as stream:
+        chunks = [
+            record
+            for record in stream_reader(stream, emit_chunks=True, lazy_chunks=True)
+            if isinstance(record, LazyChunk)
+        ]
+
+    assert len(chunks) >= 2
+    final_chunk = chunks[-1]
+    chunk_data_start = (
+        final_chunk.record_start
+        + OPCODE_AND_LEN_STRUCT.size
+        + 8
+        + 8
+        + 8
+        + 4
+        + 4
+        + len(final_chunk.compression.encode())
+        + 8
+    )
+    path.write_bytes(path.read_bytes()[: chunk_data_start + final_chunk.data_len // 2])
+    return len(chunks) - 1
 
 
 @pytest.mark.e2e
@@ -25,6 +67,25 @@ def test_info_missing_suffix_suggests_existing_mcap(tmp_path: Path) -> None:
     assert f"Error: File not found: {entered_path}" in result.stderr
     assert f"Did you mean {mcap_path}?" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.e2e
+def test_info_json_rebuilds_complete_prefix_when_final_chunk_is_truncated(tmp_path: Path) -> None:
+    path = tmp_path / "truncated-final-chunk.mcap"
+    complete_chunk_count = _write_file_truncated_inside_final_chunk(path)
+
+    result = subprocess.run(
+        ["pymcap-cli", "info-json", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["statistics"]["chunk_count"] == complete_chunk_count
+    assert data["statistics"]["message_count"] > 0
 
 
 @pytest.mark.e2e

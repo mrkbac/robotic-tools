@@ -1,34 +1,79 @@
 """Shared utilities for ROS message parsing."""
 
+from __future__ import annotations
+
 import re
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from ros_parser.models import MessageDefinition
 
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
 # Standard escape sequence mapping for ROS string literals
 _ESCAPE_MAP = {
-    "\\'": "'",
-    '\\"': '"',
-    "\\a": "\a",
-    "\\b": "\b",
-    "\\f": "\f",
-    "\\n": "\n",
-    "\\r": "\r",
-    "\\t": "\t",
-    "\\v": "\v",
-    "\\\\": "\\",
+    "'": "'",
+    '"': '"',
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
 }
-
-# Regex patterns for escape sequence processing
-_OCTAL_ESCAPE_PATTERN = re.compile(r"\\([0-7]{1,3})")
-_HEX_ESCAPE_PATTERN = re.compile(r"\\x([0-9a-fA-F]{2})")
-_UNICODE_4_ESCAPE_PATTERN = re.compile(r"\\u([0-9a-fA-F]{4})")
-_UNICODE_8_ESCAPE_PATTERN = re.compile(r"\\U([0-9a-fA-F]{8})")
 
 # Schema separator pattern (3 or more = characters on their own line)
 _SCHEMA_SEPARATOR_PATTERN = re.compile(r"^={3,}$", flags=re.MULTILINE)
 # MSG header pattern (e.g., "MSG: package/msg/Name")
 _MSG_HEADER_PATTERN = re.compile(r"^MSG:\s+(\S+)$", flags=re.MULTILINE)
+
+_INTEGER_RANGES: dict[str, tuple[int, int]] = {
+    "char": (0, 2**8 - 1),
+    "uint8": (0, 2**8 - 1),
+    "int8": (-(2**7), 2**7 - 1),
+    "uint16": (0, 2**16 - 1),
+    "int16": (-(2**15), 2**15 - 1),
+    "uint32": (0, 2**32 - 1),
+    "int32": (-(2**31), 2**31 - 1),
+    "uint64": (0, 2**64 - 1),
+    "int64": (-(2**63), 2**63 - 1),
+}
+
+
+def integer_type_range(type_name: str, *, is_ros1: bool) -> tuple[int, int] | None:
+    """Return the ROS-version-specific range for an integer primitive."""
+    if type_name == "byte":
+        return (-(2**7), 2**7 - 1) if is_ros1 else (0, 2**8 - 1)
+    return _INTEGER_RANGES.get(type_name)
+
+
+class IntegerLiteral(int):
+    """Integer value that retains its source spelling until type validation."""
+
+    source: str
+
+    def __new__(cls, value: int, source: str) -> Self:
+        instance = super().__new__(cls, value)
+        instance.source = source
+        return instance
+
+
+class FloatLiteral(float):
+    """Float value that retains its source spelling until type validation."""
+
+    source: str
+
+    def __new__(cls, value: float, source: str) -> Self:
+        instance = super().__new__(cls, value)
+        instance.source = source
+        return instance
+
+
+class UnquotedLiteral(str):
+    """Unquoted word that can be interpreted according to its field type."""
 
 
 def unescape_string(s: str) -> str:
@@ -46,19 +91,64 @@ def unescape_string(s: str) -> str:
     Returns:
         The string with escape sequences converted to actual characters
     """
-    result = s
-    for escaped, unescaped in _ESCAPE_MAP.items():
-        result = result.replace(escaped, unescaped)
+    result: list[str] = []
+    index = 0
+    hex_digits = frozenset("0123456789abcdefABCDEF")
+    octal_digits = frozenset("01234567")
 
-    # Handle octal escapes (\012)
-    result = _OCTAL_ESCAPE_PATTERN.sub(lambda m: chr(int(m.group(1), 8)), result)
+    while index < len(s):
+        if s[index] != "\\":
+            result.append(s[index])
+            index += 1
+            continue
 
-    # Handle hex escapes (\x10)
-    result = _HEX_ESCAPE_PATTERN.sub(lambda m: chr(int(m.group(1), 16)), result)
+        if index + 1 >= len(s):
+            result.append("\\")
+            index += 1
+            continue
 
-    # Handle unicode escapes (\u1010, \U0002F804)
-    result = _UNICODE_4_ESCAPE_PATTERN.sub(lambda m: chr(int(m.group(1), 16)), result)
-    return _UNICODE_8_ESCAPE_PATTERN.sub(lambda m: chr(int(m.group(1), 16)), result)
+        token = s[index + 1]
+        unescaped = _ESCAPE_MAP.get(token)
+        if unescaped is not None:
+            result.append(unescaped)
+            index += 2
+            continue
+
+        if s[index + 1] == "x" and index + 4 <= len(s):
+            digits = s[index + 2 : index + 4]
+            if all(digit in hex_digits for digit in digits):
+                result.append(chr(int(digits, 16)))
+                index += 4
+                continue
+
+        if s[index + 1] == "u" and index + 6 <= len(s):
+            digits = s[index + 2 : index + 6]
+            if all(digit in hex_digits for digit in digits):
+                result.append(chr(int(digits, 16)))
+                index += 6
+                continue
+
+        if s[index + 1] == "U" and index + 10 <= len(s):
+            digits = s[index + 2 : index + 10]
+            if all(digit in hex_digits for digit in digits):
+                result.append(chr(int(digits, 16)))
+                index += 10
+                continue
+
+        if s[index + 1] in octal_digits:
+            end = index + 2
+            while end < len(s) and end < index + 4 and s[end] in octal_digits:
+                end += 1
+            result.append(chr(int(s[index + 1 : end], 8)))
+            index = end
+            continue
+
+        # Preserve unknown or incomplete escapes literally, and consume both
+        # characters so a following letter cannot be interpreted a second time.
+        result.extend(("\\", s[index + 1]))
+        index += 2
+
+    return "".join(result)
 
 
 def for_each_msgdef_in_schema(
@@ -97,7 +187,7 @@ def for_each_msgdef_in_schema(
         if match:
             cur_schema_name = match.group(1)
             # Remove this line from the message definition
-            section_text = _MSG_HEADER_PATTERN.sub("", section_text)
+            section_text = _MSG_HEADER_PATTERN.sub("", section_text).strip()
 
         # Parse the package and message names from the schema name
         # e.g., "geometry_msgs/msg/Point" -> package="geometry_msgs", msg="Point"

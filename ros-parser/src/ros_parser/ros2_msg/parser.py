@@ -4,17 +4,107 @@ from pathlib import Path
 from typing import Any, cast
 
 # Import from standalone parser (pre-compiled grammar)
-from .._lark_standalone_runtime import Token, Transformer
-from .._utils import unescape_string
+from .._lark_standalone_runtime import LarkError, Token, Transformer
+from .._utils import (
+    FloatLiteral,
+    IntegerLiteral,
+    UnquotedLiteral,
+    integer_type_range,
+    unescape_string,
+)
 from ..models import (
     ActionDefinition,
     Constant,
     Field,
     MessageDefinition,
+    MessageDefinitionError,
     ServiceDefinition,
     Type,
 )
 from ._standalone_parser import Lark_StandAlone
+
+
+def _invalid_default(type_spec: Type, value: str) -> MessageDefinitionError:
+    """Build the consistent error used for invalid ROS2 field defaults."""
+    return MessageDefinitionError(
+        f"Invalid default {value!r} for field type '{type_spec}': "
+        "the value does not match the declared type"
+    )
+
+
+def _validate_scalar_default(
+    type_spec: Type, value: bool | float | str
+) -> bool | int | float | str:
+    """Validate and normalize one scalar ROS2 default value."""
+    type_name = type_spec.type_name
+    if type_name == "bool":
+        if isinstance(value, UnquotedLiteral) and value.lower() in {"true", "false"}:
+            return value.lower() == "true"
+        if isinstance(value, IntegerLiteral) and value.source in {"0", "1"}:
+            return bool(value)
+        raise _invalid_default(type_spec, repr(value))
+    integer_range = integer_type_range(type_name, is_ros1=False)
+    if integer_range is not None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise _invalid_default(type_spec, repr(value))
+        value = int(value)
+        lower, upper = integer_range
+        if not lower <= value <= upper:
+            raise _invalid_default(type_spec, repr(value))
+        return value
+    if type_name in {"float32", "float64"}:
+        if isinstance(value, UnquotedLiteral) and value.lower() in {
+            "nan",
+            "+nan",
+            "-nan",
+            "inf",
+            "+inf",
+            "-inf",
+        }:
+            return float(value)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise _invalid_default(type_spec, repr(value))
+        return float(value)
+    if type_name in {"string", "wstring"}:
+        if isinstance(value, (IntegerLiteral, FloatLiteral)):
+            string_value = value.source
+        else:
+            string_value = cast("str", value)
+        if (
+            type_spec.string_upper_bound is not None
+            and len(string_value) > type_spec.string_upper_bound
+        ):
+            raise _invalid_default(type_spec, repr(string_value))
+        return str(string_value)
+    raise _invalid_default(type_spec, repr(value))
+
+
+def _validate_field_default(
+    type_spec: Type, value: bool | float | str | list[Any]
+) -> bool | int | float | str | list[Any]:
+    """Validate a ROS2 field default against its type and cardinality."""
+    if type_spec.is_array:
+        if not isinstance(value, list):
+            raise MessageDefinitionError(
+                f"Invalid array default for field type '{type_spec}': the value must be an array"
+            )
+        if not type_spec.is_primitive:
+            raise _invalid_default(type_spec, repr(value))
+        if type_spec.array_size is not None:
+            if type_spec.is_upper_bound and len(value) > type_spec.array_size:
+                raise MessageDefinitionError(
+                    f"Invalid array default for field type '{type_spec}': "
+                    "the value exceeds the declared upper bound"
+                )
+            if not type_spec.is_upper_bound and len(value) != type_spec.array_size:
+                raise MessageDefinitionError(
+                    f"Invalid array default for field type '{type_spec}': "
+                    "the value has the wrong number of elements"
+                )
+        return [_validate_scalar_default(type_spec, item) for item in value]
+    if isinstance(value, list) or not type_spec.is_primitive:
+        raise _invalid_default(type_spec, repr(value))
+    return _validate_scalar_default(type_spec, value)
 
 
 class MessageTransformer(Transformer[Any, MessageDefinition]):
@@ -58,22 +148,26 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
         tail = items[2] if len(items) > 2 else None
 
         # tail is a tuple: (is_constant: bool, value: bool | int | float | str | list | None)
-        if tail and tail[0]:  # is_constant
+        if tail is not None and tail[0]:  # is_constant
             # Validate that constants only use primitive types (per ROS 2 spec)
             if isinstance(type_spec, Type):
                 if type_spec.package_name is not None:
-                    raise ValueError(
+                    raise MessageDefinitionError(
                         f"Constant '{name}' uses complex type '{type_spec}'. "
                         "Constants must use primitive types only."
                     )
                 if type_spec.is_array:
-                    raise ValueError(
+                    raise MessageDefinitionError(
                         f"Constant '{name}' uses array type '{type_spec}'. "
                         "Constants must use primitive types only (no arrays)."
                     )
-            return Constant(type=type_spec, name=name, value=tail[1])
+            try:
+                value = _validate_scalar_default(type_spec, tail[1])
+            except MessageDefinitionError as exc:
+                raise MessageDefinitionError(f"Constant '{name}': {exc}") from exc
+            return Constant(type=type_spec, name=name, value=value)
         # is_field
-        default_value = tail[1] if tail else None
+        default_value = _validate_field_default(type_spec, tail[1]) if tail is not None else None
         return Field(type=type_spec, name=name, default_value=default_value)
 
     def field_or_const_tail(
@@ -114,12 +208,8 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
         return (False, None)
 
     def identifier(self, items: list[Token]) -> str:
-        """Return identifier after validation."""
-        name = str(items[0])
-        # Validate no consecutive underscores
-        if "__" in name:
-            raise ValueError(f"Identifier '{name}' contains consecutive underscores")
-        return name
+        """Return the identifier exactly as recorded in the schema."""
+        return str(items[0])
 
     def type_spec(self, items: list[Any]) -> Type:
         """Build a Type from primitive/complex type and optional bounds/arrays."""
@@ -148,7 +238,7 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
             type_obj = Type(type_name=str(base_type), string_upper_bound=string_bound)
 
         # Apply array specification if present
-        if array_spec:
+        if array_spec is not None:
             is_array, array_size, is_upper_bound = array_spec
             type_obj = Type(
                 type_name=type_obj.type_name,
@@ -189,7 +279,10 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
 
     def string_bound(self, items: list[Token]) -> int:
         """Extract string bound value."""
-        return int(items[0])
+        size = int(items[0])
+        if size <= 0:
+            raise MessageDefinitionError("ROS2 string bound must be greater than zero")
+        return size
 
     def array_spec(self, items: list[Any]) -> tuple[bool, int | None, bool]:
         """Extract array specification from child rule."""
@@ -205,11 +298,17 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
 
     def fixed_array(self, items: list[Token]) -> tuple[bool, int, bool]:
         """Return array specification for fixed-size array."""
-        return (True, int(items[0]), False)
+        size = int(items[0])
+        if size <= 0:
+            raise MessageDefinitionError("ROS2 array size must be greater than zero")
+        return (True, size, False)
 
     def bounded_array(self, items: list[Token]) -> tuple[bool, int, bool]:
         """Return array specification for bounded array."""
-        return (True, int(items[0]), True)
+        size = int(items[0])
+        if size <= 0:
+            raise MessageDefinitionError("ROS2 array bound must be greater than zero")
+        return (True, size, True)
 
     def default_value(self, items: list[Any]) -> bool | int | float | str | list[Any]:
         """Return default value."""
@@ -254,10 +353,9 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
         # Use custom unescaping for ROS-specific escape sequences
         return unescape_string(string_content)
 
-    def boolean_literal(self, items: list[Token]) -> bool:
-        """Parse boolean value - returns True for 'true'/'True'/'1', False otherwise."""
-        value = str(items[0])
-        return value.lower() in ("true", "1")
+    def boolean_literal(self, items: list[Token]) -> str:
+        """Retain a boolean word until its declared field type is known."""
+        return UnquotedLiteral(str(items[0]))
 
     def numeric_literal(self, items: list[Token]) -> int | float:
         """
@@ -269,23 +367,23 @@ class MessageTransformer(Transformer[Any, MessageDefinition]):
 
         # Handle different number bases using Python's int() base parameter
         if "x" in value_str.lower():
-            return int(value_str, 16)
+            return IntegerLiteral(int(value_str, 16), value_str)
         if "b" in value_str.lower():
-            return int(value_str, 2)
+            return IntegerLiteral(int(value_str, 2), value_str)
         if "o" in value_str.lower():
-            return int(value_str, 8)
+            return IntegerLiteral(int(value_str, 8), value_str)
 
         # Handle decimal integers and floats
         # If contains '.', 'e', or 'E', it's a float
         if "." in value_str or "e" in value_str.lower():
-            return float(value_str)
-        return int(value_str)
+            return FloatLiteral(float(value_str), value_str)
+        return IntegerLiteral(int(value_str), value_str)
 
     def unquoted_string(self, items: list[Token]) -> str:
         """Parse unquoted string."""
         string_content = str(items[0]).strip()
         # Handle escape sequences even in unquoted strings
-        return unescape_string(string_content)
+        return UnquotedLiteral(unescape_string(string_content))
 
     # Line filtering - return None for lines we want to filter out
     def line(self, items: list[Any]) -> Field | Constant | str | None:
@@ -319,7 +417,12 @@ def parse_string(message_string: str, context_package_name: str | None = None) -
     # Create parser with context package name
     transformer: Any = MessageTransformer(context_package_name=context_package_name)
     parser: Any = Lark_StandAlone(transformer=transformer)  # type: ignore[invalid-argument-type]
-    return cast("MessageDefinition", parser.parse(cleaned))
+    try:
+        return cast("MessageDefinition", parser.parse(cleaned))
+    except MessageDefinitionError as exc:
+        raise MessageDefinitionError(f"Invalid ROS2 message definition: {exc}") from exc
+    except LarkError as exc:
+        raise MessageDefinitionError(f"Invalid ROS2 message definition: {exc}") from exc
 
 
 def parse_file(file_path: str | Path, package_name: str | None = None) -> MessageDefinition:

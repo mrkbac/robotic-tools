@@ -105,9 +105,9 @@ PACKAGE_NAME: /[a-z]([a-z0-9_]*[a-z0-9])?/
 // Type identifiers start with uppercase letter
 TYPE_IDENTIFIER: /[A-Z][A-Za-z0-9]*/
 
-// General identifier for field/constant names
-// Pattern: letter optionally followed by alphanumeric/underscores (no trailing underscore)
-IDENTIFIER: /[A-Za-z]([A-Za-z0-9_]*[A-Za-z0-9])?/
+// General identifier for field/constant names. Preserve the spelling found in
+// recorded schemas instead of enforcing authoring-time naming conventions.
+IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
 
 // Special base numeric literals - highest priority to match before plain integers
 HEX_NUMBER.2: /[+-]?0[xX][0-9a-fA-F]+/
@@ -119,16 +119,15 @@ INTEGER.1: INT
 SIGNED_NUMBER.1: SIGNED_INT
 FLOAT_NUMBER.1: SIGNED_FLOAT
 
-// Boolean literals - higher priority than UNQUOTED_STRING
+// Boolean literals
 // Only true/false (1/0 treated as numeric and coerced in semantic pass)
 // Use word boundaries to avoid matching "false" in "falsehood"
-BOOLEAN.1: /\b(true|True|false|False)\b/
+BOOLEAN.1: /(?i:\b(?:true|false)\b)/
 
 // Strings can be quoted or unquoted for compatibility with reference parser
 ESCAPED_STRING: /'(?:[^'\\]|\\.)*'/
               | /"(?:[^"\\]|\\.)*"/
 
-// Unquoted strings (for default values and constants) - match until comment or end of line
-// Excludes =, whitespace, #, comma, brackets, quotes, and newline
-// LOWEST priority - fallback for anything not matched by other terminals
+// Kept as a parseable token so semantic validation can issue the specific
+// ROS2 error that string defaults and constants must be quoted.
 UNQUOTED_STRING.0: /[^\s#\[\],=\n"'][^#\[\],=\n"']*/

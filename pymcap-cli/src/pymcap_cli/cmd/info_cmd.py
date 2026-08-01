@@ -4,6 +4,7 @@ import base64
 import gzip
 import json
 import logging
+import struct
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
-from small_mcap import McapError, RebuildInfo, rebuild_summary
+from small_mcap import EndOfFileError, McapError, RebuildInfo, rebuild_summary
 from small_mcap.records import Summary
 
 from pymcap_cli.cmd._arg_constraints import conflicts, constraint_group, requires
@@ -360,7 +361,11 @@ def _watch_file(
                     time.sleep(interval)
                     continue
 
-                needs_full_rescan = info_data is None or current_size < last_size
+                needs_full_rescan = (
+                    info_data is None
+                    or current_size < last_size
+                    or info_data.next_offset < last_size
+                )
 
                 try:
                     with path.open("rb") as f:
@@ -385,10 +390,12 @@ def _watch_file(
                 except OSError as e:
                     console.print(f"[red]Error reading file:[/] {e}")
                     return 1
-                except (McapError, ValueError, AssertionError):
-                    # File may be partially written; wait and retry
+                except EndOfFileError:
                     time.sleep(interval)
                     continue
+                except (McapError, ValueError, AssertionError, struct.error) as e:
+                    console.print(f"[red]Error reading file:[/] {e}")
+                    return 1
 
                 last_size = current_size
 

@@ -5,11 +5,16 @@ code-generated encoder in `_dynamic_encoder.py`. Numpy stays an optional dep —
 these tests are skipped when it is not installed.
 """
 
+import struct
+import sys
 from collections.abc import Sequence
 from io import BytesIO
 
+import mcap_ros2_support_fast._dynamic_encoder as dynamic_encoder
 import pytest
+from mcap_ros2._cdr import CdrWriter, EncapsulationKind
 from mcap_ros2_support_fast import ROS2EncoderFactory
+from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap.reader import read_message_decoded
 from small_mcap.writer import McapWriter
@@ -56,6 +61,69 @@ def test_fixed_float64_9_as_2d_ndarray_flattens() -> None:
 
     msgs = _read(_write_one(schema, "test_msgs/Cov", {"cov": cov}))
     assert list(msgs[0].decoded_message.cov) == list(range(9))
+
+
+def test_numpy_array_matches_reference_cdr_bytes_and_decoder() -> None:
+    schema_name = "test_msgs/NumpyArray"
+    schema = "float64[3] values\nuint8 tail"
+    values = np.array([1.5, 2.5, 3.5], dtype=np.float32)
+
+    output = BytesIO()
+    writer = CdrWriter(output, kind=EncapsulationKind.CDR_LE)
+    writer.write_float64_array([1.5, 2.5, 3.5])
+    writer.write_uint8(0xA5)
+    expected = output.getvalue()
+
+    encoder = create_encoder_function(schema_name, schema)
+    decoder = create_decoder_function(schema_name, schema)
+    encoded = bytes(encoder({"values": values, "tail": 0xA5}))
+    decoded = decoder(expected)
+
+    assert encoded == expected
+    assert list(decoded.values) == [1.5, 2.5, 3.5]
+    assert decoded.tail == 0xA5
+
+
+def test_two_dimensional_bool_ndarray_flattens_to_one_byte_per_element() -> None:
+    schema_name = "test_msgs/BoolArray"
+    schema = "bool[4] values\nuint8 tail"
+    values = np.array([[True, False], [False, True]], dtype=np.bool_)
+    output = BytesIO()
+    writer = CdrWriter(output, kind=EncapsulationKind.CDR_LE)
+    writer.write_boolean_array([True, False, False, True])
+    writer.write_uint8(0xA5)
+    expected = output.getvalue()
+
+    encoded = bytes(create_encoder_function(schema_name, schema)({"values": values, "tail": 0xA5}))
+
+    assert encoded == expected == bytes.fromhex("0001000001000001a5")
+
+
+@pytest.mark.parametrize("endianness", ["<", ">"], ids=["little-endian", "big-endian"])
+def test_numpy_packing_respects_requested_endianness(endianness: str) -> None:
+    values = np.arange(9, dtype=np.float64).reshape(3, 3)
+
+    packed = dynamic_encoder._to_packed_bytes(values, "d", endianness)
+
+    assert packed == struct.pack(f"{endianness}9d", *range(9))
+
+
+def test_native_numpy_packing_avoids_array_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = np.arange(9, dtype=np.float64).reshape(3, 3)
+    native_endianness = "<" if sys.byteorder == "little" else ">"
+
+    def fail_array_copy(*args, **kwargs):
+        pytest.fail(f"native NumPy packing copied through array.array: {args!r}, {kwargs!r}")
+
+    monkeypatch.setattr(dynamic_encoder.array, "array", fail_array_copy)
+
+    assert (
+        dynamic_encoder._to_packed_bytes(values, "d", native_endianness, expected_length=9)
+        == values.tobytes()
+    )
+
+    with pytest.raises(ValueError, match="fixed array expected 8 elements, got 9"):
+        dynamic_encoder._to_packed_bytes(values, "d", native_endianness, expected_length=8)
 
 
 def test_fixed_array_byte_equivalence_ndarray_vs_list() -> None:
