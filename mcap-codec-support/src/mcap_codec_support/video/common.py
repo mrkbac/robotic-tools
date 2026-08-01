@@ -205,7 +205,14 @@ def build_encoder_options(
         pixel_scale = (width * height) / (1920 * 1080)
         bit_rate = int(5_000_000 * (2 ** ((28 - quality) / 6)) * pixel_scale)
         return {}, bit_rate
-    if codec_name in {"h264_nvenc", "hevc_nvenc"}:
+    if codec_name == "hevc_nvenc":
+        return {
+            "preset": preset or "p5",
+            "tune": "hq",
+            "rc": "constqp",
+            "qp": str(quality),
+        }, None
+    if codec_name == "h264_nvenc":
         return {"rc": "vbr", "cq": str(quality)}, None
     if codec_name in {"h264_vaapi", "hevc_vaapi"}:
         return {"qp": str(quality)}, None

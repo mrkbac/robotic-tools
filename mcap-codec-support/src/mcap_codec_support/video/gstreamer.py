@@ -244,10 +244,9 @@ def _quality_to_qp(quality: int) -> int:
     path — the buffers carry no framerate, so bits-*per-second* rate control has
     nothing to divide by and the stream comes out near-lossless (bigger than the
     source JPEGs). Constant-QP is both the mode that actually works and the right
-    semantic match: the ffmpeg-cli NVENC path uses ``rc=vbr cq=<quality>``.
-    Jetson's V4L2 constant-QP scale is consistently less aggressive than NVENC's
-    CQ scale here, so apply a small offset to keep the default backend output
-    size in the same range.
+    semantic match for the ffmpeg-cli HEVC NVENC path. Jetson's V4L2 constant-QP
+    scale is consistently less aggressive than desktop NVENC's scale here, so
+    apply a small offset to keep the default backend output size in the same range.
     """
     return max(0, min(51, quality + 7))
 
