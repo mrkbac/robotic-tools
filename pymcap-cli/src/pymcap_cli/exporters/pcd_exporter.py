@@ -38,10 +38,17 @@ if TYPE_CHECKING:
 
 
 class _PointFieldMessage(Protocol):
-    name: str
-    offset: int
-    datatype: int
-    count: int
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def offset(self) -> int: ...
+
+    @property
+    def datatype(self) -> int: ...
+
+    @property
+    def count(self) -> int: ...
 
 
 class _PointCloudMessage(Protocol):

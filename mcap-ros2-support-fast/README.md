@@ -64,6 +64,10 @@ with open("output.mcap", "wb") as f:
     writer.finish()
 ```
 
+Bounded ROS 2 sequences enforce their declared maximum while encoding. Passing more
+elements than the schema permits raises `ValueError` instead of silently dropping
+data. Decoding remains wire-compatible and reads the length stored in the message.
+
 ## Benchmarks
 
 Median runtime from the non-`slow` `pytest-benchmark` suite on the included nuScenes dataset (`data/data/nuScenes-v1.0-mini-scene-0061-ros2.mcap`, 30,900 messages).

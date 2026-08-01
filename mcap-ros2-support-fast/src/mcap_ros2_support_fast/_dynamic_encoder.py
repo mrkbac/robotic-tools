@@ -45,9 +45,6 @@ except ImportError:
         """Return the number of serialized primitive elements (no-numpy build)."""
         return len(value)
 
-    def _truncate_array(value: Any, size: int) -> Any:
-        """Truncate an array-like value (no-numpy build)."""
-        return value[:size]
 else:
     _np = np
     _ndarray: type = np.ndarray
@@ -68,12 +65,6 @@ else:
         if isinstance(value, _ndarray):
             return int(value.size)
         return len(value)
-
-    def _truncate_array(value: Any, size: int) -> Any:
-        """Truncate an array-like value to the serialized primitive element count."""
-        if isinstance(value, _ndarray):
-            return value.ravel()[:size]
-        return value[:size]
 
 
 def _get_field(obj: Any, f: str, default: Any) -> Any:
@@ -233,26 +224,17 @@ class EncoderGeneratorFactory:
 
         if fixed_size is None:
             length_expr = f"len({value_expr})" if is_string_like else f"_array_length({value_expr})"
+            len_var = self.generate_var_name()
+            self.code.append(f"{len_var} = {length_expr}")
             if is_upper_bound and array_size is not None:
-                len_var = self.generate_var_name()
-                self.code.append(f"{len_var} = {length_expr}")
-                truncated_var = self.generate_var_name()
-                truncate_expr = (
-                    f"{value_expr}[:{array_size}]"
-                    if is_string_like
-                    else f"_truncate_array({value_expr}, {array_size})"
-                )
-                self.code.append(
-                    f"{truncated_var} = {truncate_expr} "
-                    f"if {len_var} > {array_size} else {value_expr}"
-                )
-                self.code.append(f"{len_var} = min({len_var}, {array_size})")
-                value_expr = truncated_var
-                self.generate_primitive_writer(len_var, TypeId.UINT32)
-            else:
-                len_var = self.generate_var_name()
-                self.code.append(f"{len_var} = {length_expr}")
-                self.generate_primitive_writer(len_var, TypeId.UINT32)
+                with self.code.indent(f"if {len_var} > {array_size}:"):
+                    self.code.append(
+                        "raise ValueError("
+                        f"f'bounded array expected at most {array_size} elements, "
+                        f"got {{{len_var}}}'"
+                        ")"
+                    )
+            self.generate_primitive_writer(len_var, TypeId.UINT32)
 
         if type_id == TypeId.STRING:
             random_i = self.generate_var_name()
@@ -322,24 +304,17 @@ class EncoderGeneratorFactory:
 
         # Bounded arrays (<=N) and dynamic arrays ([]) both write length prefix
         if array_size is None or is_upper_bound:
-            # For bounded arrays, truncate to upper bound if needed
+            len_var = self.generate_var_name()
+            self.code.append(f"{len_var} = len({array_var})")
             if is_upper_bound and array_size is not None:
-                len_var = self.generate_var_name()
-                self.code.append(f"{len_var} = len({array_var})")
-                truncated_var = self.generate_var_name()
-                self.code.append(
-                    f"{truncated_var} = {array_var}[:{array_size}] "
-                    f"if {len_var} > {array_size} else {array_var}"
-                )
-                self.code.append(f"{len_var} = min({len_var}, {array_size})")
-                array_var = truncated_var
-                # Write the cached length
-                self.generate_primitive_writer(len_var, TypeId.UINT32)
-            else:
-                # Cache len() to avoid redundant function call
-                len_var = self.generate_var_name()
-                self.code.append(f"{len_var} = len({array_var})")
-                self.generate_primitive_writer(len_var, TypeId.UINT32)
+                with self.code.indent(f"if {len_var} > {array_size}:"):
+                    self.code.append(
+                        "raise ValueError("
+                        f"f'bounded array expected at most {array_size} elements, "
+                        f"got {{{len_var}}}'"
+                        ")"
+                    )
+            self.generate_primitive_writer(len_var, TypeId.UINT32)
 
         random_i = self.generate_var_name()
         self.reset_alignment()  # Need to reset alignment at the start of loops
@@ -457,7 +432,6 @@ class EncoderGeneratorFactory:
         namespace: dict[str, Any] = {
             "_get_field": _get_field,
             "_array_length": _array_length,
-            "_truncate_array": _truncate_array,
             "_to_packed_bytes": _to_packed_bytes,
             "_PADS": (
                 b"",

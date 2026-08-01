@@ -403,7 +403,12 @@ def optimize_plan(plan: PlanList) -> PlanList:
             final_steps.append(ComplexAction(action.target, optimize_plan(action.plan)))
         elif action.type == ActionType.COMPLEX_ARRAY:
             final_steps.append(
-                ComplexArrayAction(action.target, optimize_plan(action.plan), action.size)
+                ComplexArrayAction(
+                    action.target,
+                    optimize_plan(action.plan),
+                    action.size,
+                    action.is_upper_bound,
+                )
             )
 
     return target_type, final_steps

@@ -11,6 +11,8 @@
 
 - Setup: `uv sync --all-groups --all-extras --all-packages`. Web: `bun install` inside `mcap-web-inspector/`.
 - Repo-wide fast tests: `uv run --frozen --all-groups --all-extras --all-packages bash scripts/pytest_fast.sh`.
+- Package coverage uses an explicit source path, for example
+  `uv run pytest pointcloud2/tests --cov=pointcloud2/src/pointcloud2 --cov-config=pointcloud2/pyproject.toml`.
 - Python tests: `uv run pytest <package>/tests -m "not benchmark" --no-cov -q`.
 - Single test file / test: `uv run pytest -s <package>/tests/test_x.py[::test_name]`.
 - Lint/format only via pre-commit: `pre-commit run --files <paths>` or focused hooks (`ruff-check`, `ruff-format`, `typos`, `ty-check`, `pytest-fast`).
@@ -28,6 +30,9 @@
 
 ## Dependencies And Import Boundaries
 
+- Support every non-EOL CPython release allowed by `requires-python`, and keep the test matrix synchronized
+  with that set. When dependency releases support different Python ranges, retain compatible versions
+  with environment markers or lockfile resolution splits instead of dropping a supported Python release.
 - Keep the base install useful and importable. A dependency belongs in `[project.dependencies]` only
   when ordinary package use needs it; feature-specific, large, or platform-sensitive dependencies
   belong in `[project.optional-dependencies]`.

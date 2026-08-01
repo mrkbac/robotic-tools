@@ -16,7 +16,8 @@ pureini/python/pureini/_pureini*.pyd
 package-lock.json
 *.mcap
 .coverage
+.coverage.*
 *.mp4
 *.webm
 *.mkv
-coverage.xml
+coverage*.xml

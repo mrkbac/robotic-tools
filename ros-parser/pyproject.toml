@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Compilers",
     "Typing :: Typed",
@@ -39,6 +40,13 @@ build-backend = "uv_build"
 dev = [
     "lark>=1.3.0",
 ]
+
+[tool.coverage.run]
+omit = ["*/ros_parser/_lark_standalone_runtime.py"]
+
+[tool.coverage.report]
+fail_under = 100
+precision = 1
 
 [tool.ruff]
 extend = "../pyproject.toml"

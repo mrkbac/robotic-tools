@@ -932,8 +932,6 @@ def _read_message_indexed(
 
     def _lazy_yield(index: ChunkIndex) -> Iterable[McapRecord | ChunkIndex]:
         yield index
-        if _chunk_fully_excluded(index, exclude_channels):
-            return
         yield from _yield_loaded_chunk_messages(
             load_chunk(index, validate_crc),
             exclude_channels,

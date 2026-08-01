@@ -58,16 +58,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         package:
-          - { dir: small-mcap, cov: true, submodules: true }
-          - { dir: pymcap-cli, cov: true, submodules: true }
-          - { dir: mcap-ros2-support-fast, cov: true, submodules: true }
-          - { dir: mcap-codec-support, cov: true, submodules: false }
-          - { dir: ros-parser, cov: true, submodules: false }
-          - { dir: pointcloud2, cov: true, submodules: false }
-          - { dir: pureini, cov: false, submodules: false }
-          - { dir: digitalis, cov: false, submodules: false }
+          - { dir: small-mcap, cov: true, config: small-mcap/pyproject.toml, submodules: true }
+          - { dir: pymcap-cli, cov: true, config: pymcap-cli/pyproject.toml, submodules: true }
+          - { dir: mcap-ros2-support-fast, cov: true, config: mcap-ros2-support-fast/pyproject.toml, submodules: true }
+          - { dir: mcap-codec-support, cov: true, config: mcap-codec-support/pyproject.toml, submodules: false }
+          - { dir: ros-parser, cov: true, config: ros-parser/pyproject.toml, submodules: false }
+          - { dir: pointcloud2, cov: true, config: pointcloud2/pyproject.toml, submodules: false }
+          - { dir: pureini, cov: false, config: pyproject.toml, submodules: false }
+          - { dir: robo-ws-bridge, cov: true, config: robo-ws-bridge/pyproject.toml, submodules: false }
+          - { dir: digitalis, cov: true, config: digitalis/pyproject.toml, submodules: false }
 
     name: test (${{ matrix.package.dir }}, ${{ matrix.python-version }})
 
@@ -130,9 +131,18 @@ jobs:
 
       - name: Run tests
         run: |
-          cov_module=$(echo "${{ matrix.package.dir }}" | tr '-' '_')
           if [ "${{ matrix.package.cov }}" = "true" ]; then
-            uv run pytest ${{ matrix.package.dir }}/tests -v --cov=$cov_module -m "not benchmark" -n auto
+            cov_module=$(echo "${{ matrix.package.dir }}" | tr '-' '_')
+            uv run pytest \
+              ${{ matrix.package.dir }}/tests \
+              -v \
+              -m "not benchmark" \
+              --benchmark-skip \
+              --cov=${{ matrix.package.dir }}/src/$cov_module \
+              --cov-config=${{ matrix.package.config }} \
+              --cov-report=term-missing \
+              --cov-report=xml:coverage-${{ matrix.package.dir }}.xml \
+              -n auto
           else
             uv run pytest ${{ matrix.package.dir }}/tests -v --no-cov -m "not benchmark" -n auto
           fi
@@ -143,6 +153,71 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: ${{ matrix.package.dir }}
+          files: coverage-${{ matrix.package.dir }}.xml
+          disable_search: true
+
+  pureini-rust-coverage:
+    name: pureini Rust coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.13"
+          activate-environment: true
+          enable-cache: true
+          prune-cache: true
+          cache-suffix: pureini-rust-coverage
+
+      - name: Install PureINI minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Measure Rust coverage
+        shell: bash
+        run: |
+          python_libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+          export PYO3_PYTHON="$(command -v python)"
+          export LD_LIBRARY_PATH="${python_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+          cd pureini/rust
+          cargo llvm-cov clean --workspace
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo test --release
+          cd ../..
+
+          uv build --package pureini --wheel --out-dir dist/pureini-coverage
+          pureini_wheel=$(find dist/pureini-coverage -name 'pureini-*.whl' -print -quit)
+          uv run \
+            --isolated \
+            --no-project \
+            --python 3.13 \
+            --with "$pureini_wheel" \
+            --with pytest \
+            --with numpy \
+            python -m pytest pureini/tests -m "not benchmark" -q
+
+          cd pureini/rust
+          cargo llvm-cov report \
+            --release \
+            --fail-under-lines 71.8 \
+            --lcov \
+            --output-path ../../pureini-rust.lcov
+
+      - name: Upload Rust coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: pureini-rust
+          files: pureini-rust.lcov
+          disable_search: true
 
   pureini-wheel:
     name: pureini wheel (${{ matrix.platform.target }})

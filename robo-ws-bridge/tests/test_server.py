@@ -6,6 +6,7 @@ import logging
 import socket
 import struct
 from contextlib import suppress
+from unittest.mock import AsyncMock
 
 import pytest
 from robo_ws_bridge import (
@@ -16,8 +17,9 @@ from robo_ws_bridge import (
     StatusLevel,
     WebSocketBridgeEndpoint,
     WebSocketBridgeServer,
+    install_invalid_handshake_log_filter,
 )
-from robo_ws_bridge.server import Channel, ConnectionOutbox
+from robo_ws_bridge.server import Channel, ConnectionOutbox, ConnectionState
 from robo_ws_bridge.ws_types import (
     BinaryOpCodes,
     RemoveStatusMessage,
@@ -26,7 +28,7 @@ from robo_ws_bridge.ws_types import (
 )
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 
 def _free_port() -> int:
@@ -404,10 +406,12 @@ def test_endpoint_can_share_listener_and_isolates_channels_by_path() -> None:
     assert asyncio.run(run()) == ("/first", "/second")
 
 
-def test_bridge_server_logs_non_websocket_clients_without_traceback(caplog) -> None:
+def test_bridge_server_handles_non_websocket_clients_without_traceback(caplog) -> None:
     port = _free_port()
+    response = b""
 
     async def run() -> None:
+        nonlocal response
         server = WebSocketBridgeServer(host="127.0.0.1", port=port)
         await server.start()
         try:
@@ -415,7 +419,7 @@ def test_bridge_server_logs_non_websocket_clients_without_traceback(caplog) -> N
             writer.write(b"GET / HTTP/1.0\r\nHost: example\r\n\r\n")
             await writer.drain()
             with suppress(ConnectionError):
-                await reader.read()
+                response = await reader.read()
             writer.close()
             with suppress(ConnectionError):
                 await writer.wait_closed()
@@ -426,10 +430,50 @@ def test_bridge_server_logs_non_websocket_clients_without_traceback(caplog) -> N
         asyncio.run(run())
 
     records = [record for record in caplog.records if record.name == "websockets.server"]
-    assert records, "expected the rejected handshake to be logged"
+    assert response.startswith(b"HTTP/1.1 ")
     assert all(record.levelno < logging.ERROR for record in records)
     assert all(record.exc_info is None for record in records)
-    assert any("HTTP/1.0" in record.getMessage() for record in records)
+    if records:
+        assert any("HTTP/1.0" in record.getMessage() for record in records)
+
+
+def test_invalid_handshake_log_filter_removes_traceback(caplog) -> None:
+    install_invalid_handshake_log_filter()
+    logger = logging.getLogger("websockets.server")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        exception = InvalidHandshake("invalid upgrade")
+        exception.__cause__ = ValueError("HTTP/1.0")
+        logger.error(
+            "opening handshake failed",
+            exc_info=(InvalidHandshake, exception, None),
+        )
+
+    record = caplog.records[-1]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is None
+    assert record.getMessage() == (
+        "rejected invalid WebSocket handshake: invalid upgrade (HTTP/1.0)"
+    )
+
+
+def test_invalid_handshake_log_filter_preserves_unrelated_records(caplog) -> None:
+    install_invalid_handshake_log_filter()
+    logger = logging.getLogger("websockets.server")
+    exception = ValueError("unrelated")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        logger.warning("ordinary warning")
+        logger.error(
+            "unrelated failure",
+            exc_info=(ValueError, exception, None),
+        )
+
+    warning, error = caplog.records
+    assert warning.getMessage() == "ordinary warning"
+    assert warning.exc_info is None
+    assert error.levelno == logging.ERROR
+    assert error.exc_info == (ValueError, exception, None)
 
 
 def test_outbox_latest_channel_keeps_only_newest_frame() -> None:
@@ -447,6 +491,19 @@ def test_outbox_latest_channel_keeps_only_newest_frame() -> None:
     frames = asyncio.run(drain(2))
     assert set(frames) == {b"b" * 100, b"c" * 100}
     assert outbox.pending_bytes == 0
+
+
+def test_sender_stops_cleanly_when_client_disconnects() -> None:
+    endpoint = WebSocketBridgeEndpoint()
+    websocket = AsyncMock()
+    websocket.send.side_effect = ConnectionClosed(None, None)
+    state = ConnectionState(websocket=websocket)
+    state.outbox.offer(7, b"frame", delivery="reliable")
+
+    asyncio.run(endpoint._run_sender(state))
+
+    websocket.send.assert_awaited_once_with(b"frame")
+    assert not state.outbox.is_key_busy(7)
 
 
 def test_outbox_reliable_frames_keep_order_and_hard_cap_drops() -> None:

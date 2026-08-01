@@ -43,6 +43,8 @@ run_pkg pymcap-cli -n auto
 run_pkg mcap-ros2-support-fast
 run_pkg ros-parser
 run_pkg pointcloud2
+run_pkg pureini
+run_pkg robo-ws-bridge
 run_pkg digitalis
 
 echo "✓ Fast tests complete!"

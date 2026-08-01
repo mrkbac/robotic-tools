@@ -208,7 +208,7 @@ class VideoEncoder:
 
         try:
             self._context = cast("VideoCodecContext", av.CodecContext.create(codec_name, "w"))
-        except av.error.FFmpegError as exc:
+        except (av.error.FFmpegError, ValueError) as exc:
             raise VideoEncoderError(f"Failed to create encoder {codec_name}: {exc}") from exc
 
         fps_int = max(round(self._target_fps), 1)

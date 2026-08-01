@@ -826,10 +826,17 @@ class _CompressedVideoMessage(Protocol):
 
 
 class _DecodedFrame(Protocol):
-    is_jpeg: bool
-    data: bytes
-    width: int
-    height: int
+    @property
+    def is_jpeg(self) -> bool: ...
+
+    @property
+    def data(self) -> bytes: ...
+
+    @property
+    def width(self) -> int: ...
+
+    @property
+    def height(self) -> int: ...
 
 
 class _VideoCompressTransform:

@@ -111,21 +111,20 @@ def test_fixed_uint8_round_trip(value):
     ],
     ids=["bytes", "bytearray", "memoryview", "list", "tuple", "array_B"],
 )
-def test_bounded_uint8_truncates(value):
+def test_bounded_uint8_accepts_values_at_bound(value):
     """Bounded uint8[<=3] accepts the same input types and reaches the bound exactly."""
     decoded = _round_trip(b"uint8[<=3] xs", "test_msgs/U8B", {"xs": value})
     assert list(decoded.xs) == [1, 2, 3]
 
 
-def test_bounded_uint8_truncates_oversized_inputs():
-    """Bounded uint8[<=3] truncates inputs that exceed the bound."""
+def test_bounded_uint8_rejects_oversized_inputs():
     for value in [
         b"\x01\x02\x03\x04\x05",
         [1, 2, 3, 4, 5],
         (1, 2, 3, 4, 5),
     ]:
-        decoded = _round_trip(b"uint8[<=3] xs", "test_msgs/U8BT", {"xs": value})
-        assert list(decoded.xs) == [1, 2, 3]
+        with pytest.raises(ValueError, match="bounded array expected at most 3 elements, got 5"):
+            _round_trip(b"uint8[<=3] xs", "test_msgs/U8BT", {"xs": value})
 
 
 def test_byte_array_input_types_produce_identical_cdr_bytes():

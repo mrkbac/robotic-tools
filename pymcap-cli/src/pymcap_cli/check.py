@@ -317,7 +317,7 @@ def _parse_topic_rule(name: str, value: YamlValue, path: str) -> TopicRule:
         topic=topic,
         selector=selector,
         expected=expected,
-        severity=cast("Severity", severity),
+        severity=severity,
         schema=schema,
         message_encoding=message_encoding,
         frequency=frequency,
@@ -393,7 +393,7 @@ def _parse_live_node(name: str, value: YamlValue, path: str) -> LiveNodeRule:
         node=node,
         selector=_selector(node, path),
         expected=expected,
-        severity=cast("Severity", severity),
+        severity=severity,
     )
 
 

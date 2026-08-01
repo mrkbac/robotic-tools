@@ -14,6 +14,7 @@ This test suite ensures mcap-ros2-support-fast has identical input type support.
 from array import array
 from io import BytesIO
 
+import pytest
 from mcap_ros2_support_fast import ROS2EncoderFactory
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from small_mcap.reader import read_message_decoded
@@ -297,7 +298,7 @@ def test_fixed_arrays_with_various_types() -> None:
 
 
 def test_bounded_arrays_with_various_types() -> None:
-    """Test that bounded arrays (<=N) work with different input types and truncate correctly."""
+    """Test that bounded arrays reject oversized values and accept values within bounds."""
     output = BytesIO()
     ros_writer = McapWriter(output=output, encoder_factory=ROS2EncoderFactory())
     ros_writer.start()
@@ -310,17 +311,17 @@ def test_bounded_arrays_with_various_types() -> None:
     ros_writer.add_schema(schema_id, schema_name, "ros2msg", schema_data)
     ros_writer.add_channel(channel_id, "/test", "cdr", schema_id)
 
-    # Test with inputs that exceed bounds (should truncate)
-    ros_writer.add_message_encode(
-        channel_id=channel_id,
-        log_time=0,
-        data={
-            "bounded_bytes": b"\x01\x02\x03\x04\x05\x06\x07",  # 7 bytes, should truncate to 5
-            "bounded_ints": (10, 20, 30, 40, 50),  # 5 ints, should truncate to 3
-        },
-        publish_time=0,
-        sequence=0,
-    )
+    with pytest.raises(ValueError, match="bounded array expected at most 5 elements, got 7"):
+        ros_writer.add_message_encode(
+            channel_id=channel_id,
+            log_time=0,
+            data={
+                "bounded_bytes": b"\x01\x02\x03\x04\x05\x06\x07",
+                "bounded_ints": (10, 20, 30, 40, 50),
+            },
+            publish_time=0,
+            sequence=0,
+        )
 
     # Test with inputs within bounds
     ros_writer.add_message_encode(
@@ -338,14 +339,7 @@ def test_bounded_arrays_with_various_types() -> None:
 
     output.seek(0)
     messages = list(read_ros2_messages(output))
-    assert len(messages) == 2
-
-    # First message (truncated)
-    msg0 = messages[0].decoded_message
-    assert list(msg0.bounded_bytes) == [1, 2, 3, 4, 5]  # Truncated to 5
-    assert list(msg0.bounded_ints) == [10, 20, 30]  # Truncated to 3
-
-    # Second message (within bounds)
-    msg1 = messages[1].decoded_message
-    assert list(msg1.bounded_bytes) == [100, 101]
-    assert list(msg1.bounded_ints) == [1, 2]
+    assert len(messages) == 1
+    msg = messages[0].decoded_message
+    assert list(msg.bounded_bytes) == [100, 101]
+    assert list(msg.bounded_ints) == [1, 2]

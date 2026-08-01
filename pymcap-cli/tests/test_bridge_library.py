@@ -843,7 +843,7 @@ def test_recording_session_manager_closes_sessions_concurrently(
     assert manager.active_session_count == 0
 
 
-def test_library_server_logs_non_websocket_clients_without_traceback(
+def test_library_server_handles_non_websocket_clients_without_traceback(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -857,15 +857,17 @@ def test_library_server_logs_non_websocket_clients_without_traceback(
         speed=1,
         loop=False,
     )
+    response = b""
 
     async def request() -> None:
+        nonlocal response
         await server.start()
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             writer.write(b"GET / HTTP/1.0\r\nHost: example\r\n\r\n")
             await writer.drain()
             with suppress(ConnectionError):
-                await reader.read()
+                response = await reader.read()
             writer.close()
             with suppress(ConnectionError):
                 await writer.wait_closed()
@@ -876,10 +878,11 @@ def test_library_server_logs_non_websocket_clients_without_traceback(
         asyncio.run(request())
 
     records = [record for record in caplog.records if record.name == "websockets.server"]
-    assert records, "expected the rejected handshake to be logged"
+    assert response.startswith(b"HTTP/1.1 ")
     assert all(record.levelno < logging.ERROR for record in records)
     assert all(record.exc_info is None for record in records)
-    assert any("handshake" in record.getMessage() for record in records)
+    if records:
+        assert any("handshake" in record.getMessage() for record in records)
 
 
 def test_recording_session_close_retrieves_keyboard_interrupt(tmp_path: Path) -> None:

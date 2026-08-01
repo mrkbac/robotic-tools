@@ -6,6 +6,7 @@ import asyncio
 import json
 import socket
 import struct
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from robo_ws_bridge import (
@@ -17,6 +18,9 @@ from robo_ws_bridge import (
 )
 from robo_ws_bridge.ws_types import BinaryOpCodes, ConnectionStatus
 from websockets.asyncio.server import serve
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
 
 def test_connection_graph_applies_updates_and_removals() -> None:
@@ -289,3 +293,134 @@ def test_client_does_not_reconnect_after_policy_violation() -> None:
 
     asyncio.run(run())
     assert connection_count == 1
+
+
+class RecordingWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[str | bytes] = []
+
+    async def send(self, message: str | bytes) -> None:
+        self.sent.append(message)
+
+
+def test_disconnected_operations_reject_network_requests() -> None:
+    client = WebSocketBridgeClient("ws://example:8765")
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="Cannot advertise"):
+            await client.advertise("/topic", encoding="cdr", schema_name="example/Message")
+        with pytest.raises(RuntimeError, match="Cannot publish"):
+            await client.publish(1, b"payload")
+        with pytest.raises(RuntimeError, match="Cannot get parameters"):
+            await client.get_parameters()
+        with pytest.raises(RuntimeError, match="Cannot set parameters"):
+            await client.set_parameters([])
+        with pytest.raises(RuntimeError, match="Cannot fetch asset"):
+            await client.fetch_asset("package://example/mesh.dae")
+        with pytest.raises(RuntimeError, match="Not connected"):
+            await client.subscribe_to_channel(10, 20)
+        with pytest.raises(RuntimeError, match="Not connected"):
+            await client.unsubscribe_from_channel(10)
+
+    asyncio.run(run())
+
+
+def test_client_publish_and_subscription_frames() -> None:
+    client = WebSocketBridgeClient("ws://example:8765")
+    websocket = RecordingWebSocket()
+    client._websocket = cast("ClientConnection", websocket)
+
+    async def run() -> int:
+        channel_id = await client.advertise(
+            "/topic",
+            encoding="cdr",
+            schema_name="example/Message",
+            schema="int32 value",
+            schema_encoding="ros2msg",
+        )
+        await client.publish(channel_id, b"payload")
+        await client.subscribe_to_channel(7, 42)
+        await client.unsubscribe_from_channel(7)
+        await client.unadvertise(channel_id)
+        return channel_id
+
+    channel_id = asyncio.run(run())
+
+    assert channel_id == 1
+    assert json.loads(cast("str", websocket.sent[0])) == {
+        "op": "advertise",
+        "channels": [
+            {
+                "id": 1,
+                "topic": "/topic",
+                "encoding": "cdr",
+                "schemaName": "example/Message",
+                "schema": "int32 value",
+                "schemaEncoding": "ros2msg",
+            }
+        ],
+    }
+    assert websocket.sent[1] == struct.pack("<BI", int(BinaryOpCodes.CLIENT_MESSAGE_DATA), 1) + (
+        b"payload"
+    )
+    assert json.loads(cast("str", websocket.sent[2])) == {
+        "op": "subscribe",
+        "subscriptions": [{"id": 7, "channelId": 42}],
+    }
+    assert json.loads(cast("str", websocket.sent[3])) == {
+        "op": "unsubscribe",
+        "subscriptionIds": [7],
+    }
+    assert json.loads(cast("str", websocket.sent[4])) == {
+        "op": "unadvertise",
+        "channelIds": [1],
+    }
+    assert client._active_subscriptions == set()
+    assert client._subscription_to_channel == {}
+    assert client._channel_to_subscription == {}
+
+
+def test_parameter_and_asset_requests_correlate_responses() -> None:
+    client = WebSocketBridgeClient("ws://example:8765")
+
+    class RespondingWebSocket(RecordingWebSocket):
+        async def send(self, message: str | bytes) -> None:
+            await super().send(message)
+            request = json.loads(cast("str", message))
+            if request["op"] in {"getParameters", "setParameters"}:
+                client._handle_parameter_values(
+                    {
+                        "op": "parameterValues",
+                        "id": request["id"],
+                        "parameters": [{"name": "speed", "value": 2.0}],
+                    }
+                )
+            elif request["op"] == "fetchAsset":
+                response = (
+                    struct.pack(
+                        "<BIBI",
+                        int(BinaryOpCodes.FETCH_ASSET_RESPONSE),
+                        request["requestId"],
+                        0,
+                        0,
+                    )
+                    + b"mesh"
+                )
+                client._handle_fetch_asset_response(response)
+
+    websocket = RespondingWebSocket()
+    client._websocket = cast("ClientConnection", websocket)
+
+    async def run() -> tuple[list[dict[str, str | float]], list[dict[str, str | float]], bytes]:
+        fetched = await client.get_parameters(["speed"])
+        updated = await client.set_parameters([{"name": "speed", "value": 2.0}])
+        asset = await client.fetch_asset("package://example/mesh.dae")
+        return fetched, updated, asset
+
+    fetched, updated, asset = asyncio.run(run())
+
+    assert fetched == [{"name": "speed", "value": 2.0}]
+    assert updated == [{"name": "speed", "value": 2.0}]
+    assert asset == b"mesh"
+    assert client._pending_param_requests == {}
+    assert client._pending_asset_requests == {}

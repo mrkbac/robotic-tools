@@ -91,15 +91,13 @@ int32 tail"""
     assert decoded.tail == 99
 
 
-def test_bounded_ndarray_truncates_flattened_elements() -> None:
+def test_bounded_ndarray_rejects_too_many_flattened_elements() -> None:
     schema = b"""int32[<=3] xs
 int32 tail"""
     xs = np.array([[1, 2], [3, 4]], dtype=np.int32)
 
-    msgs = _read(_write_one(schema, "test_msgs/Xs", {"xs": xs, "tail": 99}))
-    decoded = msgs[0].decoded_message
-    assert list(decoded.xs) == [1, 2, 3]
-    assert decoded.tail == 99
+    with pytest.raises(ValueError, match="bounded array expected at most 3 elements, got 4"):
+        _write_one(schema, "test_msgs/Xs", {"xs": xs, "tail": 99})
 
 
 def test_dtype_mismatch_int32_field_with_int64_ndarray() -> None:
@@ -128,12 +126,12 @@ def test_byte_array_uint8_ndarray() -> None:
     assert list(msgs[0].decoded_message.bs) == [10, 20, 30]
 
 
-def test_bounded_array_truncates_ndarray() -> None:
+def test_bounded_array_rejects_oversized_ndarray() -> None:
     schema = b"int32[<=3] bounded"
     bounded = np.array([1, 2, 3, 4, 5], dtype=np.int32)
 
-    msgs = _read(_write_one(schema, "test_msgs/B", {"bounded": bounded}))
-    assert list(msgs[0].decoded_message.bounded) == [1, 2, 3]
+    with pytest.raises(ValueError, match="bounded array expected at most 3 elements, got 5"):
+        _write_one(schema, "test_msgs/B", {"bounded": bounded})
 
 
 def test_fixed_uint8_5_ndarray() -> None:

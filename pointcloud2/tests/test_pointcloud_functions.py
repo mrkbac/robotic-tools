@@ -1,5 +1,7 @@
 """Tests for point cloud processing functions."""
 
+import sys
+
 import numpy as np
 import pytest
 from pointcloud2 import PointField, create_cloud, read_points
@@ -73,6 +75,26 @@ class TestReadPoints:
         np.testing.assert_array_equal(points["x"], [1.0, 4.0, 7.0])
         np.testing.assert_array_equal(points["y"], [2.0, 5.0, 8.0])
         np.testing.assert_array_equal(points["z"], [3.0, 6.0, 9.0])
+
+    def test_read_points_swaps_non_native_byte_order(self):
+        is_host_bigendian = sys.byteorder == "big"
+        dtype = np.dtype([("x", "<f4" if is_host_bigendian else ">f4")])
+        data = np.array([(1.5,), (-2.25,)], dtype=dtype).tobytes()
+        cloud = MockPointCloud2(
+            header=None,
+            height=1,
+            width=2,
+            fields=[PointField("x", 0, PointField.FLOAT32)],
+            is_bigendian=not is_host_bigendian,
+            point_step=4,
+            row_step=8,
+            data=data,
+            is_dense=True,
+        )
+
+        points = read_points(cloud)
+
+        np.testing.assert_array_equal(points["x"], [1.5, -2.25])
 
     def test_read_specific_fields(self):
         """Test reading specific fields from a cloud."""

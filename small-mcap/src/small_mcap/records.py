@@ -706,15 +706,7 @@ class MessageIndex(McapRecord):
         records_len = self._HEADER_STRUCT.unpack_from(raw, 0)[1]
         payload = memoryview(raw)[6 : 6 + records_len]
         if records_len % 16:
-            # Malformed length: keep the struct.error the entry-wise parse raises.
-            timestamps: list[int] = []
-            offsets: list[int] = []
-            for t, o in struct.iter_unpack(self._ENTRY_STRUCT.format, payload):
-                timestamps.append(t)
-                offsets.append(o)
-            self._timestamps = timestamps
-            self._offsets = offsets
-            return
+            raise struct.error("MessageIndex entries must be a multiple of 16 bytes")
         values = array("Q")
         values.frombytes(payload)
         if sys.byteorder != "little":

@@ -1,5 +1,9 @@
 """Tests for bug fixes comparing against reference implementation."""
 
+from types import SimpleNamespace
+
+import pytest
+from mcap_ros2._dynamic import generate_dynamic, serialize_dynamic
 from mcap_ros2_support_fast._planner import create_decoder_function, create_encoder_function
 
 PARAMETER_EVENT_SCHEMA = """\
@@ -121,24 +125,18 @@ int32[<=5] numbers
         assert list(decoded.numbers) == [1, 2, 3]
 
     def test_bounded_primitive_array_exceeds_bounds(self):
-        """Test bounded array with data exceeding bounds gets truncated."""
         schema = """
 int32[<=5] numbers
 """
         encoder = create_encoder_function("my_msgs/TestBounded", schema)
-        decoder = create_decoder_function("my_msgs/TestBounded", schema)
 
         msg = type("TestBounded", (), {})()
-        msg.numbers = [1, 2, 3, 4, 5, 6, 7, 8]  # Exceeds bounds
+        msg.numbers = [1, 2, 3, 4, 5, 6]
 
-        encoded = encoder(msg)
-        decoded = decoder(encoded)
+        with pytest.raises(ValueError, match="bounded array expected at most 5 elements, got 6"):
+            encoder(msg)
 
-        # Should be truncated to first 5 elements
-        assert list(decoded.numbers) == [1, 2, 3, 4, 5]
-
-    def test_bounded_complex_array(self):
-        """Test bounded arrays of complex types."""
+    def test_bounded_complex_array_exceeds_bounds(self):
         schema = """
 NestedMsg[<=3] items
 ============
@@ -146,12 +144,9 @@ MSG: my_msgs/NestedMsg
 int32 value
 """
         encoder = create_encoder_function("my_msgs/TestBoundedComplex", schema)
-        decoder = create_decoder_function("my_msgs/TestBoundedComplex", schema)
-
         nested_msg = type("NestedMsg", (), {})
         msg = type("TestBoundedComplex", (), {})()
 
-        # Create 5 items (exceeds bound of 3)
         items = []
         for i in range(5):
             item = nested_msg()
@@ -160,12 +155,70 @@ int32 value
 
         msg.items = items
 
-        encoded = encoder(msg)
-        decoded = decoder(encoded)
+        with pytest.raises(ValueError, match="bounded array expected at most 3 elements, got 5"):
+            encoder(msg)
 
-        # Should be truncated to first 3 elements
-        assert len(decoded.items) == 3
-        assert [item.value for item in decoded.items] == [0, 10, 20]
+    def test_bounded_complex_array_preserves_following_field(self):
+        schema = """
+NestedMsg[<=2] items
+uint32 tail
+============
+MSG: my_msgs/NestedMsg
+int32 value
+"""
+        encoder = create_encoder_function("my_msgs/TestBoundedComplex", schema)
+        decoder = create_decoder_function("my_msgs/TestBoundedComplex", schema)
+        msg = type(
+            "TestBoundedComplex",
+            (),
+            {
+                "items": [{"value": 10}, {"value": 20}],
+                "tail": 99,
+            },
+        )()
+
+        decoded = decoder(encoder(msg))
+
+        assert [item.value for item in decoded.items] == [10, 20]
+        assert decoded.tail == 99
+
+    def test_bounded_complex_array_decoder_matches_reference(self):
+        schema = """
+NestedMsg[<=2] items
+uint32 tail
+============
+MSG: my_msgs/NestedMsg
+int32 value
+"""
+        schema_name = "my_msgs/TestBoundedComplex"
+        message = SimpleNamespace(
+            items=[SimpleNamespace(value=10), SimpleNamespace(value=20)],
+            tail=99,
+        )
+        reference_encoder = serialize_dynamic(schema_name, schema)[schema_name]
+        reference_decoder = generate_dynamic(schema_name, schema)[schema_name]
+        fast_encoder = create_encoder_function(schema_name, schema)
+        fast_decoder = create_decoder_function(schema_name, schema)
+
+        valid_payload = reference_encoder(message)
+        assert fast_encoder(message) == valid_payload
+
+        overbound_payload = (
+            valid_payload[:4]
+            + (3).to_bytes(4, "little")
+            + valid_payload[8:16]
+            + (30).to_bytes(4, "little", signed=True)
+            + valid_payload[16:]
+        )
+        reference_message = reference_decoder(overbound_payload)
+        fast_message = fast_decoder(overbound_payload)
+
+        assert (
+            [item.value for item in fast_message.items]
+            == [item.value for item in reference_message.items]
+            == [10, 20, 30]
+        )
+        assert fast_message.tail == reference_message.tail == 99
 
     def test_bounded_vs_fixed_vs_dynamic_arrays(self):
         """Test that bounded, fixed, and dynamic arrays are handled correctly."""
@@ -180,14 +233,14 @@ int32[<=5] bounded
         msg = type("TestArrayTypes", (), {})()
         msg.fixed = [1, 2, 3, 4, 5]  # Must be exactly 5
         msg.dynamic = [10, 20, 30, 40, 50, 60, 70]  # Can be any length
-        msg.bounded = [100, 200, 300, 400, 500, 600, 700]  # Will be truncated to 5
+        msg.bounded = [100, 200, 300, 400, 500]
 
         encoded = encoder(msg)
         decoded = decoder(encoded)
 
         assert list(decoded.fixed) == [1, 2, 3, 4, 5]
         assert list(decoded.dynamic) == [10, 20, 30, 40, 50, 60, 70]
-        assert list(decoded.bounded) == [100, 200, 300, 400, 500]  # Truncated
+        assert list(decoded.bounded) == [100, 200, 300, 400, 500]
 
 
 class TestDefaultValues:

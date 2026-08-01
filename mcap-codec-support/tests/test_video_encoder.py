@@ -12,12 +12,27 @@ from mcap_codec_support.video.pyav import (
     raw_image_to_frame,
     video_frame_to_rgb_bytes,
 )
+from mcap_codec_support.video.pyav import (
+    test_encoder as is_encoder_available,
+)
 
 av = pytest.importorskip("av")
 
 
 def _make_encoder() -> VideoEncoder:
     return VideoEncoder(width=16, height=16, codec_name="libx264")
+
+
+def test_video_encoder_reports_unavailable_codec() -> None:
+    with pytest.raises(
+        VideoEncoderError,
+        match="Failed to create encoder codec-that-does-not-exist",
+    ):
+        VideoEncoder(width=16, height=16, codec_name="codec-that-does-not-exist")
+
+
+def test_encoder_probe_reports_unavailable_codec() -> None:
+    assert not is_encoder_available("codec-that-does-not-exist")
 
 
 @pytest.fixture

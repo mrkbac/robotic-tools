@@ -117,6 +117,11 @@ class TestDtypeFromFields:
 class TestFieldsFromDtype:
     """Test the fields_from_dtype function."""
 
+    def test_unstructured_dtype(self):
+        dtype = np.dtype(np.float32)
+
+        assert fields_from_dtype(dtype) == []
+
     def test_single_field_float32(self):
         """Test converting single float32 dtype to fields."""
         dtype = np.dtype([("x", "<f4")])

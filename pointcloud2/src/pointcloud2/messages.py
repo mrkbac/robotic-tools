@@ -1,5 +1,6 @@
 """Python typing protocol definitions for the PointCloud2 message."""
 
+from collections.abc import Sequence
 from typing import Protocol, TypedDict
 
 
@@ -89,7 +90,7 @@ class Pointcloud2Msg(Protocol):
         ...
 
     @property
-    def fields(self) -> list[PointFieldMsg]:
+    def fields(self) -> Sequence[PointFieldMsg]:
         """Describes the channels and their layout in the binary data blob."""
         ...
 

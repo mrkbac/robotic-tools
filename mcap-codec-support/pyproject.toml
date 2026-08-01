@@ -18,6 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
     "Typing :: Typed",
 ]
@@ -61,6 +62,10 @@ dev = [
     "small-mcap",
     "pytest>=8.4.2",
 ]
+
+[tool.coverage.report]
+fail_under = 59.44
+precision = 2
 
 [tool.uv.sources]
 small-mcap = { workspace = true }

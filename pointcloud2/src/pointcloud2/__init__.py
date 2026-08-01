@@ -214,7 +214,8 @@ def dtype_from_fields(
     }
     if point_step is not None:
         dtype_dict["itemsize"] = point_step
-    return np.dtype(dtype_dict)
+    # NumPy's public stubs do not expose the structured dtype dictionary shape.
+    return np.dtype(dtype_dict)  # ty: ignore[no-matching-overload]
 
 
 def fields_from_dtype(dtype: np.dtype) -> list[PointField]:
@@ -297,11 +298,9 @@ def read_points(
 
     # Select points indexed by the uvs field
     if uvs is not None:
-        # Don't convert to numpy array if it is already one
-        if not isinstance(uvs, np.ndarray):
-            uvs = np.fromiter(uvs, int)
-        # Index requested points
-        points = points[uvs]
+        indices = uvs if isinstance(uvs, np.ndarray) else np.fromiter(uvs, int)
+        # NumPy's stubs don't preserve the integer dtype after the isinstance branch.
+        points = points[indices]  # ty: ignore[invalid-argument-type]
 
     # Cast into 2d array if cloud is 'organized'
     if reshape_organized_cloud and cloud.height > 1:

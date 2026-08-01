@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Internet",
     "Topic :: Scientific/Engineering",
     "Typing :: Typed",
@@ -37,3 +38,7 @@ Issues = "https://github.com/mrkbac/robotic-tools/issues"
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]
 build-backend = "uv_build"
+
+[tool.coverage.report]
+fail_under = 79.68
+precision = 2

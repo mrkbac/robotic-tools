@@ -1245,10 +1245,7 @@ def _validate_field_path(
             with contextlib.suppress(ValidationError):
                 working_msgdef = _get_message_definition(working_type, all_definitions)
 
-    if owner_msgdef is None:
-        raise ValidationError(
-            f"{context.capitalize()} field path '{field_path}' does not resolve to a field"
-        )
+    assert owner_msgdef is not None
     return working_type, owner_msgdef
 
 

@@ -431,8 +431,6 @@ def rebuild_summary(
                 summary.schemas[record.id] = record
             elif isinstance(record, Message):
                 update_message(record)
-            elif isinstance(record, Chunk):
-                raise RuntimeError("Unreachable")  # noqa: TRY004, TRY301
             elif isinstance(record, LazyChunk):
                 pending_chunk_start_offset = record_start_pos
                 message_index_start_offset = current_pos
