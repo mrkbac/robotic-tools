@@ -64,7 +64,7 @@ dev = [
 ]
 
 [tool.coverage.report]
-fail_under = 59.44
+fail_under = 100.0
 precision = 2
 
 [tool.uv.sources]

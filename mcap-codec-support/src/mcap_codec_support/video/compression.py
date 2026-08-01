@@ -348,6 +348,9 @@ def encode_raw_image_to_compressed(
     scale: int | None,
 ) -> tuple[bytes, int, int]:
     """Encode a raw ROS Image message to a compressed still-image format using Pillow."""
+    if image_format not in {"jpeg", "png"}:
+        raise VideoEncoderError(f"Unsupported image format {image_format!r}")
+
     image = raw_image_to_pil(decoded_message)
     src_w, src_h = image.size
     if scale is not None:

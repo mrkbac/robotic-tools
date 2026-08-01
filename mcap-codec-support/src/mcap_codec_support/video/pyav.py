@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections import deque
 from fractions import Fraction
 from io import BytesIO
 from typing import TYPE_CHECKING, cast
@@ -244,19 +245,26 @@ class VideoEncoder:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    def _require_context(self) -> VideoCodecContext:
+        context = self._context
+        if context is None:
+            raise VideoEncoderError("Encoder is closed")
+        return context
+
     def encode(self, frame: VideoFrame) -> bytes | None:
         """Encode a single frame and return compressed video bytes, or None if buffered."""
+        context = self._require_context()
         needs_resize = frame.width != self.config.width or frame.height != self.config.height
         needs_fmt = frame.format.name not in self._YUV420P_COMPAT
         if needs_resize or needs_fmt:
             frame = frame.reformat(
-                width=self.config.width, height=self.config.height, format=self._context.pix_fmt
+                width=self.config.width, height=self.config.height, format=context.pix_fmt
             )
         frame.pts = self._frame_index
         self._frame_index += 1
 
         try:
-            packets = list(self._context.encode(frame))
+            packets = list(context.encode(frame))
         except av.error.FFmpegError as exc:
             raise VideoEncoderError(f"Encoding error: {exc}") from exc
 
@@ -266,8 +274,9 @@ class VideoEncoder:
 
     def flush_packets(self) -> list[bytes]:
         """Flush remaining buffered frames as one bytes blob per packet."""
+        context = self._require_context()
         try:
-            packets = list(self._context.encode(None))
+            packets = list(context.encode(None))
         except av.error.FFmpegError:
             return []
         return [bytes(packet) for packet in packets]
@@ -305,13 +314,26 @@ class PyAVVideoDecompressor:
         self._video_format = video_format
         self._jpeg_quality = jpeg_quality
         self._decoder: VideoCodecContext | None = None
+        self._decoder_codecs: tuple[str, ...] | None = None
+        self._pending_frames: deque[VideoFrame] = deque()
         self._jpeg_encoder: VideoCodecContext | None = None
         self._jpeg_pts = 0
 
     def _ensure_decoder(self, codec: str) -> VideoCodecContext:
-        if self._decoder is not None:
-            return self._decoder
         codec_names = _DECOMPRESS_CODECS.get(codec.lower(), ("hevc",))
+        if self._decoder is not None and self._decoder_codecs == codec_names:
+            return self._decoder
+
+        # A decompressor is normally bound to one stream, but the format is
+        # carried in every CompressedVideo message.  If a channel switches to
+        # a new codec (for example after a camera reconfiguration), flush the
+        # old context before creating the new one. Otherwise delayed B-frames
+        # from the old stream are silently lost and packets are fed to the
+        # wrong decoder.
+        if self._decoder is not None:
+            self._pending_frames.extend(self._decoder.decode(None))
+        self._decoder = None
+        self._decoder_codecs = None
         last_error: av.error.FFmpegError | ValueError | None = None
         for codec_name in codec_names:
             try:
@@ -321,6 +343,7 @@ class PyAVVideoDecompressor:
                 last_error = exc
                 continue
             self._decoder = decoder
+            self._decoder_codecs = codec_names
             return decoder
         raise VideoEncoderError(f"No usable decoder for {codec}: {last_error}")
 
@@ -358,10 +381,10 @@ class PyAVVideoDecompressor:
 
     def decompress(self, video_data: bytes, codec: str) -> DecompressedFrame | None:
         decoder = self._ensure_decoder(codec)
-        frames = decoder.decode(Packet(video_data))
-        if not frames:
+        self._pending_frames.extend(decoder.decode(Packet(video_data)))
+        if not self._pending_frames:
             return None
-        frame = frames[-1]
+        frame = self._pending_frames.popleft()
 
         if self._video_format == "compressed":
             return self._frame_to_jpeg(frame)
@@ -378,6 +401,8 @@ class PyAVVideoDecompressor:
     def close(self) -> None:
         """Release native codec contexts."""
         self._decoder = None
+        self._decoder_codecs = None
+        self._pending_frames.clear()
         self._jpeg_encoder = None
 
     def __enter__(self) -> Self:
@@ -387,11 +412,11 @@ class PyAVVideoDecompressor:
         self.close()
 
     def flush(self) -> list[DecompressedFrame]:
-        if self._decoder is None:
-            return []
-        frames = self._decoder.decode(None)
+        if self._decoder is not None:
+            self._pending_frames.extend(self._decoder.decode(None))
         results: list[DecompressedFrame] = []
-        for frame in frames:
+        while self._pending_frames:
+            frame = self._pending_frames.popleft()
             if self._video_format == "compressed":
                 results.append(self._frame_to_jpeg(frame))
             else:

@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import threading
+from collections import deque
 from functools import lru_cache
 from pathlib import Path
 from queue import Empty, Queue
@@ -711,7 +712,7 @@ class FFmpegVideoEncoder:
         try:
             self._process.stdin.write(frame)
             self._process.stdin.flush()
-        except BrokenPipeError as exc:
+        except (BrokenPipeError, OSError, ValueError) as exc:
             stderr_tail = "\n".join(self._stderr_lines[-5:])
             raise VideoEncoderError(f"ffmpeg process died unexpectedly:\n{stderr_tail}") from exc
 
@@ -796,6 +797,8 @@ class FFmpegVideoDecompressor:
         self._width: int | None = None
         self._height: int | None = None
         self._probe_buffer = bytearray()
+        self._codec_family: str | None = None
+        self._pending_frames: deque[DecompressedFrame] = deque()
 
     def _start_process(self, codec: str) -> None:
         ffmpeg = find_ffmpeg()
@@ -855,6 +858,19 @@ class FFmpegVideoDecompressor:
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._stdout_thread.start()
         self._stderr_thread.start()
+        self._codec_family = _codec_family(codec)
+
+    def _reset_process_state(self) -> None:
+        """Forget a completed decoder before starting a different codec."""
+        self._process = None
+        self._stdout_thread = None
+        self._stderr_thread = None
+        self._output_queue = Queue()
+        self._stderr_lines.clear()
+        self._width = None
+        self._height = None
+        self._probe_buffer.clear()
+        self._codec_family = None
 
     def _detect_dimensions(self, data: bytes, codec: str) -> tuple[int, int]:
         """Detect video dimensions via ffprobe."""
@@ -968,6 +984,16 @@ class FFmpegVideoDecompressor:
 
     def decompress(self, video_data: bytes, codec: str) -> DecompressedFrame | None:
         data_to_write = video_data
+        codec_family = _codec_family(codec)
+
+        if self._process is not None and self._codec_family != codec_family:
+            # ffmpeg fixes the input demuxer/decoder at process start.  A
+            # channel may nevertheless switch formats after a camera
+            # reconfiguration, so drain the old process instead of silently
+            # feeding the new packets to the wrong decoder.
+            self._pending_frames.extend(self.flush())
+            self._reset_process_state()
+
         # Start process on first call.
         if self._process is None:
             # For raw mode, detect dimensions before starting.
@@ -986,8 +1012,17 @@ class FFmpegVideoDecompressor:
         if self._process is None or self._process.stdin is None:
             raise VideoEncoderError("ffmpeg process not started")
 
-        self._process.stdin.write(data_to_write)
-        self._process.stdin.flush()
+        try:
+            self._process.stdin.write(data_to_write)
+            self._process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            stderr_tail = "\n".join(self._stderr_lines[-5:])
+            raise VideoEncoderError(
+                f"ffmpeg decoder process died unexpectedly:\n{stderr_tail}"
+            ) from exc
+
+        if self._pending_frames:
+            return self._pending_frames.popleft()
 
         try:
             return self._output_queue.get(timeout=0.2)
@@ -995,13 +1030,14 @@ class FFmpegVideoDecompressor:
             return None
 
     def flush(self) -> list[DecompressedFrame]:
+        frames: list[DecompressedFrame] = list(self._pending_frames)
+        self._pending_frames.clear()
         if self._process is None:
-            return []
+            return frames
 
         if self._process.stdin and not self._process.stdin.closed:
             self._process.stdin.close()
 
-        frames: list[DecompressedFrame] = []
         while True:
             try:
                 frame = self._output_queue.get(timeout=5.0)
@@ -1012,6 +1048,11 @@ class FFmpegVideoDecompressor:
                 break
 
         self._process.wait(timeout=5)
+        if self._stdout_thread is not None:
+            self._stdout_thread.join(timeout=5)
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=5)
+        self._reset_process_state()
         return frames
 
     def __del__(self) -> None:

@@ -31,10 +31,10 @@ def pointcloud2_to_encoding_info(
 
     fields = []
     for field in msg.fields:
-        field_type = FieldType(field.datatype)
         field_size = _FIELD_TYPE_SIZES.get(field.datatype)
         if field_size is None:
             raise ValueError(f"Unsupported PointField datatype {field.datatype}")
+        field_type = FieldType(field.datatype)
         if field.count < 1:
             raise ValueError(f"PointField '{field.name}' count must be positive")
         fields.extend(

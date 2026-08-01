@@ -69,6 +69,16 @@ class TestVideoEncoderClose:
             raise RuntimeError("simulated error")
         assert enc._context is None
 
+    def test_encode_after_close_reports_encoder_error(self, encoder):
+        encoder.close()
+        with pytest.raises(VideoEncoderError, match="Encoder is closed"):
+            encoder.encode(av.VideoFrame(16, 16, "rgb24"))
+
+    def test_flush_after_close_reports_encoder_error(self, encoder):
+        encoder.close()
+        with pytest.raises(VideoEncoderError, match="Encoder is closed"):
+            encoder.flush_packets()
+
 
 @pytest.mark.parametrize(
     ("encoding", "source_pixel", "expected_pixel"),

@@ -267,6 +267,9 @@ class GStreamerVideoEncoder:
     In both cases ``nvvidconv`` converts to NVMM ``NV12`` for the hardware encoder.
     """
 
+    _process: subprocess.Popen[bytes] | None = None
+    _read_fd: int | None = None
+
     def __init__(
         self,
         width: int,
@@ -279,6 +282,8 @@ class GStreamerVideoEncoder:
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
     ) -> None:
+        self._process: subprocess.Popen[bytes] | None = None
+        self._read_fd: int | None = None
         gst = find_gst_launch()
         if not gst:
             raise VideoEncoderError("gst-launch-1.0 not found on PATH")
@@ -373,6 +378,9 @@ class GStreamerVideoEncoder:
 
     def _read_output(self) -> None:
         fd = self._read_fd
+        if fd is None:
+            self._output_queue.put(None)
+            return
         try:
             while True:
                 try:
@@ -389,9 +397,10 @@ class GStreamerVideoEncoder:
             self._output_queue.put(None)
 
     def _read_stderr(self) -> None:
-        if self._process.stderr is None:
+        process = self._process
+        if process is None or process.stderr is None:
             return
-        for raw_line in self._process.stderr:
+        for raw_line in process.stderr:
             text = raw_line.decode(errors="replace").rstrip()
             if text:
                 self._stderr_lines.append(text)
@@ -402,13 +411,14 @@ class GStreamerVideoEncoder:
         Output is drained non-blocking: a frame's access unit is typically
         returned by a later ``encode`` call and the tail by ``flush_packets``.
         """
-        if self._process.stdin is None:
+        process = self._process
+        if process is None or process.stdin is None:
             raise VideoEncoderError("gst-launch stdin is not available")
         try:
-            self._process.stdin.write(frame)
+            process.stdin.write(frame)
             if len(frame) < _SMALL_WRITE_FLUSH_BYTES:
-                self._process.stdin.flush()
-        except BrokenPipeError as exc:
+                process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
             stderr_tail = "\n".join(self._stderr_lines[-5:])
             raise VideoEncoderError(f"gst-launch died unexpectedly:\n{stderr_tail}") from exc
 
@@ -423,14 +433,17 @@ class GStreamerVideoEncoder:
 
     def flush_packets(self) -> list[bytes]:
         """Close the pipeline and return all remaining access units."""
-        if self._process.stdin and not self._process.stdin.closed:
+        process = self._process
+        if process is None:
+            raise VideoEncoderError("gst-launch process is not available")
+        if process.stdin and not process.stdin.closed:
             with contextlib.suppress(BrokenPipeError):
-                self._process.stdin.close()
+                process.stdin.close()
 
         self._stdout_thread.join(timeout=10)
         self._stderr_thread.join(timeout=5)
         try:
-            self._process.wait(timeout=10)
+            process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.close()
 
@@ -444,29 +457,36 @@ class GStreamerVideoEncoder:
                 break
             packets.append(item)
 
-        with contextlib.suppress(OSError):
-            os.close(self._read_fd)
+        read_fd = self._read_fd
+        if read_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+            self._read_fd = None
 
-        if self._process.returncode:
+        if process.returncode:
             stderr_tail = "\n".join(self._stderr_lines[-5:])
             raise VideoEncoderError(
-                f"gst-launch exited with code {self._process.returncode}:\n{stderr_tail}"
+                f"gst-launch exited with code {process.returncode}:\n{stderr_tail}"
             )
         return packets
 
     def close(self) -> None:
         """Terminate the gst-launch subprocess if still running (idempotent)."""
         try:
-            if self._process.stdin and not self._process.stdin.closed:
+            process = self._process
+            if process is not None and process.stdin and not process.stdin.closed:
                 with contextlib.suppress(BrokenPipeError, OSError, ValueError):
-                    self._process.stdin.close()
-            if self._process.poll() is None:
-                self._process.kill()
-                self._process.wait(timeout=2)
+                    process.stdin.close()
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
         except Exception:  # noqa: BLE001, S110
             pass
-        with contextlib.suppress(OSError):
-            os.close(self._read_fd)
+        read_fd = self._read_fd
+        if read_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+            self._read_fd = None
 
     def __del__(self) -> None:
         self.close()
