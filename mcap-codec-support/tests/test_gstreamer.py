@@ -157,7 +157,7 @@ class TestBackendDecode:
 
     def test_decode_image_raw_sets_pix_fmt(self) -> None:
         backend = GStreamerCompressionBackend()
-        raw = _FakeImageMsg(b"\x00" * (4 * 4 * 3), width=4, height=4, encoding="rgb8")
+        raw = _FakeImageMsg(b"\x00" * (4 * 4 * 3), width=4, height=4, encoding="rgb8", step=4 * 3)
         msg = _FakeDecoded(raw, "/raw")
         _data, w, h = backend.decode_image(msg, "sensor_msgs/Image")
         assert (w, h) == (4, 4)

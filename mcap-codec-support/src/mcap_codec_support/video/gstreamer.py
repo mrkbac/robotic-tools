@@ -58,6 +58,7 @@ from mcap_codec_support.video.common import (
     SOFTWARE_CODEC_CANDIDATES,
     EncoderConfig,
     VideoEncoderError,
+    raw_image_to_buffer,
 )
 from mcap_codec_support.video.ffmpeg import (
     ROS_ENCODING_TO_PIX_FMT,
@@ -560,12 +561,23 @@ class GStreamerCompressionBackend:
             self._topic_pix_fmt[topic] = None
             return self.decode_compressed(data)
 
-        encoding = str(msg.decoded_message.encoding).lower()
+        buffer = raw_image_to_buffer(msg.decoded_message)
+        encoding = buffer.encoding
         pix_fmt = ROS_ENCODING_TO_PIX_FMT.get(encoding)
         if not pix_fmt:
             raise VideoEncoderError(f"Unsupported image encoding: {msg.decoded_message.encoding}")
         self._topic_pix_fmt[topic] = pix_fmt
-        return data, msg.decoded_message.width, msg.decoded_message.height
+        if buffer.step == buffer.row_bytes:
+            return buffer.data[: buffer.row_bytes * buffer.height], buffer.width, buffer.height
+
+        packed = bytearray(buffer.row_bytes * buffer.height)
+        for row in range(buffer.height):
+            source_start = row * buffer.step
+            target_start = row * buffer.row_bytes
+            packed[target_start : target_start + buffer.row_bytes] = buffer.data[
+                source_start : source_start + buffer.row_bytes
+            ]
+        return bytes(packed), buffer.width, buffer.height
 
     def create_encoder(
         self,
