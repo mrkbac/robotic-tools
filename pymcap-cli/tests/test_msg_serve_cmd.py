@@ -154,6 +154,34 @@ class TestRouting:
         assert status == 404
         assert "Could not resolve package" in body
 
+    def test_pkg_page_503_when_known_package_messages_cannot_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            msg_serve_cmd,
+            "list_package_messages",
+            lambda _package_name, **_kw: None,
+        )
+        monkeypatch.setattr(
+            msg_serve_cmd,
+            "get_package_info",
+            lambda _pkg, **_kw: PackageInfo(
+                name="sensor_msgs",
+                repo_name="common_interfaces",
+                source_url=None,
+                source_version=None,
+                release_url=None,
+                release_version=None,
+                release_tag=None,
+            ),
+        )
+
+        status, _ctype, body = _route("/pkg/sensor_msgs", ROS2Distro.HUMBLE, ())
+
+        assert status == 503
+        assert "Could not load message definitions" in body
+        assert "defines no .msg types" not in body
+
     def test_msg_page_renders_definition(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             msg_serve_cmd,

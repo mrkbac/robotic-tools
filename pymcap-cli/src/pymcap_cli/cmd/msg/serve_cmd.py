@@ -302,6 +302,14 @@ def _render_pkg(pkg: str, distro: ROS2Distro, extra_paths: tuple[Path, ...]) -> 
         )
         return 404, _page(pkg, _breadcrumb(("packages", "/"), (pkg, None)), body)
 
+    if names is None:
+        body = (
+            f'<p class="empty">Could not load message definitions for '
+            f"<strong>{html.escape(pkg)}</strong>. The package is known to the "
+            "distro index, but its message archive could not be loaded.</p>"
+        )
+        return 503, _page(pkg, _breadcrumb(("packages", "/"), (pkg, None)), body)
+
     sections: list[str] = []
     if info is not None:
         sections.append(_render_info_card(info, distro))

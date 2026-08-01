@@ -68,6 +68,61 @@ def test_msg_def_uses_colored_rendering_for_tty(
     assert "height" in out
 
 
+def test_msg_def_compact_strips_comments_constants_and_blank_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    definition = (
+        "# root comment\n"
+        'string label "keep # and ="  # inline comment\n'
+        "uint8 FLAG=1\n"
+        "\n"
+        "========================================\n"
+        "MSG: example_msgs/Dependency\n"
+        "# dependency comment\n"
+        "int32 value  # dependency inline\n"
+        "uint8 OTHER=2\n"
+    )
+    monkeypatch.setattr(msg_def_cmd, "get_message_definition", lambda *_args, **_kwargs: definition)
+
+    rc = msg_def_cmd.msg_def("example_msgs/Root", compact=True)
+
+    assert rc == 0
+    assert capsys.readouterr().out == (
+        'string label "keep # and ="\n'
+        "========================================\n"
+        "MSG: example_msgs/Dependency\n"
+        "int32 value\n"
+    )
+
+
+def test_msg_def_root_only_uses_direct_definition(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[tuple[str, ROS2Distro, tuple[Path, ...]]] = []
+
+    def fake_get_message_text(
+        msg_type: str,
+        distro: ROS2Distro = ROS2Distro.HUMBLE,
+        extra_paths: tuple[Path, ...] = (),
+    ) -> tuple[str, list[str]]:
+        calls.append((msg_type, distro, extra_paths))
+        return "uint8 root\n", ["example_msgs/Dependency"]
+
+    def unexpected_recursive_lookup(*_args, **_kwargs) -> str:
+        pytest.fail("root-only must not resolve recursive dependencies")
+
+    monkeypatch.setattr(msg_def_cmd, "get_message_text", fake_get_message_text)
+    monkeypatch.setattr(msg_def_cmd, "get_message_definition", unexpected_recursive_lookup)
+
+    rc = msg_def_cmd.msg_def("example_msgs/Root", root_only=True)
+
+    assert rc == 0
+    assert capsys.readouterr().out == "uint8 root\n"
+    assert calls == [("example_msgs/Root", ROS2Distro.HUMBLE, ())]
+
+
 def test_msg_def_returns_one_when_definition_is_missing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -102,3 +157,5 @@ def test_msg_def_is_registered_in_top_level_cli_help(
     assert exc_info.value.code == 0
     assert "Usage: pymcap-cli msg def" in output
     assert "Print a resolved ROS2" in output
+    assert "--compact" in output
+    assert "--root-only" in output

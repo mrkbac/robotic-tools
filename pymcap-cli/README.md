@@ -658,16 +658,30 @@ pymcap-cli list metadata data.mcap
 
 ### `msg` — ROS2 Message Definitions
 
-Resolve, list, and browse ROS2 `.msg` definitions. `msg def` prints complete
-definitions including dependencies; `msg list` lists package message types; and
-`msg serve` starts a local browser UI.
+Resolve, hash, search, list, and browse ROS2 `.msg` definitions. `msg def` prints
+complete definitions including dependencies; `msg hash` prints the RIHS01
+interface hash; `msg search` finds definitions in local/cache data (or an
+explicit all-distro scan); `msg list` lists package message types; and `msg serve`
+starts a local browser UI.
 
 ```bash
 # Resolve a standard ROS2 message
 pymcap-cli msg def sensor_msgs/msg/Image --distro humble
 
+# Print only the root definition, with comments and constants removed
+pymcap-cli msg def sensor_msgs/msg/Image --root-only --compact
+
 # Include custom package roots before AMENT_PREFIX_PATH and the user cache
 pymcap-cli msg def my_robot_msgs/msg/Status -I ./install/share
+
+# Calculate the ROS interface hash
+pymcap-cli msg hash sensor_msgs/msg/PointCloud2 --distro jazzy
+
+# Find and display a definition from local/cache sources
+pymcap-cli msg search pointcloud2 --show-definition
+
+# Search every package in a distro when local/cache sources are insufficient
+pymcap-cli msg search PointCloud2 --remote --show-definition
 
 # List messages in a package or browse definitions locally
 pymcap-cli msg list sensor_msgs --distro jazzy
@@ -675,7 +689,9 @@ pymcap-cli msg serve --distro jazzy --no-browser
 ```
 
 Missing standard packages are resolved from rosdistro/GitHub and cached under
-the `pymcap_cli_msg_def` user cache.
+the `pymcap_cli_msg_def` user cache. Bare `msg search` queries search supplied
+paths, `AMENT_PREFIX_PATH`, and that cache without downloading every package;
+use `--remote` for an explicit all-package scan.
 
 ### `get` — Extract Attachments and Metadata
 

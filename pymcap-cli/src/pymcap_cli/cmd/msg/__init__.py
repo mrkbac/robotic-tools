@@ -2,7 +2,7 @@
 
 from cyclopts import App
 
-from pymcap_cli.cmd.msg import def_cmd, list_cmd, serve_cmd
+from pymcap_cli.cmd.msg import def_cmd, hash_cmd, list_cmd, search_cmd, serve_cmd
 
 msg_app = App(
     name="msg",
@@ -10,5 +10,7 @@ msg_app = App(
 )
 
 msg_app.command(def_cmd.msg_def, name="def")
+msg_app.command(hash_cmd.msg_hash, name="hash")
 msg_app.command(list_cmd.msg_list, name="list")
+msg_app.command(search_cmd.msg_search, name="search")
 msg_app.command(serve_cmd.msg_serve, name="serve")

@@ -19,6 +19,7 @@ from pymcap_cli.core.msg_resolver import (
     _parse_distro_yaml,
     _RepoRelease,
     list_package_messages,
+    search_message_definitions,
 )
 
 SAMPLE_DISTRO_DATA = {
@@ -314,6 +315,57 @@ class TestListPackageMessages:
             extra_paths=(tmp_path / "base", tmp_path / "overlay"),
         )
         assert result == ["Bar", "Foo"]
+
+    def test_lists_messages_from_ros2_subdirectory(self, tmp_path: Path) -> None:
+        msg_dir = tmp_path / "src" / "dual_msgs" / "ros2"
+        msg_dir.mkdir(parents=True)
+        (msg_dir / "PointCloud2.msg").write_text("uint32 height\n")
+
+        assert list_package_messages("dual_msgs", extra_paths=(tmp_path,)) == ["PointCloud2"]
+
+    def test_definition_prefers_extra_paths_in_order(self, tmp_path: Path) -> None:
+        first = tmp_path / "first" / "overlay_msgs" / "msg"
+        second = tmp_path / "second" / "overlay_msgs" / "msg"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        (first / "Value.msg").write_text("uint8 first\n")
+        (second / "Value.msg").write_text("uint8 second\n")
+
+        result = _get_msg_def(
+            "overlay_msgs/Value",
+            ROS2Distro.HUMBLE,
+            [first.parents[1], second.parents[1]],
+        )
+
+        assert result is not None
+        assert result[0] == "uint8 first\n"
+
+    def test_search_finds_local_ros2_message_by_field(self, tmp_path: Path) -> None:
+        msg_dir = tmp_path / "src" / "custom_sensor_msgs" / "ros2"
+        msg_dir.mkdir(parents=True)
+        (msg_dir / "PointCloud2.msg").write_text("uint32 height\nuint32 width\nuint8[] data\n")
+
+        results = search_message_definitions(
+            "pointcloud2",
+            extra_paths=(tmp_path,),
+            package_name="custom_sensor_msgs",
+        )
+
+        assert [result.message_type for result in results] == ["custom_sensor_msgs/msg/PointCloud2"]
+
+    def test_search_prefers_exact_message_name_over_references(self, tmp_path: Path) -> None:
+        msg_dir = tmp_path / "src" / "custom_msgs" / "msg"
+        msg_dir.mkdir(parents=True)
+        (msg_dir / "PointCloud2.msg").write_text("uint32 width\n")
+        (msg_dir / "Wrapper.msg").write_text("# PointCloud2 is referenced here\nuint8 value\n")
+
+        results = search_message_definitions(
+            "pointcloud2",
+            extra_paths=(tmp_path,),
+            package_name="custom_msgs",
+        )
+
+        assert [result.message_type for result in results] == ["custom_msgs/msg/PointCloud2"]
 
     def test_release_zip_warms_per_message_cache(self, tmp_path: Path) -> None:
         """Listing via the release zip must populate _remote_msgs so a

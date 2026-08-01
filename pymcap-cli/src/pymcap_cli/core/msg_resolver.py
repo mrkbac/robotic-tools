@@ -284,6 +284,11 @@ def _remote_msg_cache_dir(cache_dir: Path) -> Path:
     return cache_dir / "_remote_msgs"
 
 
+# Subdirectories that may hold a package's .msg files inside its source tree.
+# Most packages use ``msg/``; dual-ROS sources like ``foxglove_msgs`` use ``ros2/``.
+_MSG_SUBDIRS: tuple[str, ...] = ("msg", "ros2")
+
+
 def _cache_component(value: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in value)
 
@@ -314,6 +319,14 @@ def _github_repo_parts(git_url: str) -> tuple[str, str] | None:
 def _repo_cache_dir(cache_dir: Path, repo_name: str, ref: str) -> Path:
     ref_key = _cache_component(ref)
     return _remote_msg_cache_dir(cache_dir) / _cache_component(repo_name) / ref_key
+
+
+def _message_paths_in_folder(folder: Path, pkg_name: str, msg_name: str) -> list[Path]:
+    """Return deterministic candidate paths for one message under one root."""
+    candidates: set[Path] = set()
+    for subdir in _MSG_SUBDIRS:
+        candidates.update(folder.rglob(f"**/{pkg_name}/{subdir}/{msg_name}.msg"))
+    return sorted(candidates, key=lambda path: path.as_posix())
 
 
 def _extract_dependencies(pkg_name: str, msg_text: str) -> list[str]:
@@ -389,12 +402,12 @@ def _get_msg_def_disk(msg_type: str, folders: tuple[Path, ...]) -> tuple[str, li
         return None
     pkg_name, msg_name = parts
 
-    pattern = f"**/{pkg_name}/msg/{msg_name}.msg"
     for f in folders:
         if not f.exists():
             continue
-        msg_path = next(f.rglob(pattern), None)
-        if msg_path is not None:
+        candidates = _message_paths_in_folder(f, pkg_name, msg_name)
+        if candidates:
+            msg_path = candidates[0]
             logger.debug(f"Found {msg_type} at {msg_path}")
             return _read_msg_path(msg_path, pkg_name)
     return None
@@ -462,11 +475,6 @@ def _get_msg_def(
     if _ensure_release_pkg_cached(cache_dir, distro, pkg_name) is None:
         return None
     return _lookup_cached_remote_msg(cache_dir, distro, pkg_name, msg_name)
-
-
-# Subdirectories that may hold a package's .msg files inside its source tree.
-# Most packages use ``msg/``; dual-ROS sources like ``foxglove_msgs`` use ``ros2/``.
-_MSG_SUBDIRS: tuple[str, ...] = ("msg", "ros2")
 
 
 def _list_msgs_in_pkg_dir(pkg_dir: Path) -> list[str]:
@@ -547,7 +555,7 @@ def _ensure_release_pkg_cached(
 
 
 def _find_pkg_dir_in_folders(folders: tuple[Path, ...], pkg_name: str) -> list[Path]:
-    """Locate every ``<pkg_name>/msg`` directory under any of ``folders``.
+    """Locate every known message directory for ``pkg_name`` under ``folders``.
 
     Returns the *parent* dir (the package root) for each match. Multiple
     matches let workspace overlays add messages to a package.
@@ -556,11 +564,16 @@ def _find_pkg_dir_in_folders(folders: tuple[Path, ...], pkg_name: str) -> list[P
     for f in folders:
         if not f.exists():
             continue
-        for msg_dir in f.rglob(f"{pkg_name}/msg"):
-            if msg_dir.is_dir():
-                pkg_dir = msg_dir.parent
-                if pkg_dir not in seen:
-                    seen.append(pkg_dir)
+        candidates = [
+            msg_dir
+            for subdir in _MSG_SUBDIRS
+            for msg_dir in f.rglob(f"{pkg_name}/{subdir}")
+            if msg_dir.is_dir()
+        ]
+        for msg_dir in sorted(candidates, key=lambda path: path.as_posix()):
+            pkg_dir = msg_dir.parent
+            if pkg_dir not in seen:
+                seen.append(pkg_dir)
     return seen
 
 
@@ -608,6 +621,139 @@ def list_distro_packages(distro: ROS2Distro = ROS2Distro.HUMBLE) -> list[str] | 
     if index is None:
         return None
     return sorted(index.pkg_to_repo)
+
+
+@dataclass(frozen=True, slots=True)
+class MessageSearchResult:
+    """A message definition matched by :func:`search_message_definitions`."""
+
+    message_type: str
+    text: str
+    source: Path | None
+
+
+def _iter_definition_paths(folders: tuple[Path, ...]) -> list[Path]:
+    """Return message files under known source roots in deterministic order."""
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for folder in folders:
+        if not folder.exists():
+            continue
+        candidates = sorted(
+            (path for path in folder.rglob("*.msg") if path.parent.name in _MSG_SUBDIRS),
+            key=lambda path: path.as_posix(),
+        )
+        for path in candidates:
+            if path not in seen:
+                paths.append(path)
+                seen.add(path)
+    return paths
+
+
+def _message_type_from_path(path: Path) -> str:
+    return f"{path.parent.parent.name}/msg/{path.stem}"
+
+
+def _search_matches(query: str, message_type: str, text: str) -> bool:
+    parts = _message_parts(query) if "/" in query else None
+    if parts is not None:
+        return f"{parts[0]}/msg/{parts[1]}".casefold() == message_type.casefold()
+    needle = query.casefold()
+    return needle in f"{message_type}\n{text}".casefold()
+
+
+def search_message_definitions(
+    query: str,
+    *,
+    distro: ROS2Distro = ROS2Distro.HUMBLE,
+    extra_paths: tuple[Path, ...] = (),
+    package_name: str | None = None,
+    include_remote: bool = False,
+) -> list[MessageSearchResult]:
+    """Search local, cached, and optionally all distro message definitions.
+
+    Local and cached files are searched without network access. A fully
+    qualified type may be resolved directly. ``include_remote`` enables the
+    intentionally expensive all-package scan for bare field or type queries.
+    """
+    if not query:
+        return []
+
+    results: dict[str, MessageSearchResult] = {}
+    local_folders = (*extra_paths, *_get_ament_prefix_paths())
+    cached_folders = (_remote_msg_cache_dir(_get_cache_dir(distro)),)
+
+    for path in _iter_definition_paths((*local_folders, *cached_folders)):
+        message_type = _message_type_from_path(path)
+        if package_name is not None and path.parent.parent.name != package_name:
+            continue
+        parsed = _read_msg_path(path, path.parent.parent.name)
+        if parsed is None:
+            continue
+        text, _dependencies = parsed
+        if _search_matches(query, message_type, text):
+            results.setdefault(
+                message_type,
+                MessageSearchResult(message_type=message_type, text=text, source=path),
+            )
+
+    if "/" in query:
+        parts = _message_parts(query)
+        if parts is not None and (package_name is None or parts[0] == package_name):
+            canonical_type = f"{parts[0]}/msg/{parts[1]}"
+            if canonical_type not in results:
+                resolved = _get_msg_def(query, distro, list(extra_paths))
+                if resolved is not None:
+                    text, _dependencies = resolved
+                    if _search_matches(query, canonical_type, text):
+                        results[canonical_type] = MessageSearchResult(
+                            message_type=canonical_type,
+                            text=text,
+                            source=None,
+                        )
+
+    if include_remote:
+        packages = list_distro_packages(distro)
+        if packages is not None:
+            for package in packages:
+                if package_name is not None and package != package_name:
+                    continue
+                names = list_package_messages(
+                    package,
+                    distro=distro,
+                    extra_paths=extra_paths,
+                )
+                if names is None:
+                    continue
+                for name in names:
+                    message_type = f"{package}/msg/{name}"
+                    if message_type in results:
+                        continue
+                    resolved = get_message_text(
+                        message_type,
+                        distro=distro,
+                        extra_paths=extra_paths,
+                    )
+                    if resolved is None:
+                        continue
+                    text, _dependencies = resolved
+                    if _search_matches(query, message_type, text):
+                        results[message_type] = MessageSearchResult(
+                            message_type=message_type,
+                            text=text,
+                            source=None,
+                        )
+
+    if "/" not in query:
+        exact_name_matches = [
+            result
+            for result in results.values()
+            if result.message_type.rsplit("/", maxsplit=1)[-1].casefold() == query.casefold()
+        ]
+        if exact_name_matches:
+            return sorted(exact_name_matches, key=lambda result: result.message_type)
+
+    return [results[key] for key in sorted(results)]
 
 
 @dataclass(frozen=True)
