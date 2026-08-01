@@ -40,5 +40,5 @@ requires = ["uv_build>=0.8.9,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.coverage.report]
-fail_under = 79.68
+fail_under = 100.00
 precision = 2
