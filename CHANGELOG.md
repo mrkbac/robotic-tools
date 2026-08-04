@@ -4,6 +4,66 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.28.0, mcap-codec-support 0.16.0, mcap-ros2-support-fast 0.8.0, pointcloud2 0.6.0, pureini 0.10.0, small-mcap 0.15.0, robo-ws-bridge 0.11.0, ros-parser 0.9.0, digitalis 0.13.0
+
+Headline: ROS message tooling gains RIHS01 hashing, definition search, and
+compact output, while CDR, point-cloud, video, and MCAP edge cases are hardened
+for interoperable and damaged-data workflows.
+
+### pymcap-cli 0.28.0
+
+- New `msg hash` resolves a ROS 2 message and prints its RIHS01 interface hash.
+- New `msg search` finds message types and fields in explicit paths,
+  `AMENT_PREFIX_PATH`, and the local cache, with opt-in `--remote` distro-wide
+  search and optional definition output.
+- `msg def` can print only the root definition and compact it by removing
+  comments, constants, and blank lines. The message browser now reports an
+  unavailable distro archive as a service error instead of rendering it as an
+  empty package.
+
+### mcap-codec-support 0.16.0
+
+- HEVC NVENC uses the validated p5/HQ constant-QP mapping and keeps supported
+  MJPEG-to-HEVC conversion on CUDA, including range conversion, without changing
+  H.264 behavior.
+- Video encoders preserve padded ROS image rows across FFmpeg, GStreamer, and
+  PyAV backends instead of treating row padding as pixel data.
+
+### mcap-ros2-support-fast 0.8.0
+
+- CDR encapsulation is now legal and byte-compatible with rosbags in both byte
+  orders. Big-endian payloads decode correctly, PL_CDR is rejected explicitly,
+  ROS `char` maps to `uint8`, and zero-length sequences no longer gain padding
+  that the decoder would skip.
+
+### pointcloud2 0.6.0
+
+- Organized clouds preserve their axes and `row_step` padding, subarray dtypes
+  round-trip through field definitions, and one-shot field iterables are handled
+  consistently.
+
+### small-mcap 0.15.0
+
+- Readers validate attachment CRCs and chunk record envelopes, including all
+  chunk decode paths, and non-seekable reads retain log-time order through the
+  final chunk.
+- Rebuilding a file truncated inside chunk data now rolls the incomplete chunk
+  back instead of publishing indexes beyond end-of-file. Chunked writes also
+  validate channel IDs and writer state.
+
+### ros-parser 0.9.0
+
+- String unescaping preserves escaped backslashes, boolean defaults are
+  case-insensitive, and integer bounds are enforced from one consistent range
+  table.
+
+### pureini 0.10.0
+
+- Removed unnecessary unsafe integer stores while preserving the encoded format
+  and codec behavior.
+
+---
+
 ## pymcap-cli 0.27.0, mcap-codec-support 0.15.0, pureini 0.9.0
 
 Headline: Rust CloudINI compression reached 92.8× real time for 1 cm lossy
