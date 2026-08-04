@@ -66,6 +66,63 @@ def test_msg_search_no_match_explains_remote_fallback(
     assert "--remote" in captured.err
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_return_code"),
+    [(KeyboardInterrupt(), 0), (RuntimeError("search failed"), 1)],
+)
+def test_msg_search_handles_search_errors(
+    error: BaseException,
+    expected_return_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(msg_search_cmd, "search_message_definitions", fail)
+
+    assert msg_search_cmd.msg_search("pointcloud2") == expected_return_code
+
+
+def test_msg_search_reports_definition_that_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        msg_search_cmd,
+        "search_message_definitions",
+        lambda *_args, **_kwargs: [
+            MessageSearchResult("sensor_msgs/msg/PointCloud2", "uint32 height\n", None),
+        ],
+    )
+    monkeypatch.setattr(msg_search_cmd, "get_message_definition", lambda *_args, **_kwargs: None)
+
+    assert msg_search_cmd.msg_search("pointcloud2", show_definition=True) == 1
+    assert "could not resolve" in capsys.readouterr().err
+
+
+def test_msg_search_prints_headers_between_multiple_definitions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = [
+        MessageSearchResult("example_msgs/msg/First", "uint8 first\n", None),
+        MessageSearchResult("example_msgs/msg/Second", "uint8 second\n", None),
+    ]
+    monkeypatch.setattr(
+        msg_search_cmd, "search_message_definitions", lambda *_args, **_kwargs: results
+    )
+    monkeypatch.setattr(
+        msg_search_cmd,
+        "get_message_definition",
+        lambda msg_type, **_kwargs: f"uint8 {msg_type.rsplit('/', 1)[-1].lower()}\n",
+    )
+
+    assert msg_search_cmd.msg_search("example", show_definition=True) == 0
+    assert capsys.readouterr().out == (
+        "# example_msgs/msg/First\nuint8 first\n\n# example_msgs/msg/Second\nuint8 second\n"
+    )
+
+
 def test_msg_search_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

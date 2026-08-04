@@ -146,6 +146,23 @@ def test_msg_def_returns_one_when_definition_is_missing(
     assert "missing_msgs/msg/Thing" in captured.err
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_return_code"),
+    [(KeyboardInterrupt(), 0), (RuntimeError("lookup failed"), 1)],
+)
+def test_msg_def_handles_resolution_errors(
+    error: BaseException,
+    expected_return_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(msg_def_cmd, "get_message_definition", fail)
+
+    assert msg_def_cmd.msg_def("example_msgs/Value") == expected_return_code
+
+
 def test_msg_def_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

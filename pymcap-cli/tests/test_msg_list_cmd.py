@@ -78,6 +78,23 @@ def test_msg_list_returns_one_when_package_unknown(
     assert "not_a_package_msgs" in captured.err
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_return_code"),
+    [(KeyboardInterrupt(), 0), (RuntimeError("lookup failed"), 1)],
+)
+def test_msg_list_handles_resolution_errors(
+    error: BaseException,
+    expected_return_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(msg_list_cmd, "list_package_messages", fail)
+
+    assert msg_list_cmd.msg_list("example_msgs") == expected_return_code
+
+
 def test_msg_list_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

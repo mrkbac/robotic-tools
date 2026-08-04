@@ -251,6 +251,54 @@ def test_full_http_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
         thread.join(timeout=2)
 
 
+def test_msg_serve_handles_bind_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        msg_serve_cmd,
+        "ThreadingHTTPServer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("address unavailable")),
+    )
+
+    assert msg_serve_cmd.msg_serve(no_browser=True) == 1
+    assert "could not bind" in capsys.readouterr().err
+
+
+def test_msg_serve_opens_browser_and_closes_after_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeServer:
+        is_closed = False
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            self.is_closed = True
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon: bool) -> None:
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    server = FakeServer()
+    opened_urls: list[str] = []
+    monkeypatch.setattr(msg_serve_cmd, "ThreadingHTTPServer", lambda *_args: server)
+    monkeypatch.setattr(msg_serve_cmd.threading, "Thread", FakeThread)
+    monkeypatch.setattr(msg_serve_cmd.webbrowser, "open", opened_urls.append)
+
+    assert msg_serve_cmd.msg_serve(host="127.0.0.1", port=8765) == 0
+    assert server.is_closed is True
+    assert opened_urls == ["http://127.0.0.1:8765/"]
+    assert "Stopping." in capsys.readouterr().err
+
+
 def test_msg_serve_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

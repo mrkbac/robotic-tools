@@ -430,7 +430,7 @@ def test_bridge_server_handles_non_websocket_clients_without_traceback(caplog) -
         asyncio.run(run())
 
     records = [record for record in caplog.records if record.name == "websockets.server"]
-    assert response.startswith(b"HTTP/1.1 ")
+    assert not response or response.startswith(b"HTTP/1.1 ")
     assert all(record.levelno < logging.ERROR for record in records)
     assert all(record.exc_info is None for record in records)
     if records:

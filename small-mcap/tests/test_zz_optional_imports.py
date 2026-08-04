@@ -28,7 +28,39 @@ def test_optional_compression_import_paths(monkeypatch) -> None:
         assert stdlib_writer._zstd_compress(b"x", 5) == b"compressed:x"
         assert stdlib_reader._zstd_decompress(b"x", 1) == b"decompressed:x"
 
+    class FakeZstdCompressor:
+        def __init__(self, level: int | None = None) -> None:
+            self.level = level
+
+        def compress(self, data: bytes | memoryview) -> bytes:
+            return f"compressed-{self.level}:".encode() + bytes(data)
+
+    class FakeZstdDecompressor:
+        def decompress(self, data: bytes | memoryview, *, max_output_size: int) -> bytes:
+            return f"decompressed-{max_output_size}:".encode() + bytes(data)
+
+    class FakeZstandard(ModuleType):
+        ZstdCompressor = FakeZstdCompressor
+        ZstdDecompressor = FakeZstdDecompressor
+
     original_import = builtins.__import__
+
+    def blocked_stdlib_zstd(name, *args, **kwargs):
+        if name in {"compression", "compression.zstd"}:
+            raise ImportError(name)
+        return original_import(name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", blocked_stdlib_zstd)
+        patch.setitem(sys.modules, "zstandard", FakeZstandard("zstandard"))
+        third_party_writer = importlib.reload(writer_module)
+        third_party_reader = importlib.reload(reader_module)
+
+        assert third_party_writer._zstd_compress(b"x") == b"compressed-None:x"
+        assert third_party_writer._zstd_compress(b"y") == b"compressed-None:y"
+        assert third_party_writer._zstd_compress(b"x", 5) == b"compressed-5:x"
+        assert third_party_reader._zstd_decompress(b"x", 4) == b"decompressed-4:x"
+        assert third_party_reader._zstd_decompress(b"y", 4) == b"decompressed-4:y"
 
     def blocked_import(name, *args, **kwargs):
         if name in {"compression", "compression.zstd", "lz4.frame", "zstandard"}:

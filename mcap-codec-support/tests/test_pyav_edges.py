@@ -35,11 +35,7 @@ def test_test_encoder_reports_available_context(monkeypatch) -> None:
     def create(name: str, direction: str) -> _FakeContext:
         return _FakeContext(name, direction)
 
-    monkeypatch.setattr(
-        pyav_module.av.CodecContext,
-        "create",
-        create,
-    )
+    monkeypatch.setattr(pyav_module, "_create_codec_context", create)
 
     assert pyav_module.test_encoder("libx264") is True
 
@@ -49,7 +45,7 @@ def test_test_encoder_reports_creation_errors(monkeypatch, error) -> None:
     def create(*_args):
         raise error
 
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", create)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", create)
 
     assert pyav_module.test_encoder("broken") is False
 
@@ -85,7 +81,7 @@ def test_image_decoder_contexts_are_thread_local_and_reused(monkeypatch) -> None
         created.append(context)
         return context
 
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", create)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", create)
     monkeypatch.setattr(pyav_module._decoder_local, "mjpeg_ctx", None, raising=False)
     monkeypatch.setattr(pyav_module._decoder_local, "png_ctx", None, raising=False)
 
@@ -255,7 +251,7 @@ def test_video_frame_to_rgb_bytes_trims_tightly_packed_plane() -> None:
 
 def test_video_encoder_sets_hardware_bitrate(monkeypatch) -> None:
     context = _FakeContext("h264_videotoolbox", "w")
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", lambda *_args: context)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", lambda *_args: context)
 
     encoder = pyav_module.VideoEncoder(1920, 1080, "h264_videotoolbox")
     try:
@@ -271,7 +267,7 @@ def test_video_encoder_wraps_open_error(monkeypatch) -> None:
         raise av.error.InvalidDataError(1, "cannot open")
 
     context.open = fail_open
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", lambda *_args: context)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", lambda *_args: context)
 
     with pytest.raises(VideoEncoderError, match="Failed to open encoder broken"):
         pyav_module.VideoEncoder(16, 16, "broken")
@@ -284,7 +280,7 @@ def test_video_encoder_wraps_encode_error(monkeypatch) -> None:
         raise av.error.InvalidDataError(1, "bad frame")
 
     context.encode = fail_encode
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", lambda *_args: context)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", lambda *_args: context)
     encoder = pyav_module.VideoEncoder(16, 16, "libx264")
     frame = SimpleNamespace(
         width=16,
@@ -306,7 +302,7 @@ def test_video_encoder_flush_returns_empty_when_context_reports_error(monkeypatc
         raise av.error.InvalidDataError(1, "flush failed")
 
     context.encode = fail_encode
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", lambda *_args: context)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", lambda *_args: context)
     encoder = pyav_module.VideoEncoder(16, 16, "libx264")
     try:
         assert encoder.flush_packets() == []
@@ -323,7 +319,7 @@ def test_pyav_decompressor_falls_back_between_av1_decoders(monkeypatch) -> None:
             raise av.error.InvalidDataError(1, "decoder unavailable")
         return _FakeContext(name, direction)
 
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", create)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", create)
     decompressor = pyav_module.PyAVVideoDecompressor()
 
     assert decompressor._ensure_decoder("av1").codec == "libdav1d"
@@ -332,8 +328,8 @@ def test_pyav_decompressor_falls_back_between_av1_decoders(monkeypatch) -> None:
 
 def test_pyav_decompressor_reports_missing_decoder(monkeypatch) -> None:
     monkeypatch.setattr(
-        pyav_module.av.CodecContext,
-        "create",
+        pyav_module,
+        "_create_codec_context",
         lambda *_args: (_ for _ in ()).throw(av.error.InvalidDataError(1, "missing")),
     )
 

@@ -6,7 +6,7 @@ import threading
 from collections import deque
 from fractions import Fraction
 from io import BytesIO
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import av
 import av.error
@@ -39,10 +39,17 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _create_codec_context(
+    codec_name: str,
+    direction: Literal["r", "w"],
+) -> VideoCodecContext:
+    return cast("VideoCodecContext", av.CodecContext.create(codec_name, direction))
+
+
 def test_encoder(encoder_name: str) -> bool:
     """Test if an encoder is available via PyAV."""
     try:
-        av.CodecContext.create(encoder_name, "w")
+        _create_codec_context(encoder_name, "w")
     except (av.error.FFmpegError, ValueError):
         return False
     else:
@@ -77,7 +84,7 @@ _decoder_local = _DecoderLocal()
 def _get_mjpeg_ctx() -> VideoCodecContext:
     ctx = _decoder_local.mjpeg_ctx
     if ctx is None:
-        ctx = cast("VideoCodecContext", av.CodecContext.create("mjpeg", "r"))
+        ctx = _create_codec_context("mjpeg", "r")
         ctx.open()
         _decoder_local.mjpeg_ctx = ctx
     return ctx
@@ -86,7 +93,7 @@ def _get_mjpeg_ctx() -> VideoCodecContext:
 def _get_png_ctx() -> VideoCodecContext:
     ctx = _decoder_local.png_ctx
     if ctx is None:
-        ctx = av.CodecContext.create("png", "r")
+        ctx = _create_codec_context("png", "r")
         ctx.open()
         _decoder_local.png_ctx = ctx
     return ctx
@@ -208,7 +215,7 @@ class VideoEncoder:
         self._context: VideoCodecContext | None = None
 
         try:
-            self._context = cast("VideoCodecContext", av.CodecContext.create(codec_name, "w"))
+            self._context = _create_codec_context(codec_name, "w")
         except (av.error.FFmpegError, ValueError) as exc:
             raise VideoEncoderError(f"Failed to create encoder {codec_name}: {exc}") from exc
 
@@ -337,7 +344,7 @@ class PyAVVideoDecompressor:
         last_error: av.error.FFmpegError | ValueError | None = None
         for codec_name in codec_names:
             try:
-                decoder = cast("VideoCodecContext", av.CodecContext.create(codec_name, "r"))
+                decoder = _create_codec_context(codec_name, "r")
                 decoder.open()
             except (av.error.FFmpegError, ValueError) as exc:
                 last_error = exc
@@ -354,7 +361,7 @@ class PyAVVideoDecompressor:
             and self._jpeg_encoder.height == height
         ):
             return self._jpeg_encoder
-        self._jpeg_encoder = cast("VideoCodecContext", av.CodecContext.create("mjpeg", "w"))
+        self._jpeg_encoder = _create_codec_context("mjpeg", "w")
         self._jpeg_encoder.width = width
         self._jpeg_encoder.height = height
         self._jpeg_encoder.pix_fmt = "yuvj420p"

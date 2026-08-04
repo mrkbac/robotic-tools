@@ -58,7 +58,7 @@ def test_pyav_decompressor_does_not_reuse_decoder_for_a_new_codec(monkeypatch) -
         created.append(decoder)
         return decoder
 
-    monkeypatch.setattr(pyav_module.av.CodecContext, "create", create)
+    monkeypatch.setattr(pyav_module, "_create_codec_context", create)
     decompressor = pyav_module.PyAVVideoDecompressor()
 
     assert decompressor._ensure_decoder("h264").codec == "h264"
@@ -171,9 +171,7 @@ def test_pyav_decompressor_flushes_delayed_frames_before_codec_switch(monkeypatc
             return ["new"] if self.codec == "vp9" else []
 
     monkeypatch.setattr(
-        pyav_module.av.CodecContext,
-        "create",
-        lambda codec, _direction: FakeDecoder(codec),
+        pyav_module, "_create_codec_context", lambda codec, _direction: FakeDecoder(codec)
     )
     decompressor = pyav_module.PyAVVideoDecompressor()
     monkeypatch.setattr(

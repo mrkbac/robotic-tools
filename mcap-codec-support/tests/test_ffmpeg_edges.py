@@ -108,6 +108,23 @@ def test_check_decoder_cli_handles_missing_binary_and_errors(monkeypatch) -> Non
     assert ffmpeg.check_decoder_cli("mjpeg") is False
 
 
+def test_check_decoder_cli_parses_decoder_listing(monkeypatch) -> None:
+    monkeypatch.setattr(ffmpeg, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        ffmpeg.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            " V..... mjpeg Motion JPEG\n V..... h264 H.264\n",
+            "",
+        ),
+    )
+
+    assert ffmpeg.check_decoder_cli("mjpeg") is True
+    assert ffmpeg.check_decoder_cli("vp9") is False
+
+
 def test_probe_hw_mjpeg_decoder_handles_failures_and_success(monkeypatch) -> None:
     monkeypatch.setattr(ffmpeg, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(ffmpeg, "_hw_mjpeg_candidates", lambda: ("first", "second"))
@@ -148,6 +165,22 @@ def test_probe_hw_mjpeg_decoder_skips_unlisted_candidates(monkeypatch) -> None:
 
 def test_probe_hw_mjpeg_decoder_returns_none_when_binary_missing(monkeypatch) -> None:
     monkeypatch.setattr(ffmpeg, "find_ffmpeg", lambda: None)
+    ffmpeg.probe_hw_mjpeg_decoder.cache_clear()
+    try:
+        assert ffmpeg.probe_hw_mjpeg_decoder() is None
+    finally:
+        ffmpeg.probe_hw_mjpeg_decoder.cache_clear()
+
+
+def test_probe_hw_mjpeg_decoder_returns_none_when_all_candidates_fail(monkeypatch) -> None:
+    monkeypatch.setattr(ffmpeg, "find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(ffmpeg, "_hw_mjpeg_candidates", lambda: ("broken",))
+    monkeypatch.setattr(ffmpeg, "check_decoder_cli", lambda _name: True)
+    monkeypatch.setattr(
+        ffmpeg.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(args, 1, b"", b"failed"),
+    )
     ffmpeg.probe_hw_mjpeg_decoder.cache_clear()
     try:
         assert ffmpeg.probe_hw_mjpeg_decoder() is None

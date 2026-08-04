@@ -60,6 +60,42 @@ def test_msg_hash_returns_one_when_definition_is_missing(
     assert "could not resolve" in captured.err
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_return_code"),
+    [(KeyboardInterrupt(), 0), (RuntimeError("lookup failed"), 1)],
+)
+def test_msg_hash_handles_resolution_errors(
+    error: BaseException,
+    expected_return_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(msg_hash_cmd, "get_message_definition", fail)
+
+    assert msg_hash_cmd.msg_hash("example_msgs/Value") == expected_return_code
+
+
+def test_msg_hash_handles_hashing_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        msg_hash_cmd,
+        "get_message_definition",
+        lambda *_args, **_kwargs: "uint32 value\n",
+    )
+    monkeypatch.setattr(
+        msg_hash_cmd,
+        "compute_rihs01",
+        lambda *_args: (_ for _ in ()).throw(ValueError("invalid definition")),
+    )
+
+    assert msg_hash_cmd.msg_hash("example_msgs/Value") == 1
+    assert "failed to compute RIHS01" in capsys.readouterr().err
+
+
 def test_msg_hash_is_registered_in_top_level_cli_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
