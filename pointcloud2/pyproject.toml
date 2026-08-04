@@ -23,7 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-version = "0.5.0"
+version = "0.6.0"
 
 [project.urls]
 Source = "https://github.com/mrkbac/robotic-tools"

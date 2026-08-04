@@ -1,6 +1,6 @@
 [project]
 name = "digitalis"
-version = "0.12.0"
+version = "0.13.0"
 description = "Terminal-based visualization tool for robotics development"
 readme = "README.md"
 requires-python = ">=3.10"
