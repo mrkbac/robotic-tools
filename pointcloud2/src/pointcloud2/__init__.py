@@ -40,9 +40,12 @@ import math
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import numpy.typing as npt
 from numpy.lib.recfunctions import unstructured_to_structured
 
 from pointcloud2.messages import HeaderMsg, Pointcloud2Msg, PointFieldDict, PointFieldMsg
@@ -215,8 +218,7 @@ def dtype_from_fields(
     }
     if point_step is not None:
         dtype_dict["itemsize"] = point_step
-    # NumPy's public stubs do not expose the structured dtype dictionary shape.
-    return np.dtype(dtype_dict)  # ty: ignore[no-matching-overload]
+    return np.dtype(cast("npt.DTypeLike", dtype_dict))
 
 
 def fields_from_dtype(dtype: np.dtype) -> list[PointField]:
