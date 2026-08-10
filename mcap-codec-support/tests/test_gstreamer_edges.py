@@ -536,3 +536,10 @@ def test_compression_backend_delegates_and_falls_back(monkeypatch) -> None:
     assert software.create_encoder(2, 2, "libx264", 28)[0] == "ffmpeg"
     monkeypatch.setattr(gst, "GStreamerVideoEncoder", lambda **kwargs: ("gst", kwargs))
     assert software.create_encoder(2, 2, "nvv4l2h264enc", 28)[0] == "gst"
+
+
+def test_compression_backend_rejects_ffmpeg_arguments() -> None:
+    backend = gst.GStreamerCompressionBackend()
+
+    with pytest.raises(VideoEncoderError, match="require the ffmpeg-cli backend"):
+        backend.create_encoder(4, 4, "nvv4l2h264enc", 28, extra_args=("-preset", "slow"))

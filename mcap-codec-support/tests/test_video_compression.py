@@ -59,6 +59,13 @@ def test_pyav_backend_delegates_image_and_encoder_operations(monkeypatch) -> Non
     assert backend.get_pix_fmt("/camera") is None
 
 
+def test_pyav_backend_rejects_ffmpeg_arguments() -> None:
+    backend = compression._PyAVCompressionBackend()
+
+    with pytest.raises(VideoEncoderError, match="require the ffmpeg-cli backend"):
+        backend.create_encoder(4, 4, "libx264", 28, extra_args=("-preset", "slow"))
+
+
 def test_ffmpeg_backend_delegates_and_selects_compressed_decode_mode(monkeypatch) -> None:
     backend = compression._FfmpegCliCompressionBackend()
     monkeypatch.setattr(ffmpeg, "probe_encoder_cli", lambda name: name == "codec")
