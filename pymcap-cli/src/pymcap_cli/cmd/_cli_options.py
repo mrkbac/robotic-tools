@@ -618,9 +618,10 @@ PointCloudTopicOptionsOption = Annotated[
         name=["--pointcloud-topic-options"],
         group=POINTCLOUD_GROUP,
         help=(
-            "Exact-topic overrides as TOPIC:key=value[,key=value...]; repeatable. "
-            "Keys: resolution, pc-format, pc-schema, pc-encoding, pc-compression, "
-            "draco-compression-level."
+            "Per-topic overrides as PATTERN:key=value[,key=value...]; repeatable. "
+            "PATTERN is a topic regex (full match, case-insensitive), so a plain "
+            "topic name selects just that topic. Keys: resolution, pc-format, "
+            "pc-schema, pc-encoding, pc-compression, draco-compression-level."
         ),
     ),
 ]
@@ -634,8 +635,10 @@ VideoTopicOptionsOption = Annotated[
         name=["--video-topic-options"],
         group=ENCODING_GROUP,
         help=(
-            "Exact-topic overrides as TOPIC:key=value[,key=value...]; repeatable. "
-            "Keys: quality, codec, encoder, scale, backend."
+            "Per-topic overrides as PATTERN:key=value[,key=value...]; repeatable. "
+            "PATTERN is a topic regex (full match, case-insensitive), so a plain "
+            "topic name selects just that topic. Keys: quality, codec, encoder, "
+            "scale, backend."
         ),
     ),
 ]
@@ -645,8 +648,9 @@ VideoTopicFfmpegArgsOption = Annotated[
         name=["--video-topic-ffmpeg-args"],
         group=ENCODING_GROUP,
         help=(
-            "Append extra ffmpeg output arguments for an exact topic as "
-            "TOPIC:ARGS; repeatable. Inherits --ffmpeg-args; use TOPIC:none to clear."
+            "Append extra ffmpeg output arguments for matching topics as "
+            "PATTERN:ARGS; repeatable. PATTERN is a topic regex (full match, "
+            "case-insensitive). Inherits --ffmpeg-args; use PATTERN:none to clear."
         ),
     ),
 ]

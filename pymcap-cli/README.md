@@ -814,28 +814,34 @@ pymcap-cli roscompress data.mcap -o compressed.mcap --quality 28 --codec h265
 # Draco point cloud compression using the Foxglove compressed point cloud schema
 pymcap-cli roscompress data.mcap -o compressed.mcap --pc-format draco --pc-schema foxglove
 
-# Override inherited point-cloud settings for one exact topic (repeatable)
+# Override inherited point-cloud settings for one topic (repeatable)
 pymcap-cli roscompress data.mcap -o compressed.mcap \
   --pointcloud-topic-options '/LIDAR_TOP/points:resolution=0.02,pc-compression=lz4'
 
-# Override inherited video settings for exact topics (repeatable)
+# Override inherited video settings; the selector is a topic regex
 pymcap-cli roscompress data.mcap -o compressed.mcap \
   --video-topic-options '/CAM_FRONT/image:quality=24,scale=1280' \
-  --video-topic-options '/CAM_BACK/image:codec=h265,quality=28'
+  --video-topic-options '/CAM_(BACK|BACK_LEFT|BACK_RIGHT)/image:codec=h265,quality=28'
 
-# Append raw ffmpeg output arguments globally and for one exact topic
+# Append raw ffmpeg output arguments globally and for matching topics
 pymcap-cli roscompress data.mcap -o compressed.mcap --backend ffmpeg-cli \
   --ffmpeg-args='-preset medium' \
-  --video-topic-ffmpeg-args '/CAM_FRONT/image:-tune film -threads 4'
+  --video-topic-ffmpeg-args '/CAM_.*/image:-tune film -threads 4'
 ```
 
-Topic profiles match exact topic names and inherit unspecified global options.
+Topic profiles inherit every unspecified global option. The selector is a topic
+regex matched in full and case-insensitively, exactly like `--topic` /
+`--exclude-topic`, so a plain topic name selects just that topic. When patterns
+overlap, the first profile that matches a topic wins, and any topic no profile
+claims uses the global options. A pattern that matches no topic is reported as a
+warning rather than silently ignored.
+
 Point-cloud keys: `resolution`, `pc-format`, `pc-schema`, `pc-encoding`,
 `pc-compression`, `draco-compression-level`. Video keys: `quality`, `codec`,
 `encoder`, `scale`, `backend`; `encoder=auto` and `scale=original` clear global
 values. FFmpeg arguments use shell-style quoting without invoking a shell.
 Per-topic arguments append to `--ffmpeg-args` and require `ffmpeg-cli`; use
-`TOPIC:none` to clear them for one topic.
+`PATTERN:none` to clear them for the matching topics.
 
 ### `rosdecompress` — ROS Decompression
 

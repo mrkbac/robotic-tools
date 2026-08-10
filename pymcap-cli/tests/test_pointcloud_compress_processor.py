@@ -20,6 +20,7 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     OverwriteCollisionPolicy,
 )
+from pymcap_cli.core.message_filter import TopicSelection
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
 from pymcap_cli.core.processors.pointcloud_clean import PointcloudCleanProcessor
 from pymcap_cli.core.processors.pointcloud_compress import PointcloudCompressProcessor
@@ -173,23 +174,37 @@ def test_pointcloud_processor_compresses_without_cleanup(tmp_path: Path):
     assert _compressed_cloud_point_counts(out) == [10, 10, 10]
 
 
-def test_pointcloud_processor_matches_only_its_exact_topics() -> None:
-    processor = PointcloudCompressProcessor(topics=frozenset({"/LIDAR_TOP/points"}))
-    schema = Schema(
+def _pointcloud_schema() -> Schema:
+    return Schema(
         id=1,
         name="sensor_msgs/msg/PointCloud2",
         encoding="ros2msg",
         data=POINTCLOUD2.encode(),
     )
 
-    assert processor.matches(
-        Channel(1, 1, "/LIDAR_TOP/points", "cdr", {}),
-        schema,
+
+def test_pointcloud_processor_matches_a_plain_topic_name_exactly() -> None:
+    processor = PointcloudCompressProcessor(
+        topics=TopicSelection.from_patterns(include=["/LIDAR_TOP/points"])
     )
-    assert not processor.matches(
-        Channel(2, 1, "/LIDAR_TOP/points_filtered", "cdr", {}),
-        schema,
+    schema = _pointcloud_schema()
+
+    assert processor.matches(Channel(1, 1, "/LIDAR_TOP/points", "cdr", {}), schema)
+    # fullmatch, so a plain name must not also select a longer topic
+    assert not processor.matches(Channel(2, 1, "/LIDAR_TOP/points_filtered", "cdr", {}), schema)
+
+
+def test_pointcloud_processor_matches_topic_regex_and_honors_exclusions() -> None:
+    processor = PointcloudCompressProcessor(
+        topics=TopicSelection.from_patterns(
+            include=[r"/RADAR_.*/points"], exclude=["/RADAR_FRONT/points"]
+        )
     )
+    schema = _pointcloud_schema()
+
+    assert processor.matches(Channel(1, 1, "/RADAR_BACK_LEFT/points", "cdr", {}), schema)
+    assert not processor.matches(Channel(2, 1, "/RADAR_FRONT/points", "cdr", {}), schema)
+    assert not processor.matches(Channel(3, 1, "/LIDAR_TOP/points", "cdr", {}), schema)
 
 
 def test_pointcloud_processor_compresses_big_endian_clouds(tmp_path: Path):

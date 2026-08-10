@@ -48,6 +48,7 @@ from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from small_mcap import DecodedMessage, Message, Schema
 from typing_extensions import override
 
+from pymcap_cli.core.message_filter import ALL_TOPICS, TopicSelection
 from pymcap_cli.core.processors.base import (
     Action,
     ChannelContext,
@@ -87,6 +88,20 @@ def _decode_pool_size() -> int:
         except ValueError:
             logger.warning("Ignoring non-integer VC_DECODE=%r", env)
     return min(8, max(2, (os.cpu_count() or 4) - 2))
+
+
+def split_decode_workers(processor_count: int) -> int | None:
+    """Per-processor decode-pool size when several compressors run in one chain.
+
+    Each processor owns its pool, so a chain of per-topic compressors would
+    otherwise start ``processor_count`` full-size pools and oversubscribe the
+    CPU. ``None`` keeps the undivided default for the single-processor case.
+    """
+    if processor_count < 1:
+        raise ValueError("processor_count must be positive")
+    if processor_count == 1:
+        return None
+    return max(1, _decode_pool_size() // processor_count)
 
 
 @dataclass(slots=True)
@@ -394,15 +409,16 @@ class VideoCompressProcessor(InputProcessor):
         scale: int | None = None,
         backend: EncoderMode = EncoderMode.AUTO,
         ffmpeg_args: tuple[str, ...] = (),
-        topics: frozenset[str] | None = None,
-        exclude_topics: frozenset[str] = frozenset(),
+        topics: TopicSelection = ALL_TOPICS,
+        decode_workers: int | None = None,
     ) -> None:
+        if decode_workers is not None and decode_workers < 1:
+            raise ValueError("decode_workers must be positive")
         self._codec = codec
         self._quality = quality
         self._scale = scale
         self._ffmpeg_args = ffmpeg_args
         self._topics = topics
-        self._exclude_topics = exclude_topics
         resolved = resolve_video_compression_backend(
             codec=codec,
             encoder=encoder,
@@ -432,8 +448,17 @@ class VideoCompressProcessor(InputProcessor):
         # frames (stateless, parallel across topics) while each topic's single
         # encode thread consumes them in order, so decode and encode overlap.
         self._decode_pool = (
-            ThreadPoolExecutor(max_workers=_decode_pool_size()) if self._prefetch_decode else None
+            ThreadPoolExecutor(
+                max_workers=decode_workers if decode_workers is not None else _decode_pool_size()
+            )
+            if self._prefetch_decode
+            else None
         )
+
+    @property
+    def matched_topics(self) -> frozenset[str]:
+        """Image topics this processor selected, known after channels were read."""
+        return frozenset(channel.topic for channel, _schema, _name in self._targets.values())
 
     # ---------------------------------------------------------------- scoping
     @override
@@ -447,11 +472,7 @@ class VideoCompressProcessor(InputProcessor):
     ) -> Action:
         if schema is not None:
             name = normalize_schema_name(schema.name)
-            if (
-                name in IMAGE_SCHEMAS
-                and (self._topics is None or channel.topic in self._topics)
-                and channel.topic not in self._exclude_topics
-            ):
+            if name in IMAGE_SCHEMAS and self._topics.selects(channel.topic):
                 self._targets[channel.id] = (channel, schema, name)
         return Action.CONTINUE
 

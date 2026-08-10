@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
-from mcap_codec_support.pointcloud.factories import CloudiniPointCloudDecompressFactory
-from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
+import pymcap_cli.cmd.roscompress_cmd as roscompress_module
+from mcap_codec_support.pointcloud.factories import (
+    CloudiniPointCloudDecompressFactory,
+    CompressedPointCloudDecompressFactory,
+)
+from mcap_codec_support.pointcloud.schemas import (
+    COMPRESSED_POINTCLOUD2_SCHEMA,
+    FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
+    POINTCLOUD2,
+)
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd.roscompress_cmd import roscompress
@@ -14,6 +23,11 @@ from small_mcap import CompressionType, McapWriter, get_summary, read_message, r
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
+    from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig
+    from pymcap_cli.core.message_filter import TopicSelection
+    from pymcap_cli.core.processors.message_transform import MessageTransformProcessor
 
 _STRING_SCHEMA = "string data"
 
@@ -147,3 +161,123 @@ def test_roscompress_clean_pointcloud_without_compression(tmp_path: Path):
 def _iter_raw(path: Path):
     with path.open("rb") as f:
         yield from list(read_message(f))
+
+
+def _schema_names_by_topic(path: Path) -> dict[str, str]:
+    with path.open("rb") as f:
+        summary = get_summary(f)
+    assert summary is not None
+    return {
+        channel.topic: summary.schemas[channel.schema_id].name
+        for channel in summary.channels.values()
+    }
+
+
+def test_roscompress_applies_a_pointcloud_profile_to_matching_topics_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """One topic gets Draco/Foxglove, the other inherits the Cloudini defaults."""
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+    worker_counts: list[int] = []
+    create_processor = roscompress_module.create_pointcloud_compress_processor
+
+    def create_counted_processor(
+        config: RoscompressConfig,
+        *,
+        workers: int = 0,
+        topics: TopicSelection,
+    ) -> MessageTransformProcessor:
+        worker_counts.append(workers)
+        return create_processor(config, workers=workers, topics=topics)
+
+    monkeypatch.setattr(roscompress_module, "pointcloud_worker_count", lambda: 4)
+    monkeypatch.setattr(
+        roscompress_module, "create_pointcloud_compress_processor", create_counted_processor
+    )
+
+    rc = roscompress(
+        str(src),
+        out,
+        force=True,
+        image_format="none",
+        pointcloud=True,
+        pointcloud_topic_options=["/lidar/points:pc-format=draco,pc-schema=foxglove"],
+    )
+    assert rc == 0
+
+    schemas = _schema_names_by_topic(out)
+    assert schemas["/lidar/points"] == FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA
+    assert schemas["/lidar/points/secondary"] == COMPRESSED_POINTCLOUD2_SCHEMA
+    assert worker_counts == [4, 4]
+
+
+def test_roscompress_pointcloud_profile_regex_covers_every_matching_topic(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    rc = roscompress(
+        str(src),
+        out,
+        force=True,
+        image_format="none",
+        pointcloud=True,
+        pointcloud_topic_options=[r"/lidar/points.*:pc-format=draco,pc-schema=foxglove"],
+    )
+    assert rc == 0
+
+    schemas = _schema_names_by_topic(out)
+    assert schemas["/lidar/points"] == FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA
+    assert schemas["/lidar/points/secondary"] == FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA
+
+
+def test_roscompress_cleans_profiled_and_default_pointcloud_topics(tmp_path: Path):
+    """Cleanup still applies to every cloud when one topic has its own profile."""
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    rc = roscompress(
+        str(src),
+        out,
+        force=True,
+        image_format="none",
+        pointcloud=True,
+        pointcloud_drop_invalid=True,
+        pointcloud_topic_options=["/lidar/points:pc-format=draco,pc-schema=foxglove"],
+    )
+    assert rc == 0
+
+    factories = [CompressedPointCloudDecompressFactory(), DecoderFactory()]
+    with out.open("rb") as f:
+        counts = {
+            m.channel.topic: int(m.decoded_message.width) * int(m.decoded_message.height)
+            for m in read_message_decoded(f, decoder_factories=factories)
+            if m.channel.topic.startswith("/lidar/points")
+        }
+    # All valid points survive: 6 on the primary topic and 2 on the secondary.
+    assert counts["/lidar/points"] == 6
+    assert counts["/lidar/points/secondary"] == 2
+
+
+def test_roscompress_warns_when_a_pointcloud_profile_matches_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+
+    with caplog.at_level(logging.WARNING):
+        rc = roscompress(
+            str(src),
+            out,
+            force=True,
+            image_format="none",
+            pointcloud=True,
+            pointcloud_topic_options=["/lidar/pionts:resolution=0.5"],
+        )
+
+    assert rc == 0
+    assert any(
+        "No point-cloud input topics matched" in record.message
+        and "/lidar/pionts" in str(record.args)
+        for record in caplog.records
+    )

@@ -23,12 +23,17 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     OverwriteCollisionPolicy,
 )
-from pymcap_cli.core.processors.video_compress import VideoCompressProcessor, VideoEncoderSession
+from pymcap_cli.core.message_filter import TopicSelection
+from pymcap_cli.core.processors.video_compress import (
+    VideoCompressProcessor,
+    VideoEncoderSession,
+    split_decode_workers,
+)
 from small_mcap import McapWriter, get_summary, read_message, read_message_decoded
 
 from tests.fixtures.image_mcap_generator import (
     SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA,
-    create_jpeg_frame,
+    write_camera_mcap,
 )
 
 if TYPE_CHECKING:
@@ -40,30 +45,7 @@ _VIDEO_SCHEMA = "foxglove_msgs/msg/CompressedVideo"
 
 
 def _write_cameras(path: Path, topics: list[str], n: int) -> None:
-    buf = io.BytesIO()
-    writer = McapWriter(buf, chunk_size=1 << 20, encoder_factory=ROS2EncoderFactory())
-    writer.start(profile="ros2")
-    writer.add_schema(
-        1,
-        "sensor_msgs/msg/CompressedImage",
-        "ros2msg",
-        SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode(),
-    )
-    for cid, topic in enumerate(topics, start=1):
-        writer.add_channel(cid, topic, "cdr", 1)
-    step = 1_000_000
-    for i in range(n):
-        for cid, _topic in enumerate(topics, start=1):
-            log_time = i * step + cid
-            header = {"stamp": {"sec": i, "nanosec": cid}, "frame_id": f"cam{cid}"}
-            writer.add_message_encode(
-                cid,
-                log_time,
-                {"header": header, "format": "jpeg", "data": create_jpeg_frame(_W, _H, i)},
-                log_time,
-            )
-    writer.finish()
-    path.write_bytes(buf.getvalue())
+    write_camera_mcap(path, topics, n, width=_W, height=_H)
 
 
 def _pillow_frame(
@@ -182,20 +164,15 @@ def test_video_processor_composes_with_topic_drop(tmp_path: Path):
     assert counts == {"/cam/front": 8}
 
 
-def test_video_processor_transcodes_only_its_exact_topics(tmp_path: Path):
+def test_video_processor_transcodes_only_its_selected_topics(tmp_path: Path):
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_cameras(src, ["/CAM_FRONT/image", "/CAM_BACK/image"], n=8)
 
-    _run(
-        src,
-        out,
-        extra_processors=[
-            VideoCompressProcessor(
-                encoder="libx264",
-                topics=frozenset({"/CAM_FRONT/image"}),
-            )
-        ],
+    processor = VideoCompressProcessor(
+        encoder="libx264",
+        topics=TopicSelection.from_patterns(include=["/CAM_FRONT/image"]),
     )
+    _run(src, out, extra_processors=[processor])
 
     with out.open("rb") as stream:
         summary = get_summary(stream)
@@ -208,6 +185,50 @@ def test_video_processor_transcodes_only_its_exact_topics(tmp_path: Path):
         "/CAM_FRONT/image": _VIDEO_SCHEMA,
         "/CAM_BACK/image": "sensor_msgs/msg/CompressedImage",
     }
+    assert processor.matched_topics == frozenset({"/CAM_FRONT/image"})
+
+
+def test_video_processor_transcodes_every_topic_matching_a_regex(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_cameras(src, ["/CAM_FRONT/image", "/CAM_BACK/image", "/LIDAR_TOP/image"], n=4)
+
+    processor = VideoCompressProcessor(
+        encoder="libx264",
+        topics=TopicSelection.from_patterns(include=[r"/CAM_.*/image"]),
+    )
+    _run(src, out, extra_processors=[processor])
+
+    assert processor.matched_topics == frozenset({"/CAM_FRONT/image", "/CAM_BACK/image"})
+
+
+def test_video_processor_reports_no_matched_topics_when_nothing_selected(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_cameras(src, ["/CAM_FRONT/image"], n=2)
+
+    processor = VideoCompressProcessor(
+        encoder="libx264",
+        topics=TopicSelection.from_patterns(include=["/CAM_FRNT/image"]),
+    )
+    _run(src, out, extra_processors=[processor])
+
+    assert processor.matched_topics == frozenset()
+
+
+def test_split_decode_workers_divides_the_pool_across_a_processor_chain() -> None:
+    single = video_compress._decode_pool_size()
+
+    assert split_decode_workers(1) is None
+    assert split_decode_workers(4) == max(1, single // 4)
+
+
+def test_split_decode_workers_rejects_non_positive_processor_count() -> None:
+    with pytest.raises(ValueError, match="processor_count must be positive"):
+        split_decode_workers(0)
+
+
+def test_video_processor_rejects_non_positive_decode_workers() -> None:
+    with pytest.raises(ValueError, match="decode_workers must be positive"):
+        VideoCompressProcessor(decode_workers=0)
 
 
 def test_video_processor_output_is_a_valid_bitstream(tmp_path: Path):

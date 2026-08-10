@@ -7,12 +7,42 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pymcap_cli.utils import RelativeTime, parse_timestamp_args
+from pymcap_cli.utils import RelativeTime, compile_topic_patterns, parse_timestamp_args
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from small_mcap import Channel, Schema, Summary
+
+
+@dataclass(frozen=True, slots=True)
+class TopicSelection:
+    """Compiled include/exclude topic regexes, matched with ``fullmatch``.
+
+    Ordinary ROS topic names therefore select exactly themselves without added
+    anchors. An empty ``include`` selects every topic ``exclude`` does not
+    reject, so the default instance selects everything.
+    """
+
+    include: tuple[re.Pattern[str], ...] = ()
+    exclude: tuple[re.Pattern[str], ...] = ()
+
+    @classmethod
+    def from_patterns(
+        cls, include: Sequence[str] = (), exclude: Sequence[str] = ()
+    ) -> TopicSelection:
+        return cls(
+            include=tuple(compile_topic_patterns(list(include))),
+            exclude=tuple(compile_topic_patterns(list(exclude))),
+        )
+
+    def selects(self, topic: str) -> bool:
+        if any(pattern.fullmatch(topic) for pattern in self.exclude):
+            return False
+        return not self.include or any(pattern.fullmatch(topic) for pattern in self.include)
+
+
+ALL_TOPICS = TopicSelection()
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,13 +113,11 @@ class MessageFilterOptions:
 
     def matches_topic(self, topic: str) -> bool:
         """Return whether a topic passes the canonical include/exclude selectors."""
-        include_regex = self._compile_selectors(self.topics)
-        exclude_regex = self._compile_selectors(self.exclude_topics)
-        positive = not self.has_positive_topics or any(
-            pattern.fullmatch(topic) for pattern in include_regex
+        selection = TopicSelection(
+            include=self._compile_selectors(self.topics),
+            exclude=self._compile_selectors(self.exclude_topics),
         )
-        excluded = any(pattern.fullmatch(topic) for pattern in exclude_regex)
-        return positive and not excluded
+        return selection.selects(topic)
 
     def _validate_unresolved(self) -> None:
         if self.early_bail and self.end_time is None:
@@ -107,20 +135,15 @@ class MessageFilterOptions:
         self,
         base_predicate: Callable[[Channel, Schema | None], bool] | None = None,
     ) -> Callable[[Channel, Schema | None], bool]:
-        include_regex = self._compile_selectors(self.topics)
-        exclude_regex = self._compile_selectors(self.exclude_topics)
-        has_positive = self.has_positive_topics
+        selection = TopicSelection(
+            include=self._compile_selectors(self.topics),
+            exclude=self._compile_selectors(self.exclude_topics),
+        )
 
         def should_include(channel: Channel, schema: Schema | None) -> bool:
             if base_predicate is not None and not base_predicate(channel, schema):
                 return False
-
-            topic = channel.topic
-            positive = not has_positive or any(
-                pattern.fullmatch(topic) for pattern in include_regex
-            )
-            excluded = any(pattern.fullmatch(topic) for pattern in exclude_regex)
-            return positive and not excluded
+            return selection.selects(channel.topic)
 
         return should_include
 

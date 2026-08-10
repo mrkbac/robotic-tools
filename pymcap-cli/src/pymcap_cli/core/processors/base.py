@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, IntFlag, auto
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable
@@ -212,6 +212,13 @@ def chunk_decision_for_message_scope(scope: MessageScope, context: ChunkContext)
     if any(idx.channel_id in scope.channel_ids for idx in indexes):
         return ChunkDecision.DECODE
     return ChunkDecision.CONTINUE
+
+
+class TopicMatchingProcessor(Protocol):
+    """Processor that reports the topics it selected once channels were read."""
+
+    @property
+    def matched_topics(self) -> frozenset[str]: ...
 
 
 class InputProcessor:

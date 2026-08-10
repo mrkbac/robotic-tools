@@ -28,6 +28,7 @@ from mcap_codec_support.pointcloud import (
 )
 from typing_extensions import override
 
+from pymcap_cli.core.message_filter import ALL_TOPICS, TopicSelection
 from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,
     TransformOutput,
@@ -86,12 +87,10 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         drop_invalid: bool = False,
         sort_field: str | None = None,
         workers: int = 0,
-        topics: frozenset[str] | None = None,
-        exclude_topics: frozenset[str] = frozenset(),
+        topics: TopicSelection = ALL_TOPICS,
     ) -> None:
         super().__init__(workers=workers)
         self._topics = topics
-        self._exclude_topics = exclude_topics
         self._compressor_args = (
             pc_format,
             pc_encoding,
@@ -126,8 +125,7 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         return (
             schema is not None
             and normalize_schema_name(schema.name) in POINTCLOUD2_SCHEMAS
-            and (self._topics is None or channel.topic in self._topics)
-            and channel.topic not in self._exclude_topics
+            and self._topics.selects(channel.topic)
         )
 
     def _compressor(self) -> PointCloudCompressorProtocol:

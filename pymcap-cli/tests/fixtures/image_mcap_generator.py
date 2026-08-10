@@ -184,6 +184,48 @@ def create_image_mcap(
     return output.getvalue()
 
 
+def write_camera_mcap(
+    path: Path,
+    topics: list[str],
+    num_frames: int,
+    *,
+    width: int = 160,
+    height: int = 120,
+) -> None:
+    """Write one JPEG ``CompressedImage`` channel per topic, interleaved by frame."""
+    output = io.BytesIO()
+    writer = McapWriter(output, chunk_size=1024 * 1024, encoder_factory=ROS2EncoderFactory())
+    writer.start(profile="ros2")
+    writer.add_schema(
+        1,
+        "sensor_msgs/msg/CompressedImage",
+        "ros2msg",
+        SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode(),
+    )
+    for channel_id, topic in enumerate(topics, start=1):
+        writer.add_channel(channel_id, topic, "cdr", 1)
+
+    time_step_ns = 1_000_000
+    for frame_idx in range(num_frames):
+        for channel_id, _topic in enumerate(topics, start=1):
+            log_time = frame_idx * time_step_ns + channel_id
+            writer.add_message_encode(
+                channel_id,
+                log_time,
+                {
+                    "header": {
+                        "stamp": {"sec": frame_idx, "nanosec": channel_id},
+                        "frame_id": f"cam{channel_id}",
+                    },
+                    "format": "jpeg",
+                    "data": create_jpeg_frame(width, height, frame_idx),
+                },
+                log_time,
+            )
+    writer.finish()
+    path.write_bytes(output.getvalue())
+
+
 def save_image_fixture(name: str, data: bytes, fixtures_dir: Path | None = None) -> Path:
     """Save MCAP image data to fixtures directory."""
     if fixtures_dir is None:

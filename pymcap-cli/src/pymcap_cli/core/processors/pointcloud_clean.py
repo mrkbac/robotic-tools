@@ -8,6 +8,7 @@ from mcap_codec_support._schemas import normalize_schema_name
 from mcap_codec_support.pointcloud import POINTCLOUD2_SCHEMAS, drop_invalid_and_reorder
 from typing_extensions import override
 
+from pymcap_cli.core.message_filter import ALL_TOPICS, TopicSelection
 from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,
     TransformOutput,
@@ -20,14 +21,25 @@ if TYPE_CHECKING:
 class PointcloudCleanProcessor(MessageTransformProcessor):
     """Clean PointCloud2 messages without changing their schema."""
 
-    def __init__(self, *, drop_invalid: bool = True, sort_field: str | None = "line") -> None:
+    def __init__(
+        self,
+        *,
+        drop_invalid: bool = True,
+        sort_field: str | None = "line",
+        topics: TopicSelection = ALL_TOPICS,
+    ) -> None:
         super().__init__()
         self._drop_invalid = drop_invalid
         self._sort_field = sort_field
+        self._topics = topics
 
     @override
     def matches(self, channel: Channel, schema: Schema | None) -> bool:
-        return schema is not None and normalize_schema_name(schema.name) in POINTCLOUD2_SCHEMAS
+        return (
+            schema is not None
+            and normalize_schema_name(schema.name) in POINTCLOUD2_SCHEMAS
+            and self._topics.selects(channel.topic)
+        )
 
     @override
     def transform(

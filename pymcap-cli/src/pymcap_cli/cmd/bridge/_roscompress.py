@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
+from pymcap_cli.core.message_filter import ALL_TOPICS, TopicSelection
 
 if TYPE_CHECKING:
     from pymcap_cli.cmd._pointcloud_cleanup import PointcloudCleanupConfig
-    from pymcap_cli.core.processors.base import InputProcessor
     from pymcap_cli.core.processors.message_transform import MessageTransformProcessor
+    from pymcap_cli.core.processors.video_compress import VideoCompressProcessor
 
 BackendName = Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
 ImageFormat = Literal["video", "jpeg", "png", "none"]
@@ -83,9 +84,7 @@ def create_pointcloud_processors(
 ) -> tuple[MessageTransformProcessor, ...]:
     processors: list[MessageTransformProcessor] = []
     cleanup_processor = (
-        None
-        if config.pointcloud and config.pc_format == "cloudini"
-        else create_pointcloud_cleanup_processor(config)
+        None if fuses_cloudini_cleanup(config) else create_pointcloud_cleanup_processor(config)
     )
     if cleanup_processor is not None:
         processors.append(cleanup_processor)
@@ -96,6 +95,8 @@ def create_pointcloud_processors(
 
 def create_pointcloud_cleanup_processor(
     config: RoscompressConfig,
+    *,
+    topics: TopicSelection = ALL_TOPICS,
 ) -> MessageTransformProcessor | None:
     cleanup = resolve_cleanup(config)
     if not cleanup.enabled:
@@ -107,23 +108,27 @@ def create_pointcloud_cleanup_processor(
     return PointcloudCleanProcessor(
         drop_invalid=cleanup.drop_invalid,
         sort_field=cleanup.sort_field,
+        topics=topics,
     )
+
+
+def fuses_cloudini_cleanup(config: RoscompressConfig) -> bool:
+    """Whether this config's compressor performs cleanup inside its native encode."""
+    return config.pointcloud and config.pc_format == "cloudini"
 
 
 def create_pointcloud_compress_processor(
     config: RoscompressConfig,
     *,
     workers: int = 0,
-    fuse_cleanup: bool = True,
-    topics: frozenset[str] | None = None,
-    exclude_topics: frozenset[str] = frozenset(),
+    topics: TopicSelection = ALL_TOPICS,
 ) -> MessageTransformProcessor:
     from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
         PointcloudCompressProcessor,
     )
 
     cleanup = resolve_cleanup(config)
-    use_fused_cleanup = fuse_cleanup and config.pc_format == "cloudini"
+    use_fused_cleanup = fuses_cloudini_cleanup(config)
     return PointcloudCompressProcessor(
         pc_format=config.pc_format,
         pc_schema=config.pc_schema,
@@ -135,20 +140,21 @@ def create_pointcloud_compress_processor(
         sort_field=cleanup.sort_field if use_fused_cleanup else None,
         workers=workers,
         topics=topics,
-        exclude_topics=exclude_topics,
     )
 
 
 def create_video_compress_processor(
     config: RoscompressConfig,
     *,
-    topics: frozenset[str] | None = None,
-    exclude_topics: frozenset[str] = frozenset(),
-) -> InputProcessor:
+    topics: TopicSelection = ALL_TOPICS,
+    shared_by: int = 1,
+) -> VideoCompressProcessor:
+    """Build a video compressor sharing its decode-worker budget with its peers."""
     from mcap_codec_support.video import EncoderMode  # noqa: PLC0415
 
     from pymcap_cli.core.processors.video_compress import (  # noqa: PLC0415
         VideoCompressProcessor,
+        split_decode_workers,
     )
 
     return VideoCompressProcessor(
@@ -159,5 +165,5 @@ def create_video_compress_processor(
         backend=EncoderMode(config.backend),
         ffmpeg_args=config.ffmpeg_args,
         topics=topics,
-        exclude_topics=exclude_topics,
+        decode_workers=split_decode_workers(shared_by),
     )

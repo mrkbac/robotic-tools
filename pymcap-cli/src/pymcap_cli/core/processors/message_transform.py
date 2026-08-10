@@ -144,6 +144,11 @@ class MessageTransformProcessor(InputProcessor):
     def worker_count(self) -> int:
         return self._workers
 
+    @property
+    def matched_topics(self) -> frozenset[str]:
+        """Topics this processor selected, known after channels were read."""
+        return frozenset(channel.topic for channel, _schema, _decoder in self._targets.values())
+
     def target_for_channel(self, channel_id: int) -> _Target | None:
         return self._targets.get(channel_id)
 
