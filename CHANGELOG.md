@@ -4,6 +4,15 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.30.0
+
+- Fixed the isolated `pointcloud` extra so the `pymcap-cli` entry point no
+  longer imports the optional live-bridge dependency.
+- Extended the built-wheel dependency matrix to run the CLI with the
+  `pointcloud` extra in isolation.
+
+---
+
 ## pymcap-cli 0.29.0, mcap-codec-support 0.17.0
 
 Headline: `roscompress` can tune video and point-cloud compression per topic,
