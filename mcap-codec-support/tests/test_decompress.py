@@ -284,12 +284,12 @@ class TestVideoDecompressFactoryTimestamp:
 
         for msg in read_message_decoded(buf, decoder_factories=[factory]):
             assert msg.decoded_message is not None
-            header = msg.decoded_message["header"]
-            assert header["stamp"]["sec"] == 999
-            assert header["stamp"]["nanosec"] == 12345
-            assert header["frame_id"] == "camera_link"
-            assert msg.decoded_message["format"] == "jpeg"
-            assert msg.decoded_message["data"][:2] == b"\xff\xd8"
+            header = msg.decoded_message.header
+            assert header.stamp.sec == 999
+            assert header.stamp.nanosec == 12345
+            assert header.frame_id == "camera_link"
+            assert msg.decoded_message.format == "jpeg"
+            assert msg.decoded_message.data[:2] == b"\xff\xd8"
             break
         else:
             raise AssertionError("No messages decoded")
@@ -325,13 +325,14 @@ class TestPointCloudDecompressor:
         }
 
         result = factory._decompress(_ns(msg))
-        assert result["header"] == msg["header"]
-        assert result["height"] == 1
-        assert result["width"] == 100
-        assert result["point_step"] == 12
-        assert result["is_dense"] is True
-        assert result["data"] == original
-        assert "compressed_data" not in result
+        assert result.header.stamp.sec == 10
+        assert result.header.frame_id == "lidar"
+        assert result.height == 1
+        assert result.width == 100
+        assert result.point_step == 12
+        assert result.is_dense is True
+        assert result.data == original
+        assert not hasattr(result, "compressed_data")
 
     def test_preserves_metadata(self):
         from mcap_codec_support.pointcloud import PointCloudDecompressFactory
@@ -359,10 +360,16 @@ class TestPointCloudDecompressor:
         }
 
         result = factory._decompress(_ns(msg))
-        assert result["header"]["frame_id"] == "velodyne"
-        assert result["fields"] == fields
-        assert result["is_bigendian"] is False
-        assert result["row_step"] == 60
+        assert result.header.frame_id == "velodyne"
+        actual_fields = [
+            (field.name, field.offset, field.datatype, field.count) for field in result.fields
+        ]
+        expected_fields = [
+            (field["name"], field["offset"], field["datatype"], field["count"]) for field in fields
+        ]
+        assert actual_fields == expected_fields
+        assert result.is_bigendian is False
+        assert result.row_step == 60
 
     def test_cloudini_from_foxglove_schema_uses_payload_layout(self):
         from mcap_codec_support.pointcloud import PointCloudDecompressFactory
@@ -382,11 +389,11 @@ class TestPointCloudDecompressor:
         }
 
         result = factory._decompress(_ns(msg))
-        assert result["header"]["frame_id"] == "velodyne"
-        assert result["height"] == 1
-        assert result["width"] == 7
-        assert [field["name"] for field in result["fields"]] == ["x", "y", "z"]
-        assert result["data"] == original
+        assert result.header.frame_id == "velodyne"
+        assert result.height == 1
+        assert result.width == 7
+        assert [field.name for field in result.fields] == ["x", "y", "z"]
+        assert result.data == original
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +414,8 @@ class TestVideoDecompressFactory:
         assert len(results) == 1
         decoded = results[0].decoded_message
         assert decoded is not None
-        assert decoded["format"] == "jpeg"
-        assert decoded["data"][:2] == b"\xff\xd8"
+        assert decoded.format == "jpeg"
+        assert decoded.data[:2] == b"\xff\xd8"
 
     def test_multi_topic_gets_separate_decoders(self):
         from mcap_codec_support.video import VideoDecompressFactory
@@ -444,7 +451,7 @@ class TestVideoDecompressFactory:
         for r in results:
             decoded = r.decoded_message
             assert decoded is not None
-            assert decoded["format"] == "jpeg"
+            assert decoded.format == "jpeg"
 
         # Factory should have created 2 separate decompressors
         assert len(factory._decompressors) == 2
@@ -467,7 +474,7 @@ class TestVideoDecompressFactory:
         decoded = [message.decoded_message for message in messages]
 
         assert len(decoded) == 2
-        assert all(frame is not None and frame["data"][:2] == b"\xff\xd8" for frame in decoded)
+        assert all(frame is not None and frame.data[:2] == b"\xff\xd8" for frame in decoded)
 
     @pytest.mark.parametrize("codec", ["h264", "h265", "vp9", "av1"])
     def test_video_codec_matrix_raw_output(self, codec):
@@ -505,7 +512,7 @@ class TestVideoDecompressFactory:
         decoded = [message.decoded_message for message in messages]
 
         assert len(decoded) == 3
-        assert all(frame is not None and len(frame["data"]) == 64 * 64 * 3 for frame in decoded)
+        assert all(frame is not None and len(frame.data) == 64 * 64 * 3 for frame in decoded)
 
 
 class TestVideoDecompressFactoryFlush:
@@ -533,7 +540,7 @@ class TestVideoDecompressFactoryFlush:
 
         # The single keyframe should decode immediately (no buffering)
         assert len(decoded) == 1
-        assert decoded[0].decoded_message["format"] == "jpeg"
+        assert decoded[0].decoded_message.format == "jpeg"
         assert flushed == []
         # Verify decompressor was created for the channel
         assert len(factory._decompressors) == 1
@@ -569,8 +576,8 @@ class TestPointCloudDecompressFactory:
 
         assert len(results) == 1
         decoded = results[0].decoded_message
-        assert decoded["data"] == original
-        assert decoded["width"] == 50
+        assert decoded.data == original
+        assert decoded.width == 50
 
     def test_decode_cloudini_foxglove_from_mcap(self):
         from mcap_codec_support.pointcloud import PointCloudDecompressFactory
@@ -594,8 +601,8 @@ class TestPointCloudDecompressFactory:
 
         assert len(results) == 1
         decoded = results[0].decoded_message
-        assert decoded["data"] == original
-        assert decoded["width"] == 4
+        assert decoded.data == original
+        assert decoded.width == 4
 
     def test_decode_draco_compressed_pointcloud2_from_mcap(self):
         pytest.importorskip("DracoPy")
@@ -621,8 +628,8 @@ class TestPointCloudDecompressFactory:
 
         assert len(results) == 1
         decoded = results[0].decoded_message
-        assert decoded["header"]["frame_id"] == "lidar"
-        points = read_points(SimpleNamespace(**{k: v for k, v in decoded.items() if k != "header"}))
+        assert decoded.header.frame_id == "lidar"
+        points = read_points(decoded)
         np.testing.assert_allclose(points["x"], [1.0, 4.0, 7.0], atol=0.01)
         np.testing.assert_allclose(points["intensity"], [10.0, 20.0, 30.0], atol=0.01)
         np.testing.assert_array_equal(points["ring"], [1, 2, 3])

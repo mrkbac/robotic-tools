@@ -132,7 +132,7 @@ def _counts(path: Path) -> dict[str, int]:
 def _compressed_point_counts(path: Path) -> list[int]:
     with path.open("rb") as f:
         return [
-            int(msg.decoded_message["width"]) * int(msg.decoded_message["height"])
+            int(msg.decoded_message.width) * int(msg.decoded_message.height)
             for msg in read_message_decoded(
                 f, decoder_factories=[CloudiniPointCloudDecompressFactory()]
             )

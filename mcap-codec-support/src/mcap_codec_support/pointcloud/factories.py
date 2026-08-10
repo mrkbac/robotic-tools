@@ -7,9 +7,10 @@ structured numpy array via :func:`pointcloud2.read_points`.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from mcap_codec_support._messages import Header, Time
+from mcap_codec_support.pointcloud._messages import PointCloud2, PointField
 from mcap_codec_support.pointcloud.schemas import (
     COMPRESSED_POINTCLOUD2_SCHEMA,
     FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
@@ -20,12 +21,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     import numpy as np
-    from pointcloud2 import HeaderMsg, PointFieldDict, PointFieldMsg
+    from pointcloud2 import HeaderMsg, Pointcloud2Msg, PointFieldMsg
     from pureini import PointcloudDecoder
     from small_mcap import Schema
-
-    from mcap_codec_support._messages import Header, Stamp
-    from mcap_codec_support.pointcloud._messages import Pointcloud2Dict
 
 
 class _RosCompressedPointcloud2Msg(Protocol):
@@ -78,11 +76,10 @@ def is_compressed_codec_available() -> bool:
     return True
 
 
-def _pointcloud_dict_to_array(cloud_dict: Pointcloud2Dict) -> np.ndarray:
+def _pointcloud_to_array(cloud: PointCloud2) -> np.ndarray:
     from pointcloud2 import read_points  # noqa: PLC0415
 
-    ns = SimpleNamespace(**{k: v for k, v in cloud_dict.items() if k != "header"})
-    return read_points(ns, skip_nans=True)
+    return read_points(cast("Pointcloud2Msg", cloud), skip_nans=True)
 
 
 def _decode_format(fmt: str | bytes) -> str:
@@ -95,85 +92,74 @@ def _as_bytes(payload: bytes | bytearray | memoryview) -> bytes:
     return payload if isinstance(payload, bytes) else bytes(payload)
 
 
-def _stamp_from_msg(stamp: _StampMsg) -> Stamp:
-    return {"sec": stamp.sec, "nanosec": stamp.nanosec}
+def _time_from_msg(stamp: _StampMsg) -> Time:
+    return Time(sec=stamp.sec, nanosec=stamp.nanosec)
 
 
 def _header_from_ros_msg(msg: _RosCompressedPointcloud2Msg) -> Header:
-    return {
-        "stamp": _stamp_from_msg(msg.header.stamp),
-        "frame_id": msg.header.frame_id,
-    }
+    return Header(stamp=_time_from_msg(msg.header.stamp), frame_id=msg.header.frame_id)
 
 
 def _header_from_foxglove_msg(msg: _FoxgloveCompressedPointcloudMsg) -> Header:
-    return {
-        "stamp": _stamp_from_msg(msg.timestamp),
-        "frame_id": msg.frame_id,
-    }
+    return Header(stamp=_time_from_msg(msg.timestamp), frame_id=msg.frame_id)
 
 
-def _fields_from_msg(fields: list[PointFieldMsg]) -> list[PointFieldDict]:
+def _fields_from_msg(fields: list[PointFieldMsg]) -> list[PointField]:
     return [
-        {
-            "name": field.name,
-            "offset": field.offset,
-            "datatype": field.datatype,
-            "count": field.count,
-        }
+        PointField(
+            name=field.name,
+            offset=field.offset,
+            datatype=field.datatype,
+            count=field.count,
+        )
         for field in fields
     ]
 
 
-def _fields_from_cloudini_info(info: Any) -> list[PointFieldDict]:
+def _fields_from_cloudini_info(info: Any) -> list[PointField]:
     return [
-        {
-            "name": field.name,
-            "offset": field.offset,
-            "datatype": int(field.type),
-            "count": 1,
-        }
+        PointField(name=field.name, offset=field.offset, datatype=int(field.type), count=1)
         for field in info.fields
     ]
 
 
 def _pointcloud2_from_cloudini_ros(
     msg: _RosCompressedPointcloud2Msg, pc_decoder: PointcloudDecoder
-) -> Pointcloud2Dict:
+) -> PointCloud2:
     raw_bytes, _info = pc_decoder.decode(_as_bytes(msg.compressed_data))
-    return {
-        "header": _header_from_ros_msg(msg),
-        "height": int(msg.height),
-        "width": int(msg.width),
-        "fields": _fields_from_msg(msg.fields),
-        "is_bigendian": bool(msg.is_bigendian),
-        "point_step": int(msg.point_step),
-        "row_step": int(msg.row_step),
-        "data": raw_bytes,
-        "is_dense": bool(msg.is_dense),
-    }
+    return PointCloud2(
+        header=_header_from_ros_msg(msg),
+        height=int(msg.height),
+        width=int(msg.width),
+        fields=_fields_from_msg(msg.fields),
+        is_bigendian=bool(msg.is_bigendian),
+        point_step=int(msg.point_step),
+        row_step=int(msg.row_step),
+        data=raw_bytes,
+        is_dense=bool(msg.is_dense),
+    )
 
 
 def _pointcloud2_from_cloudini_foxglove(
     msg: _FoxgloveCompressedPointcloudMsg, pc_decoder: PointcloudDecoder
-) -> Pointcloud2Dict:
+) -> PointCloud2:
     raw_bytes, info = pc_decoder.decode(_as_bytes(msg.data))
     point_step = info.point_step
     width = info.width
-    return {
-        "header": _header_from_foxglove_msg(msg),
-        "height": info.height,
-        "width": width,
-        "fields": _fields_from_cloudini_info(info),
-        "is_bigendian": False,
-        "point_step": point_step,
-        "row_step": point_step * width,
-        "data": raw_bytes,
-        "is_dense": True,
-    }
+    return PointCloud2(
+        header=_header_from_foxglove_msg(msg),
+        height=info.height,
+        width=width,
+        fields=_fields_from_cloudini_info(info),
+        is_bigendian=False,
+        point_step=point_step,
+        row_step=point_step * width,
+        data=raw_bytes,
+        is_dense=True,
+    )
 
 
-def _decode_draco_payload(payload: bytes, header: Header) -> Pointcloud2Dict:
+def _decode_draco_payload(payload: bytes, header: Header) -> PointCloud2:
     import DracoPy  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
     from pointcloud2 import fields_from_dtype  # noqa: PLC0415
@@ -228,29 +214,34 @@ def _decode_draco_payload(payload: bytes, header: Header) -> Pointcloud2Dict:
     for name, values in columns:
         point_data[name] = values
 
-    fields: list[PointFieldDict] = [
-        {"name": field.name, "offset": field.offset, "datatype": field.datatype, "count": 1}
+    fields = [
+        PointField(
+            name=field.name,
+            offset=field.offset,
+            datatype=field.datatype,
+            count=1,
+        )
         for field in fields_from_dtype(point_data.dtype)
     ]
 
-    return {
-        "header": header,
-        "height": 1,
-        "width": point_count,
-        "fields": fields,
-        "is_bigendian": False,
-        "point_step": point_data.dtype.itemsize,
-        "row_step": point_data.dtype.itemsize * point_count,
-        "data": point_data.tobytes(),
-        "is_dense": True,
-    }
+    return PointCloud2(
+        header=header,
+        height=1,
+        width=point_count,
+        fields=fields,
+        is_bigendian=False,
+        point_step=point_data.dtype.itemsize,
+        row_step=point_data.dtype.itemsize * point_count,
+        data=point_data.tobytes(),
+        is_dense=True,
+    )
 
 
-def _pointcloud2_from_draco_ros(msg: _RosCompressedPointcloud2Msg) -> Pointcloud2Dict:
+def _pointcloud2_from_draco_ros(msg: _RosCompressedPointcloud2Msg) -> PointCloud2:
     return _decode_draco_payload(msg.compressed_data, _header_from_ros_msg(msg))
 
 
-def _pointcloud2_from_draco_foxglove(msg: _FoxgloveCompressedPointcloudMsg) -> Pointcloud2Dict:
+def _pointcloud2_from_draco_foxglove(msg: _FoxgloveCompressedPointcloudMsg) -> PointCloud2:
     return _decode_draco_payload(msg.data, _header_from_foxglove_msg(msg))
 
 
@@ -279,7 +270,7 @@ class CloudiniPointCloudDecompressFactory:
     def _decompress(
         self,
         msg: _RosCompressedPointcloud2Msg | _FoxgloveCompressedPointcloudMsg,
-    ) -> Pointcloud2Dict:
+    ) -> PointCloud2:
         if _decode_format(msg.format) != "cloudini":
             raise ValueError(f"unsupported compressed point cloud format: {msg.format!r}")
         if _is_ros_style_compressed_msg(msg):
@@ -290,14 +281,14 @@ class CloudiniPointCloudDecompressFactory:
         self,
         message_encoding: str,
         schema: Schema | None,
-    ) -> Callable[[bytes | memoryview], Pointcloud2Dict] | None:
+    ) -> Callable[[bytes | memoryview], PointCloud2] | None:
         if schema is None or schema.name not in _COMPRESSED_POINTCLOUD_SCHEMAS:
             return None
         cdr_decoder = self._cdr_factory.decoder_for(message_encoding, schema)
         if cdr_decoder is None:
             return None
 
-        def _decode(data: bytes | memoryview) -> Pointcloud2Dict:
+        def _decode(data: bytes | memoryview) -> PointCloud2:
             return self._decompress(cdr_decoder(data))
 
         return _decode
@@ -314,7 +305,7 @@ class DracoPointCloudDecompressFactory:
     def _decompress(
         self,
         msg: _RosCompressedPointcloud2Msg | _FoxgloveCompressedPointcloudMsg,
-    ) -> Pointcloud2Dict:
+    ) -> PointCloud2:
         if _decode_format(msg.format) != "draco":
             raise ValueError(f"unsupported compressed point cloud format: {msg.format!r}")
         if _is_ros_style_compressed_msg(msg):
@@ -325,14 +316,14 @@ class DracoPointCloudDecompressFactory:
         self,
         message_encoding: str,
         schema: Schema | None,
-    ) -> Callable[[bytes | memoryview], Pointcloud2Dict] | None:
+    ) -> Callable[[bytes | memoryview], PointCloud2] | None:
         if schema is None or schema.name not in _COMPRESSED_POINTCLOUD_SCHEMAS:
             return None
         cdr_decoder = self._cdr_factory.decoder_for(message_encoding, schema)
         if cdr_decoder is None:
             return None
 
-        def _decode(data: bytes | memoryview) -> Pointcloud2Dict:
+        def _decode(data: bytes | memoryview) -> PointCloud2:
             return self._decompress(cdr_decoder(data))
 
         return _decode
@@ -357,7 +348,7 @@ class CompressedPointCloudDecompressFactory:
     def _decompress(
         self,
         msg: _RosCompressedPointcloud2Msg | _FoxgloveCompressedPointcloudMsg,
-    ) -> Pointcloud2Dict:
+    ) -> PointCloud2:
         fmt = _decode_format(msg.format)
         is_ros = _is_ros_style_compressed_msg(msg)
         if fmt == "cloudini":
@@ -375,14 +366,14 @@ class CompressedPointCloudDecompressFactory:
         self,
         message_encoding: str,
         schema: Schema | None,
-    ) -> Callable[[bytes | memoryview], Pointcloud2Dict] | None:
+    ) -> Callable[[bytes | memoryview], PointCloud2] | None:
         if schema is None or schema.name not in _COMPRESSED_POINTCLOUD_SCHEMAS:
             return None
         cdr_decoder = self._cdr_factory.decoder_for(message_encoding, schema)
         if cdr_decoder is None:
             return None
 
-        def _decode(data: bytes | memoryview) -> Pointcloud2Dict:
+        def _decode(data: bytes | memoryview) -> PointCloud2:
             return self._decompress(cdr_decoder(data))
 
         return _decode
@@ -404,7 +395,7 @@ class CompressedPointCloudDecoderFactory:
             return None
 
         def _decode(data: bytes | memoryview) -> np.ndarray:
-            return _pointcloud_dict_to_array(decoder(data))
+            return _pointcloud_to_array(decoder(data))
 
         return _decode
 

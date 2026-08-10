@@ -7,7 +7,7 @@ import shutil
 import struct
 import tempfile
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from mcap_codec_support.pointcloud import (
     COMPRESSED_POINTCLOUD2_SCHEMA,
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from _typeshed import SupportsWrite
-    from mcap_codec_support.pointcloud._messages import Pointcloud2Dict
     from small_mcap import Channel, DecodedMessage, Schema
 
     from pymcap_cli.exporters.base import TopicContext
@@ -109,32 +108,7 @@ def _effective_row_step(width: int, point_step: int, row_step: int) -> int:
     return width * point_step if row_step == 0 else row_step
 
 
-def _cloud_from_decoded(decoded: _PointCloudMessage | Pointcloud2Dict) -> _Cloud:
-    if isinstance(decoded, dict):
-        pointcloud = cast("Pointcloud2Dict", decoded)
-        return _Cloud(
-            height=pointcloud["height"],
-            width=pointcloud["width"],
-            fields=tuple(
-                _RawField(
-                    name=field.get("name", ""),
-                    offset=field.get("offset", 0),
-                    datatype=field["datatype"],
-                    count=field.get("count", 1),
-                )
-                for field in pointcloud["fields"]
-            ),
-            is_bigendian=pointcloud["is_bigendian"],
-            point_step=pointcloud["point_step"],
-            row_step=_effective_row_step(
-                pointcloud["width"],
-                pointcloud["point_step"],
-                pointcloud["row_step"],
-            ),
-            data=memoryview(pointcloud["data"]),
-            is_dense=pointcloud["is_dense"],
-        )
-    message = cast("_PointCloudMessage", decoded)
+def _cloud_from_decoded(message: _PointCloudMessage) -> _Cloud:
     return _Cloud(
         height=int(message.height),
         width=int(message.width),
@@ -285,7 +259,7 @@ def _write_rows(fh: SupportsWrite[str], rows: Iterator[str]) -> int:
     return point_count
 
 
-def write_pcd_ascii(path: Path, decoded: _PointCloudMessage | Pointcloud2Dict) -> None:
+def write_pcd_ascii(path: Path, decoded: _PointCloudMessage) -> None:
     """Write PointCloud2 records as an ASCII PCD v0.7 file."""
     cloud = _cloud_from_decoded(decoded)
     _validate_cloud(cloud)
@@ -329,8 +303,7 @@ class _PcdTopicWriter:
     def write(self, msg: DecodedMessage) -> None:
         log_time_ns, _ = message_timestamps_ns(msg)
         path = unique_message_path(self.dir_path, log_time_ns, "pcd", self._used_counts)
-        decoded = cast("_PointCloudMessage | Pointcloud2Dict", msg.decoded_message)
-        write_pcd_ascii(path, decoded)
+        write_pcd_ascii(path, msg.decoded_message)
 
     def close(self) -> None:
         pass

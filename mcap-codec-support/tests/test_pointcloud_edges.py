@@ -8,6 +8,9 @@ import mcap_codec_support.pointcloud.compression as compression
 import mcap_codec_support.pointcloud.factories as factories
 import numpy as np
 import pytest
+from mcap_codec_support._messages import Header, Time
+from mcap_codec_support.pointcloud import PointCloud2 as DecodedPointCloud2
+from mcap_codec_support.pointcloud import PointField as DecodedPointField
 from mcap_codec_support.pointcloud._pureini import pointcloud2_data, pointcloud2_to_encoding_info
 from mcap_codec_support.pointcloud.compression import (
     CloudiniPointCloudCompressor,
@@ -37,6 +40,26 @@ def _cloud(fields, data: bytes, *, width: int, height: int, point_step: int, row
         row_step=row_step,
         data=data,
         is_bigendian=False,
+        is_dense=True,
+    )
+
+
+def _decoded_cloud(
+    frame_id: str = "lidar",
+    *,
+    data: bytes = b"",
+    width: int = 0,
+    fields: list[DecodedPointField] | None = None,
+) -> DecodedPointCloud2:
+    return DecodedPointCloud2(
+        header=Header(stamp=Time(sec=1, nanosec=2), frame_id=frame_id),
+        height=1,
+        width=width,
+        fields=[] if fields is None else fields,
+        is_bigendian=False,
+        point_step=4,
+        row_step=4 * width,
+        data=data,
         is_dense=True,
     )
 
@@ -374,22 +397,20 @@ def test_factory_helpers_normalize_payloads_and_headers() -> None:
     stamp = SimpleNamespace(sec=3, nanosec=4)
     ros = SimpleNamespace(header=SimpleNamespace(stamp=stamp, frame_id="ros"))
     fox = SimpleNamespace(timestamp=stamp, frame_id="fox")
-    assert factories._header_from_ros_msg(ros) == {
-        "stamp": {"sec": 3, "nanosec": 4},
-        "frame_id": "ros",
-    }
-    assert factories._header_from_foxglove_msg(fox) == {
-        "stamp": {"sec": 3, "nanosec": 4},
-        "frame_id": "fox",
-    }
+    assert factories._header_from_ros_msg(ros) == Header(
+        stamp=Time(sec=3, nanosec=4), frame_id="ros"
+    )
+    assert factories._header_from_foxglove_msg(fox) == Header(
+        stamp=Time(sec=3, nanosec=4), frame_id="fox"
+    )
 
     fields = [PointField("x", 0, PointField.FLOAT32, count=1)]
     assert factories._fields_from_msg(fields) == [
-        {"name": "x", "offset": 0, "datatype": PointField.FLOAT32, "count": 1}
+        DecodedPointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1)
     ]
     info = SimpleNamespace(fields=[SimpleNamespace(name="x", offset=0, type=7)])
     assert factories._fields_from_cloudini_info(info) == [
-        {"name": "x", "offset": 0, "datatype": 7, "count": 1}
+        DecodedPointField(name="x", offset=0, datatype=7, count=1)
     ]
 
 
@@ -416,8 +437,8 @@ def test_cloudini_factory_decompresses_both_message_shapes() -> None:
     factory = factories.CloudiniPointCloudDecompressFactory()
     factory._pc_decoder = Decoder()
     ros_result = factory._decompress(ros_msg)
-    assert ros_result["header"]["frame_id"] == "ros"
-    assert ros_result["data"] == b"raw"
+    assert ros_result.header.frame_id == "ros"
+    assert ros_result.data == b"raw"
 
     fox_msg = SimpleNamespace(
         format="cloudini",
@@ -426,9 +447,9 @@ def test_cloudini_factory_decompresses_both_message_shapes() -> None:
         frame_id="fox",
     )
     fox_result = factory._decompress(fox_msg)
-    assert fox_result["header"]["frame_id"] == "fox"
-    assert fox_result["width"] == 2
-    assert fox_result["row_step"] == 8
+    assert fox_result.header.frame_id == "fox"
+    assert fox_result.width == 2
+    assert fox_result.row_step == 8
     with pytest.raises(ValueError, match="unsupported"):
         factory._decompress(SimpleNamespace(format="draco", compressed_data=b"x"))
 
@@ -464,14 +485,14 @@ def test_draco_factory_decodes_attributes_and_shapes(monkeypatch) -> None:
     )
     fake_draco = SimpleNamespace(AttributeType=AttributeType, decode=lambda _payload: decoded)
     monkeypatch.setitem(sys.modules, "DracoPy", fake_draco)
-    header = {"stamp": {"sec": 1, "nanosec": 2}, "frame_id": "lidar"}
+    header = Header(stamp=Time(sec=1, nanosec=2), frame_id="lidar")
 
     result = factories._decode_draco_payload(b"payload", header)
 
-    assert result["width"] == 2
-    assert result["height"] == 1
-    assert result["header"] == header
-    assert {field["name"] for field in result["fields"]} >= {
+    assert result.width == 2
+    assert result.height == 1
+    assert result.header == header
+    assert {field.name for field in result.fields} >= {
         "x",
         "y",
         "z",
@@ -532,18 +553,18 @@ def test_codec_availability_and_pointcloud_array_conversion(monkeypatch) -> None
     monkeypatch.setattr(builtins, "__import__", original_import)
     assert factories.is_compressed_codec_available() is True
 
-    cloud_dict = {
-        "header": {"stamp": {"sec": 1, "nanosec": 2}, "frame_id": "lidar"},
-        "height": 1,
-        "width": 1,
-        "fields": [{"name": "x", "offset": 0, "datatype": 7, "count": 1}],
-        "is_bigendian": False,
-        "point_step": 4,
-        "row_step": 4,
-        "data": np.array([(1.0,)], dtype=[("x", "<f4")]).tobytes(),
-        "is_dense": True,
-    }
-    assert factories._pointcloud_dict_to_array(cloud_dict)["x"][0] == 1.0
+    cloud = DecodedPointCloud2(
+        header=Header(stamp=Time(sec=1, nanosec=2), frame_id="lidar"),
+        height=1,
+        width=1,
+        fields=[DecodedPointField(name="x", offset=0, datatype=7, count=1)],
+        is_bigendian=False,
+        point_step=4,
+        row_step=4,
+        data=np.array([(1.0,)], dtype=[("x", "<f4")]).tobytes(),
+        is_dense=True,
+    )
+    assert factories._pointcloud_to_array(cloud)["x"][0] == 1.0
 
 
 def test_factory_decoder_closures_and_draco_foxglove(monkeypatch) -> None:
@@ -567,7 +588,7 @@ def test_factory_decoder_closures_and_draco_foxglove(monkeypatch) -> None:
     monkeypatch.setattr(cloud._cdr_factory, "decoder_for", lambda *_: lambda _: cloud_msg)
     decoder = cloud.decoder_for("cdr", schema)
     assert decoder is not None
-    assert decoder(b"cdr")["header"]["frame_id"] == "ros"
+    assert decoder(b"cdr").header.frame_id == "ros"
 
     draco = factories.DracoPointCloudDecompressFactory()
     fox_msg = SimpleNamespace(
@@ -581,38 +602,38 @@ def test_factory_decoder_closures_and_draco_foxglove(monkeypatch) -> None:
     monkeypatch.setattr(
         factories,
         "_pointcloud2_from_draco_foxglove",
-        lambda _: {"header": {"frame_id": "fox"}},
+        lambda _: _decoded_cloud("fox"),
     )
     decoder = draco.decoder_for("cdr", schema)
     assert decoder is not None
-    assert decoder(b"cdr")["header"]["frame_id"] == "fox"
+    assert decoder(b"cdr").header.frame_id == "fox"
 
     monkeypatch.setattr(
         factories,
         "_decode_draco_payload",
-        lambda payload, header: {
-            "header": header,
-            "data": payload,
-            "height": 1,
-            "width": 0,
-            "fields": [],
-            "is_bigendian": False,
-            "point_step": 0,
-            "row_step": 0,
-            "is_dense": True,
-        },
+        lambda payload, header: DecodedPointCloud2(
+            header=header,
+            height=1,
+            width=0,
+            fields=[],
+            is_bigendian=False,
+            point_step=0,
+            row_step=0,
+            data=payload,
+            is_dense=True,
+        ),
     )
     direct_fox = direct_draco_foxglove(fox_msg)
-    assert direct_fox["header"]["frame_id"] == "fox"
+    assert direct_fox.header.frame_id == "fox"
 
     with pytest.raises(ValueError, match="unsupported"):
         draco._decompress(SimpleNamespace(format="cloudini", compressed_data=b"x"))
     monkeypatch.setattr(
         factories,
         "_pointcloud2_from_draco_foxglove",
-        lambda _: {"header": {"frame_id": "fox"}},
+        lambda _: _decoded_cloud("fox"),
     )
-    assert draco._decompress(fox_msg)["header"]["frame_id"] == "fox"
+    assert draco._decompress(fox_msg).header.frame_id == "fox"
 
     ros_msg = SimpleNamespace(
         format="draco",
@@ -622,23 +643,23 @@ def test_factory_decoder_closures_and_draco_foxglove(monkeypatch) -> None:
     monkeypatch.setattr(
         factories,
         "_pointcloud2_from_draco_ros",
-        lambda _: {"header": {"frame_id": "ros"}},
+        lambda _: _decoded_cloud("ros"),
     )
-    assert draco._decompress(ros_msg)["header"]["frame_id"] == "ros"
+    assert draco._decompress(ros_msg).header.frame_id == "ros"
 
     dispatcher = factories.CompressedPointCloudDecompressFactory()
     monkeypatch.setattr(dispatcher._cdr_factory, "decoder_for", lambda *_: lambda _: fox_msg)
     monkeypatch.setattr(
         dispatcher,
         "_decompress",
-        lambda _: {"header": {"frame_id": "fox"}},
+        lambda _: _decoded_cloud("fox"),
     )
     decoder = dispatcher.decoder_for("cdr", schema)
     assert decoder is not None
-    assert decoder(b"cdr")["header"]["frame_id"] == "fox"
+    assert decoder(b"cdr").header.frame_id == "fox"
 
     actual_dispatcher = factories.CompressedPointCloudDecompressFactory()
-    assert actual_dispatcher._decompress(fox_msg)["header"]["frame_id"] == "fox"
+    assert actual_dispatcher._decompress(fox_msg).header.frame_id == "fox"
 
 
 def test_compressed_array_decoder_factory_and_direct_pointcloud_factory(monkeypatch) -> None:
@@ -652,17 +673,11 @@ def test_compressed_array_decoder_factory_and_direct_pointcloud_factory(monkeypa
         factory._decompress_factory,
         "decoder_for",
         lambda *_: (
-            lambda _: {
-                "header": {"stamp": {"sec": 1, "nanosec": 2}, "frame_id": "lidar"},
-                "height": 1,
-                "width": 1,
-                "fields": [{"name": "x", "offset": 0, "datatype": 7, "count": 1}],
-                "is_bigendian": False,
-                "point_step": 4,
-                "row_step": 4,
-                "data": np.array([(1.0,)], dtype=[("x", "<f4")]).tobytes(),
-                "is_dense": True,
-            }
+            lambda _: _decoded_cloud(
+                data=np.array([(1.0,)], dtype=[("x", "<f4")]).tobytes(),
+                width=1,
+                fields=[DecodedPointField(name="x", offset=0, datatype=7, count=1)],
+            )
         ),
     )
     decoder = factory.decoder_for("cdr", schema)

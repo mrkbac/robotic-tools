@@ -17,6 +17,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from mcap_codec_support._messages import Header, Time
 from mcap_codec_support.pointcloud import (
     COMPRESSED_POINTCLOUD2_SCHEMA,
     FOXGLOVE_COMPRESSED_POINTCLOUD_SCHEMA,
@@ -27,7 +28,9 @@ from mcap_codec_support.video import (
     COMPRESSED_IMAGE,
     COMPRESSED_VIDEO_SCHEMA,
     IMAGE,
+    CompressedImage,
     EncoderMode,
+    Image,
 )
 from mcap_codec_support.video.compression import create_video_decompressor
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -141,10 +144,10 @@ class PointcloudDecompressProcessor(InputProcessor, _OutputChannelMixin):
             yield message
             return
         channel, decoder = target
-        pc_dict = decoder(message.data)
+        pointcloud = decoder(message.data)
         out_id = self._output_channel_id(context, channel)
 
-        yield replace(message, channel_id=out_id, data=self._encode(pc_dict))
+        yield replace(message, channel_id=out_id, data=self._encode(pointcloud))
 
 
 @dataclass(slots=True)
@@ -259,22 +262,26 @@ class VideoDecompressProcessor(InputProcessor, _OutputChannelMixin):
     def _emit(
         self, state: _VideoChannelState, meta: _PendingVideo, frame: Any
     ) -> MessageWithContext:
-        header = {
-            "stamp": {"sec": meta.stamp_sec, "nanosec": meta.stamp_nanosec},
-            "frame_id": meta.frame_id,
-        }
+        header = Header(
+            stamp=Time(sec=meta.stamp_sec, nanosec=meta.stamp_nanosec),
+            frame_id=meta.frame_id,
+        )
         if frame.is_jpeg:
-            payload: dict[str, Any] = {"header": header, "format": "jpeg", "data": frame.data}
+            payload: CompressedImage | Image = CompressedImage(
+                header=header,
+                format="jpeg",
+                data=frame.data,
+            )
         else:
-            payload = {
-                "header": header,
-                "height": frame.height,
-                "width": frame.width,
-                "encoding": "rgb8",
-                "is_bigendian": 0,
-                "step": frame.width * 3,
-                "data": frame.data,
-            }
+            payload = Image(
+                header=header,
+                height=frame.height,
+                width=frame.width,
+                encoding="rgb8",
+                is_bigendian=0,
+                step=frame.width * 3,
+                data=frame.data,
+            )
         return MessageWithContext(
             message=Message(
                 channel_id=state.out_channel_id,

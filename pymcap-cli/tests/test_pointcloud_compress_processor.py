@@ -24,6 +24,7 @@ from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
 from pymcap_cli.core.processors.pointcloud_clean import PointcloudCleanProcessor
 from pymcap_cli.core.processors.pointcloud_compress import PointcloudCompressProcessor
 from small_mcap import CompressionType, McapWriter, get_summary, read_message, read_message_decoded
+from small_mcap.records import Channel, Schema
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -129,7 +130,7 @@ def _compressed_cloud_point_counts(path: Path) -> list[int]:
             )
             if m.channel.topic == "/lidar/points"
         ]
-    return [int(cloud["width"]) * int(cloud["height"]) for cloud in clouds]
+    return [int(cloud.width) * int(cloud.height) for cloud in clouds]
 
 
 def _pointcloud_x_values(path: Path) -> list[list[float]]:
@@ -170,6 +171,25 @@ def test_pointcloud_processor_compresses_without_cleanup(tmp_path: Path):
     assert summary.schemas[cloud_channels[0].schema_id].name == COMPRESSED_POINTCLOUD2_SCHEMA
 
     assert _compressed_cloud_point_counts(out) == [10, 10, 10]
+
+
+def test_pointcloud_processor_matches_only_its_exact_topics() -> None:
+    processor = PointcloudCompressProcessor(topics=frozenset({"/LIDAR_TOP/points"}))
+    schema = Schema(
+        id=1,
+        name="sensor_msgs/msg/PointCloud2",
+        encoding="ros2msg",
+        data=POINTCLOUD2.encode(),
+    )
+
+    assert processor.matches(
+        Channel(1, 1, "/LIDAR_TOP/points", "cdr", {}),
+        schema,
+    )
+    assert not processor.matches(
+        Channel(2, 1, "/LIDAR_TOP/points_filtered", "cdr", {}),
+        schema,
+    )
 
 
 def test_pointcloud_processor_compresses_big_endian_clouds(tmp_path: Path):
@@ -301,7 +321,7 @@ def test_pointcloud_processor_parallel_matches_inline(tmp_path: Path):
             ):
                 if m.channel.topic == "/lidar/points":
                     d = m.decoded_message
-                    result.append((m.channel.topic, int(d["width"]) * int(d["height"])))
+                    result.append((m.channel.topic, int(d.width) * int(d.height)))
         return result
 
     assert _clouds(out_parallel) == _clouds(out_inline)

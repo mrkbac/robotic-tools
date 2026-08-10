@@ -39,10 +39,14 @@ with open("input.mcap", "rb") as stream:
         print(message.channel.topic, message.decoded_message)
 ```
 
-`video_format="raw"` produces ROS2 `Image`-shaped dictionaries.
-`video_format="compressed"` produces JPEG `CompressedImage`-shaped
-dictionaries. Compressed point clouds are returned as `PointCloud2`-shaped
-dictionaries. All other ROS2 messages use the fast CDR decoder.
+`video_format="raw"` produces ROS-like `Image` dataclass instances.
+`video_format="compressed"` produces JPEG `CompressedImage` instances.
+Compressed point clouds are returned as `PointCloud2` instances. Their fields
+use the same attribute access as messages from the generic ROS2 decoder. All
+other ROS2 messages use the fast CDR decoder.
+
+Use `CompressedPointCloudDecoderFactory` or `Pointcloud2DecoderFactory` when a
+structured NumPy array is preferred over a ROS-like message.
 
 For more control, compose the individual `VideoDecompressFactory`,
 `PointCloudDecompressFactory`, and ROS2 `DecoderFactory` instances yourself.

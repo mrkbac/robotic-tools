@@ -106,9 +106,9 @@ def test_roscompress_cleans_pointclouds_and_excludes_by_regex(tmp_path: Path):
         ]
     assert len(clouds) == 3
     for cloud in clouds:
-        n = int(cloud["width"]) * int(cloud["height"])
+        n = int(cloud.width) * int(cloud.height)
         assert n == 6  # 6 valid, 4 zeros dropped
-        buf = np.frombuffer(bytes(cloud["data"]), np.uint8).reshape(n, int(cloud["point_step"]))
+        buf = np.frombuffer(bytes(cloud.data), np.uint8).reshape(n, int(cloud.point_step))
         xyz = np.ascontiguousarray(buf[:, :12]).view(np.float32).reshape(n, 3)
         assert int((xyz == 0).all(axis=1).sum()) == 0
 

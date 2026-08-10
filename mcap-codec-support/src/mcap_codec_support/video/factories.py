@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from mcap_codec_support._messages import Header, Time
+from mcap_codec_support.video._messages import CompressedImage, Image
 from mcap_codec_support.video.common import EncoderMode
 from mcap_codec_support.video.schemas import COMPRESSED_VIDEO_SCHEMA
 
@@ -16,9 +18,7 @@ if TYPE_CHECKING:
 
     from small_mcap import Channel, Schema
 
-    from mcap_codec_support._messages import Header
     from mcap_codec_support._protocols import VideoDecompressorProtocol
-    from mcap_codec_support.video._messages import CompressedImageDict, ImageDict
     from mcap_codec_support.video.common import DecompressedFrame
 
 
@@ -81,7 +81,7 @@ class VideoDecompressFactory:
         message_encoding: str,
         schema: Schema | None,
         channel: Channel,
-    ) -> Callable[[bytes | memoryview], CompressedImageDict | ImageDict | None] | None:
+    ) -> Callable[[bytes | memoryview], CompressedImage | Image | None] | None:
         if schema is None or schema.name != COMPRESSED_VIDEO_SCHEMA:
             return None
 
@@ -91,7 +91,7 @@ class VideoDecompressFactory:
 
         decompressor = self._get_decompressor(channel.id)
 
-        def _decode(data: bytes | memoryview) -> CompressedImageDict | ImageDict | None:
+        def _decode(data: bytes | memoryview) -> CompressedImage | Image | None:
             decoded = cdr_decoder(data)
             codec = decoded.format
             video_data = decoded.data
@@ -103,22 +103,22 @@ class VideoDecompressFactory:
                 return None
 
             timestamp = decoded.timestamp
-            header: Header = {
-                "stamp": {"sec": timestamp.sec, "nanosec": timestamp.nanosec},
-                "frame_id": decoded.frame_id,
-            }
+            header = Header(
+                stamp=Time(sec=timestamp.sec, nanosec=timestamp.nanosec),
+                frame_id=decoded.frame_id,
+            )
 
             if frame.is_jpeg:
-                return {"header": header, "format": "jpeg", "data": frame.data}
+                return CompressedImage(header=header, format="jpeg", data=frame.data)
 
-            return {
-                "header": header,
-                "height": frame.height,
-                "width": frame.width,
-                "encoding": "rgb8",
-                "is_bigendian": 0,
-                "step": frame.width * 3,
-                "data": frame.data,
-            }
+            return Image(
+                header=header,
+                height=frame.height,
+                width=frame.width,
+                encoding="rgb8",
+                is_bigendian=0,
+                step=frame.width * 3,
+                data=frame.data,
+            )
 
         return _decode

@@ -1,5 +1,6 @@
 """Point cloud MCAP factories and compression helpers."""
 
+from mcap_codec_support.pointcloud._messages import PointCloud2, PointField
 from mcap_codec_support.pointcloud.compression import (
     CloudiniPointCloudCompressor,
     DracoPointCloudCompressor,
@@ -39,10 +40,12 @@ __all__ = [
     "CompressedPointCloudDecoderFactory",
     "CompressedPointCloudDecompressFactory",
     "DracoPointCloudCompressor",
+    "PointCloud2",
     "PointCloudCompressionError",
     "PointCloudCompressionResult",
     "PointCloudCompressorProtocol",
     "PointCloudDecompressFactory",
+    "PointField",
     "Pointcloud2DecoderFactory",
     "build_compressed_pointcloud2_message",
     "build_foxglove_compressed_pointcloud_message",
