@@ -9,6 +9,14 @@ from robo_ws_bridge.ws_types import ChannelInfo
 from small_mcap import Channel, Schema
 
 from pymcap_cli.cmd._pointcloud_cleanup import pointcloud_worker_count
+from pymcap_cli.cmd._roscompress import (
+    RoscompressConfig,
+    create_image_processor,
+    create_pointcloud_cleanup_processor,
+    create_pointcloud_compress_processor,
+    pointcloud_output_schema,
+    resolve_cleanup,
+)
 from pymcap_cli.cmd.bridge._adaptive import adaptive_max_dimension
 from pymcap_cli.cmd.bridge._proxy_runtime import (
     MESSAGE_ENCODING,
@@ -16,14 +24,6 @@ from pymcap_cli.cmd.bridge._proxy_runtime import (
     LiveTransformer,
     TransformResult,
     schema_from_channel,
-)
-from pymcap_cli.cmd.bridge._roscompress import (
-    RoscompressConfig,
-    create_image_processor,
-    create_pointcloud_cleanup_processor,
-    create_pointcloud_compress_processor,
-    pointcloud_output_schema,
-    resolve_cleanup,
 )
 from pymcap_cli.core.processors.message_transform import (
     MessageTransformProcessor,

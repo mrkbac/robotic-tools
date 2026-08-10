@@ -1,4 +1,4 @@
-"""Shared roscompress configuration and processor construction for bridge commands."""
+"""Shared roscompress configuration and processor construction."""
 
 from __future__ import annotations
 

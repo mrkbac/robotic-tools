@@ -38,6 +38,7 @@ SCENARIOS = (
             "assert importlib.util.find_spec('numpy') is None",
         ),
     ),
+    Scenario("pointcloud", ("pymcap-cli", "--version")),
     Scenario(
         "video",
         (

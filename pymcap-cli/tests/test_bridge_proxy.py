@@ -14,6 +14,7 @@ import pytest
 from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
 from mcap_codec_support.video import IMAGE
 from mcap_codec_support.video.common import EncoderConfig
+from pymcap_cli.cmd._roscompress import RoscompressConfig
 from pymcap_cli.cmd.bridge._adaptive import (
     AdaptiveVideoRung,
     RungTransition,
@@ -34,7 +35,6 @@ from pymcap_cli.cmd.bridge._proxy_transforms import (
     create_transformer,
     is_video_keyframe,
 )
-from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig
 from pymcap_cli.cmd.bridge.proxy import BridgeProxy, _ChannelState
 from pymcap_cli.core.processors.video_compress import ResolvedVideoCompressionBackend
 from rich.console import Console

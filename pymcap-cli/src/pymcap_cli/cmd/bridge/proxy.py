@@ -44,6 +44,7 @@ from pymcap_cli.cmd._cli_options import (
     ServerHostOption,
     ServerPortOption,
 )
+from pymcap_cli.cmd._roscompress import RoscompressConfig, resolve_cleanup
 from pymcap_cli.cmd.bridge._adaptive import (
     AdaptiveQualityGovernor,
     RungTransition,
@@ -66,7 +67,6 @@ from pymcap_cli.cmd.bridge._proxy_transforms import (
     create_transformer,
     is_video_keyframe,
 )
-from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig, resolve_cleanup
 from pymcap_cli.cmd.bridge._shared import console, to_ws_url
 from pymcap_cli.log_setup import ERR
 

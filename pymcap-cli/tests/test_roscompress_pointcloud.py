@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
-    from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig
+    from pymcap_cli.cmd._roscompress import RoscompressConfig
     from pymcap_cli.core.message_filter import TopicSelection
     from pymcap_cli.core.processors.message_transform import MessageTransformProcessor
 

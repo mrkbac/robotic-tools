@@ -52,8 +52,7 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._pointcloud_cleanup import pointcloud_worker_count
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
-from pymcap_cli.cmd.bridge._roscompress import (
+from pymcap_cli.cmd._roscompress import (
     RoscompressConfig,
     create_image_processor,
     create_pointcloud_cleanup_processor,
@@ -62,6 +61,7 @@ from pymcap_cli.cmd.bridge._roscompress import (
     fuses_cloudini_cleanup,
     resolve_cleanup,
 )
+from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison

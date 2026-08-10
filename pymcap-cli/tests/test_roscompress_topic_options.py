@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from pymcap_cli.cmd.bridge._roscompress import RoscompressConfig
+from pymcap_cli.cmd._roscompress import RoscompressConfig
 from pymcap_cli.cmd.roscompress_cmd import (
     _parse_ffmpeg_args,
     _profile_entries,
