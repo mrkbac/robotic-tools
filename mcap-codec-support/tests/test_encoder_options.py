@@ -52,3 +52,27 @@ def test_ffmpeg_hevc_nvenc_output_args_include_constant_qp(
     assert args[args.index("-rc") : args.index("-rc") + 2] == ["-rc", "constqp"]
     assert args[args.index("-qp") : args.index("-qp") + 2] == ["-qp", "20"]
     assert "-cq" not in args
+
+
+def test_ffmpeg_output_args_put_user_arguments_before_the_output() -> None:
+    args = ffmpeg_module._build_output_args(
+        "ffmpeg",
+        "h264",
+        "libx264",
+        30,
+        {},
+        None,
+        extra_args=("-preset", "slow", "-tune", "film"),
+    )
+
+    assert args[-9:] == [
+        "-fflags",
+        "+flush_packets",
+        "-preset",
+        "slow",
+        "-tune",
+        "film",
+        "-f",
+        "h264",
+        "pipe:1",
+    ]

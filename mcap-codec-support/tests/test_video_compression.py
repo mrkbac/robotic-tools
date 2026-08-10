@@ -121,10 +121,19 @@ def test_ffmpeg_backend_create_encoder_passes_hardware_decode_probe(monkeypatch)
     assert captured["decode_codec"] == "mjpeg_cuvid"
 
     captured.clear()
-    backend.create_encoder(4, 5, "libx264", 28, input_pix_fmt="rgb24", scale=(2, 2))
+    backend.create_encoder(
+        4,
+        5,
+        "libx264",
+        28,
+        input_pix_fmt="rgb24",
+        scale=(2, 2),
+        extra_args=("-preset", "slow"),
+    )
     assert captured["decode_codec"] is None
     assert captured["input_pix_fmt"] == "rgb24"
     assert captured["scale"] == (2, 2)
+    assert captured["extra_args"] == ("-preset", "slow")
 
 
 def test_backend_selection_explicit_modes(monkeypatch) -> None:

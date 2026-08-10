@@ -579,7 +579,10 @@ class GStreamerCompressionBackend:
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> GStreamerVideoEncoder | FFmpegVideoEncoder:
+        if extra_args:
+            raise VideoEncoderError("extra FFmpeg arguments require the ffmpeg-cli backend")
         if any(codec_name in candidates for candidates in SOFTWARE_CODEC_CANDIDATES.values()):
             # Fallback path (hardware encoder died): reuse the proven CPU encoder.
             return FFmpegVideoEncoder(

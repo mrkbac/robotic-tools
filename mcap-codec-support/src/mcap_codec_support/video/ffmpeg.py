@@ -431,6 +431,7 @@ def _build_output_args(
     bit_rate: int | None,
     *,
     use_cuda: bool = False,
+    extra_args: tuple[str, ...] = (),
 ) -> list[str]:
     """Build the shared encoder output arguments."""
     cmd: list[str] = [
@@ -453,6 +454,7 @@ def _build_output_args(
         cmd.extend(["-b:v", str(bit_rate)])
     for key, value in options.items():
         cmd.extend([f"-{key}", value])
+    cmd.extend(extra_args)
 
     output_fmt = _CODEC_TO_FORMAT.get(codec_fam, "h264")
     cmd.extend(["-f", output_fmt, "pipe:1"])
@@ -619,6 +621,7 @@ class FFmpegVideoEncoder:
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
         decode_codec: str | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> None:
         ffmpeg = _require_ffmpeg()
         codec_fam = _codec_family(codec_name)
@@ -685,6 +688,7 @@ class FFmpegVideoEncoder:
                 options,
                 bit_rate,
                 use_cuda=use_cuda,
+                extra_args=extra_args,
             )
         )
 

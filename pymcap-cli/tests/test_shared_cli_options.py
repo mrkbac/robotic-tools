@@ -136,6 +136,17 @@ def test_bridge_proxy_uses_roscompress_option_names(
         assert bridge_only_name not in proxy_help
 
 
+def test_roscompress_exposes_per_topic_compression_options(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = _help(capsys, "roscompress")
+
+    assert "--video-topic-options" in output
+    assert "--pointcloud-topic-options" in output
+    assert "--ffmpeg-args" in output
+    assert "--video-topic-ffmpeg-args" in output
+
+
 @pytest.mark.parametrize("command", ["play", "serve"])
 def test_bridge_playback_exposes_ros_transform_presets(
     command: str,

@@ -182,6 +182,34 @@ def test_video_processor_composes_with_topic_drop(tmp_path: Path):
     assert counts == {"/cam/front": 8}
 
 
+def test_video_processor_transcodes_only_its_exact_topics(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_cameras(src, ["/CAM_FRONT/image", "/CAM_BACK/image"], n=8)
+
+    _run(
+        src,
+        out,
+        extra_processors=[
+            VideoCompressProcessor(
+                encoder="libx264",
+                topics=frozenset({"/CAM_FRONT/image"}),
+            )
+        ],
+    )
+
+    with out.open("rb") as stream:
+        summary = get_summary(stream)
+    assert summary is not None
+    schemas_by_topic = {
+        channel.topic: summary.schemas[channel.schema_id].name
+        for channel in summary.channels.values()
+    }
+    assert schemas_by_topic == {
+        "/CAM_FRONT/image": _VIDEO_SCHEMA,
+        "/CAM_BACK/image": "sensor_msgs/msg/CompressedImage",
+    }
+
+
 def test_video_processor_output_is_a_valid_bitstream(tmp_path: Path):
     """The emitted H.264 packets decode cleanly back to the original frame count.
 

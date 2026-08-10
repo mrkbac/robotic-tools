@@ -244,6 +244,7 @@ class VideoEncoderSession:
         quality: int,
         topic: str,
         scale: int | None = None,
+        ffmpeg_args: tuple[str, ...] = (),
     ) -> None:
         self._backend = backend
         self._encoder_name = encoder_name
@@ -251,6 +252,7 @@ class VideoEncoderSession:
         self._quality = quality
         self._topic = topic
         self._scale = scale
+        self._ffmpeg_args = ffmpeg_args
         self._encoder: VideoEncoderProtocol[Any] | None = None
         self._settings: VideoEncoderSettings | None = None
         self._is_aborting = Event()
@@ -309,6 +311,7 @@ class VideoEncoderSession:
             self._quality,
             input_pix_fmt=settings.pix_fmt,
             scale=settings.scale_dims,
+            extra_args=self._ffmpeg_args,
         )
         logger.info(
             "%s %s: %dx%d using %s",
@@ -347,6 +350,7 @@ class VideoEncoderSession:
             self._quality,
             input_pix_fmt=settings.pix_fmt,
             scale=settings.scale_dims,
+            extra_args=self._ffmpeg_args,
         )
         self._settings = settings
         logger.warning("Encoder failed for %s, falling back to %s", self._topic, software)
@@ -389,16 +393,26 @@ class VideoCompressProcessor(InputProcessor):
         encoder: str | None = None,
         scale: int | None = None,
         backend: EncoderMode = EncoderMode.AUTO,
+        ffmpeg_args: tuple[str, ...] = (),
+        topics: frozenset[str] | None = None,
+        exclude_topics: frozenset[str] = frozenset(),
     ) -> None:
         self._codec = codec
         self._quality = quality
         self._scale = scale
+        self._ffmpeg_args = ffmpeg_args
+        self._topics = topics
+        self._exclude_topics = exclude_topics
         resolved = resolve_video_compression_backend(
             codec=codec,
             encoder=encoder,
             backend=backend,
         )
         self._backend = resolved.backend
+        if ffmpeg_args and resolved.backend.label != "ffmpeg-cli":
+            raise VideoEncoderError(
+                "extra FFmpeg arguments require the ffmpeg-cli backend; use --backend ffmpeg-cli"
+            )
         self._encoder_name = resolved.encoder_name
         self._prefetch_decode = resolved.backend.prefetch_supported
         self._inflight_per_topic = (
@@ -433,7 +447,11 @@ class VideoCompressProcessor(InputProcessor):
     ) -> Action:
         if schema is not None:
             name = normalize_schema_name(schema.name)
-            if name in IMAGE_SCHEMAS:
+            if (
+                name in IMAGE_SCHEMAS
+                and (self._topics is None or channel.topic in self._topics)
+                and channel.topic not in self._exclude_topics
+            ):
                 self._targets[channel.id] = (channel, schema, name)
         return Action.CONTINUE
 
@@ -568,6 +586,7 @@ class VideoCompressProcessor(InputProcessor):
             quality=self._quality,
             topic=channel.topic,
             scale=self._scale,
+            ffmpeg_args=self._ffmpeg_args,
         )
         try:
             session.ensure_encoder(width, height)

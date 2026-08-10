@@ -84,10 +84,13 @@ class _PyAVCompressionBackend:
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> VideoEncoder:
         # PyAV reformats input frames per-frame inside VideoEncoder.encode, so
         # the protocol's pix-fmt / scale knobs are FFmpeg-CLI-only.
         del input_pix_fmt, scale
+        if extra_args:
+            raise VideoEncoderError("extra FFmpeg arguments require the ffmpeg-cli backend")
         from mcap_codec_support.video.pyav import VideoEncoder  # noqa: PLC0415
 
         return VideoEncoder(
@@ -184,6 +187,7 @@ class _FfmpegCliCompressionBackend:
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> FFmpegVideoEncoder:
         from mcap_codec_support.video.ffmpeg import (  # noqa: PLC0415
             FFmpegVideoEncoder,
@@ -204,6 +208,7 @@ class _FfmpegCliCompressionBackend:
             input_pix_fmt=input_pix_fmt,
             scale=scale,
             decode_codec=decode_codec,
+            extra_args=extra_args,
         )
 
 

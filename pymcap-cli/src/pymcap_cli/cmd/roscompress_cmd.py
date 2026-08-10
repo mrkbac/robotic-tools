@@ -10,11 +10,13 @@ and composes with everything else. The heavy lifting lives in the processors
 
 import logging
 import re
+import shlex
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import Parameter
-from mcap_codec_support.video import EncoderMode, VideoEncoderError
+from mcap_codec_support.video import VideoEncoderError
 from rich.console import Console
 
 from pymcap_cli.cmd._cli_options import (
@@ -27,6 +29,7 @@ from pymcap_cli.cmd._cli_options import (
     EncoderOption,
     EndTimeOption,
     ExcludeTopicOption,
+    FfmpegArgsOption,
     ForceOverwriteOption,
     ImageFormatOption,
     JpegQualityOption,
@@ -38,18 +41,26 @@ from pymcap_cli.cmd._cli_options import (
     PointCloudOption,
     PointCloudSchemaOption,
     PointCloudSortFieldOption,
+    PointCloudTopicOptionsOption,
     QualityOption,
     ResolutionOption,
     ScaleOption,
     StartTimeOption,
     TopicOption,
+    VideoTopicFfmpegArgsOption,
+    VideoTopicOptionsOption,
 )
 from pymcap_cli.cmd._message_filter_options import create_message_filter
-from pymcap_cli.cmd._pointcloud_cleanup import (
-    pointcloud_worker_count,
-    resolve_pointcloud_cleanup,
-)
+from pymcap_cli.cmd._pointcloud_cleanup import pointcloud_worker_count
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.cmd.bridge._roscompress import (
+    RoscompressConfig,
+    create_image_processor,
+    create_pointcloud_cleanup_processor,
+    create_pointcloud_compress_processor,
+    create_video_compress_processor,
+    resolve_cleanup,
+)
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
@@ -74,6 +85,195 @@ _INPUT_BUFFER_BYTES = 8 * 1024 * 1024
 _ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
 
 
+@dataclass(frozen=True, slots=True)
+class _TopicOptionSpec:
+    topic: str
+    values: dict[str, str]
+
+
+def _parse_topic_option_spec(
+    specification: str,
+    *,
+    option_name: str,
+    allowed_keys: frozenset[str],
+) -> _TopicOptionSpec:
+    topic, separator, raw_values = specification.partition(":")
+    topic = topic.strip()
+    if not separator or not topic or not raw_values.strip():
+        raise ValueError(f"{option_name} must use TOPIC:key=value[,key=value...] syntax")
+
+    values: dict[str, str] = {}
+    for assignment in raw_values.split(","):
+        key, equals, value = assignment.partition("=")
+        key = key.strip().replace("_", "-")
+        value = value.strip()
+        if not equals or not key or not value:
+            raise ValueError(f"{option_name} must use TOPIC:key=value[,key=value...] syntax")
+        if key not in allowed_keys:
+            kind = "point-cloud" if option_name == "--pointcloud-topic-options" else "video"
+            raise ValueError(f"unknown {kind} topic option '{key}'")
+        if key in values:
+            raise ValueError(f"duplicate {option_name} key '{key}' for topic '{topic}'")
+        values[key] = value
+    return _TopicOptionSpec(topic=topic, values=values)
+
+
+def _choice(value: str, *, key: str, choices: frozenset[str]) -> str:
+    if value not in choices:
+        raise ValueError(f"{key} must be one of: {', '.join(sorted(choices))}")
+    return value
+
+
+def _integer(value: str, *, key: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
+
+
+def _resolve_pointcloud_topic_options(
+    specifications: list[str] | None,
+    defaults: RoscompressConfig,
+) -> dict[str, RoscompressConfig]:
+    resolved: dict[str, RoscompressConfig] = {}
+    allowed_keys = frozenset(
+        {
+            "resolution",
+            "pc-format",
+            "pc-schema",
+            "pc-encoding",
+            "pc-compression",
+            "draco-compression-level",
+        }
+    )
+    for specification in specifications or []:
+        parsed = _parse_topic_option_spec(
+            specification,
+            option_name="--pointcloud-topic-options",
+            allowed_keys=allowed_keys,
+        )
+        settings = resolved.get(parsed.topic, defaults)
+        for key, value in parsed.values.items():
+            if key == "resolution":
+                try:
+                    topic_resolution = float(value)
+                except ValueError as exc:
+                    raise ValueError(f"resolution must be a number, got {value!r}") from exc
+                if topic_resolution <= 0:
+                    raise ValueError("resolution must be positive")
+                settings = replace(settings, resolution=topic_resolution)
+            elif key == "pc-format":
+                settings = replace(
+                    settings,
+                    pc_format=_choice(value, key=key, choices=frozenset({"cloudini", "draco"})),
+                )
+            elif key == "pc-schema":
+                settings = replace(
+                    settings,
+                    pc_schema=_choice(
+                        value, key=key, choices=frozenset({"auto", "pointcloud2", "foxglove"})
+                    ),
+                )
+            elif key == "pc-encoding":
+                settings = replace(
+                    settings,
+                    pc_encoding=_choice(
+                        value, key=key, choices=frozenset({"lossy", "lossless", "none"})
+                    ),
+                )
+            elif key == "pc-compression":
+                settings = replace(
+                    settings,
+                    pc_compression=_choice(
+                        value, key=key, choices=frozenset({"zstd", "lz4", "none"})
+                    ),
+                )
+            else:
+                level = _integer(value, key=key)
+                if not 0 <= level <= 10:
+                    raise ValueError("draco-compression-level must be between 0 and 10")
+                settings = replace(settings, draco_compression_level=level)
+        resolved[parsed.topic] = settings
+    return resolved
+
+
+def _resolve_video_topic_options(
+    specifications: list[str] | None,
+    defaults: RoscompressConfig,
+    ffmpeg_specifications: list[str] | None = None,
+) -> dict[str, RoscompressConfig]:
+    resolved: dict[str, RoscompressConfig] = {}
+    allowed_keys = frozenset({"quality", "codec", "encoder", "scale", "backend"})
+    for specification in specifications or []:
+        parsed = _parse_topic_option_spec(
+            specification,
+            option_name="--video-topic-options",
+            allowed_keys=allowed_keys,
+        )
+        settings = resolved.get(parsed.topic, defaults)
+        for key, value in parsed.values.items():
+            if key == "quality":
+                topic_quality = _integer(value, key=key)
+                if not 0 <= topic_quality <= 51:
+                    raise ValueError("quality must be between 0 and 51")
+                settings = replace(settings, quality=topic_quality)
+            elif key == "codec":
+                settings = replace(
+                    settings,
+                    codec=_choice(
+                        value, key=key, choices=frozenset({"h264", "h265", "vp9", "av1"})
+                    ),
+                )
+            elif key == "encoder":
+                settings = replace(settings, encoder=None if value in {"auto", "none"} else value)
+            elif key == "scale":
+                if value in {"none", "original"}:
+                    settings = replace(settings, scale=None)
+                else:
+                    topic_scale = _integer(value, key=key)
+                    if topic_scale <= 0:
+                        raise ValueError("scale must be positive")
+                    settings = replace(settings, scale=topic_scale)
+            else:
+                settings = replace(
+                    settings,
+                    backend=_choice(
+                        value,
+                        key=key,
+                        choices=frozenset({"auto", "ffmpeg-cli", "gstreamer", "pyav"}),
+                    ),
+                )
+        resolved[parsed.topic] = settings
+    for specification in ffmpeg_specifications or []:
+        topic, separator, raw_args = specification.partition(":")
+        topic = topic.strip()
+        if not separator or not topic or not raw_args.strip():
+            raise ValueError("--video-topic-ffmpeg-args must use TOPIC:ARGS syntax")
+        settings = resolved.get(topic, defaults)
+        topic_args = (
+            ()
+            if raw_args.strip() == "none"
+            else settings.ffmpeg_args + _parse_ffmpeg_args(raw_args)
+        )
+        resolved[topic] = replace(
+            settings,
+            ffmpeg_args=topic_args,
+        )
+    return resolved
+
+
+def _parse_ffmpeg_args(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    try:
+        arguments = tuple(shlex.split(value))
+    except ValueError as exc:
+        raise ValueError(f"invalid FFmpeg arguments: {exc}") from exc
+    if not arguments:
+        raise ValueError("FFmpeg arguments must not be empty")
+    return arguments
+
+
 def roscompress(
     file: str,
     output: OutputPathOption,
@@ -88,9 +288,25 @@ def roscompress(
     encoder: Annotated[
         EncoderOption, Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = None,
+    video_topic_options: Annotated[
+        VideoTopicOptionsOption,
+        Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT]),
+    ] = None,
+    ffmpeg_args: Annotated[
+        FfmpegArgsOption,
+        Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT]),
+    ] = None,
+    video_topic_ffmpeg_args: Annotated[
+        VideoTopicFfmpegArgsOption,
+        Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT]),
+    ] = None,
     resolution: Annotated[
         ResolutionOption, Parameter(group=[POINTCLOUD_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = 0.01,
+    pointcloud_topic_options: Annotated[
+        PointCloudTopicOptionsOption,
+        Parameter(group=[POINTCLOUD_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT]),
+    ] = None,
     pc_format: Annotated[
         PointCloudFormatOption,
         Parameter(group=[POINTCLOUD_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT]),
@@ -152,11 +368,19 @@ def roscompress(
         Video codec (h264, h265, vp9, av1). Default: h264.
     encoder
         Force specific encoder (libx264, h264_videotoolbox, etc.). If None, auto-detect.
+    video_topic_options
+        Exact-topic video overrides using ``TOPIC:key=value[,key=value...]``. Repeatable.
+    ffmpeg_args
+        Extra ffmpeg output arguments as one shell-style string. Requires ffmpeg-cli.
+    video_topic_ffmpeg_args
+        Exact-topic extra ffmpeg arguments using ``TOPIC:ARGS``. Repeatable.
     scale
         Cap the maximum image dimension (width or height) while preserving aspect ratio.
         When None, use original resolution.
     resolution
         Resolution for lossy point cloud compression. Default: 0.01.
+    pointcloud_topic_options
+        Exact-topic point-cloud overrides using ``TOPIC:key=value[,key=value...]``. Repeatable.
     pc_format
         Point cloud output format (cloudini or draco). Default: cloudini.
     pc_schema
@@ -177,6 +401,8 @@ def roscompress(
         topics unchanged.
     jpeg_quality
         JPEG quality (1-100, higher = better) when ``image_format=jpeg``. Default: 90.
+    backend
+        Video encoder backend. Default: auto.
     pointcloud
         Enable point cloud compression. Default: True.
     pointcloud_drop_invalid
@@ -194,12 +420,42 @@ def roscompress(
         logger.error("Output path is the same file as the input; choose a different output file.")
         return 1
 
+    if (video_topic_options or ffmpeg_args or video_topic_ffmpeg_args) and image_format != "video":
+        logger.error("video topic and FFmpeg options require --image-format video")
+        return 1
+    if pointcloud_topic_options and not pointcloud:
+        logger.error("--pointcloud-topic-options requires --pointcloud enabled")
+        return 1
+
     try:
-        cleanup = resolve_pointcloud_cleanup(
-            pointcloud_compression_enabled=pointcloud,
+        defaults = RoscompressConfig(
+            image_format=image_format,
+            codec=codec,
+            quality=quality,
+            encoder=encoder,
+            backend=backend,
+            scale=scale,
+            jpeg_quality=jpeg_quality,
+            pointcloud=pointcloud,
+            resolution=resolution,
+            pc_format=pc_format,
+            pc_schema=pc_schema,
+            pc_encoding=pc_encoding,
+            pc_compression=pc_compression,
+            draco_compression_level=draco_compression_level,
             pointcloud_drop_invalid=pointcloud_drop_invalid,
             pointcloud_sort_field=pointcloud_sort_field,
+            ffmpeg_args=_parse_ffmpeg_args(ffmpeg_args),
         )
+        video_topic_settings = _resolve_video_topic_options(
+            video_topic_options,
+            defaults,
+            video_topic_ffmpeg_args,
+        )
+        pointcloud_topic_settings = _resolve_pointcloud_topic_options(
+            pointcloud_topic_options, defaults
+        )
+        cleanup = resolve_cleanup(defaults)
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
         return 1
@@ -213,71 +469,53 @@ def roscompress(
     extras: list[InputProcessor] = []
     try:
         if image_format == "video":
-            from pymcap_cli.core.processors.video_compress import (  # noqa: PLC0415
-                VideoCompressProcessor,
-            )
-
+            overridden_topics = frozenset(video_topic_settings)
+            for topic_name, settings in video_topic_settings.items():
+                extras.append(
+                    create_video_compress_processor(settings, topics=frozenset({topic_name}))
+                )
             extras.append(
-                VideoCompressProcessor(
-                    codec=codec,
-                    quality=quality,
-                    encoder=encoder,
-                    scale=scale,
-                    backend=EncoderMode(backend),
+                create_video_compress_processor(
+                    defaults,
+                    exclude_topics=overridden_topics,
                 )
             )
         elif image_format in {"jpeg", "png"}:
-            from pymcap_cli.core.processors.image_compress import (  # noqa: PLC0415
-                ImageCompressProcessor,
-            )
+            extras.append(create_image_processor(defaults))
 
-            extras.append(
-                ImageCompressProcessor(
-                    image_format=image_format,
-                    jpeg_quality=jpeg_quality,
-                    scale=scale,
-                )
-            )
-
-        use_fused_cloudini_cleanup = pointcloud and pc_format == "cloudini"
+        use_fused_cloudini_cleanup = (
+            pointcloud and pc_format == "cloudini" and not pointcloud_topic_settings
+        )
         if cleanup.enabled and not use_fused_cloudini_cleanup:
-            from pymcap_cli.core.processors.pointcloud_clean import (  # noqa: PLC0415
-                PointcloudCleanProcessor,
-            )
-
-            extras.append(
-                PointcloudCleanProcessor(
-                    drop_invalid=cleanup.drop_invalid,
-                    sort_field=cleanup.sort_field,
-                )
-            )
+            cleanup_processor = create_pointcloud_cleanup_processor(defaults)
+            assert cleanup_processor is not None
+            extras.append(cleanup_processor)
 
         if pointcloud:
-            from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
-                PointcloudCompressProcessor,
-            )
-
+            workers = pointcloud_worker_count()
+            overridden_topics = frozenset(pointcloud_topic_settings)
+            for topic_name, settings in pointcloud_topic_settings.items():
+                extras.append(
+                    create_pointcloud_compress_processor(
+                        settings,
+                        workers=workers,
+                        fuse_cleanup=False,
+                        topics=frozenset({topic_name}),
+                    )
+                )
             extras.append(
-                PointcloudCompressProcessor(
-                    pc_format=pc_format,
-                    pc_schema=pc_schema,
-                    pc_encoding=pc_encoding,
-                    pc_compression=pc_compression,
-                    resolution=resolution,
-                    draco_compression_level=draco_compression_level,
-                    drop_invalid=cleanup.drop_invalid if use_fused_cloudini_cleanup else False,
-                    sort_field=cleanup.sort_field if use_fused_cloudini_cleanup else None,
-                    # Always parallelize point-cloud compression on its own pool.
-                    # Profiling the video path showed the main thread is NOT idle
-                    # (it drives reading + video dispatch/drain + writing), so
-                    # compressing point clouds inline on it serializes behind that
-                    # work rather than "riding for free". A dedicated pool lets
-                    # Cloudini/Draco work overlap the main loop.
-                    workers=pointcloud_worker_count(),
+                create_pointcloud_compress_processor(
+                    defaults,
+                    workers=workers,
+                    fuse_cleanup=use_fused_cloudini_cleanup,
+                    exclude_topics=overridden_topics,
                 )
             )
     except ImportError:
-        extra = "draco" if pc_format == "draco" else "pointcloud"
+        uses_draco = pc_format == "draco" or any(
+            settings.pc_format == "draco" for settings in pointcloud_topic_settings.values()
+        )
+        extra = "draco" if uses_draco else "pointcloud"
         logger.error(  # noqa: TRY400
             f"Optional dependencies are required for this mode. "
             f"Install with: uv add 'pymcap-cli[{extra}]'"
@@ -294,6 +532,24 @@ def roscompress(
     if image_format == "video":
         logger.info(f"Image mode: video ({encoder or 'auto'}, {codec}, backend={backend})")
         logger.info(f"Quality (CRF): {quality}")
+        if defaults.ffmpeg_args:
+            logger.info("FFmpeg args: %s", shlex.join(defaults.ffmpeg_args))
+        for topic_name, settings in video_topic_settings.items():
+            logger.info(
+                "Video topic %s: %s q%d scale=%s encoder=%s backend=%s",
+                topic_name,
+                settings.codec,
+                settings.quality,
+                settings.scale or "original",
+                settings.encoder or "auto",
+                settings.backend,
+            )
+            if settings.ffmpeg_args:
+                logger.info(
+                    "Video topic %s ffmpeg args: %s",
+                    topic_name,
+                    shlex.join(settings.ffmpeg_args),
+                )
     elif image_format == "jpeg":
         logger.info(f"Image mode: jpeg (raw → CompressedImage, q={jpeg_quality})")
     elif image_format == "png":
@@ -304,6 +560,18 @@ def roscompress(
         logger.info(f"Scale (max dim): {scale}px")
     if pointcloud:
         logger.info(f"Point cloud: {pc_format} (schema={pc_schema})")
+        for topic_name, settings in pointcloud_topic_settings.items():
+            logger.info(
+                "Point cloud topic %s: %s (schema=%s, resolution=%g, encoding=%s, "
+                "compression=%s, draco-level=%d)",
+                topic_name,
+                settings.pc_format,
+                settings.pc_schema,
+                settings.resolution,
+                settings.pc_encoding,
+                settings.pc_compression,
+                settings.draco_compression_level,
+            )
     else:
         logger.info("Point cloud compression: disabled")
     if cleanup.enabled:

@@ -86,8 +86,12 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
         drop_invalid: bool = False,
         sort_field: str | None = None,
         workers: int = 0,
+        topics: frozenset[str] | None = None,
+        exclude_topics: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(workers=workers)
+        self._topics = topics
+        self._exclude_topics = exclude_topics
         self._compressor_args = (
             pc_format,
             pc_encoding,
@@ -119,7 +123,12 @@ class PointcloudCompressProcessor(MessageTransformProcessor):
 
     @override
     def matches(self, channel: Channel, schema: Schema | None) -> bool:
-        return schema is not None and normalize_schema_name(schema.name) in POINTCLOUD2_SCHEMAS
+        return (
+            schema is not None
+            and normalize_schema_name(schema.name) in POINTCLOUD2_SCHEMAS
+            and (self._topics is None or channel.topic in self._topics)
+            and channel.topic not in self._exclude_topics
+        )
 
     def _compressor(self) -> PointCloudCompressorProtocol:
         """The calling thread's compressor (built lazily; not shared across threads)."""

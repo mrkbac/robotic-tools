@@ -109,6 +109,7 @@ class VideoCompressionBackend(Protocol[FrameT]):
         *,
         input_pix_fmt: str | None = None,
         scale: tuple[int, int] | None = None,
+        extra_args: tuple[str, ...] = (),
     ) -> VideoEncoderProtocol[FrameT]: ...
 
     def get_pix_fmt(self, topic: str) -> str | None: ...

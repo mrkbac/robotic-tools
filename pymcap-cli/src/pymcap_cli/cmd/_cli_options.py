@@ -51,6 +51,11 @@ IMAGE_POINTCLOUD_MODE_CONSTRAINT = constraint_group(
     requires_value("--codec", "--image-format", "video", hint="--image-format video"),
     requires_value("--encoder", "--image-format", "video", hint="--image-format video"),
     requires_value("--backend", "--image-format", "video", hint="--image-format video"),
+    requires_value("--ffmpeg-args", "--image-format", "video", hint="--image-format video"),
+    requires_value("--video-topic-options", "--image-format", "video", hint="--image-format video"),
+    requires_value(
+        "--video-topic-ffmpeg-args", "--image-format", "video", hint="--image-format video"
+    ),
     requires_value(
         "--scale", "--image-format", "video", "jpeg", "png", hint="a non-none --image-format"
     ),
@@ -58,6 +63,7 @@ IMAGE_POINTCLOUD_MODE_CONSTRAINT = constraint_group(
         "--jpeg-quality", "--image-format", "jpeg", "png", hint="--image-format jpeg or png"
     ),
     requires_value("--resolution", "--pointcloud", True, hint="--pointcloud enabled"),
+    requires_value("--pointcloud-topic-options", "--pointcloud", True, hint="--pointcloud enabled"),
     requires_value("--pc-format", "--pointcloud", True, hint="--pointcloud enabled"),
     requires_value("--pc-schema", "--pointcloud", True, hint="--pointcloud enabled"),
     requires_value("--pc-encoding", "--pointcloud", True, hint="--pointcloud enabled"),
@@ -528,6 +534,18 @@ BackendOption = Annotated[
     Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"],
     Parameter(name=["--backend"], group=ENCODING_GROUP),
 ]
+FfmpegArgsOption = Annotated[
+    str | None,
+    Parameter(
+        name=["--ffmpeg-args"],
+        group=ENCODING_GROUP,
+        help=(
+            "Extra ffmpeg output arguments as one shell-style string. Requires an "
+            "ffmpeg-cli backend; arguments are passed directly without shell evaluation. "
+            "Use --ffmpeg-args='-preset medium' when the value begins with a dash."
+        ),
+    ),
+]
 OptionalBackendOption = Annotated[
     Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"] | None,
     Parameter(name=["--backend"], group=ENCODING_GROUP, help="Preset default: auto."),
@@ -594,9 +612,43 @@ PointCloudSortFieldOption = Annotated[
     str | None,
     Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
 ]
+PointCloudTopicOptionsOption = Annotated[
+    list[str] | None,
+    Parameter(
+        name=["--pointcloud-topic-options"],
+        group=POINTCLOUD_GROUP,
+        help=(
+            "Exact-topic overrides as TOPIC:key=value[,key=value...]; repeatable. "
+            "Keys: resolution, pc-format, pc-schema, pc-encoding, pc-compression, "
+            "draco-compression-level."
+        ),
+    ),
+]
 OptionalPointCloudSortFieldOption = Annotated[
     str | None,
     Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
+]
+VideoTopicOptionsOption = Annotated[
+    list[str] | None,
+    Parameter(
+        name=["--video-topic-options"],
+        group=ENCODING_GROUP,
+        help=(
+            "Exact-topic overrides as TOPIC:key=value[,key=value...]; repeatable. "
+            "Keys: quality, codec, encoder, scale, backend."
+        ),
+    ),
+]
+VideoTopicFfmpegArgsOption = Annotated[
+    list[str] | None,
+    Parameter(
+        name=["--video-topic-ffmpeg-args"],
+        group=ENCODING_GROUP,
+        help=(
+            "Append extra ffmpeg output arguments for an exact topic as "
+            "TOPIC:ARGS; repeatable. Inherits --ffmpeg-args; use TOPIC:none to clear."
+        ),
+    ),
 ]
 
 MessagePathVariablesOption = Annotated[

@@ -9,6 +9,7 @@ from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 
 if TYPE_CHECKING:
     from pymcap_cli.cmd._pointcloud_cleanup import PointcloudCleanupConfig
+    from pymcap_cli.core.processors.base import InputProcessor
     from pymcap_cli.core.processors.message_transform import MessageTransformProcessor
 
 BackendName = Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
@@ -38,6 +39,7 @@ class RoscompressConfig:
     draco_compression_level: int = 7
     pointcloud_drop_invalid: bool | None = None
     pointcloud_sort_field: str | None = None
+    ffmpeg_args: tuple[str, ...] = ()
 
 
 def resolve_cleanup(config: RoscompressConfig) -> PointcloudCleanupConfig:
@@ -112,13 +114,16 @@ def create_pointcloud_compress_processor(
     config: RoscompressConfig,
     *,
     workers: int = 0,
+    fuse_cleanup: bool = True,
+    topics: frozenset[str] | None = None,
+    exclude_topics: frozenset[str] = frozenset(),
 ) -> MessageTransformProcessor:
     from pymcap_cli.core.processors.pointcloud_compress import (  # noqa: PLC0415
         PointcloudCompressProcessor,
     )
 
     cleanup = resolve_cleanup(config)
-    use_fused_cleanup = config.pc_format == "cloudini"
+    use_fused_cleanup = fuse_cleanup and config.pc_format == "cloudini"
     return PointcloudCompressProcessor(
         pc_format=config.pc_format,
         pc_schema=config.pc_schema,
@@ -129,4 +134,30 @@ def create_pointcloud_compress_processor(
         drop_invalid=cleanup.drop_invalid if use_fused_cleanup else False,
         sort_field=cleanup.sort_field if use_fused_cleanup else None,
         workers=workers,
+        topics=topics,
+        exclude_topics=exclude_topics,
+    )
+
+
+def create_video_compress_processor(
+    config: RoscompressConfig,
+    *,
+    topics: frozenset[str] | None = None,
+    exclude_topics: frozenset[str] = frozenset(),
+) -> InputProcessor:
+    from mcap_codec_support.video import EncoderMode  # noqa: PLC0415
+
+    from pymcap_cli.core.processors.video_compress import (  # noqa: PLC0415
+        VideoCompressProcessor,
+    )
+
+    return VideoCompressProcessor(
+        codec=config.codec,
+        quality=config.quality,
+        encoder=config.encoder,
+        scale=config.scale,
+        backend=EncoderMode(config.backend),
+        ffmpeg_args=config.ffmpeg_args,
+        topics=topics,
+        exclude_topics=exclude_topics,
     )
