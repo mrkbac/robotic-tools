@@ -4,6 +4,40 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.29.0, mcap-codec-support 0.17.0
+
+Headline: `roscompress` can tune video and point-cloud compression per topic,
+while codec decoders now return ROS-like messages that compose directly with
+the rest of the ROS tooling.
+
+### pymcap-cli 0.29.0
+
+- `roscompress` accepts repeatable per-topic video and point-cloud profiles.
+  Selectors are case-insensitive full-match regexes, unspecified values inherit
+  the global settings, the first matching profile wins, and unmatched or fully
+  shadowed profiles produce a warning.
+- Video profiles can override quality, codec, encoder, scale, and backend;
+  point-cloud profiles can override resolution, format, schema, encoding,
+  compression, and Draco compression level.
+- The FFmpeg CLI backend accepts global and per-topic output arguments using
+  shell-style quoting without invoking a shell. Per-topic arguments can extend
+  or clear the inherited global arguments.
+- Decompression and PCD export consume the codec library's ROS-like image and
+  point-cloud messages directly, keeping attribute access and CDR re-encoding
+  consistent with ordinary decoded ROS messages.
+
+### mcap-codec-support 0.17.0
+
+- Video and point-cloud decoder factories return exported ROS-like `Image`,
+  `CompressedImage`, `PointCloud2`, and `PointField` dataclass instances instead
+  of dictionaries. They expose standard message metadata and field access and
+  work directly with existing point-cloud helpers.
+- Video compression backends support explicit extra encoder arguments for the
+  FFmpeg CLI path and reject them clearly for PyAV and GStreamer instead of
+  silently ignoring unsupported settings.
+
+---
+
 ## pymcap-cli 0.28.0, mcap-codec-support 0.16.0, mcap-ros2-support-fast 0.8.0, pointcloud2 0.6.0, pureini 0.10.0, small-mcap 0.15.0, robo-ws-bridge 0.11.0, ros-parser 0.9.0, digitalis 0.13.0
 
 Headline: ROS message tooling gains RIHS01 hashing, definition search, and
