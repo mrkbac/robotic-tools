@@ -77,6 +77,37 @@ def test_walkers_match_and_finish_all_directories(
     assert adaptive_progress[-1] == 11
 
 
+def test_adaptive_walker_does_not_time_consumer_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = tmp_path / "child"
+    grandchild = child / "grandchild"
+    grandchild.mkdir(parents=True)
+    files = [
+        tmp_path / "root.mcap",
+        child / "child.mcap",
+        grandchild / "grandchild.mcap",
+    ]
+    for path in files:
+        path.write_bytes(b"")
+
+    now_ns = 0
+    monkeypatch.setattr(index_scanner.time, "perf_counter_ns", lambda: now_ns)
+
+    def _fail_parallel(*_args, **_kwargs):
+        pytest.fail("consumer time must not make the adaptive walker select threads")
+
+    monkeypatch.setattr(index_scanner, "_iter_mcap_files_parallel", _fail_parallel)
+
+    walker = index_scanner._iter_mcap_files(tmp_path, recurse=True)
+    first = next(walker)
+    now_ns = index_scanner._SLOW_DIRECTORY_SCAN_NS * 10
+    discovered = [first, *walker]
+
+    assert {path for path, _ in discovered} == set(files)
+
+
 def test_force_rebuild_refreshes_existing_aggregates(tmp_path: Path) -> None:
     """``scan(force_rebuild=True)`` backfills derived columns on existing rows."""
     files = _make_mcap_tree(tmp_path, count=2)

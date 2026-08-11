@@ -272,31 +272,23 @@ def _iter_mcap_files_adaptive(
     while stack:
         directory = stack.pop()
         started_ns = time.perf_counter_ns()
-        try:
-            scan_it = os.scandir(directory)
-        except OSError:
+        scanned = _scan_directory(directory)
+        if scanned is None:
             continue
-        with scan_it:
-            for entry in scan_it:
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(entry.path)
-                        continue
-                    if not entry.name.endswith(".mcap"):
-                        continue
-                    st = entry.stat()
-                except OSError:
-                    continue
-                if stat.S_ISREG(st.st_mode):
-                    yield Path(entry.path), st
+        new_dirs, files = scanned
         elapsed_ns += time.perf_counter_ns() - started_ns
+        stack.extend(new_dirs)
         dirs_done += 1
         if on_dir_done is not None and dirs_done % 200 == 0:
             on_dir_done(dirs_done)
 
-        if dirs_done != _WALKER_PROBE_DIRECTORIES:
-            continue
-        if stack and elapsed_ns // dirs_done >= _SLOW_DIRECTORY_SCAN_NS:
+        should_parallelize = (
+            dirs_done == _WALKER_PROBE_DIRECTORIES
+            and bool(stack)
+            and elapsed_ns // dirs_done >= _SLOW_DIRECTORY_SCAN_NS
+        )
+        yield from files
+        if should_parallelize:
             if on_dir_done is not None:
                 on_dir_done(dirs_done)
 
@@ -316,6 +308,30 @@ def _iter_mcap_files_adaptive(
 
     if on_dir_done is not None:
         on_dir_done(dirs_done)
+
+
+def _scan_directory(
+    directory: str,
+) -> tuple[list[str], list[tuple[Path, os.stat_result]]] | None:
+    new_dirs: list[str] = []
+    files: list[tuple[Path, os.stat_result]] = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        new_dirs.append(entry.path)
+                        continue
+                    if not entry.name.endswith(".mcap"):
+                        continue
+                    st = entry.stat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    files.append((Path(entry.path), st))
+    except OSError:
+        return None
+    return new_dirs, files
 
 
 def _iter_mcap_files_serial(
@@ -365,36 +381,14 @@ def _iter_mcap_files_parallel(
     keeping slow mounts busy without a per-file cross-thread queue.
     """
 
-    def _scan_directory(
-        directory: str,
-    ) -> tuple[list[str], list[tuple[Path, os.stat_result]]]:
-        new_dirs: list[str] = []
-        files: list[tuple[Path, os.stat_result]] = []
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            new_dirs.append(entry.path)
-                            continue
-                        if not entry.name.endswith(".mcap"):
-                            continue
-                        st = entry.stat()
-                    except OSError:
-                        continue
-                    if stat.S_ISREG(st.st_mode):
-                        files.append((Path(entry.path), st))
-        except OSError:
-            pass
-        return new_dirs, files
-
     dirs_done = 0
     with ThreadPoolExecutor(max_workers=walker_workers) as executor:
         pending = {executor.submit(_scan_directory, root_str) for root_str in root_strs}
         while pending:
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
-                new_dirs, files = future.result()
+                scanned = future.result()
+                new_dirs, files = scanned if scanned is not None else ([], [])
                 dirs_done += 1
                 pending.update(executor.submit(_scan_directory, path) for path in new_dirs)
                 yield from files
