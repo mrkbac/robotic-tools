@@ -832,6 +832,9 @@ pymcap-cli roscompress data.mcap -o compressed.mcap \
 pymcap-cli roscompress data.mcap -o compressed.mcap --backend ffmpeg-cli \
   --ffmpeg-args='-preset medium' \
   --video-topic-ffmpeg-args '/CAM_.*/image:-tune film -threads 4'
+
+# Delete the local source only after validating the completed output
+pymcap-cli roscompress data.mcap -o compressed.mcap --delete-source
 ```
 
 Topic profiles inherit every unspecified global option. The selector is a topic
@@ -866,6 +869,9 @@ pymcap-cli rosdecompress input.mcap output.mcap --video-format raw
 
 # Skip point cloud decompression
 pymcap-cli rosdecompress input.mcap output.mcap --no-pointcloud
+
+# Delete the local source only after validating the completed output
+pymcap-cli rosdecompress input.mcap output.mcap --delete-source
 ```
 
 ### `export-images` — Image Files

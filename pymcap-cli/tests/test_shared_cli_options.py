@@ -147,6 +147,14 @@ def test_roscompress_exposes_per_topic_compression_options(
     assert "--video-topic-ffmpeg-args" in output
 
 
+@pytest.mark.parametrize("command", ["roscompress", "rosdecompress"])
+def test_ros_transforms_expose_delete_source(
+    command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "--delete-source" in _help(capsys, command)
+
+
 @pytest.mark.parametrize("command", ["play", "serve"])
 def test_bridge_playback_exposes_ros_transform_presets(
     command: str,

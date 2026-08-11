@@ -26,6 +26,7 @@ from pymcap_cli.cmd._cli_options import (
     POINTCLOUD_GROUP,
     BackendOption,
     CodecOption,
+    DeleteSourceOption,
     DracoCompressionLevelOption,
     EncoderOption,
     EndTimeOption,
@@ -67,7 +68,12 @@ from pymcap_cli.cmd._roscompress_topic_options import (
     VideoTopicProfile,
     parse_topic_pattern,
 )
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.cmd._run_processor import (
+    finalize_delete_source,
+    processing_had_errors,
+    resolve_overwrite_policy,
+    run_processor,
+)
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
@@ -248,6 +254,7 @@ def roscompress(
     output: OutputPathOption,
     *,
     force: ForceOverwriteOption = False,
+    delete_source: DeleteSourceOption = False,
     quality: Annotated[
         QualityOption, Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = 28,
@@ -331,6 +338,8 @@ def roscompress(
         Output filename.
     force
         Force overwrite of output file without confirmation.
+    delete_source
+        Delete the local source after the output is validated. URL inputs are skipped.
     quality
         Video quality (CRF: lower = better, 0-51). Default: 28.
     codec
@@ -647,6 +656,16 @@ def roscompress(
     input_size = _local_size(file)
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
+
+    if delete_source:
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source file preserved.")
+            return 1
+        return finalize_delete_source(
+            sources=[file],
+            outputs=[output],
+            require_lossless=not (topic or exclude_topic or start or end),
+        )
 
     return 0
 

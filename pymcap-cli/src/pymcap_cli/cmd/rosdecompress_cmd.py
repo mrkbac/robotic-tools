@@ -18,10 +18,16 @@ from pymcap_cli.cmd._arg_constraints import constraint_group, requires_value
 from pymcap_cli.cmd._cli_options import (
     ENCODING_GROUP,
     BackendOption,
+    DeleteSourceOption,
     ForceOverwriteOption,
     OutputPathOption,
 )
-from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
+from pymcap_cli.cmd._run_processor import (
+    finalize_delete_source,
+    processing_had_errors,
+    resolve_overwrite_policy,
+    run_processor,
+)
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.utils import output_overwrites_input
@@ -48,6 +54,7 @@ def rosdecompress(
     output: OutputPathOption,
     *,
     force: ForceOverwriteOption = False,
+    delete_source: DeleteSourceOption = False,
     video: Annotated[
         bool,
         Parameter(
@@ -92,6 +99,8 @@ def rosdecompress(
         Output filename.
     force
         Force overwrite of output file without confirmation.
+    delete_source
+        Delete the local source after the output is validated. URL inputs are skipped.
     video
         Enable video decompression. Default: True.
     video_format
@@ -163,6 +172,16 @@ def rosdecompress(
     input_size = _local_size(file)
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
+
+    if delete_source:
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source file preserved.")
+            return 1
+        return finalize_delete_source(
+            sources=[file],
+            outputs=[output],
+            require_lossless=True,
+        )
 
     return 0
 

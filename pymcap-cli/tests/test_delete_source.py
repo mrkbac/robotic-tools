@@ -13,8 +13,10 @@ from pymcap_cli.cmd._run_processor import (
 )
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.cmd.merge_cmd import merge
+from pymcap_cli.cmd.roscompress_cmd import roscompress
+from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
 
-from tests.fixtures.mcap_generator import create_simple_mcap
+from tests.fixtures.mcap_generator import create_multi_topic_mcap, create_simple_mcap
 
 
 def test_validate_mcap_output_returns_true_for_valid_file(simple_mcap: Path) -> None:
@@ -142,6 +144,95 @@ def test_compress_command_deletes_source_on_success(simple_mcap_copy: Path, tmp_
     assert not simple_mcap_copy.exists()
     assert output.exists()
     assert validate_mcap_output(output)
+
+
+@pytest.mark.parametrize("command", ["roscompress", "rosdecompress"])
+def test_ros_transform_command_deletes_source_on_success(
+    command: str,
+    simple_mcap_copy: Path,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "out.mcap"
+
+    if command == "roscompress":
+        rc = roscompress(
+            str(simple_mcap_copy),
+            output,
+            force=True,
+            delete_source=True,
+            image_format="none",
+            pointcloud=False,
+        )
+    else:
+        rc = rosdecompress(
+            str(simple_mcap_copy),
+            output,
+            force=True,
+            delete_source=True,
+            video=False,
+            pointcloud=False,
+        )
+
+    assert rc == 0
+    assert not simple_mcap_copy.exists()
+    assert validate_mcap_output(output)
+
+
+@pytest.mark.parametrize("command", ["roscompress", "rosdecompress"])
+def test_ros_transform_command_keeps_source_when_output_loses_messages(
+    command: str,
+    simple_mcap_copy: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "out.mcap"
+
+    def message_count(path: Path) -> int:
+        return 1 if path == output else 2
+
+    monkeypatch.setattr(_run_processor, "mcap_message_count", message_count)
+    if command == "roscompress":
+        rc = roscompress(
+            str(simple_mcap_copy),
+            output,
+            force=True,
+            delete_source=True,
+            image_format="none",
+            pointcloud=False,
+        )
+    else:
+        rc = rosdecompress(
+            str(simple_mcap_copy),
+            output,
+            force=True,
+            delete_source=True,
+            video=False,
+            pointcloud=False,
+        )
+
+    assert rc == 1
+    assert simple_mcap_copy.exists()
+    assert validate_mcap_output(output)
+
+
+def test_roscompress_filtered_delete_allows_intentional_message_loss(tmp_path: Path) -> None:
+    source = tmp_path / "src.mcap"
+    source.write_bytes(create_multi_topic_mcap(["/keep", "/drop"], messages_per_topic=2))
+    output = tmp_path / "out.mcap"
+
+    rc = roscompress(
+        str(source),
+        output,
+        force=True,
+        delete_source=True,
+        image_format="none",
+        pointcloud=False,
+        topic=["/keep"],
+    )
+
+    assert rc == 0
+    assert not source.exists()
+    assert _run_processor.mcap_message_count(output) == 2
 
 
 def test_compress_command_keeps_source_on_validation_failure(
