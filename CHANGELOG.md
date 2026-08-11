@@ -4,6 +4,28 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.31.0
+
+Headline: indexed recording workflows gain per-file MessagePath statistics and
+substantially faster scans, while ROS compression profiles and source cleanup
+become safer and more explicit.
+
+- Added `index stats` to run terminal MessagePath reducers such as `@@max`,
+  `@@mean`, and `@@count` once per indexed file, with table and JSON output,
+  folder filtering, variables, and clear stale-file errors.
+- Accelerated fresh, incremental, and unchanged index scans by avoiding
+  unnecessary process pools and catalog-wide cache loads. Directory discovery
+  stays serial on fast local storage and switches to bounded threaded walking
+  when initial directory reads indicate a slow mount.
+- Per-topic `roscompress` profiles now use validated typed options. Profiles can
+  use `mode=keep` to copy matching video or point-cloud topics unchanged, or
+  `mode=default` to reset earlier overrides for the same selector.
+- `roscompress` and `rosdecompress` now support `--delete-source`. They preserve
+  the input when processing reports errors, output validation fails, or an
+  unfiltered transform writes fewer messages than the source.
+
+---
+
 ## pymcap-cli 0.30.0
 
 - Fixed the isolated `pointcloud` extra so the `pymcap-cli` entry point no
