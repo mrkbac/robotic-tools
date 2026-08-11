@@ -47,8 +47,7 @@ from pymcap_cli.cmd.bridge._shared import (
 )
 from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.core.named_message_path import (
-    create_cat_query_evaluators,
-    evaluate_cat_queries,
+    CatQueryRuntime,
     parse_cat_queries,
 )
 from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_queries
@@ -85,7 +84,7 @@ async def _cat_async(
     path_variables = dict(variables or {})
     try:
         parsed_queries = parse_cat_queries(query)
-        stream_evaluators = create_cat_query_evaluators(parsed_queries)
+        query_runtime = CatQueryRuntime(parsed_queries)
     except Exception:
         logger.exception("Invalid --query syntax")
         return 1
@@ -178,30 +177,25 @@ async def _cat_async(
 
     def _emit_reduced() -> None:
         # Stream reducers (@@count, @@max, ...) emit one value when the session ends
-        for stream_topic, evaluators in stream_evaluators.items():
-            topic_queries = parsed_queries[stream_topic]
-            for parsed, evaluator in zip(topic_queries, evaluators, strict=True):
-                if evaluator is None:
-                    continue
-                try:
-                    final = evaluator.finalize(path_variables)
-                except MessagePathError as exc:
-                    logger.warning(f"Filter error on {stream_topic}: {exc}")
-                    continue
-                if final is NO_OUTPUT:
-                    continue
-                query_name = parsed.output_name if len(topic_queries) > 1 else parsed.source
-                value = message_to_dict(final, bytes_mode=bytes_mode)
-                if is_tty:
-                    reduced_line = Text()
-                    reduced_line.append(query_name, style="bold cyan")
-                    reduced_line.append(" = ", style="dim")
-                    reduced_line.append(json.dumps(value), style="green")
-                    console.print(reduced_line)
-                else:
-                    entry = {"topic": stream_topic, "query": query_name, "value": value}
-                    sys.stdout.write(json.dumps(entry, separators=(",", ":")) + "\n")
-                    sys.stdout.flush()
+        for stream_topic, query_name, evaluator in query_runtime.reducers():
+            try:
+                final = evaluator.finalize(path_variables)
+            except MessagePathError as exc:
+                logger.warning(f"Filter error on {stream_topic}: {exc}")
+                continue
+            if final is NO_OUTPUT:
+                continue
+            value = message_to_dict(final, bytes_mode=bytes_mode)
+            if is_tty:
+                reduced_line = Text()
+                reduced_line.append(query_name, style="bold cyan")
+                reduced_line.append(" = ", style="dim")
+                reduced_line.append(json.dumps(value), style="green")
+                console.print(reduced_line)
+            else:
+                entry = {"topic": stream_topic, "query": query_name, "value": value}
+                sys.stdout.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                sys.stdout.flush()
 
     def _on_message(channel: ChannelInfo, log_time_ns: int, payload: bytes) -> None:
         nonlocal total, return_code
@@ -243,9 +237,8 @@ async def _cat_async(
 
         if queries_for_topic is not None:
             try:
-                data = evaluate_cat_queries(
-                    queries_for_topic,
-                    stream_evaluators[topic],
+                data = query_runtime.evaluate(
+                    topic,
                     decoded,
                     log_time_ns,
                     path_variables,

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
 
 from ros_parser.message_path import (
     NO_OUTPUT,
@@ -32,6 +35,65 @@ class CatQuery:
     source: str
     output_name: str
     path: MessagePath
+
+
+class CatQueryRuntime:
+    """Stateful evaluation of cat-style queries for one message stream."""
+
+    __slots__ = ("_evaluators", "_queries")
+
+    def __init__(self, queries: Mapping[str, tuple[CatQuery, ...]]) -> None:
+        self._queries = dict(queries)
+        self._evaluators = {
+            topic: tuple(
+                MessagePathEvaluator(query.path) if query.path.has_stream else None
+                for query in topic_queries
+            )
+            for topic, topic_queries in self._queries.items()
+        }
+
+    def evaluate(
+        self,
+        topic: str,
+        decoded_message: Any,
+        timestamp_ns: int,
+        variables: MessagePathVariables,
+    ) -> Any:
+        """Evaluate the queries for one message on ``topic``."""
+        queries = self._queries[topic]
+        evaluators = self._evaluators[topic]
+        if len(queries) == 1:
+            query = queries[0]
+            evaluator = evaluators[0]
+            result = (
+                evaluator.observe(decoded_message, timestamp_ns, variables)
+                if evaluator is not None
+                else query.path.apply(decoded_message, variables)
+            )
+            return NO_OUTPUT if result is NO_OUTPUT or query_result_is_empty(result) else result
+
+        projected: dict[str, Any] = {}
+        for query, evaluator in zip(queries, evaluators, strict=True):
+            try:
+                result = (
+                    evaluator.observe(decoded_message, timestamp_ns, variables)
+                    if evaluator is not None
+                    else query.path.apply(decoded_message, variables)
+                )
+            except MessagePathError as exc:
+                raise MessagePathError(f"{query.source}: {exc}") from exc
+            if result is not NO_OUTPUT and not query_result_is_empty(result):
+                projected[query.output_name] = result
+        return projected or NO_OUTPUT
+
+    def reducers(self) -> Iterator[tuple[str, str, MessagePathEvaluator]]:
+        """Yield each stream evaluator with its topic and display name."""
+        for topic, evaluators in self._evaluators.items():
+            queries = self._queries[topic]
+            for query, evaluator in zip(queries, evaluators, strict=True):
+                if evaluator is not None:
+                    display_name = query.output_name if len(queries) > 1 else query.source
+                    yield topic, display_name, evaluator
 
 
 def parse_path_arg(arg: str) -> tuple[str, str]:
@@ -63,52 +125,6 @@ def parse_cat_queries(queries: list[str] | None) -> dict[str, tuple[CatQuery, ..
             )
         topic_queries.append(CatQuery(source=path_source, output_name=output_name, path=path))
     return {topic: tuple(topic_queries) for topic, topic_queries in parsed.items()}
-
-
-def create_cat_query_evaluators(
-    parsed_queries: dict[str, tuple[CatQuery, ...]],
-) -> dict[str, tuple[MessagePathEvaluator | None, ...]]:
-    """Create independent stream state for every parsed query."""
-    return {
-        topic: tuple(
-            MessagePathEvaluator(parsed.path) if parsed.path.has_stream else None
-            for parsed in topic_queries
-        )
-        for topic, topic_queries in parsed_queries.items()
-    }
-
-
-def evaluate_cat_queries(
-    queries: tuple[CatQuery, ...],
-    evaluators: tuple[MessagePathEvaluator | None, ...],
-    decoded_message: Any,
-    timestamp_ns: int,
-    variables: MessagePathVariables,
-) -> Any:
-    """Evaluate one topic's queries, combining multiple projections by output name."""
-    if len(queries) == 1:
-        parsed = queries[0]
-        evaluator = evaluators[0]
-        result = (
-            evaluator.observe(decoded_message, timestamp_ns, variables)
-            if evaluator is not None
-            else parsed.path.apply(decoded_message, variables)
-        )
-        return NO_OUTPUT if result is NO_OUTPUT or query_result_is_empty(result) else result
-
-    projected: dict[str, Any] = {}
-    for parsed, evaluator in zip(queries, evaluators, strict=True):
-        try:
-            result = (
-                evaluator.observe(decoded_message, timestamp_ns, variables)
-                if evaluator is not None
-                else parsed.path.apply(decoded_message, variables)
-            )
-        except MessagePathError as exc:
-            raise MessagePathError(f"{parsed.source}: {exc}") from exc
-        if result is not NO_OUTPUT and not query_result_is_empty(result):
-            projected[parsed.output_name] = result
-    return projected or NO_OUTPUT
 
 
 def query_result_is_empty(result: object) -> bool:

@@ -42,8 +42,7 @@ from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._message_path_options import create_message_path_variables
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.named_message_path import (
-    create_cat_query_evaluators,
-    evaluate_cat_queries,
+    CatQueryRuntime,
     parse_cat_queries,
 )
 from pymcap_cli.display.cat_helpers import SchemaCache, plan_for_queries
@@ -146,7 +145,7 @@ def cat(
 
     try:
         parsed_queries = parse_cat_queries(query)
-        stream_evaluators = create_cat_query_evaluators(parsed_queries)
+        query_runtime = CatQueryRuntime(parsed_queries)
     except Exception:
         logger.exception("Invalid query syntax")
         return 1
@@ -250,9 +249,8 @@ def cat(
                 # Apply query filter
                 if queries_for_topic is not None:
                     try:
-                        data = evaluate_cat_queries(
-                            queries_for_topic,
-                            stream_evaluators[msg.channel.topic],
+                        data = query_runtime.evaluate(
+                            msg.channel.topic,
                             msg.decoded_message,
                             msg.message.log_time,
                             variables,
@@ -320,35 +318,30 @@ def cat(
                         print(line, file=sys.stdout)  # noqa: T201
 
             # Stream reducers (@@count, @@max, ...) emit one value at end of stream
-            for stream_topic, evaluators in stream_evaluators.items():
-                topic_queries = parsed_queries[stream_topic]
-                for parsed, evaluator in zip(topic_queries, evaluators, strict=True):
-                    if evaluator is None:
-                        continue
-                    try:
-                        final = evaluator.finalize(variables)
-                    except MessagePathError as e:
-                        logger.warning(f"Filter error on {stream_topic}: {e}")
-                        continue
-                    if final is NO_OUTPUT:
-                        continue
-                    query_name = parsed.output_name if len(topic_queries) > 1 else parsed.source
-                    value = message_to_dict(final, bytes_mode=bytes_mode)
-                    if is_tty:
-                        reduced_line = Text()
-                        reduced_line.append(query_name, style="bold cyan")
-                        reduced_line.append(" = ", style="dim")
-                        reduced_line.append(json.dumps(value), style="green")
-                        console_out.print(reduced_line)
+            for stream_topic, query_name, evaluator in query_runtime.reducers():
+                try:
+                    final = evaluator.finalize(variables)
+                except MessagePathError as e:
+                    logger.warning(f"Filter error on {stream_topic}: {e}")
+                    continue
+                if final is NO_OUTPUT:
+                    continue
+                value = message_to_dict(final, bytes_mode=bytes_mode)
+                if is_tty:
+                    reduced_line = Text()
+                    reduced_line.append(query_name, style="bold cyan")
+                    reduced_line.append(" = ", style="dim")
+                    reduced_line.append(json.dumps(value), style="green")
+                    console_out.print(reduced_line)
+                else:
+                    reduced_entry = json.dumps(
+                        {"topic": stream_topic, "query": query_name, "value": value},
+                        separators=(",", ":"),
+                    )
+                    if out_file is not None:
+                        out_file.write(reduced_entry + "\n")
                     else:
-                        reduced_entry = json.dumps(
-                            {"topic": stream_topic, "query": query_name, "value": value},
-                            separators=(",", ":"),
-                        )
-                        if out_file is not None:
-                            out_file.write(reduced_entry + "\n")
-                        else:
-                            print(reduced_entry, file=sys.stdout)  # noqa: T201
+                        print(reduced_entry, file=sys.stdout)  # noqa: T201
 
         if writing_to_file:
             logger.info(f"Wrote {message_count:,} messages to {output}")
