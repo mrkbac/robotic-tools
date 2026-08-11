@@ -24,14 +24,18 @@ from __future__ import annotations
 import json
 import logging
 import os
-import queue
 import stat
 import struct
-import threading
 import time
 import zlib
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
@@ -73,7 +77,10 @@ class _WorkerState:
 _WORKER_STATE = _WorkerState()
 
 
-def _worker_init(file_fp_cache: dict[str, str], known_summary_fps: set[str]) -> None:
+def _worker_init(
+    file_fp_cache: dict[str, str],
+    known_summary_fps: set[str],
+) -> None:
     _WORKER_STATE.file_fp_cache = file_fp_cache
     _WORKER_STATE.known_summary_fps = known_summary_fps
 
@@ -185,6 +192,10 @@ class _ScanResult:
 
 
 _DEFAULT_WALKER_WORKERS = 8
+_WALKER_PROBE_DIRECTORIES = 2
+_SLOW_DIRECTORY_SCAN_NS = 250_000
+_INLINE_FILE_LIMIT = 128
+_INLINE_BYTE_LIMIT = 16 * 1024 * 1024
 
 
 def _iter_mcap_files(
@@ -192,16 +203,16 @@ def _iter_mcap_files(
     *,
     recurse: bool,
     on_dir_done: Callable[[int], None] | None = None,
-    walker_workers: int = _DEFAULT_WALKER_WORKERS,
+    walker_workers: int | None = None,
 ) -> Iterator[tuple[Path, os.stat_result | None]]:
     """Yield ``(path, stat_result | None)`` for every ``.mcap`` under ``root``.
 
-    Recursive walks spread ``os.scandir()`` and ``entry.stat()`` across
-    ``walker_workers`` threads. On slow mounts (NFS, FUSE, SSHFS) most of the
-    per-directory cost is round-trip latency rather than CPU work, so even
-    a small thread pool overlaps those round-trips and cuts walker
-    wall-clock dramatically. ``walker_workers <= 1`` falls back to a serial
-    BFS that uses no threads.
+    Recursive walks start serially and switch to a small thread pool when the
+    first directories are slow. On slow mounts (NFS, FUSE, SSHFS) most of the
+    per-directory cost is round-trip latency rather than CPU work, so threads
+    overlap those round trips. Fast local filesystems avoid the thread-pool
+    overhead. An explicit ``walker_workers`` value bypasses this selection;
+    values up to one use the serial walker.
 
     The walker hands the caller the ``stat_result`` from each entry, so the
     main loop avoids a second ``stat`` per file. ``follow_symlinks=False``
@@ -240,12 +251,71 @@ def _iter_mcap_files(
             on_dir_done(1)
         return
 
-    if walker_workers <= 1:
+    if walker_workers is None:
+        yield from _iter_mcap_files_adaptive(root_str, on_dir_done=on_dir_done)
+    elif walker_workers <= 1:
         yield from _iter_mcap_files_serial(root_str, on_dir_done=on_dir_done)
     else:
         yield from _iter_mcap_files_parallel(
-            root_str, walker_workers=walker_workers, on_dir_done=on_dir_done
+            [root_str], walker_workers=walker_workers, on_dir_done=on_dir_done
         )
+
+
+def _iter_mcap_files_adaptive(
+    root_str: str,
+    *,
+    on_dir_done: Callable[[int], None] | None,
+) -> Iterator[tuple[Path, os.stat_result]]:
+    stack = [root_str]
+    dirs_done = 0
+    elapsed_ns = 0
+    while stack:
+        directory = stack.pop()
+        started_ns = time.perf_counter_ns()
+        try:
+            scan_it = os.scandir(directory)
+        except OSError:
+            continue
+        with scan_it:
+            for entry in scan_it:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                        continue
+                    if not entry.name.endswith(".mcap"):
+                        continue
+                    st = entry.stat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    yield Path(entry.path), st
+        elapsed_ns += time.perf_counter_ns() - started_ns
+        dirs_done += 1
+        if on_dir_done is not None and dirs_done % 200 == 0:
+            on_dir_done(dirs_done)
+
+        if dirs_done != _WALKER_PROBE_DIRECTORIES:
+            continue
+        if stack and elapsed_ns // dirs_done >= _SLOW_DIRECTORY_SCAN_NS:
+            if on_dir_done is not None:
+                on_dir_done(dirs_done)
+
+            def _offset_progress(
+                parallel_dirs_done: int,
+                serial_dirs_done: int = dirs_done,
+            ) -> None:
+                if on_dir_done is not None:
+                    on_dir_done(serial_dirs_done + parallel_dirs_done)
+
+            yield from _iter_mcap_files_parallel(
+                stack,
+                walker_workers=_DEFAULT_WALKER_WORKERS,
+                on_dir_done=_offset_progress,
+            )
+            return
+
+    if on_dir_done is not None:
+        on_dir_done(dirs_done)
 
 
 def _iter_mcap_files_serial(
@@ -283,109 +353,55 @@ def _iter_mcap_files_serial(
 
 
 def _iter_mcap_files_parallel(
-    root_str: str,
+    root_strs: list[str],
     *,
     walker_workers: int,
     on_dir_done: Callable[[int], None] | None,
 ) -> Iterator[tuple[Path, os.stat_result]]:
     """Walk the tree with a small thread pool issuing scandir() in parallel.
 
-    Each worker pulls a directory path off ``dir_q``, scandirs it, pushes
-    subdirectories back onto ``dir_q``, and feeds ``(path, stat)`` tuples to
-    ``out_q`` for the main thread to yield. An ``in_flight`` counter (under
-    ``state_lock``) tracks how many directories are still pending — when it
-    hits zero the workers send a sentinel and exit.
+    Each future returns one directory's subdirectories and files as a batch.
+    The caller schedules the next directory futures before yielding the files,
+    keeping slow mounts busy without a per-file cross-thread queue.
     """
-    out_q: queue.Queue[tuple[Path, os.stat_result] | None] = queue.Queue(maxsize=8192)
-    dir_q: queue.Queue[str] = queue.Queue()
-    dir_q.put(root_str)
 
-    state_lock = threading.Lock()
-    state = {"in_flight": 1, "dirs_done": 0, "shutdown": False}
-    sentinels_sent = [False]
-
-    def _worker() -> None:
-        while True:
-            try:
-                directory = dir_q.get(timeout=0.25)
-            except queue.Empty:
-                with state_lock:
-                    if state["shutdown"] or state["in_flight"] == 0:
-                        return
-                continue
-            new_dirs: list[str] = []
-            try:
-                with os.scandir(directory) as it:
-                    for entry in it:
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                new_dirs.append(entry.path)
-                                continue
-                            if not entry.name.endswith(".mcap"):
-                                continue
-                            st = entry.stat()
-                        except OSError:
+    def _scan_directory(
+        directory: str,
+    ) -> tuple[list[str], list[tuple[Path, os.stat_result]]]:
+        new_dirs: list[str] = []
+        files: list[tuple[Path, os.stat_result]] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            new_dirs.append(entry.path)
                             continue
-                        if stat.S_ISREG(st.st_mode):
-                            out_q.put((Path(entry.path), st))
-            except OSError:
-                pass
-            with state_lock:
-                state["in_flight"] += len(new_dirs)
-                state["in_flight"] -= 1
-                state["dirs_done"] += 1
-                local_dirs_done = state["dirs_done"]
-                drained = state["in_flight"] == 0
-            for d in new_dirs:
-                dir_q.put(d)
-            if on_dir_done is not None and local_dirs_done % 200 == 0:
-                # Rich progress's update() is thread-safe; the only shared
-                # state we mutate from the callback is ScanStats.dirs_walked,
-                # whose monotonic-int set is harmless under a small race.
-                on_dir_done(local_dirs_done)
-            if drained:
-                with state_lock:
-                    if not sentinels_sent[0]:
-                        sentinels_sent[0] = True
-                        for _ in range(walker_workers):
-                            out_q.put(None)
-                return
+                        if not entry.name.endswith(".mcap"):
+                            continue
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(st.st_mode):
+                        files.append((Path(entry.path), st))
+        except OSError:
+            pass
+        return new_dirs, files
 
-    threads = [
-        threading.Thread(target=_worker, name=f"walker-{i}", daemon=True)
-        for i in range(walker_workers)
-    ]
-    for t in threads:
-        t.start()
-
-    pending_sentinels = walker_workers
-    try:
-        while pending_sentinels > 0:
-            item = out_q.get()
-            if item is None:
-                pending_sentinels -= 1
-                continue
-            yield item
-    finally:
-        with state_lock:
-            state["shutdown"] = True
-        for t in threads:
-            t.join(timeout=1.0)
-        if on_dir_done is not None:
-            on_dir_done(state["dirs_done"])
-
-
-def _stat_skip(conn: sqlite3.Connection, inp: _ScanInput) -> bool:
-    row = conn.execute(
-        """SELECT obs.size_bytes, obs.mtime_ns, obs.content_id
-           FROM file_observation obs JOIN file_path fp ON fp.id = obs.file_path_id
-           WHERE fp.value = ? ORDER BY obs.id DESC LIMIT 1""",
-        (str(inp.path),),
-    ).fetchone()
-    if row is None:
-        return False
-    size_bytes, mtime_ns, content_id = row
-    return size_bytes == inp.size_bytes and mtime_ns == inp.mtime_ns and content_id is not None
+    dirs_done = 0
+    with ThreadPoolExecutor(max_workers=walker_workers) as executor:
+        pending = {executor.submit(_scan_directory, root_str) for root_str in root_strs}
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                new_dirs, files = future.result()
+                dirs_done += 1
+                pending.update(executor.submit(_scan_directory, path) for path in new_dirs)
+                yield from files
+                if on_dir_done is not None and dirs_done % 200 == 0:
+                    on_dir_done(dirs_done)
+    if on_dir_done is not None:
+        on_dir_done(dirs_done)
 
 
 def _error_skip(
@@ -414,26 +430,33 @@ def _content_exists(conn: sqlite3.Connection, summary_fp: str) -> bool:
     return row is not None
 
 
-def _current_paths_for_root(conn: sqlite3.Connection, root: Path, *, recurse: bool) -> set[str]:
+def _current_files_for_root(
+    conn: sqlite3.Connection,
+    root: Path,
+    *,
+    recurse: bool,
+) -> dict[str, tuple[int, int, int | None]]:
     root = root.resolve()
     if root.is_file():
         rows = conn.execute(
-            "SELECT abs_path FROM current_file WHERE abs_path = ?",
+            "SELECT abs_path, size_bytes, mtime_ns, content_id "
+            "FROM current_file WHERE abs_path = ?",
             (str(root),),
         ).fetchall()
-        return {row[0] for row in rows}
+        return {row[0]: (row[1], row[2], row[3]) for row in rows}
 
     root_str = str(root)
     child_prefix = root_str if root_str.endswith(os.sep) else f"{root_str}{os.sep}"
     child_upper = child_prefix[:-1] + chr(ord(child_prefix[-1]) + 1)
     rows = conn.execute(
-        "SELECT abs_path FROM current_file WHERE abs_path = ? OR (abs_path >= ? AND abs_path < ?)",
+        "SELECT abs_path, size_bytes, mtime_ns, content_id FROM current_file "
+        "WHERE abs_path = ? OR (abs_path >= ? AND abs_path < ?)",
         (root_str, child_prefix, child_upper),
     ).fetchall()
-    paths = {row[0] for row in rows}
+    files = {row[0]: (row[1], row[2], row[3]) for row in rows}
     if recurse:
-        return paths
-    return {path for path in paths if Path(path).parent == root}
+        return files
+    return {path: values for path, values in files.items() if Path(path).parent == root}
 
 
 def _load_summary_info(
@@ -705,10 +728,10 @@ def _record_observation(
     inp: _ScanInput,
     file_fp: str,
     content_id: int | None,
+    previous_content_id: int | None,
     session_id: int,
 ) -> None:
     file_path_id = intern_file_path(conn, str(inp.path))
-    previous_content_id = _current_content_id_for_file_path_id(conn, file_path_id)
     conn.execute(
         """INSERT INTO file_observation
            (file_path_id, size_bytes, mtime_ns, inode, file_fingerprint,
@@ -726,17 +749,6 @@ def _record_observation(
         ),
     )
     _update_content_current_file_count(conn, previous_content_id, content_id)
-
-
-def _current_content_id_for_file_path_id(
-    conn: sqlite3.Connection,
-    file_path_id: int,
-) -> int | None:
-    row = conn.execute(
-        "SELECT content_id FROM file_observation WHERE file_path_id = ? ORDER BY id DESC LIMIT 1",
-        (file_path_id,),
-    ).fetchone()
-    return None if row is None else row[0]
 
 
 def _increment_content_current_file_count(
@@ -807,9 +819,13 @@ def _record_error(
     )
 
 
-def _record_deletion(conn: sqlite3.Connection, abs_path: str, session_id: int) -> None:
+def _record_deletion(
+    conn: sqlite3.Connection,
+    abs_path: str,
+    previous_content_id: int | None,
+    session_id: int,
+) -> None:
     file_path_id = intern_file_path(conn, abs_path)
-    previous_content_id = _current_content_id_for_file_path_id(conn, file_path_id)
     conn.execute(
         """INSERT INTO file_observation
            (file_path_id, size_bytes, mtime_ns, inode, file_fingerprint,
@@ -1132,7 +1148,8 @@ def scan(
     summary.
     """
     stats = ScanStats()
-    current_paths = _current_paths_for_root(conn, root, recurse=recurse)
+    current_files = _current_files_for_root(conn, root, recurse=recurse)
+    current_paths = set(current_files)
     session_id: int | None = None
 
     def _ensure_session() -> int:
@@ -1149,6 +1166,8 @@ def scan(
     metadata_id_cache: dict[str, int] = {}
     library_id_cache: dict[str, int] = {}
     profile_id_cache: dict[str, int] = {}
+    known_summary_fps: set[str] = set()
+    file_fp_cache: dict[str, str] = {}
 
     def _resolve_content_id(summary_fp: str) -> int:
         cid = content_id_by_fp.get(summary_fp)
@@ -1164,10 +1183,19 @@ def scan(
 
     def _record_scan_error(inp: _ScanInput, kind: str, message: str, file_fp: str = "") -> None:
         active_session_id = _ensure_session()
+        previous = current_files.get(str(inp.path))
+        previous_content_id = None if previous is None else previous[2]
         conn.execute("BEGIN")
         try:
             _record_error(conn, inp, kind, message, active_session_id)
-            _record_observation(conn, inp, file_fp, None, active_session_id)
+            _record_observation(
+                conn,
+                inp,
+                file_fp,
+                None,
+                previous_content_id,
+                active_session_id,
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -1176,6 +1204,8 @@ def scan(
     def _record_scan_result(result: _ScanResult) -> None:
         """Apply one scan result. Caller wraps a batch in a single BEGIN/COMMIT."""
         active_session_id = _ensure_session()
+        previous = current_files.get(str(result.inp.path))
+        previous_content_id = None if previous is None else previous[2]
         if result.error_kind is not None:
             _record_error(
                 conn,
@@ -1189,6 +1219,7 @@ def scan(
                 result.inp,
                 result.file_fingerprint or "",
                 None,
+                previous_content_id,
                 active_session_id,
             )
             stats.errored += 1
@@ -1200,6 +1231,7 @@ def scan(
                 result.inp,
                 result.file_fingerprint or "",
                 content_id,
+                previous_content_id,
                 active_session_id,
             )
             file_fp_cache[result.file_fingerprint or ""] = result.summary_fingerprint
@@ -1222,6 +1254,7 @@ def scan(
                     result.inp,
                     result.file_fingerprint or "",
                     content_id,
+                    previous_content_id,
                     active_session_id,
                 )
                 stats.fingerprint_reused += 1
@@ -1243,6 +1276,7 @@ def scan(
                     result.inp,
                     result.file_fingerprint or "",
                     content_id,
+                    previous_content_id,
                     active_session_id,
                 )
                 known_summary_fps.add(result.summary_fingerprint)
@@ -1253,23 +1287,81 @@ def scan(
             progress(stats)
 
     try:
-        known_summary_fps = _existing_summary_fingerprints(conn)
-        file_fp_cache = _existing_file_to_summary(conn)
-        if force_rebuild:
-            # Workers must NOT short-circuit on the byte fingerprint cache or
-            # the summary-fingerprint cache, otherwise they'd return a
-            # ``_ScanResult`` without ``content`` and there'd be nothing to
-            # refresh. Hand them empty snapshots so every file goes through
-            # the full read + ``_build_content_row`` path.
-            file_fp_cache_snapshot: dict[str, str] = {}
-            known_summary_fps_snapshot: set[str] = set()
-        else:
-            file_fp_cache_snapshot = dict(file_fp_cache)
-            known_summary_fps_snapshot = set(known_summary_fps)
-
         max_workers = max(1, jobs)
         max_pending = max_workers * 4
         pending: set[Future[_ScanResult]] = set()
+        pool: ProcessPoolExecutor | None = None
+        caches_loaded = False
+        buffered_inputs: list[_ScanInput] = []
+        buffered_bytes = 0
+        can_inline = not force_rebuild and (
+            max_workers == 1 or bool(current_files) or root.is_file()
+        )
+
+        def _ensure_caches() -> None:
+            nonlocal caches_loaded
+            if caches_loaded:
+                return
+            if not force_rebuild:
+                file_fp_cache.update(_existing_file_to_summary(conn))
+                known_summary_fps.update(_existing_summary_fingerprints(conn))
+            caches_loaded = True
+
+        def _ensure_pool() -> ProcessPoolExecutor:
+            nonlocal pool
+            if pool is not None:
+                return pool
+            _ensure_caches()
+            if force_rebuild:
+                file_fp_cache_snapshot: dict[str, str] = {}
+                known_summary_fps_snapshot: set[str] = set()
+            else:
+                file_fp_cache_snapshot = dict(file_fp_cache)
+                known_summary_fps_snapshot = set(known_summary_fps)
+            pool = ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_worker_init,
+                initargs=(file_fp_cache_snapshot, known_summary_fps_snapshot),
+            )
+            return pool
+
+        def _flush_inline() -> None:
+            nonlocal buffered_bytes
+            if not buffered_inputs:
+                return
+            _ensure_caches()
+            conn.execute("BEGIN")
+            try:
+                for inp in buffered_inputs:
+                    result = _process_file(
+                        inp,
+                        file_fp_cache=file_fp_cache,
+                        known_summary_fps=known_summary_fps,
+                        rebuild_missing=rebuild_missing,
+                        read_message_indexes=read_message_indexes,
+                    )
+                    _record_scan_result(result)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            buffered_inputs.clear()
+            buffered_bytes = 0
+
+        def _submit_buffered() -> None:
+            nonlocal buffered_bytes
+            active_pool = _ensure_pool()
+            pending.update(
+                active_pool.submit(
+                    _process_file_task,
+                    inp,
+                    rebuild_missing,
+                    read_message_indexes,
+                )
+                for inp in buffered_inputs
+            )
+            buffered_inputs.clear()
+            buffered_bytes = 0
 
         def _drain_one_or_more() -> None:
             nonlocal pending
@@ -1290,13 +1382,13 @@ def scan(
             if progress is not None:
                 progress(stats)
 
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=_worker_init,
-            initargs=(file_fp_cache_snapshot, known_summary_fps_snapshot),
-        ) as pool:
+        walker_workers = _DEFAULT_WALKER_WORKERS if force_rebuild or not current_files else None
+        try:
             for path, walker_st in _iter_mcap_files(
-                root, recurse=recurse, on_dir_done=_on_dir_done
+                root,
+                recurse=recurse,
+                on_dir_done=_on_dir_done,
+                walker_workers=walker_workers,
             ):
                 stats.discovered += 1
                 _ensure_session()
@@ -1321,7 +1413,14 @@ def scan(
                     mtime_ns=st.st_mtime_ns,
                     inode=st.st_ino,
                 )
-                if not force_rebuild and _stat_skip(conn, inp):
+                previous = current_files.get(abs_path)
+                if (
+                    not force_rebuild
+                    and previous is not None
+                    and previous[0] == inp.size_bytes
+                    and previous[1] == inp.mtime_ns
+                    and previous[2] is not None
+                ):
                     stats.stat_skipped += 1
                     if progress is not None:
                         progress(stats)
@@ -1335,25 +1434,50 @@ def scan(
                     if progress is not None:
                         progress(stats)
                     continue
-                pending.add(
-                    pool.submit(
-                        _process_file_task,
-                        inp,
-                        rebuild_missing,
-                        read_message_indexes,
+                if pool is None and can_inline:
+                    buffered_inputs.append(inp)
+                    buffered_bytes += inp.size_bytes
+                    has_small_batch = (
+                        len(buffered_inputs) <= _INLINE_FILE_LIMIT
+                        and buffered_bytes <= _INLINE_BYTE_LIMIT
                     )
-                )
+                    if max_workers == 1 and not has_small_batch:
+                        _flush_inline()
+                    elif max_workers > 1 and not has_small_batch:
+                        _submit_buffered()
+                else:
+                    pending.add(
+                        _ensure_pool().submit(
+                            _process_file_task,
+                            inp,
+                            rebuild_missing,
+                            read_message_indexes,
+                        )
+                    )
                 if len(pending) >= max_pending:
                     _drain_one_or_more()
 
+            if buffered_inputs:
+                if pool is None and can_inline:
+                    _flush_inline()
+                else:
+                    _submit_buffered()
             while pending:
                 _drain_one_or_more()
+        finally:
+            if pool is not None:
+                pool.shutdown()
 
         for abs_path in sorted(current_paths):
             active_session_id = _ensure_session()
             conn.execute("BEGIN")
             try:
-                _record_deletion(conn, abs_path, active_session_id)
+                _record_deletion(
+                    conn,
+                    abs_path,
+                    current_files[abs_path][2],
+                    active_session_id,
+                )
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")

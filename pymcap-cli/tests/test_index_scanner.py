@@ -43,6 +43,40 @@ def _truncate_after_data_section(path: Path) -> None:
         stream.truncate(info.next_offset)
 
 
+def test_walkers_match_and_finish_all_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _make_mcap_tree(tmp_path, count=10)
+    (tmp_path / "ignored.txt").write_text("not an MCAP")
+    parallel_progress: list[int] = []
+    adaptive_progress: list[int] = []
+
+    serial = list(index_scanner._iter_mcap_files(tmp_path, recurse=True, walker_workers=1))
+    parallel = list(
+        index_scanner._iter_mcap_files(
+            tmp_path,
+            recurse=True,
+            walker_workers=4,
+            on_dir_done=parallel_progress.append,
+        )
+    )
+    monkeypatch.setattr(index_scanner, "_SLOW_DIRECTORY_SCAN_NS", 0)
+    adaptive = list(
+        index_scanner._iter_mcap_files(
+            tmp_path,
+            recurse=True,
+            on_dir_done=adaptive_progress.append,
+        )
+    )
+
+    assert {path for path, _ in serial} == set(files)
+    assert {path for path, _ in parallel} == set(files)
+    assert {path for path, _ in adaptive} == set(files)
+    assert parallel_progress[-1] == 11
+    assert adaptive_progress[-1] == 11
+
+
 def test_force_rebuild_refreshes_existing_aggregates(tmp_path: Path) -> None:
     """``scan(force_rebuild=True)`` backfills derived columns on existing rows."""
     files = _make_mcap_tree(tmp_path, count=2)
@@ -102,7 +136,10 @@ def test_first_scan_indexes_all(tmp_path: Path) -> None:
         assert chunk_totals[1] >= 3
 
 
-def test_rescan_skips_unchanged_via_stat(tmp_path: Path, monkeypatch) -> None:
+def test_rescan_skips_unchanged_via_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _make_mcap_tree(tmp_path, count=2)
     db = tmp_path / "index.sqlite"
 
@@ -117,6 +154,12 @@ def test_rescan_skips_unchanged_via_stat(tmp_path: Path, monkeypatch) -> None:
         return original(*args, **kwargs)
 
     monkeypatch.setattr(index_scanner, "read_info_approximate", _counting_read_info)
+
+    def _fail_cache_load(*_args, **_kwargs):
+        pytest.fail("unchanged scans should not load content fingerprint caches")
+
+    monkeypatch.setattr(index_scanner, "_existing_file_to_summary", _fail_cache_load)
+    monkeypatch.setattr(index_scanner, "_existing_summary_fingerprints", _fail_cache_load)
 
     with open_db(db) as conn:
         stats = scan(tmp_path, conn, pymcap_cli_version="test")
@@ -516,6 +559,11 @@ def test_byte_cache_rescan_skips_rebuild(tmp_path: Path, monkeypatch) -> None:
         return original_load(*args, **kwargs)
 
     monkeypatch.setattr(index_scanner, "_load_summary_info", _counting_load)
+
+    def _fail_process_pool(*_args, **_kwargs):
+        pytest.fail("small incremental scans should stay in process")
+
+    monkeypatch.setattr(index_scanner, "ProcessPoolExecutor", _fail_process_pool)
 
     with open_db(db) as conn:
         stats = scan(tmp_path, conn, pymcap_cli_version="test")
