@@ -17,6 +17,7 @@ from pymcap_cli.cmd.index.query_cmd import query_cmd
 from pymcap_cli.cmd.index.scan_cmd import scan_cmd
 from pymcap_cli.cmd.index.schemas_cmd import schemas_cmd
 from pymcap_cli.cmd.index.sessions_cmd import sessions_cmd
+from pymcap_cli.cmd.index.stats_cmd import stats_cmd
 from pymcap_cli.cmd.index.status_cmd import status_cmd
 from pymcap_cli.cmd.index.timeline_cmd import timeline_cmd
 from pymcap_cli.cmd.index.topics_cmd import topics_cmd
@@ -37,6 +38,7 @@ index_app.command(topics_cmd, name="topics")
 index_app.command(schemas_cmd, name="schemas")
 index_app.command(duplicates_cmd, name="duplicates")
 index_app.command(sessions_cmd, name="sessions")
+index_app.command(stats_cmd, name="stats")
 index_app.command(errors_cmd, name="errors")
 index_app.command(timeline_cmd, name="timeline")
 index_app.command(info_cmd, name="info")

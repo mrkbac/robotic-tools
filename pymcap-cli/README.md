@@ -759,6 +759,15 @@ pymcap-cli index tree /data/recordings --max-depth 3
 pymcap-cli index query /data/recordings --topic /camera/front --format json
 pymcap-cli index topics /camera --sort-by messages
 
+# Compute one reducer result per matching file (all matches by default)
+pymcap-cli index stats /data/recordings \
+  --query 'maximum=/pressure/front.value.@@max'
+
+# Machine-readable output keeps each path paired with its reducer values
+pymcap-cli index stats /data/recordings \
+  --query 'maximum=/pressure/front.value.@@max' \
+  --format json
+
 # Apply pending schema migrations to an existing catalog
 pymcap-cli index migrate
 ```
