@@ -63,6 +63,38 @@ def test_parse_time_constraint_rejected(argv: list[str], match: str):
 
 
 @pytest.mark.parametrize(
+    ("argv", "match"),
+    [
+        (
+            [
+                "roscompress",
+                "x.mcap",
+                "o.mcap",
+                "--pointcloud-topic-options",
+                "/lidar/front:resolution=0.02",
+                "--pointcloud-topic-options",
+                "/lidar/rear:mode=invalid",
+            ],
+            "mode must be one of: default, keep",
+        ),
+        (
+            [
+                "roscompress",
+                "x.mcap",
+                "o.mcap",
+                "--video-topic-options",
+                "/camera/front:mode=keep,quality=20",
+            ],
+            "mode must be specified alone",
+        ),
+    ],
+)
+def test_topic_profile_conversion_rejected(argv: list[str], match: str) -> None:
+    with pytest.raises(cyclopts.CoercionError, match=match):
+        app(argv, exit_on_error=False)
+
+
+@pytest.mark.parametrize(
     "argv",
     [
         # value-conditional gates enforced in the command body (before file/network IO)

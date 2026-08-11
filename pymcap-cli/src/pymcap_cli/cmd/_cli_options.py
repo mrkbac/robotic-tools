@@ -1,15 +1,20 @@
 """Canonical Cyclopts annotations reused by pymcap-cli commands."""
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 
-from cyclopts import Group, Parameter, validators
+from cyclopts import CoercionError, Group, Parameter, Token, validators
 
 from pymcap_cli.cmd._arg_constraints import (
     MutuallyExclusive,
     constraint_group,
     requires,
     requires_value,
+)
+from pymcap_cli.cmd._roscompress_topic_options import (
+    PointcloudTopicProfile,
+    VideoTopicProfile,
 )
 from pymcap_cli.core.msg_resolver import ROS2Distro
 from pymcap_cli.display.message_render import SMART_BYTES_INLINE_LIMIT, BytesMode
@@ -34,6 +39,48 @@ SERVER_GROUP = Group("Server")
 SPLIT_GROUP = Group("Split")
 TIME_FILTERING_GROUP = Group("Time Filtering")
 TOPIC_FILTERING_GROUP = Group("Topic Filtering")
+
+_TopicProfileT = TypeVar("_TopicProfileT")
+
+
+def _convert_topic_profiles(
+    tokens: Sequence[Token],
+    parser: Callable[[str], _TopicProfileT],
+) -> list[_TopicProfileT]:
+    profiles: list[_TopicProfileT] = []
+    for token in tokens:
+        try:
+            profiles.append(parser(token.value))
+        except ValueError as exc:
+            raise CoercionError(msg=f"{token.value!r}: {exc}", token=token) from exc
+    return profiles
+
+
+def _convert_pointcloud_topic_profiles(
+    _type: type[list[PointcloudTopicProfile]],
+    tokens: Sequence[Token],
+) -> list[PointcloudTopicProfile]:
+    return _convert_topic_profiles(
+        tokens,
+        lambda value: PointcloudTopicProfile.parse(
+            value,
+            option_name="--pointcloud-topic-options",
+        ),
+    )
+
+
+def _convert_video_topic_profiles(
+    _type: type[list[VideoTopicProfile]],
+    tokens: Sequence[Token],
+) -> list[VideoTopicProfile]:
+    return _convert_topic_profiles(
+        tokens,
+        lambda value: VideoTopicProfile.parse(
+            value,
+            option_name="--video-topic-options",
+        ),
+    )
+
 
 # Hidden constraint groups shared by every command that reuses the aliases below.
 OVERWRITE_CONSTRAINT = constraint_group(MutuallyExclusive())
@@ -578,7 +625,14 @@ PointCloudSchemaOption = Annotated[
 ]
 PointCloudEncodingOption = Annotated[
     Literal["lossy", "lossless", "none"],
-    Parameter(name=["--pc-encoding"], group=POINTCLOUD_GROUP),
+    Parameter(
+        name=["--pc-encoding"],
+        group=POINTCLOUD_GROUP,
+        help=(
+            "Cloudini field encoding. 'none' disables field encoding inside the "
+            "compressed message; it does not keep the input topic unchanged."
+        ),
+    ),
 ]
 PointCloudCompressionOption = Annotated[
     Literal["zstd", "lz4", "none"],
@@ -613,14 +667,17 @@ PointCloudSortFieldOption = Annotated[
     Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
 ]
 PointCloudTopicOptionsOption = Annotated[
-    list[str] | None,
+    list[PointcloudTopicProfile] | None,
     Parameter(
         name=["--pointcloud-topic-options"],
+        converter=_convert_pointcloud_topic_profiles,
         group=POINTCLOUD_GROUP,
         help=(
             "Per-topic overrides as PATTERN:key=value[,key=value...]; repeatable. "
             "PATTERN is a topic regex (full match, case-insensitive), so a plain "
-            "topic name selects just that topic. Keys: resolution, pc-format, "
+            "topic name selects just that topic. Use mode=keep by itself to copy "
+            "matching topics unchanged, or mode=default to reset a prior profile. "
+            "Keys: mode, resolution, pc-format, "
             "pc-schema, pc-encoding, pc-compression, draco-compression-level."
         ),
     ),
@@ -630,14 +687,17 @@ OptionalPointCloudSortFieldOption = Annotated[
     Parameter(name=["--pointcloud-sort-field"], group=POINTCLOUD_GROUP),
 ]
 VideoTopicOptionsOption = Annotated[
-    list[str] | None,
+    list[VideoTopicProfile] | None,
     Parameter(
         name=["--video-topic-options"],
+        converter=_convert_video_topic_profiles,
         group=ENCODING_GROUP,
         help=(
             "Per-topic overrides as PATTERN:key=value[,key=value...]; repeatable. "
             "PATTERN is a topic regex (full match, case-insensitive), so a plain "
-            "topic name selects just that topic. Keys: quality, codec, encoder, "
+            "topic name selects just that topic. Use mode=keep by itself to copy "
+            "matching topics unchanged, or mode=default to reset a prior profile. "
+            "Keys: mode, quality, codec, encoder, "
             "scale, backend."
         ),
     ),

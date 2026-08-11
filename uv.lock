@@ -2379,7 +2379,7 @@ xxhash = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cyclopts", specifier = ">=4" },
+    { name = "cyclopts", specifier = ">=4.22.3" },
     { name = "kaleido", marker = "extra == 'plot'", specifier = ">=1.0.0" },
     { name = "mcap-codec-support", extras = ["draco"], marker = "extra == 'draco'", editable = "mcap-codec-support" },
     { name = "mcap-codec-support", extras = ["pointcloud"], marker = "extra == 'pointcloud'", editable = "mcap-codec-support" },

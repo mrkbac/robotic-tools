@@ -54,3 +54,28 @@ def test_roscompress_cli_accepts_dash_prefixed_ffmpeg_arguments(
 
     assert exc_info.value.code == 0
     assert output.exists()
+
+
+def test_roscompress_cli_renders_per_topic_value_validation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    value = "/lidar/points:mode=invalid"
+
+    with pytest.raises(SystemExit) as exc_info:
+        app(
+            [
+                "roscompress",
+                "input.mcap",
+                "output.mcap",
+                "--pointcloud-topic-options",
+                value,
+            ]
+        )
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert exc_info.value.code == 1
+    assert "Invalid value" in output
+    assert value in output
+    assert "mode must be one of: default, keep" in output
+    assert "does not exist" not in output

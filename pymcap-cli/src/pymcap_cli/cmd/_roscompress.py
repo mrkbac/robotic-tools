@@ -2,29 +2,39 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 from pymcap_cli.cmd._pointcloud_cleanup import resolve_pointcloud_cleanup
 from pymcap_cli.core.message_filter import ALL_TOPICS, TopicSelection
 
 if TYPE_CHECKING:
     from pymcap_cli.cmd._pointcloud_cleanup import PointcloudCleanupConfig
+    from pymcap_cli.cmd._roscompress_topic_options import (
+        BackendName,
+        PointCloudCompression,
+        PointCloudEncoding,
+        PointCloudFormat,
+        PointCloudSchema,
+        PointcloudTopicProfile,
+        VideoCodec,
+        VideoTopicProfile,
+    )
     from pymcap_cli.core.processors.message_transform import MessageTransformProcessor
     from pymcap_cli.core.processors.video_compress import VideoCompressProcessor
 
-BackendName = Literal["auto", "pyav", "ffmpeg-cli", "gstreamer"]
 ImageFormat = Literal["video", "jpeg", "png", "none"]
-PointCloudFormat = Literal["cloudini", "draco"]
-PointCloudSchema = Literal["auto", "pointcloud2", "foxglove"]
-PointCloudEncoding = Literal["lossy", "lossless", "none"]
-PointCloudCompression = Literal["zstd", "lz4", "none"]
+_SettingT = TypeVar("_SettingT")
+
+
+def _inherit(current: _SettingT, override: _SettingT | None) -> _SettingT:
+    return current if override is None else override
 
 
 @dataclass(frozen=True, slots=True)
 class RoscompressConfig:
     image_format: ImageFormat = "video"
-    codec: Literal["h264", "h265", "vp9", "av1"] = "h264"
+    codec: VideoCodec = "h264"
     quality: int = 28
     adaptive_quality: bool = False
     encoder: str | None = None
@@ -41,6 +51,50 @@ class RoscompressConfig:
     pointcloud_drop_invalid: bool | None = None
     pointcloud_sort_field: str | None = None
     ffmpeg_args: tuple[str, ...] = ()
+
+    def with_pointcloud_profile(self, profile: PointcloudTopicProfile) -> RoscompressConfig:
+        if profile.mode == "default":
+            return self
+        if profile.mode == "keep":
+            return replace(self, pointcloud=False)
+        return replace(
+            self,
+            resolution=_inherit(self.resolution, profile.resolution),
+            pc_format=_inherit(self.pc_format, profile.pc_format),
+            pc_schema=_inherit(self.pc_schema, profile.pc_schema),
+            pc_encoding=_inherit(self.pc_encoding, profile.pc_encoding),
+            pc_compression=_inherit(self.pc_compression, profile.pc_compression),
+            draco_compression_level=_inherit(
+                self.draco_compression_level,
+                profile.draco_compression_level,
+            ),
+        )
+
+    def with_video_profile(self, profile: VideoTopicProfile) -> RoscompressConfig:
+        if profile.mode == "default":
+            return self
+        if profile.mode == "keep":
+            return replace(self, image_format="none")
+        return replace(
+            self,
+            quality=_inherit(self.quality, profile.quality),
+            codec=_inherit(self.codec, profile.codec),
+            encoder=(
+                self.encoder
+                if profile.encoder is None
+                else None
+                if profile.encoder in {"auto", "none"}
+                else profile.encoder
+            ),
+            scale=(
+                self.scale
+                if profile.scale is None
+                else None
+                if profile.scale in {"none", "original"}
+                else profile.scale
+            ),
+            backend=_inherit(self.backend, profile.backend),
+        )
 
 
 def resolve_cleanup(config: RoscompressConfig) -> PointcloudCleanupConfig:

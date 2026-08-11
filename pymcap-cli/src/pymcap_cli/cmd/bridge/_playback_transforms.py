@@ -18,17 +18,19 @@ from pymcap_cli.cmd._cli_options import (
     POINTCLOUD_GROUP,
 )
 from pymcap_cli.cmd._roscompress import (
-    BackendName,
     ImageFormat,
-    PointCloudCompression,
-    PointCloudEncoding,
-    PointCloudFormat,
-    PointCloudSchema,
     RoscompressConfig,
     create_image_processor,
     create_pointcloud_processors,
     pointcloud_output_schema,
     resolve_cleanup,
+)
+from pymcap_cli.cmd._roscompress_topic_options import (
+    BackendName,
+    PointCloudCompression,
+    PointCloudEncoding,
+    PointCloudFormat,
+    PointCloudSchema,
 )
 from pymcap_cli.cmd.bridge._adaptive import (
     MAX_VIDEO_FPS,

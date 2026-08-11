@@ -38,7 +38,7 @@ dependencies = [
     "rich>=14.1.0",
     "small-mcap[compression]>=0.13.0",
     "mcap-ros2-support-fast",
-    "cyclopts>=4",
+    "cyclopts>=4.22.3",
     "ros-parser>=0.8.0",
     "platformdirs>=4.0.0",
     "pyyaml>=6.0",

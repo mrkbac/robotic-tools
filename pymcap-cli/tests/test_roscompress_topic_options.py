@@ -4,12 +4,24 @@ from dataclasses import replace
 
 import pytest
 from pymcap_cli.cmd._roscompress import RoscompressConfig
+from pymcap_cli.cmd._roscompress_topic_options import (
+    PointcloudTopicProfile,
+    VideoTopicProfile,
+)
 from pymcap_cli.cmd.roscompress_cmd import (
     _parse_ffmpeg_args,
     _profile_entries,
     _resolve_pointcloud_topic_options,
     _resolve_video_topic_options,
 )
+
+
+def _pointcloud_profiles(*values: str) -> list[PointcloudTopicProfile]:
+    return [PointcloudTopicProfile.parse(value) for value in values]
+
+
+def _video_profiles(*values: str) -> list[VideoTopicProfile]:
+    return [VideoTopicProfile.parse(value) for value in values]
 
 
 def test_pointcloud_topic_options_override_selected_values_and_inherit_defaults() -> None:
@@ -23,10 +35,10 @@ def test_pointcloud_topic_options_override_selected_values_and_inherit_defaults(
     )
 
     resolved = _resolve_pointcloud_topic_options(
-        [
+        _pointcloud_profiles(
             "/sensors/lidar_top/points:resolution=0.02,pc-compression=lz4",
             "/sensors/lidar_top/points:pc-encoding=lossless",
-        ],
+        ),
         defaults,
     )
 
@@ -50,10 +62,10 @@ def test_video_topic_options_override_selected_values_and_inherit_defaults() -> 
     )
 
     resolved = _resolve_video_topic_options(
-        [
+        _video_profiles(
             "/camera/front/image:quality=24,scale=1280,codec=h265",
             "/camera/front/image:encoder=auto,backend=pyav",
-        ],
+        ),
         defaults,
     )
 
@@ -66,6 +78,69 @@ def test_video_topic_options_override_selected_values_and_inherit_defaults() -> 
             backend="pyav",
         )
     }
+
+
+@pytest.mark.parametrize("kind", ["pointcloud", "video"])
+def test_topic_mode_keep_bypasses_compression_and_default_resets_settings(kind: str) -> None:
+    defaults = RoscompressConfig(
+        image_format="video",
+        quality=28,
+        pointcloud=True,
+        resolution=0.01,
+    )
+
+    if kind == "pointcloud":
+        kept = _resolve_pointcloud_topic_options(
+            _pointcloud_profiles("/lidar/points:mode=keep"), defaults
+        )
+        reset = _resolve_pointcloud_topic_options(
+            _pointcloud_profiles(
+                "/lidar/points:resolution=0.5",
+                "/lidar/points:mode=default",
+            ),
+            defaults,
+        )
+        assert kept["/lidar/points"] == replace(defaults, pointcloud=False)
+    else:
+        kept = _resolve_video_topic_options(_video_profiles("/camera/image:mode=keep"), defaults)
+        reset = _resolve_video_topic_options(
+            _video_profiles(
+                "/camera/image:quality=20",
+                "/camera/image:mode=default",
+            ),
+            defaults,
+        )
+        assert kept["/camera/image"] == replace(defaults, image_format="none")
+
+    assert next(iter(reset.values())) == defaults
+
+
+@pytest.mark.parametrize(
+    ("resolver", "specification", "match"),
+    [
+        ("pointcloud", "/lidar/points:mode=other", "mode must be one of"),
+        (
+            "pointcloud",
+            "/lidar/points:mode=keep,resolution=0.02",
+            "mode must be specified alone",
+        ),
+        ("video", "/camera/image:mode=other", "mode must be one of"),
+        (
+            "video",
+            "/camera/image:mode=keep,quality=20",
+            "mode must be specified alone",
+        ),
+    ],
+)
+def test_topic_mode_rejects_ambiguous_values(
+    resolver: str,
+    specification: str,
+    match: str,
+) -> None:
+    load = PointcloudTopicProfile.parse if resolver == "pointcloud" else VideoTopicProfile.parse
+
+    with pytest.raises(ValueError, match=match):
+        load(specification)
 
 
 def test_video_topic_ffmpeg_args_append_to_global_args() -> None:
@@ -126,32 +201,17 @@ def test_topic_options_reject_invalid_values(
     match: str,
 ) -> None:
     if resolver == "pointcloud":
-        defaults = RoscompressConfig(
-            pc_format="cloudini",
-            pc_schema="auto",
-            pc_encoding="lossy",
-            pc_compression="zstd",
-            resolution=0.01,
-            draco_compression_level=7,
-        )
         with pytest.raises(ValueError, match=match):
-            _resolve_pointcloud_topic_options([specification], defaults)
+            PointcloudTopicProfile.parse(specification)
     else:
-        defaults = RoscompressConfig(
-            codec="h264",
-            quality=28,
-            encoder=None,
-            scale=None,
-            backend="ffmpeg-cli",
-        )
         with pytest.raises(ValueError, match=match):
-            _resolve_video_topic_options([specification], defaults)
+            VideoTopicProfile.parse(specification)
 
 
 def test_topic_options_accept_a_regex_pattern_as_the_selector() -> None:
     defaults = RoscompressConfig(codec="h264", quality=28, backend="ffmpeg-cli")
 
-    resolved = _resolve_video_topic_options([r"/CAM_.*/image:quality=20"], defaults)
+    resolved = _resolve_video_topic_options(_video_profiles(r"/CAM_.*/image:quality=20"), defaults)
 
     assert resolved == {r"/CAM_.*/image": replace(defaults, quality=20)}
 
@@ -159,7 +219,9 @@ def test_topic_options_accept_a_regex_pattern_as_the_selector() -> None:
 def test_topic_options_accept_a_non_capturing_regex_group() -> None:
     defaults = RoscompressConfig(codec="h264", quality=28, backend="ffmpeg-cli")
 
-    resolved = _resolve_video_topic_options([r"/(?:CAM_FRONT|CAM_BACK)/image:quality=20"], defaults)
+    resolved = _resolve_video_topic_options(
+        _video_profiles(r"/(?:CAM_FRONT|CAM_BACK)/image:quality=20"), defaults
+    )
 
     assert resolved == {r"/(?:CAM_FRONT|CAM_BACK)/image": replace(defaults, quality=20)}
 
@@ -180,10 +242,8 @@ def test_topic_ffmpeg_args_keep_colons_after_the_pattern_delimiter() -> None:
 
 
 def test_topic_options_reject_an_invalid_regex_pattern() -> None:
-    defaults = RoscompressConfig()
-
     with pytest.raises(ValueError, match="Invalid regex pattern"):
-        _resolve_pointcloud_topic_options(["/LIDAR_(TOP/points:resolution=0.02"], defaults)
+        PointcloudTopicProfile.parse("/LIDAR_(TOP/points:resolution=0.02")
 
 
 def test_profile_entries_give_earlier_patterns_precedence() -> None:

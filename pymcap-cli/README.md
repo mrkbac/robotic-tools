@@ -823,6 +823,11 @@ pymcap-cli roscompress data.mcap -o compressed.mcap \
   --video-topic-options '/CAM_FRONT/image:quality=24,scale=1280' \
   --video-topic-options '/CAM_(BACK|BACK_LEFT|BACK_RIGHT)/image:codec=h265,quality=28'
 
+# Keep selected topics byte-for-byte while compressing the rest
+pymcap-cli roscompress data.mcap -o compressed.mcap \
+  --pointcloud-topic-options '/LIDAR_LEFT/points:mode=keep' \
+  --video-topic-options '/CAM_REAR/image:mode=keep'
+
 # Append raw ffmpeg output arguments globally and for matching topics
 pymcap-cli roscompress data.mcap -o compressed.mcap --backend ffmpeg-cli \
   --ffmpeg-args='-preset medium' \
@@ -836,10 +841,15 @@ overlap, the first profile that matches a topic wins, and any topic no profile
 claims uses the global options. A pattern that matches no topic is reported as a
 warning rather than silently ignored.
 
-Point-cloud keys: `resolution`, `pc-format`, `pc-schema`, `pc-encoding`,
-`pc-compression`, `draco-compression-level`. Video keys: `quality`, `codec`,
-`encoder`, `scale`, `backend`; `encoder=auto` and `scale=original` clear global
-values. FFmpeg arguments use shell-style quoting without invoking a shell.
+Both profile types accept `mode=keep` by itself to copy matching topics without
+decoding, cleanup, sorting, schema/channel changes, or message reserialization.
+Those topics are excluded from the catch-all compressor. `mode=default` resets
+an earlier profile for the same pattern to the global roscompress settings.
+Point-cloud keys: `mode`, `resolution`, `pc-format`, `pc-schema`, `pc-encoding`,
+`pc-compression`, `draco-compression-level`. Video keys: `mode`, `quality`,
+`codec`, `encoder`, `scale`, `backend`; `encoder=auto` and `scale=original` clear
+global values. `pc-encoding=none` disables Cloudini's internal field encoding;
+it does not keep the source topic unchanged. FFmpeg arguments use shell-style quoting without invoking a shell.
 Per-topic arguments append to `--ffmpeg-args` and require `ffmpeg-cli`; use
 `PATTERN:none` to clear them for the matching topics.
 

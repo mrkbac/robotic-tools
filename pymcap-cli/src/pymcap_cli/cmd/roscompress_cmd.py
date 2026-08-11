@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Annotated
 from cyclopts import Parameter
 from mcap_codec_support.video import VideoEncoderError
 from rich.console import Console
+from typing_extensions import override
 
 from pymcap_cli.cmd._cli_options import (
     ENCODING_GROUP,
@@ -61,17 +62,34 @@ from pymcap_cli.cmd._roscompress import (
     fuses_cloudini_cleanup,
     resolve_cleanup,
 )
+from pymcap_cli.cmd._roscompress_topic_options import (
+    PointcloudTopicProfile,
+    VideoTopicProfile,
+    parse_topic_pattern,
+)
 from pymcap_cli.cmd._run_processor import resolve_overwrite_policy, run_processor
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.core.message_filter import TopicSelection
-from pymcap_cli.core.processors.base import TopicMatchingProcessor
+from pymcap_cli.core.processors.base import (
+    Action,
+    ChannelContext,
+    ChunkContext,
+    InputProcessor,
+    MessageContext,
+    MessageHeader,
+    MessageHeaderDecision,
+    MessageScope,
+    TopicMatchingProcessor,
+)
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
-from pymcap_cli.utils import compile_topic_patterns, output_overwrites_input
+from pymcap_cli.utils import output_overwrites_input
 
 if TYPE_CHECKING:
-    from pymcap_cli.core.processors.base import InputProcessor, OutputProcessor
+    from small_mcap import Channel, Schema
+
+    from pymcap_cli.core.processors.base import OutputProcessor
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -86,192 +104,32 @@ console = Console()
 _COMPRESSED_OUTPUT_PATTERN = re.compile(r"Compressed(Image|Video|PointCloud)")
 _INPUT_BUFFER_BYTES = 8 * 1024 * 1024
 _ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class _TopicOptionSpec:
-    pattern: str
-    values: dict[str, str]
-
-
-def _parse_topic_pattern(specification: str, *, option_name: str, syntax: str) -> tuple[str, str]:
-    """Split ``PATTERN:REST`` and validate the pattern as a topic regex."""
-    invalid_pattern: ValueError | None = None
-    # Regex groups can contain colons, as in ``(?:front|back)``, so the
-    # delimiter is the first colon that ends a valid regex prefix.
-    for index, character in enumerate(specification):
-        if character != ":":
-            continue
-        pattern = specification[:index].strip()
-        rest = specification[index + 1 :]
-        if not pattern or not rest.strip():
-            continue
-        try:
-            compile_topic_patterns([pattern])
-        except ValueError as exc:
-            invalid_pattern = exc
-            continue
-        return pattern, rest
-    if invalid_pattern is not None:
-        raise invalid_pattern
-    raise ValueError(f"{option_name} must use {syntax} syntax")
-
-
-def _parse_topic_option_spec(
-    specification: str,
-    *,
-    option_name: str,
-    allowed_keys: frozenset[str],
-) -> _TopicOptionSpec:
-    syntax = "PATTERN:key=value[,key=value...]"
-    pattern, raw_values = _parse_topic_pattern(
-        specification, option_name=option_name, syntax=syntax
-    )
-
-    values: dict[str, str] = {}
-    for assignment in raw_values.split(","):
-        key, equals, value = assignment.partition("=")
-        key = key.strip().replace("_", "-")
-        value = value.strip()
-        if not equals or not key or not value:
-            raise ValueError(f"{option_name} must use {syntax} syntax")
-        if key not in allowed_keys:
-            kind = "point-cloud" if option_name == "--pointcloud-topic-options" else "video"
-            raise ValueError(f"unknown {kind} topic option '{key}'")
-        if key in values:
-            raise ValueError(f"duplicate {option_name} key '{key}' for '{pattern}'")
-        values[key] = value
-    return _TopicOptionSpec(pattern=pattern, values=values)
-
-
-def _choice(value: str, *, key: str, choices: frozenset[str]) -> str:
-    if value not in choices:
-        raise ValueError(f"{key} must be one of: {', '.join(sorted(choices))}")
-    return value
-
-
-def _integer(value: str, *, key: str) -> int:
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
+_VIDEO_INPUT_SCHEMAS = frozenset({"sensor_msgs/Image", "sensor_msgs/CompressedImage"})
+_POINTCLOUD_INPUT_SCHEMAS = frozenset({"sensor_msgs/PointCloud2"})
 
 
 def _resolve_pointcloud_topic_options(
-    specifications: list[str] | None,
+    profiles: list[PointcloudTopicProfile] | None,
     defaults: RoscompressConfig,
 ) -> dict[str, RoscompressConfig]:
     resolved: dict[str, RoscompressConfig] = {}
-    allowed_keys = frozenset(
-        {
-            "resolution",
-            "pc-format",
-            "pc-schema",
-            "pc-encoding",
-            "pc-compression",
-            "draco-compression-level",
-        }
-    )
-    for specification in specifications or []:
-        parsed = _parse_topic_option_spec(
-            specification,
-            option_name="--pointcloud-topic-options",
-            allowed_keys=allowed_keys,
-        )
-        settings = resolved.get(parsed.pattern, defaults)
-        for key, value in parsed.values.items():
-            if key == "resolution":
-                try:
-                    topic_resolution = float(value)
-                except ValueError as exc:
-                    raise ValueError(f"resolution must be a number, got {value!r}") from exc
-                if topic_resolution <= 0:
-                    raise ValueError("resolution must be positive")
-                settings = replace(settings, resolution=topic_resolution)
-            elif key == "pc-format":
-                settings = replace(
-                    settings,
-                    pc_format=_choice(value, key=key, choices=frozenset({"cloudini", "draco"})),
-                )
-            elif key == "pc-schema":
-                settings = replace(
-                    settings,
-                    pc_schema=_choice(
-                        value, key=key, choices=frozenset({"auto", "pointcloud2", "foxglove"})
-                    ),
-                )
-            elif key == "pc-encoding":
-                settings = replace(
-                    settings,
-                    pc_encoding=_choice(
-                        value, key=key, choices=frozenset({"lossy", "lossless", "none"})
-                    ),
-                )
-            elif key == "pc-compression":
-                settings = replace(
-                    settings,
-                    pc_compression=_choice(
-                        value, key=key, choices=frozenset({"zstd", "lz4", "none"})
-                    ),
-                )
-            else:
-                level = _integer(value, key=key)
-                if not 0 <= level <= 10:
-                    raise ValueError("draco-compression-level must be between 0 and 10")
-                settings = replace(settings, draco_compression_level=level)
-        resolved[parsed.pattern] = settings
+    for profile in profiles or []:
+        settings = defaults if profile.mode is not None else resolved.get(profile.pattern, defaults)
+        resolved[profile.pattern] = settings.with_pointcloud_profile(profile)
     return resolved
 
 
 def _resolve_video_topic_options(
-    specifications: list[str] | None,
+    profiles: list[VideoTopicProfile] | None,
     defaults: RoscompressConfig,
     ffmpeg_specifications: list[str] | None = None,
 ) -> dict[str, RoscompressConfig]:
     resolved: dict[str, RoscompressConfig] = {}
-    allowed_keys = frozenset({"quality", "codec", "encoder", "scale", "backend"})
-    for specification in specifications or []:
-        parsed = _parse_topic_option_spec(
-            specification,
-            option_name="--video-topic-options",
-            allowed_keys=allowed_keys,
-        )
-        settings = resolved.get(parsed.pattern, defaults)
-        for key, value in parsed.values.items():
-            if key == "quality":
-                topic_quality = _integer(value, key=key)
-                if not 0 <= topic_quality <= 51:
-                    raise ValueError("quality must be between 0 and 51")
-                settings = replace(settings, quality=topic_quality)
-            elif key == "codec":
-                settings = replace(
-                    settings,
-                    codec=_choice(
-                        value, key=key, choices=frozenset({"h264", "h265", "vp9", "av1"})
-                    ),
-                )
-            elif key == "encoder":
-                settings = replace(settings, encoder=None if value in {"auto", "none"} else value)
-            elif key == "scale":
-                if value in {"none", "original"}:
-                    settings = replace(settings, scale=None)
-                else:
-                    topic_scale = _integer(value, key=key)
-                    if topic_scale <= 0:
-                        raise ValueError("scale must be positive")
-                    settings = replace(settings, scale=topic_scale)
-            else:
-                settings = replace(
-                    settings,
-                    backend=_choice(
-                        value,
-                        key=key,
-                        choices=frozenset({"auto", "ffmpeg-cli", "gstreamer", "pyav"}),
-                    ),
-                )
-        resolved[parsed.pattern] = settings
+    for profile in profiles or []:
+        settings = defaults if profile.mode is not None else resolved.get(profile.pattern, defaults)
+        resolved[profile.pattern] = settings.with_video_profile(profile)
     for specification in ffmpeg_specifications or []:
-        pattern, raw_args = _parse_topic_pattern(
+        pattern, raw_args = parse_topic_pattern(
             specification,
             option_name="--video-topic-ffmpeg-args",
             syntax="PATTERN:ARGS",
@@ -309,6 +167,41 @@ class _ProfiledProcessor:
     kind: str
     pattern: str | None
     processor: TopicMatchingProcessor
+
+
+class _KeptTopicObserver(InputProcessor):
+    """Track kept input topics without inspecting or decoding their messages."""
+
+    def __init__(self, topics: TopicSelection, schema_names: frozenset[str]) -> None:
+        self._topics = topics
+        self._schema_names = schema_names
+        self._matched_topics: set[str] = set()
+
+    @property
+    def matched_topics(self) -> frozenset[str]:
+        return frozenset(self._matched_topics)
+
+    @override
+    def message_scope(self, context: ChunkContext) -> MessageScope:
+        return MessageScope.none()
+
+    @override
+    def on_message_header(
+        self, context: MessageContext, header: MessageHeader
+    ) -> MessageHeaderDecision:
+        return MessageHeaderDecision.CONTINUE
+
+    @override
+    def on_channel(
+        self, context: ChannelContext, channel: "Channel", schema: "Schema | None"
+    ) -> Action:
+        if (
+            schema is not None
+            and schema.name.replace("/msg/", "/") in self._schema_names
+            and self._topics.selects(channel.topic)
+        ):
+            self._matched_topics.add(channel.topic)
+        return Action.CONTINUE
 
 
 def _profile_entries(
@@ -550,11 +443,19 @@ def roscompress(
     try:
         if image_format == "video":
             video_entries = _profile_entries(video_topic_settings, defaults)
+            video_processor_count = sum(
+                entry.settings.image_format == "video" for entry in video_entries
+            )
             for entry in video_entries:
+                if entry.settings.image_format == "none":
+                    observer = _KeptTopicObserver(entry.topics, _VIDEO_INPUT_SCHEMAS)
+                    extras.append(observer)
+                    profiled.append(_ProfiledProcessor("video", entry.pattern, observer))
+                    continue
                 processor = create_video_compress_processor(
                     entry.settings,
                     topics=entry.topics,
-                    shared_by=len(video_entries),
+                    shared_by=video_processor_count,
                 )
                 extras.append(processor)
                 profiled.append(_ProfiledProcessor("video", entry.pattern, processor))
@@ -569,6 +470,11 @@ def roscompress(
             pointcloud_entries = _profile_entries(pointcloud_topic_settings, defaults)
             workers = pointcloud_worker_count()
             for entry in pointcloud_entries:
+                if not entry.settings.pointcloud:
+                    observer = _KeptTopicObserver(entry.topics, _POINTCLOUD_INPUT_SCHEMAS)
+                    extras.append(observer)
+                    profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, observer))
+                    continue
                 # Cloudini fuses cleanup into its native encode; every other
                 # format needs the standalone pass ahead of its compressor.
                 if not fuses_cloudini_cleanup(entry.settings):
@@ -608,6 +514,9 @@ def roscompress(
         if defaults.ffmpeg_args:
             logger.info("FFmpeg args: %s", shlex.join(defaults.ffmpeg_args))
         for pattern, settings in video_topic_settings.items():
+            if settings.image_format == "none":
+                logger.info("Video topics matching %s: keep unchanged", pattern)
+                continue
             logger.info(
                 "Video topics matching %s: %s q%d scale=%s encoder=%s backend=%s",
                 pattern,
@@ -634,6 +543,9 @@ def roscompress(
     if pointcloud:
         logger.info(f"Point cloud: {pc_format} (schema={pc_schema})")
         for pattern, settings in pointcloud_topic_settings.items():
+            if not settings.pointcloud:
+                logger.info("Point cloud topics matching %s: keep unchanged", pattern)
+                continue
             logger.info(
                 "Point cloud topics matching %s: %s (schema=%s, resolution=%g, encoding=%s, "
                 "compression=%s, draco-level=%d)",

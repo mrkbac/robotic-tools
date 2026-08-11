@@ -18,6 +18,7 @@ from mcap_codec_support.pointcloud.schemas import (
 )
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
+from pymcap_cli.cmd._roscompress_topic_options import PointcloudTopicProfile
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from small_mcap import CompressionType, McapWriter, get_summary, read_message, read_message_decoded
 
@@ -173,6 +174,53 @@ def _schema_names_by_topic(path: Path) -> dict[str, str]:
     }
 
 
+def _raw_records_for_topic(path: Path, topic: str) -> list[tuple]:
+    return [
+        (
+            schema.id,
+            schema.name,
+            schema.encoding,
+            schema.data,
+            channel.id,
+            channel.schema_id,
+            channel.topic,
+            channel.message_encoding,
+            channel.metadata,
+            message.sequence,
+            message.log_time,
+            message.publish_time,
+            bytes(message.data),
+        )
+        for schema, channel, message in _iter_raw(path)
+        if channel.topic == topic
+    ]
+
+
+def test_roscompress_keeps_profiled_pointcloud_topic_unchanged(tmp_path: Path):
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_input(src)
+    expected = _raw_records_for_topic(src, "/lidar/points")
+
+    rc = roscompress(
+        str(src),
+        out,
+        force=True,
+        image_format="none",
+        pointcloud=True,
+        pointcloud_drop_invalid=True,
+        pointcloud_sort_field="line",
+        pointcloud_topic_options=[PointcloudTopicProfile.parse("/lidar/points:mode=keep")],
+    )
+
+    assert rc == 0
+    assert _raw_records_for_topic(out, "/lidar/points") == expected
+    assert _schema_names_by_topic(out) == {
+        "/lidar/points": "sensor_msgs/msg/PointCloud2",
+        "/lidar/points/secondary": COMPRESSED_POINTCLOUD2_SCHEMA,
+        "/status": "std_msgs/msg/String",
+    }
+
+
 def test_roscompress_applies_a_pointcloud_profile_to_matching_topics_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -202,7 +250,9 @@ def test_roscompress_applies_a_pointcloud_profile_to_matching_topics_only(
         force=True,
         image_format="none",
         pointcloud=True,
-        pointcloud_topic_options=["/lidar/points:pc-format=draco,pc-schema=foxglove"],
+        pointcloud_topic_options=[
+            PointcloudTopicProfile.parse("/lidar/points:pc-format=draco,pc-schema=foxglove")
+        ],
     )
     assert rc == 0
 
@@ -222,7 +272,9 @@ def test_roscompress_pointcloud_profile_regex_covers_every_matching_topic(tmp_pa
         force=True,
         image_format="none",
         pointcloud=True,
-        pointcloud_topic_options=[r"/lidar/points.*:pc-format=draco,pc-schema=foxglove"],
+        pointcloud_topic_options=[
+            PointcloudTopicProfile.parse(r"/lidar/points.*:pc-format=draco,pc-schema=foxglove")
+        ],
     )
     assert rc == 0
 
@@ -243,7 +295,9 @@ def test_roscompress_cleans_profiled_and_default_pointcloud_topics(tmp_path: Pat
         image_format="none",
         pointcloud=True,
         pointcloud_drop_invalid=True,
-        pointcloud_topic_options=["/lidar/points:pc-format=draco,pc-schema=foxglove"],
+        pointcloud_topic_options=[
+            PointcloudTopicProfile.parse("/lidar/points:pc-format=draco,pc-schema=foxglove")
+        ],
     )
     assert rc == 0
 
@@ -272,7 +326,7 @@ def test_roscompress_warns_when_a_pointcloud_profile_matches_nothing(
             force=True,
             image_format="none",
             pointcloud=True,
-            pointcloud_topic_options=["/lidar/pionts:resolution=0.5"],
+            pointcloud_topic_options=[PointcloudTopicProfile.parse("/lidar/pionts:resolution=0.5")],
         )
 
     assert rc == 0
