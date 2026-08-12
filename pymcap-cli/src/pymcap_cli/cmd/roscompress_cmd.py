@@ -11,7 +11,9 @@ and composes with everything else. The heavy lifting lives in the processors
 import logging
 import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -25,7 +27,12 @@ from pymcap_cli.cmd._cli_options import (
     IMAGE_POINTCLOUD_MODE_CONSTRAINT,
     POINTCLOUD_GROUP,
     BackendOption,
+    BatchArchiveOption,
+    BatchCompatibleOutputPathOption,
+    BatchModeOption,
+    BatchOutputDirectoryOption,
     CodecOption,
+    ContinueOnErrorOption,
     DeleteSourceOption,
     DracoCompressionLevelOption,
     EncoderOption,
@@ -35,7 +42,6 @@ from pymcap_cli.cmd._cli_options import (
     ForceOverwriteOption,
     ImageFormatOption,
     JpegQualityOption,
-    OutputPathOption,
     PointCloudCompressionOption,
     PointCloudDropInvalidOption,
     PointCloudEncodingOption,
@@ -75,6 +81,7 @@ from pymcap_cli.cmd._run_processor import (
     run_processor,
 )
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
+from pymcap_cli.core.batch import JsonValue, TransformResult, run_batch
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.core.message_filter import TopicSelection
@@ -112,6 +119,34 @@ _INPUT_BUFFER_BYTES = 8 * 1024 * 1024
 _ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
 _VIDEO_INPUT_SCHEMAS = frozenset({"sensor_msgs/Image", "sensor_msgs/CompressedImage"})
 _POINTCLOUD_INPUT_SCHEMAS = frozenset({"sensor_msgs/PointCloud2"})
+
+
+@dataclass(frozen=True, slots=True)
+class _RoscompressBatchTransform:
+    recipe_value: dict[str, JsonValue]
+    run_one: Callable[[Path, Path], int]
+
+    def recipe(self) -> JsonValue:
+        return self.recipe_value
+
+    def preflight(self, source: Path) -> None:
+        if not source.is_file():
+            raise ValueError(f"batch source is not a file: {source}")
+
+    def run(self, source: Path, partial: Path) -> TransformResult:
+        code = self.run_one(source, partial)
+        if code:
+            raise RuntimeError(f"roscompress exited with code {code}")
+        return TransformResult()
+
+    def validate(
+        self,
+        _source: Path,
+        partial: Path,
+        _result: TransformResult,
+    ) -> None:
+        if not partial.is_file():
+            raise RuntimeError("roscompress did not create its partial output")
 
 
 def _resolve_pointcloud_topic_options(
@@ -251,10 +286,14 @@ def _parse_ffmpeg_args(value: str | None) -> tuple[str, ...]:
 
 def roscompress(
     file: str,
-    output: OutputPathOption,
+    output: BatchCompatibleOutputPathOption = None,
     *,
     force: ForceOverwriteOption = False,
     delete_source: DeleteSourceOption = False,
+    batch: BatchModeOption = False,
+    output_dir: BatchOutputDirectoryOption = None,
+    archive: BatchArchiveOption = None,
+    continue_on_error: ContinueOnErrorOption = False,
     quality: Annotated[
         QualityOption, Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = 28,
@@ -397,6 +436,110 @@ def roscompress(
         Drop topics matching a full-match regex (repeatable). Excluded topics
         are skipped before decoding, e.g. ``-x '/debug/.*'``.
     """
+    if batch:
+        if output is not None:
+            logger.error("--batch rejects the single-file --output option")
+            return 1
+        if output_dir is None:
+            logger.error("--batch requires --output-dir")
+            return 1
+        if delete_source:
+            logger.error("--batch does not support --delete-source")
+            return 1
+        input_dir = Path(file)
+        if not input_dir.is_dir():
+            logger.error("--batch requires one local input directory")
+            return 1
+        try:
+            package_version = version("pymcap-cli")
+        except PackageNotFoundError:
+            package_version = "unknown"
+        recipe_value: dict[str, JsonValue] = {
+            "schema_version": 1,
+            "pymcap_cli_version": package_version,
+            "image_format": image_format,
+            "codec": codec,
+            "quality": quality,
+            "encoder": encoder,
+            "backend": backend,
+            "video_topic_options": [repr(item) for item in video_topic_options or []],
+            "ffmpeg_args": ffmpeg_args,
+            "video_topic_ffmpeg_args": video_topic_ffmpeg_args or [],
+            "scale": scale,
+            "jpeg_quality": jpeg_quality,
+            "pointcloud": pointcloud,
+            "resolution": resolution,
+            "pointcloud_topic_options": [repr(item) for item in pointcloud_topic_options or []],
+            "pc_format": pc_format,
+            "pc_schema": pc_schema,
+            "pc_encoding": pc_encoding,
+            "pc_compression": pc_compression,
+            "draco_compression_level": draco_compression_level,
+            "pointcloud_drop_invalid": pointcloud_drop_invalid,
+            "pointcloud_sort_field": pointcloud_sort_field,
+            "topic": topic or [],
+            "exclude_topic": exclude_topic or [],
+            "start": start,
+            "end": end,
+        }
+
+        def run_one(source: Path, partial: Path) -> int:
+            return roscompress(
+                str(source),
+                partial,
+                force=True,
+                delete_source=False,
+                quality=quality,
+                codec=codec,
+                encoder=encoder,
+                video_topic_options=video_topic_options,
+                ffmpeg_args=ffmpeg_args,
+                video_topic_ffmpeg_args=video_topic_ffmpeg_args,
+                resolution=resolution,
+                pointcloud_topic_options=pointcloud_topic_options,
+                pc_format=pc_format,
+                pc_schema=pc_schema,
+                pc_encoding=pc_encoding,
+                pc_compression=pc_compression,
+                draco_compression_level=draco_compression_level,
+                scale=scale,
+                image_format=image_format,
+                jpeg_quality=jpeg_quality,
+                backend=backend,
+                pointcloud=pointcloud,
+                pointcloud_drop_invalid=pointcloud_drop_invalid,
+                pointcloud_sort_field=pointcloud_sort_field,
+                topic=topic,
+                exclude_topic=exclude_topic,
+                start=start,
+                end=end,
+            )
+
+        try:
+            result = run_batch(
+                input_dir,
+                output_dir,
+                _RoscompressBatchTransform(recipe_value, run_one),
+                archive_path=archive,
+                continue_on_error=continue_on_error,
+                force=force,
+            )
+        except (OSError, ValueError) as exc:
+            logger.error(str(exc))  # noqa: TRY400
+            return 1
+        for job in result.jobs:
+            if job.status == "failed":
+                logger.error("%s: %s", job.relative_path, job.detail)
+            else:
+                logger.info("%s: %s", job.relative_path, job.status)
+        return 1 if result.failed_count else 0
+
+    if output_dir is not None or archive is not None or continue_on_error:
+        logger.error("--output-dir, --archive, and --continue-on-error require --batch")
+        return 1
+    if output is None:
+        logger.error("single-file roscompress requires --output")
+        return 1
     if output_overwrites_input(file, output):
         logger.error("Output path is the same file as the input; choose a different output file.")
         return 1

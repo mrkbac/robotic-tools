@@ -143,6 +143,15 @@ def test_roscompress_exposes_per_topic_compression_options(
 
     assert "--video-topic-options" in output
     assert "--pointcloud-topic-options" in output
+
+
+def test_roscompress_exposes_transactional_batch_options(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = _help(capsys, "roscompress")
+
+    for option in ("--batch", "--output-dir", "--archive", "--continue-on-error"):
+        assert option in output
     assert "--ffmpeg-args" in output
     assert "--video-topic-ffmpeg-args" in output
 

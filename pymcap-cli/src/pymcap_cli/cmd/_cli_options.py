@@ -274,6 +274,26 @@ OutputPathOption = Annotated[
     Path,
     Parameter(name=["-o", "--output"], group=OUTPUT_OPTIONS_GROUP),
 ]
+BatchCompatibleOutputPathOption = Annotated[
+    Path | None,
+    Parameter(name=["-o", "--output"], group=OUTPUT_OPTIONS_GROUP),
+]
+BatchModeOption = Annotated[
+    bool,
+    Parameter(name=["--batch"], group=PROCESSING_GROUP),
+]
+BatchOutputDirectoryOption = Annotated[
+    Path | None,
+    Parameter(name=["--output-dir"], group=OUTPUT_OPTIONS_GROUP),
+]
+BatchArchiveOption = Annotated[
+    Path | None,
+    Parameter(name=["--archive"], group=OUTPUT_OPTIONS_GROUP),
+]
+ContinueOnErrorOption = Annotated[
+    bool,
+    Parameter(name=["--continue-on-error"], group=PROCESSING_GROUP),
+]
 ForceOverwriteOption = Annotated[
     bool,
     Parameter(name=["-f", "--force"], group=[OUTPUT_OPTIONS_GROUP, OVERWRITE_CONSTRAINT]),
