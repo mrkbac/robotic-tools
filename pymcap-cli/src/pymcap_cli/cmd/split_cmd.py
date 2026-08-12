@@ -1,14 +1,21 @@
 """Split command - divide MCAP files into multiple output segments."""
 
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from cyclopts import Group, Parameter, validators
 from rich.console import Console
 from ros_parser.message_path import MessagePathError
 
-from pymcap_cli.cmd._arg_constraints import at_least_one, constraint_group, each_requires
+from pymcap_cli.cmd._arg_constraints import (
+    all_or_none,
+    at_least_one,
+    constraint_group,
+    each_requires,
+)
 from pymcap_cli.cmd._cli_options import (
     MESSAGE_PATH_GROUP,
     ChunkSizeOption,
@@ -37,6 +44,11 @@ from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
+from pymcap_cli.core.processors.paired_event_window import (
+    PairedEventWindowProcessor,
+    PairedWindowPlan,
+    discover_paired_windows,
+)
 from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
@@ -53,6 +65,7 @@ console = Console()
 SPLIT_GROUP = Group("Split Mode")
 OUTPUT_GROUP = Group("Output Options")
 EXPRESSION_GROUP = Group("Expression Options")
+WINDOW_GROUP = Group("Paired Window Options")
 
 # At least one split trigger must be given; the expression-only knobs need --expression.
 _SPLIT_MODE_CONSTRAINT = constraint_group(at_least_one)
@@ -67,6 +80,71 @@ _EXPRESSION_ONLY_CONSTRAINT = constraint_group(
         "--skip-value",
     )
 )
+_WINDOW_PAIR_CONSTRAINT = constraint_group(all_or_none)
+_WINDOW_ONLY_CONSTRAINT = constraint_group(
+    each_requires(
+        "--window-start",
+        "--min-window",
+        "--max-window",
+        "--orphan-stop",
+        "--nested-start",
+        "--unclosed-window",
+        "--invalid-window",
+    )
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceIdentity:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+def _source_identity(path: Path) -> _SourceIdentity:
+    value = path.stat()
+    return _SourceIdentity(
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _ensure_source_unchanged(
+    path: Path,
+    expected: _SourceIdentity,
+    phase: str,
+) -> None:
+    if _source_identity(path) != expected:
+        raise RuntimeError(f"source changed during paired-window {phase}")
+
+
+def _paired_output_paths(template: str, plan: PairedWindowPlan) -> set[Path]:
+    paths: set[Path] = set()
+    for index, window in enumerate(plan.windows):
+        fields = {
+            "index": index,
+            "index1": index + 1,
+            "key": window.key,
+            "start_time": window.start_time,
+            "start_time_iso": datetime.fromtimestamp(
+                window.start_time / 1e9, tz=timezone.utc
+            ).isoformat(),
+            "end_time": window.end_time,
+            "window_start": window.start_time,
+            "window_end": window.end_time,
+        }
+        paths.add(Path(template.format(**fields)))
+    return paths
+
+
+def _cleanup_outputs(paths: set[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 def _coerce_duration_ns(value: int | str | None) -> int | None:
@@ -106,6 +184,79 @@ def split(
             ),
         ),
     ] = None,
+    window_start: Annotated[
+        str | None,
+        Parameter(
+            name=["--window-start"],
+            group=[
+                SPLIT_GROUP,
+                _SPLIT_MODE_CONSTRAINT,
+                _WINDOW_PAIR_CONSTRAINT,
+                _WINDOW_ONLY_CONSTRAINT,
+            ],
+            help="Absolute MessagePath that opens a paired event window.",
+        ),
+    ] = None,
+    window_end: Annotated[
+        str | None,
+        Parameter(
+            name=["--window-end"],
+            group=[SPLIT_GROUP, _SPLIT_MODE_CONSTRAINT, _WINDOW_PAIR_CONSTRAINT],
+            help="Absolute MessagePath that closes a paired event window.",
+        ),
+    ] = None,
+    min_window: Annotated[
+        int | None,
+        Parameter(
+            name=["--min-window"],
+            group=[WINDOW_GROUP, _WINDOW_ONLY_CONSTRAINT],
+            converter=duration_ns_token_converter,
+            validator=validators.Number(gt=0),
+            help="Minimum accepted start-to-stop duration.",
+        ),
+    ] = None,
+    max_window: Annotated[
+        int | None,
+        Parameter(
+            name=["--max-window"],
+            group=[WINDOW_GROUP, _WINDOW_ONLY_CONSTRAINT],
+            converter=duration_ns_token_converter,
+            validator=validators.Number(gt=0),
+            help="Maximum accepted start-to-stop duration.",
+        ),
+    ] = None,
+    orphan_stop: Annotated[
+        Literal["error", "ignore", "drop"],
+        Parameter(
+            name=["--orphan-stop"],
+            group=[WINDOW_GROUP, _WINDOW_ONLY_CONSTRAINT],
+            help="Policy for a stop observed while no window is open.",
+        ),
+    ] = "error",
+    nested_start: Annotated[
+        Literal["error", "ignore", "drop"],
+        Parameter(
+            name=["--nested-start"],
+            group=[WINDOW_GROUP, _WINDOW_ONLY_CONSTRAINT],
+            help="Policy for a start observed while a window is already open.",
+        ),
+    ] = "error",
+    unclosed_window: Annotated[
+        Literal["error", "ignore", "drop"],
+        Parameter(
+            name=["--unclosed-window"],
+            group=[WINDOW_GROUP, _WINDOW_ONLY_CONSTRAINT],
+            help="Policy for a start that remains open at end of file.",
+        ),
+    ] = "error",
+    invalid_window: Annotated[
+        Literal["error", "drop"],
+        Parameter(
+            name=["--invalid-window"],
+            group=[WINDOW_GROUP, _WINDOW_ONLY_CONSTRAINT],
+            help="Policy for a window outside --min-window/--max-window.",
+        ),
+    ] = "error",
     var: Annotated[
         MessagePathVariablesOption,
         Parameter(group=[MESSAGE_PATH_GROUP, _EXPRESSION_ONLY_CONSTRAINT]),
@@ -129,9 +280,10 @@ def split(
             group=OUTPUT_GROUP,
             help=(
                 "Python format template for output filenames. Variables: {index}, {index1}, "
-                "{key}, {value}, {start_time}, {start_time_iso}, {end_time}. Standard format "
-                "specs apply, e.g. '{value:+d}' and '{index:03d}'. {value} requires "
-                "--expression."
+                "{key}, {value}, {start_time}, {start_time_iso}, {end_time}, "
+                "{window_start}, {window_end}. Standard format specs apply, e.g. "
+                "'{value:+d}' and '{index:03d}'. {value} requires --expression; window fields "
+                "require paired event windows."
             ),
         ),
     ] = "output_{index:03d}.mcap",
@@ -210,8 +362,7 @@ def split(
 ) -> int:
     """Split an MCAP file into multiple output segments.
 
-    Supports duration-based splitting (every N seconds/minutes/hours),
-    timestamp-based splitting (at specific points), or both combined.
+    Supports duration, timestamp, expression, size, and paired-event splitting.
 
     Parameters
     ----------
@@ -284,6 +435,9 @@ def split(
 
     # Build split processors
     processors: list[OutputRouter] = []
+    paired_router: PairedEventWindowProcessor | None = None
+    paired_identity: _SourceIdentity | None = None
+    owned_paired_outputs: set[Path] = set()
     if duration:
         try:
             duration_ns = parse_duration_ns(duration)
@@ -310,6 +464,43 @@ def split(
         logger.info(
             f"Size split: every {bytes_to_human(max_size_bytes)} ({max_size_bytes:,} bytes)"
         )
+
+    if (window_start is None) != (window_end is None):
+        logger.error("--window-start and --window-end must be provided together")
+        return 1
+    if window_start is not None and window_end is not None:
+        if duration or split_points or expression or max_size:
+            logger.error("paired event windows cannot be combined with other split modes")
+            return 1
+        if min_window is not None and max_window is not None and min_window > max_window:
+            logger.error("--min-window must not exceed --max-window")
+            return 1
+        source_path = Path(file)
+        if not source_path.is_file():
+            logger.error("paired event windows require one local seekable MCAP file")
+            return 1
+        try:
+            paired_identity = _source_identity(source_path)
+            plan = discover_paired_windows(
+                source_path,
+                window_start,
+                window_end,
+                minimum_duration_ns=min_window,
+                maximum_duration_ns=max_window,
+                orphan_stop=orphan_stop,
+                nested_start=nested_start,
+                unclosed_window=unclosed_window,
+                invalid_window=invalid_window,
+            )
+            _ensure_source_unchanged(source_path, paired_identity, "discovery")
+            paired_router = PairedEventWindowProcessor(window_start, window_end, plan)
+            processors.append(paired_router)
+            paired_paths = _paired_output_paths(output_template, plan)
+            owned_paired_outputs = {path for path in paired_paths if not path.exists()}
+        except Exception:
+            logger.exception("Error discovering paired event windows")
+            return 1
+        logger.info(f"Paired event windows: {len(plan.windows)} validated window(s)")
 
     try:
         template_uses_value = output_template_uses_field(output_template, "value")
@@ -362,6 +553,8 @@ def split(
         modes.append("Timestamp")
     if expression:
         modes.append("Expression")
+    if paired_router is not None:
+        modes.append("Paired window")
     if max_size:
         modes.append("Size")
     logger.info(f"Mode: {' + '.join(modes)} split")
@@ -383,7 +576,12 @@ def split(
                 overwrite_policy=overwrite_policy,
             ),
         )
+        if paired_router is not None:
+            paired_router.validate_complete()
+            assert paired_identity is not None
+            _ensure_source_unchanged(Path(file), paired_identity, "processing")
     except Exception:
+        _cleanup_outputs(owned_paired_outputs)
         logger.exception("Error during splitting")
         return 1
 

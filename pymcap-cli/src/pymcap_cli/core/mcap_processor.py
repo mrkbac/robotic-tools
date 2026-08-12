@@ -1307,6 +1307,7 @@ class McapProcessor:
                     log_time=message.log_time,
                     data=message.data,
                     publish_time=message.publish_time,
+                    sequence=message.sequence,
                 )
 
     def _handle_schema_record(self, schema: Schema, stream_id: int) -> None:

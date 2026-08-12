@@ -558,8 +558,8 @@ pymcap-cli bag2mcap recording.bag -o recording.mcap --compression lz4 --chunk-si
 ### `split` — Split into Segments
 
 Split an MCAP file into multiple output segments by duration, explicit
-timestamps, value-change of a message-path expression, or a byte budget per
-segment.
+timestamps, paired events, value-change of a message-path expression, or a byte
+budget per segment.
 
 ```bash
 # Split every 60 seconds
@@ -582,12 +582,24 @@ pymcap-cli split data.mcap \
 
 # Split when each output reaches roughly 1 GB
 pymcap-cli split data.mcap --max-size 1G -t "shard_{index:03d}.mcap"
+
+# Keep inclusive windows between matching start and stop events
+pymcap-cli split data.mcap \
+  --window-start '/events/start{data == true}' \
+  --window-end '/events/stop{data == true}' \
+  --min-window 100ms --max-window 30s \
+  -t 'event_{index:03d}_{window_start}_{window_end}.mcap'
 ```
 
 Expression extractors must resolve to a primitive (`bool`, `int`, `float`, or
 `str`). Filter expressions normalize to a boolean match/no-match value. Output
 templates accept normal Python format specifications for typed fields such as
 `{value:+d}` and `{index:03d}`.
+
+Paired windows use a discovery pass before opening outputs and reject malformed
+or out-of-range pairs by default. `--orphan-stop`, `--nested-start`,
+`--unclosed-window`, and `--invalid-window` make each alternative policy
+explicit. The local source must remain unchanged through the output pass.
 
 ### `rechunk` — Topic-Based Rechunking
 

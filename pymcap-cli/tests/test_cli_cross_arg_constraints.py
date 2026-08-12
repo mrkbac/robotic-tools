@@ -23,6 +23,24 @@ from pymcap_cli.cli import app
         (["split", "x.mcap"], "Specify at least one of"),
         (["split", "x.mcap", "--hysteresis", "2s"], "--hysteresis requires --expression"),
         (["split", "x.mcap", "--var", "a=1"], "--var requires --expression"),
+        (
+            ["split", "x.mcap", "--window-start", "/events/start{data == true}"],
+            "Missing argument: --window-end",
+        ),
+        (["split", "x.mcap", "--min-window", "1s"], "--min-window requires --window-start"),
+        (
+            [
+                "split",
+                "x.mcap",
+                "--window-start",
+                "/events/start{data == true}",
+                "--window-end",
+                "/events/stop{data == true}",
+                "--min-window",
+                "0s",
+            ],
+            "Must be > 0",
+        ),
         (["rechunk", "x.mcap", "o.mcap", "--max-groups", "0"], "Must be >= 1"),
         (
             ["process", "x.mcap", "-o", "o.mcap", "--var", "a=1"],
