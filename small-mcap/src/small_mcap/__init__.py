@@ -13,12 +13,15 @@ from small_mcap.exceptions import (
     InvalidHeaderError,
     InvalidMagicError,
     McapError,
+    McapFileReplacedError,
+    McapFileTruncatedError,
     RecordLengthLimitExceededError,
     SchemaNotFoundError,
     SeekRequiredError,
     UnsupportedCompressionError,
     WriterNotStartedError,
 )
+from small_mcap.follower import FollowBatch, McapFollower, MessageTuple
 
 # Reader classes and functions
 from small_mcap.json_decoder import JSONDecoderFactory, JSONEncoderFactory
@@ -27,6 +30,7 @@ from small_mcap.reader import (
     ChannelDecoderFactoryProtocol,
     DecodedMessage,
     DecoderFactoryProtocol,
+    ReadRecordResult,
     breakup_chunk,
     get_header,
     get_summary,
@@ -36,6 +40,7 @@ from small_mcap.reader import (
     read_message_decoded,
     read_metadata,
     stream_reader,
+    try_read_record,
 )
 from small_mcap.rebuild import RebuildInfo, read_info_approximate, rebuild_summary
 from small_mcap.records import (
@@ -95,6 +100,7 @@ __all__ = [
     "DecoderFactoryProtocol",
     "EncoderFactoryProtocol",
     "EndOfFileError",
+    "FollowBatch",
     "Footer",
     "Header",
     "IllegalOpcodeInChunkError",
@@ -106,16 +112,21 @@ __all__ = [
     "LazyChunk",
     "McapError",
     "McapFile",
+    "McapFileReplacedError",
+    "McapFileTruncatedError",
+    "McapFollower",
     "McapRecord",
     "McapWriter",
     "Message",
     "MessageEncoding",
     "MessageIndex",
+    "MessageTuple",
     "Metadata",
     "MetadataIndex",
     "Opcode",
     "PrebuiltChunk",
     "Profile",
+    "ReadRecordResult",
     "RebuildInfo",
     "RecordLengthLimitExceededError",
     "Remapper",
@@ -140,4 +151,5 @@ __all__ = [
     "read_metadata",
     "rebuild_summary",
     "stream_reader",
+    "try_read_record",
 ]

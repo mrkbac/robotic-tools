@@ -11,6 +11,19 @@ class McapError(Exception):
     pass
 
 
+class McapFileTruncatedError(McapError):
+    def __init__(self, path: str, size: int, committed_offset: int) -> None:
+        super().__init__(
+            f"followed MCAP {path!r} was truncated to {size} bytes "
+            f"before committed offset {committed_offset}"
+        )
+
+
+class McapFileReplacedError(McapError):
+    def __init__(self, path: str) -> None:
+        super().__init__(f"followed MCAP {path!r} was replaced")
+
+
 class InvalidMagicError(McapError):
     def __init__(self, bad_magic: bytes | memoryview) -> None:
         super().__init__(

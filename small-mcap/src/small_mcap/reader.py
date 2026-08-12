@@ -136,6 +136,49 @@ class _LoadedChunk:
 _ChunkLoader = Callable[[ChunkIndex, bool], _LoadedChunk]
 
 
+@dataclass(frozen=True, slots=True)
+class ReadRecordResult:
+    """One complete record read transactionally from a seekable stream."""
+
+    opcode: int
+    record: McapRecord | None
+    header: bytes
+    body: bytes
+    start_offset: int
+    end_offset: int
+
+
+def try_read_record(
+    stream: IO[bytes],
+    *,
+    record_size_limit: int = _RECORD_SIZE_LIMIT,
+) -> ReadRecordResult | None:
+    """Read one complete record or restore the starting offset on a short read."""
+    start_offset = stream.tell()
+    header = stream.read(_RECORD_HEADER_SIZE)
+    if len(header) < _RECORD_HEADER_SIZE:
+        stream.seek(start_offset)
+        return None
+    opcode, length = OPCODE_AND_LEN_STRUCT.unpack(header)
+    if length > record_size_limit:
+        stream.seek(start_offset)
+        raise RecordLengthLimitExceededError(opcode, length, record_size_limit)
+    body = stream.read(length)
+    if len(body) < length:
+        stream.seek(start_offset)
+        return None
+    record_cls = OPCODE_TO_RECORD.get(opcode)
+    record = record_cls.read(memoryview(body)) if record_cls is not None else None
+    return ReadRecordResult(
+        opcode=opcode,
+        record=record,
+        header=header,
+        body=body,
+        start_offset=start_offset,
+        end_offset=stream.tell(),
+    )
+
+
 def _get_chunk_data_stream(chunk: Chunk, validate_crc: bool = False) -> bytes | memoryview:
     if not isinstance(chunk.compression, str):
         raise UnsupportedCompressionError(

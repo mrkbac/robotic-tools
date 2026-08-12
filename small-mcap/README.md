@@ -83,6 +83,29 @@ with McapFile.open("incomplete.mcap", recover=True) as recording:
         ...
 ```
 
+### Follow an append-only file
+
+`McapFollower` polls a local growing file without blocking. Every poll has finite
+message and byte budgets; partial record headers and bodies remain uncommitted
+until a later poll completes them.
+
+```python
+from small_mcap import McapFollower
+
+with McapFollower.open("recording.mcap", validate_crc=True) as follower:
+    while True:
+        batch = follower.poll_messages(max_messages=1000, max_bytes=16 * 1024 * 1024)
+        for schema, channel, message in batch.messages:
+            consume(channel.topic, message)
+        if batch.is_final:
+            break
+```
+
+The follower emits a complete chunk without waiting for its message indexes and
+preserves schemas and channels across polls. Footer plus trailing magic marks the
+file final. Truncation and inode replacement raise `McapFileTruncatedError` and
+`McapFileReplacedError`; the follower never silently reopens a different file.
+
 ### Read decoded messages
 
 ```python
