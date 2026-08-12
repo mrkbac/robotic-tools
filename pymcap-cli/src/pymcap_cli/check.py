@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, Protocol, TypeAlias, cast, runtime_checkable
 
 import yaml
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -87,6 +88,18 @@ class FrequencyRule:
 
 
 @dataclass(frozen=True, slots=True)
+class TimeSource:
+    source: str = "log"
+    path_source: str | None = None
+    path: MessagePath | None = None
+    is_reported: bool = False
+
+    @property
+    def label(self) -> str:
+        return self.source if self.path_source is None else f"message:{self.path_source}"
+
+
+@dataclass(frozen=True, slots=True)
 class ValueRule:
     path_source: str
     path: MessagePath
@@ -134,6 +147,8 @@ class TopicRule:
     message_encoding: str | None = None
     frequency: FrequencyRule | None = None
     timeout_ns: int | None = None
+    clock: TimeSource = TimeSource()
+    is_monotonic: bool = False
     values: tuple[ValueRule, ...] = ()
     live: LiveTopicRule | None = None
 
@@ -143,7 +158,12 @@ class TopicRule:
 
     @property
     def needs_messages(self) -> bool:
-        return self.frequency is not None or self.timeout_ns is not None or bool(self.values)
+        return (
+            self.frequency is not None
+            or self.timeout_ns is not None
+            or self.is_monotonic
+            or bool(self.values)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +204,7 @@ class CheckReport:
 
 
 def parse_check_spec(text: str, *, source: str = "<spec>") -> CheckSpec:
-    """Parse and strictly validate a version 1 recording check specification."""
+    """Parse and strictly validate a versioned recording check specification."""
     try:
         loaded = cast("YamlValue", yaml.safe_load(text))
     except yaml.YAMLError as exc:
@@ -192,18 +212,19 @@ def parse_check_spec(text: str, *, source: str = "<spec>") -> CheckSpec:
 
     root = _mapping(loaded, source, set(CheckSpecInput.__annotations__))
     version = _integer(root.get("version"), f"{source}.version")
-    if version != 1:
-        raise CheckSpecError(f"{source}: version must be 1, got {version}")
+    if version not in (1, 2):
+        raise CheckSpecError(f"{source}: version must be 1 or 2, got {version}")
 
     topics_value = root.get("topics")
     if not isinstance(topics_value, dict):
         raise CheckSpecError(f"{source}: topics must be a mapping")
     topics = cast("dict[str, YamlValue]", topics_value)
     rules = tuple(
-        _parse_topic_rule(name, value, f"{source}.topics.{name}") for name, value in topics.items()
+        _parse_topic_rule(name, value, f"{source}.topics.{name}", version=version)
+        for name, value in topics.items()
     )
     live_nodes = _parse_live_root(root["live"], f"{source}.live") if "live" in root else ()
-    return CheckSpec(topics=rules, live_nodes=live_nodes)
+    return CheckSpec(topics=rules, live_nodes=live_nodes, version=version)
 
 
 def load_check_spec(path: Path) -> CheckSpec:
@@ -272,10 +293,13 @@ def _duration(value: YamlValue, path: str) -> int:
     return duration_ns
 
 
-def _parse_topic_rule(name: str, value: YamlValue, path: str) -> TopicRule:
+def _parse_topic_rule(name: str, value: YamlValue, path: str, *, version: int) -> TopicRule:
     if not isinstance(name, str) or not name:
         raise CheckSpecError(f"{path}: topic rule names must be non-empty strings")
-    mapping = _mapping(value, path, set(TopicRuleSpec.__annotations__))
+    allowed = set(TopicRuleSpec.__annotations__)
+    if version == 1:
+        allowed -= {"clock", "monotonic"}
+    mapping = _mapping(value, path, allowed)
     topic = _string(mapping.get("topic"), f"{path}.topic")
     try:
         selector = MessageFilterOptions.from_args(topic=[topic])
@@ -301,12 +325,27 @@ def _parse_topic_rule(name: str, value: YamlValue, path: str) -> TopicRule:
         else None
     )
     timeout_ns = _duration(mapping["timeout"], f"{path}.timeout") if "timeout" in mapping else None
+    clock = (
+        _parse_time_source(mapping["clock"], f"{path}.clock")
+        if "clock" in mapping
+        else TimeSource(is_reported=version >= 2)
+    )
+    is_monotonic = _boolean(mapping.get("monotonic", False), f"{path}.monotonic")
     values = _parse_values(mapping["values"], f"{path}.values") if "values" in mapping else ()
     live = _parse_live_topic(mapping["live"], f"{path}.live") if "live" in mapping else None
 
     if not expected and any(
         item is not None and item != ()
-        for item in (schema, message_encoding, frequency, timeout_ns, values, live)
+        for item in (
+            schema,
+            message_encoding,
+            frequency,
+            timeout_ns,
+            clock if clock.source != "log" or clock.path is not None else None,
+            is_monotonic or None,
+            values,
+            live,
+        )
     ):
         raise CheckSpecError(
             f"{path}: forbidden topic rule (expected: false) cannot define other checks"
@@ -322,8 +361,38 @@ def _parse_topic_rule(name: str, value: YamlValue, path: str) -> TopicRule:
         message_encoding=message_encoding,
         frequency=frequency,
         timeout_ns=timeout_ns,
+        clock=clock,
+        is_monotonic=is_monotonic,
         values=values,
         live=live,
+    )
+
+
+def _parse_time_source(value: YamlValue, path: str) -> TimeSource:
+    mapping = _mapping(value, path, {"source", "path"})
+    source = _string(mapping.get("source"), f"{path}.source")
+    if source not in ("log", "publish", "message"):
+        raise CheckSpecError(f"{path}.source must be 'log', 'publish', or 'message'")
+    path_source = _string(mapping["path"], f"{path}.path") if "path" in mapping else None
+    if source == "message" and path_source is None:
+        raise CheckSpecError(f"{path}.path is required when source is 'message'")
+    if source != "message" and path_source is not None:
+        raise CheckSpecError(f"{path}.path is only valid when source is 'message'")
+    if path_source is None:
+        return TimeSource(source=source, is_reported=True)
+    if not path_source.startswith((".", "{")):
+        raise CheckSpecError(f"{path}.path must be relative and start with '.' or '{{'")
+    try:
+        parsed_path = parse_message_path(f"/__check_clock__{path_source}")
+    except Exception as exc:
+        raise CheckSpecError(f"{path}.path is not a valid MessagePath: {exc}") from exc
+    if parsed_path.has_stream:
+        raise CheckSpecError(f"{path}.path must not contain stream modifiers")
+    return TimeSource(
+        source=source,
+        path_source=path_source,
+        path=parsed_path,
+        is_reported=True,
     )
 
 
@@ -674,10 +743,19 @@ class _TopicRuntime:
     values: list[_ValueTracker]
     first_timestamp_ns: int | None = None
     last_timestamp_ns: int | None = None
+    minimum_timestamp_ns: int | None = None
+    maximum_timestamp_ns: int | None = None
     maximum_internal_gap_ns: int = 0
+    non_monotonic_count: int = 0
+    non_monotonic_samples: list[str] = field(default_factory=list)
+    clock_error: str | None = None
 
     def observe_timestamp(self, timestamp_ns: int, recording_start_ns: int) -> None:
         if self.last_timestamp_ns is not None:
+            if timestamp_ns < self.last_timestamp_ns:
+                self.non_monotonic_count += 1
+                if len(self.non_monotonic_samples) < _FAILURE_SAMPLE_LIMIT:
+                    self.non_monotonic_samples.append(f"{self.last_timestamp_ns}->{timestamp_ns}")
             self.maximum_internal_gap_ns = max(
                 self.maximum_internal_gap_ns,
                 timestamp_ns - self.last_timestamp_ns,
@@ -685,6 +763,16 @@ class _TopicRuntime:
         else:
             self.first_timestamp_ns = timestamp_ns
         self.last_timestamp_ns = timestamp_ns
+        self.minimum_timestamp_ns = (
+            timestamp_ns
+            if self.minimum_timestamp_ns is None
+            else min(self.minimum_timestamp_ns, timestamp_ns)
+        )
+        self.maximum_timestamp_ns = (
+            timestamp_ns
+            if self.maximum_timestamp_ns is None
+            else max(self.maximum_timestamp_ns, timestamp_ns)
+        )
         if self.rate is not None:
             self.rate.observe(timestamp_ns, recording_start_ns)
 
@@ -692,6 +780,52 @@ class _TopicRuntime:
 def _decoded_payload(message: DecodedMessage) -> object:
     """Access one lazy decoded payload; kept separate for regression instrumentation."""
     return message.decoded_message
+
+
+@runtime_checkable
+class _RosTimeValue(Protocol):
+    sec: int
+    nanosec: int
+
+
+def _time_value_ns(value: object) -> int:
+    if type(value) is int:
+        timestamp_ns = value
+        if timestamp_ns < 0:
+            raise ValueError("clock value must be non-negative")
+        return timestamp_ns
+
+    sec: object
+    nanosec: object
+    if isinstance(value, Mapping):
+        sec = value.get("sec")
+        nanosec = value.get("nanosec")
+    elif isinstance(value, _RosTimeValue):
+        sec = value.sec
+        nanosec = value.nanosec
+    else:
+        raise TypeError("clock value must be integer nanoseconds or a {sec, nanosec} value")
+    if type(sec) is not int or type(nanosec) is not int:
+        raise ValueError("clock sec and nanosec must be integers")
+    if sec < 0 or not 0 <= nanosec < 1_000_000_000:
+        raise ValueError("clock sec must be non-negative and nanosec must be below 1000000000")
+    return sec * 1_000_000_000 + nanosec
+
+
+def _evaluate_time_source(
+    source: TimeSource,
+    log_time_ns: int,
+    variables: dict[str, int],
+    decoded_supplier: Callable[[], object],
+) -> int:
+    if source.source == "log":
+        return log_time_ns
+    if source.source == "publish":
+        return variables["publish_time_ns"]
+    path = source.path
+    if path is None:
+        raise ValueError("message clock path is missing")
+    return _time_value_ns(path.apply(decoded_supplier(), variables))
 
 
 def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckReport:
@@ -891,7 +1025,7 @@ class MessageRuleEvaluator:
         index: int,
         channel: Channel,
         schema: Schema | None,
-        timestamp_ns: int,
+        log_time_ns: int,
         recording_start_ns: int,
         variables: dict[str, int],
         decoded_supplier: Callable[[], object],
@@ -902,7 +1036,29 @@ class MessageRuleEvaluator:
         if runtime is None:
             runtime = _create_runtime(rule)
             self.runtimes[index, channel.topic] = runtime
-        runtime.observe_timestamp(timestamp_ns, recording_start_ns)
+        if runtime.clock_error is not None:
+            return
+        try:
+            timestamp_ns = _evaluate_time_source(
+                rule.clock,
+                log_time_ns,
+                variables,
+                decoded_supplier,
+            )
+        except (MessagePathError, TypeError, ValueError) as exc:
+            runtime.clock_error = f"clock {rule.clock.label} evaluation failed: {exc}"
+            return
+
+        clock_start_ns = (
+            recording_start_ns
+            if rule.clock.source == "log"
+            else (
+                runtime.first_timestamp_ns
+                if runtime.first_timestamp_ns is not None
+                else timestamp_ns
+            )
+        )
+        runtime.observe_timestamp(timestamp_ns, clock_start_ns)
 
         if not rule.values:
             return
@@ -954,13 +1110,18 @@ def build_results(
     recording_start_ns: int | None,
     recording_end_ns: int | None,
 ) -> list[CheckResult]:
-    final_timestamp_ns = recording_end_ns or 0
     final_variables: dict[str, int] = {}
     if recording_start_ns is not None:
         final_variables["recording_start_ns"] = recording_start_ns
     if recording_end_ns is not None:
         final_variables["recording_end_ns"] = recording_end_ns
-    for runtime in runtimes.values():
+    for (rule_index, _topic), runtime in runtimes.items():
+        rule = spec.topics[rule_index]
+        final_timestamp_ns = (
+            recording_end_ns or 0
+            if rule.clock.source == "log"
+            else runtime.maximum_timestamp_ns or 0
+        )
         for tracker in runtime.values:
             if tracker.evaluation_error is None:
                 try:
@@ -990,6 +1151,16 @@ def build_results(
             if rule.schema is not None or rule.message_encoding is not None:
                 results.append(_schema_result(rule, topic, observation))
             runtime = runtimes.get((index, topic))
+            if runtime is not None and runtime.clock_error is not None:
+                results.append(
+                    CheckResult(
+                        rule.violation_level,
+                        f"{rule.name}:{topic}/clock",
+                        runtime.clock_error,
+                        {"clock": rule.clock.label},
+                    )
+                )
+                continue
             if rule.frequency is not None:
                 results.append(
                     _frequency_result(
@@ -1010,6 +1181,8 @@ def build_results(
                         recording_end_ns,
                     )
                 )
+            if rule.is_monotonic:
+                results.append(_monotonic_result(rule, topic, runtime))
             results.extend(
                 _value_result(rule, topic, runtime, value_index)
                 for value_index in range(len(rule.values))
@@ -1053,12 +1226,12 @@ def _frequency_result(
     recording_end_ns: int | None,
 ) -> CheckResult:
     name = f"{rule.name}:{topic}/frequency"
+    bounds = _timing_bounds(rule, runtime, recording_start_ns, recording_end_ns)
     if (
         runtime is None
         or runtime.rate is None
-        or recording_start_ns is None
-        or recording_end_ns is None
-        or not runtime.rate.finish(recording_start_ns, recording_end_ns)
+        or bounds is None
+        or not runtime.rate.finish(*bounds)
         or runtime.rate.minimum_count is None
         or runtime.rate.maximum_count is None
     ):
@@ -1083,6 +1256,8 @@ def _frequency_result(
         "maximum_hz": maximum_hz,
         "window_ns": frequency.window_ns,
     }
+    if rule.clock.is_reported:
+        values["clock"] = rule.clock.label
     if effective_minimum is not None:
         values["required_minimum_hz"] = effective_minimum
         values["minimum_window_start_ns"] = runtime.rate.minimum_start_ns
@@ -1100,28 +1275,68 @@ def _timeout_result(
     recording_end_ns: int | None,
 ) -> CheckResult:
     name = f"{rule.name}:{topic}/timeout"
+    bounds = _timing_bounds(rule, runtime, recording_start_ns, recording_end_ns)
     if (
         runtime is None
         or runtime.first_timestamp_ns is None
         or runtime.last_timestamp_ns is None
-        or recording_start_ns is None
-        or recording_end_ns is None
+        or bounds is None
     ):
         return CheckResult(rule.violation_level, name, "timeout could not be evaluated")
+    timing_start_ns, timing_end_ns = bounds
     maximum_gap_ns = max(
-        runtime.first_timestamp_ns - recording_start_ns,
+        runtime.first_timestamp_ns - timing_start_ns,
         runtime.maximum_internal_gap_ns,
-        recording_end_ns - runtime.last_timestamp_ns,
+        timing_end_ns - runtime.last_timestamp_ns,
     )
     timeout_ns = cast("int", rule.timeout_ns)
     level = rule.violation_level if maximum_gap_ns > timeout_ns else OK
     summary = "message timeout is within limit" if level == OK else "message timeout exceeded"
-    return CheckResult(
-        level,
-        name,
-        summary,
-        {"maximum_gap_ns": maximum_gap_ns, "timeout_ns": timeout_ns},
-    )
+    values: dict[str, ObservationValue] = {
+        "maximum_gap_ns": maximum_gap_ns,
+        "timeout_ns": timeout_ns,
+    }
+    if rule.clock.is_reported:
+        values["clock"] = rule.clock.label
+    return CheckResult(level, name, summary, values)
+
+
+def _timing_bounds(
+    rule: TopicRule,
+    runtime: _TopicRuntime | None,
+    recording_start_ns: int | None,
+    recording_end_ns: int | None,
+) -> tuple[int, int] | None:
+    if rule.clock.source == "log":
+        if recording_start_ns is None or recording_end_ns is None:
+            return None
+        return recording_start_ns, recording_end_ns
+    if (
+        runtime is None
+        or runtime.minimum_timestamp_ns is None
+        or runtime.maximum_timestamp_ns is None
+    ):
+        return None
+    return runtime.minimum_timestamp_ns, runtime.maximum_timestamp_ns
+
+
+def _monotonic_result(
+    rule: TopicRule,
+    topic: str,
+    runtime: _TopicRuntime | None,
+) -> CheckResult:
+    name = f"{rule.name}:{topic}/monotonic"
+    if runtime is None:
+        return CheckResult(rule.violation_level, name, "monotonicity could not be evaluated")
+    level = rule.violation_level if runtime.non_monotonic_count else OK
+    summary = "clock is monotonic" if level == OK else "clock is not monotonic"
+    values: dict[str, ObservationValue] = {
+        "clock": rule.clock.label,
+        "non_monotonic_count": runtime.non_monotonic_count,
+    }
+    if runtime.non_monotonic_samples:
+        values["failure_samples"] = "; ".join(runtime.non_monotonic_samples)
+    return CheckResult(level, name, summary, values)
 
 
 def _value_result(

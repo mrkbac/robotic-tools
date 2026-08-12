@@ -10,14 +10,13 @@ class CheckSpecInput(TypedDict, total=False):
     r"""
     CheckSpecInput.
 
-    Version 1 recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Structural
-    rules only; regex validity, MessagePath validity, and cross-field constraints are enforced by the
-    parser.
+    Versioned recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Regex validity,
+    MessagePath validity, and cross-field constraints are enforced by the parser.
     """
 
-    version: Required[Literal[1]]
+    version: Required["_CheckSpecInputversion"]
     r"""
-    Spec format version; must be 1.
+    Spec format version. Version 2 adds selectable clocks and monotonicity checks.
 
     Required property
     """
@@ -275,6 +274,14 @@ SEVERITY_ERROR: Literal["error"] = "error"
 r"""The values for the 'Severity' enum"""
 
 
+TimeSourceSpec = Union["_TimeSourceSpecthen", "_TimeSourceSpecelse"]
+r"""
+TimeSourceSpec.
+
+Clock used by timing and value checks. A message clock requires a relative MessagePath.
+"""
+
+
 class TopicRuleSpec(TypedDict, total=False):
     r"""
     TopicRuleSpec.
@@ -359,6 +366,20 @@ class TopicRuleSpec(TypedDict, total=False):
 
     pattern: ^\s*(?=[0-9.]*[1-9])[0-9]*\.?[0-9]+\s*(ns|us|ms|s|m|h)?\s*$
     exclusiveMinimum: 0
+    """
+
+    clock: "TimeSourceSpec"
+    r"""
+    TimeSourceSpec.
+
+    Clock used by timing and value checks. A message clock requires a relative MessagePath.
+    """
+
+    monotonic: bool
+    r"""
+    Require the selected clock to be non-decreasing in file order. Version 2 only.
+
+    default: False
     """
 
     values: list["ValueRuleSpec"]
@@ -462,6 +483,14 @@ Aggregation type: oneOf
 """
 
 
+_CheckSpecInputversion = Literal[1] | Literal[2]
+r""" Spec format version. Version 2 adds selectable clocks and monotonicity checks. """
+_CHECKSPECINPUTVERSION_1: Literal[1] = 1
+r"""The values for the 'Spec format version. Version 2 adds selectable clocks and monotonicity checks' enum"""
+_CHECKSPECINPUTVERSION_2: Literal[2] = 2
+r"""The values for the 'Spec format version. Version 2 adds selectable clocks and monotonicity checks' enum"""
+
+
 _FREQUENCYRULESPEC_TOLERANCE_DEFAULT = 0
 r""" Default value of the field path 'FrequencyRuleSpec tolerance' """
 
@@ -472,3 +501,37 @@ r""" Default value of the field path 'LiveNodeRuleSpec expected' """
 
 _TOPICRULESPEC_EXPECTED_DEFAULT = True
 r""" Default value of the field path 'TopicRuleSpec expected' """
+
+
+_TOPICRULESPEC_MONOTONIC_DEFAULT = False
+r""" Default value of the field path 'TopicRuleSpec monotonic' """
+
+
+class _TimeSourceSpecelse(TypedDict, total=False):
+    r"""
+    not:
+      required:
+      - path
+    """
+
+    source: Required[Literal["message"]]
+    r""" Required property """
+
+    path: str
+    r"""
+    Relative MessagePath beginning with '.' or '{'; required for source=message.
+
+    minLength: 1
+    """
+
+
+class _TimeSourceSpecthen(TypedDict, total=False):
+    source: Literal["message"]
+    path: Required[str]
+    r"""
+    Relative MessagePath beginning with '.' or '{'; required for source=message.
+
+    minLength: 1
+
+    Required property
+    """

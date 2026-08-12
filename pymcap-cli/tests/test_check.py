@@ -61,6 +61,20 @@ def _write_json_mcap(
         writer.finish()
 
 
+def _write_json_mcap_with_clocks(
+    path: Path,
+    events: list[tuple[int, int, str]],
+) -> None:
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, chunk_size=256, compression=CompressionType.NONE)
+        writer.start()
+        writer.add_schema(1, "example/msg/Sample", "jsonschema", b"{}")
+        writer.add_channel(1, "/sample", "json", 1)
+        for log_time, publish_time, payload in events:
+            writer.add_message(1, log_time, payload.encode(), publish_time)
+        writer.finish()
+
+
 def _write_ros2_imu_mcap(path: Path) -> None:
     with path.open("wb") as stream:
         writer = McapWriter(
@@ -200,7 +214,11 @@ live:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("version: 2\ntopics: {}\n", "version must be 1"),
+        ("version: 3\ntopics: {}\n", "version must be 1 or 2"),
+        (
+            "version: 1\ntopics:\n  x:\n    topic: /x\n    clock:\n      source: publish\n",
+            "unknown key 'clock'",
+        ),
         ("version: 1\ntopics: []\n", "topics must be a mapping"),
         (
             "version: 1\ntopics:\n  x:\n    topic: /x\n    unknown: true\n",
@@ -397,6 +415,105 @@ topics:
     assert frequency.values["maximum_hz"] == pytest.approx(10.0)
     assert timeout.level == 0
     assert timeout.values["maximum_gap_ns"] == NS // 10
+
+
+def test_parse_check_v2_accepts_message_clock_and_monotonic() -> None:
+    spec = _spec(
+        """
+version: 2
+topics:
+  sample:
+    topic: /sample
+    clock:
+      source: message
+      path: .header.stamp
+    monotonic: true
+    timeout: 1s
+"""
+    )
+
+    rule = spec.topics[0]
+    assert rule.clock.source == "message"
+    assert rule.clock.path_source == ".header.stamp"
+    assert rule.is_monotonic
+
+
+def test_check_v2_publish_clock_drives_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_json_mcap_with_clocks(
+        path,
+        [(0, 0, "{}"), (10 * NS, NS // 10, "{}"), (20 * NS, NS // 5, "{}")],
+    )
+    spec = _spec(
+        """
+version: 2
+topics:
+  sample:
+    topic: /sample
+    clock:
+      source: publish
+    timeout: 150ms
+"""
+    )
+
+    report = check_mcap(str(path), spec)
+
+    timeout = _result(report, "sample:/sample/timeout")
+    assert timeout.level == 0
+    assert timeout.values["maximum_gap_ns"] == NS // 10
+    assert timeout.values["clock"] == "publish"
+
+
+def test_check_v2_message_clock_reports_non_monotonic_values(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_json_mcap_with_clocks(
+        path,
+        [
+            (0, 0, '{"stamp": 100}'),
+            (1, 1, '{"stamp": 90}'),
+            (2, 2, '{"stamp": 110}'),
+        ],
+    )
+    spec = _spec(
+        """
+version: 2
+topics:
+  sample:
+    topic: /sample
+    clock:
+      source: message
+      path: .stamp
+    monotonic: true
+"""
+    )
+
+    result = _result(check_mcap(str(path), spec), "sample:/sample/monotonic")
+
+    assert result.level == ERROR
+    assert result.values["non_monotonic_count"] == 1
+    assert result.values["clock"] == "message:.stamp"
+
+
+def test_check_v2_invalid_message_clock_is_explicit_failure(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_json_mcap_with_clocks(path, [(0, 0, '{"stamp": "bad"}')])
+    spec = _spec(
+        """
+version: 2
+topics:
+  sample:
+    topic: /sample
+    clock:
+      source: message
+      path: .stamp
+    monotonic: true
+"""
+    )
+
+    result = _result(check_mcap(str(path), spec), "sample:/sample/clock")
+
+    assert result.level == ERROR
+    assert "must be integer nanoseconds" in result.summary
 
 
 def test_check_sliding_frequency_reports_worst_window(tmp_path: Path) -> None:

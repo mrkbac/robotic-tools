@@ -1,13 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CheckSpecInput",
-  "description": "Version 1 recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Structural rules only; regex validity, MessagePath validity, and cross-field constraints are enforced by the parser.",
+  "description": "Versioned recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Regex validity, MessagePath validity, and cross-field constraints are enforced by the parser.",
   "type": "object",
   "required": ["version", "topics"],
   "properties": {
     "version": {
-      "const": 1,
-      "description": "Spec format version; must be 1."
+      "enum": [1, 2],
+      "description": "Spec format version. Version 2 adds selectable clocks and monotonicity checks."
     },
     "topics": {
       "type": "object",
@@ -73,6 +73,14 @@
         },
         "timeout": {
           "$ref": "#/definitions/Duration"
+        },
+        "clock": {
+          "$ref": "#/definitions/TimeSourceSpec"
+        },
+        "monotonic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require the selected clock to be non-decreasing in file order. Version 2 only."
         },
         "values": {
           "type": "array",
@@ -141,6 +149,29 @@
           "$ref": "#/definitions/Duration"
         }
       },
+      "additionalProperties": false
+    },
+    "TimeSourceSpec": {
+      "title": "TimeSourceSpec",
+      "description": "Clock used by timing and value checks. A message clock requires a relative MessagePath.",
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "source": {
+          "enum": ["log", "publish", "message"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative MessagePath beginning with '.' or '{'; required for source=message."
+        }
+      },
+      "if": {
+        "properties": { "source": { "const": "message" } },
+        "required": ["source"]
+      },
+      "then": { "required": ["path"] },
+      "else": { "not": { "required": ["path"] } },
       "additionalProperties": false
     },
     "Duration": {

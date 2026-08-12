@@ -108,6 +108,17 @@ topics:
     values:
       - '{width > 0}'
 """,
+    "multi_clock": """
+version: 2
+topics:
+  imu:
+    topic: /imu
+    clock:
+      source: message
+      path: .header.stamp
+    monotonic: true
+    timeout: 50ms
+""",
 }
 
 
@@ -133,8 +144,8 @@ extra: 1
     "missing_version": """
 topics: {}
 """,
-    "version_2": """
-version: 2
+    "version_3": """
+version: 3
 topics: {}
 """,
     "version_true": """
