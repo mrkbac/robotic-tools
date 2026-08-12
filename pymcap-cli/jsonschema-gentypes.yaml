@@ -6,23 +6,13 @@ headers: |
   # ruff: noqa: I001, E501
   # AUTO-GENERATED from pymcap-cli/schemas/ - DO NOT EDIT
 
-# Post-generation formatters
-# Note: Formatting is handled by pre-commit (ruff-format and ruff-check hooks)
-# so callbacks are not needed here
-callbacks: []
-
-# Pre-commit integration settings
-pre_commit:
-  enabled: true
-  arguments:
-    - --color=never
-  # Only run the formatter on the freshly generated file. Without this, the tool
-  # invokes a bare `pre-commit run --files=<dest>`, and the `always_run` hooks
-  # (pytest, ty, import-linter) ignore `--files` and re-run the whole suite,
-  # turning a ~0.1s codegen into a ~50s one. ruff-format alone reproduces the
-  # committed output byte-for-byte.
-  hooks:
-    - ruff-format
+# Format each generated destination, then rerun the hook so a formatting change
+# is accepted while a genuine formatter failure still stops generation.
+callbacks:
+  - - bash
+    - -c
+    - pre-commit run ruff-format --files "$1" || pre-commit run ruff-format --files "$1"
+    - format-generated
 
 # Line length for code generation (matches project ruff config)
 lineLength: 100

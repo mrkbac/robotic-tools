@@ -402,3 +402,6 @@ ignore = [
 # jsonschema-gentypes emits `Literal["a"] | Literal["b"]`; collapsing it would dirty
 # the file again on the next generation run
 "*/types/check_spec_types.py" = ["PYI030"]
+# Keep jsonschema-gentypes' stable enum/header output for the doctor schema. This
+# file currently has no long lines, so its shared E501 suppression appears unused.
+"*/types/doctor_report_types.py" = ["PYI030", "RUF100"]
