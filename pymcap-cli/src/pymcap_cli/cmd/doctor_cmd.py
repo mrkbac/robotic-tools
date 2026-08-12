@@ -3,7 +3,6 @@
 import json
 import logging
 import sys
-from collections import defaultdict
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import IO, Annotated, Literal, TextIO
@@ -62,7 +61,7 @@ def doctor(
         bool,
         Parameter(
             name=["--show-all"],
-            help="Print every finding individually instead of the grouped summary.",
+            help="Print retained finding samples individually instead of the grouped summary.",
         ),
     ] = False,
     format: Annotated[
@@ -133,7 +132,7 @@ def _print_report(report: DoctorReport, *, show_all: bool) -> None:
     if show_all:
         console.print(_findings_table(report.findings))
     else:
-        console.print(_summary_table(report.findings))
+        console.print(_summary_table(report))
 
     if report.error_count == 0 and report.warning_count == 0:
         console.print(
@@ -175,10 +174,8 @@ def _findings_table(findings: list[Finding]) -> Table:
     return table
 
 
-def _summary_table(findings: list[Finding]) -> Table:
-    grouped: dict[tuple[str, str], list[Finding]] = defaultdict(list)
-    for finding in findings:
-        grouped[(finding.severity, finding.code)].append(finding)
+def _summary_table(report: DoctorReport) -> Table:
+    samples = {(finding.severity, finding.code): finding for finding in report.findings}
 
     table = Table(title="MCAP Doctor Summary")
     table.add_column("Severity", no_wrap=True)
@@ -188,16 +185,16 @@ def _summary_table(findings: list[Finding]) -> Table:
     table.add_column("Sample Message")
 
     severity_rank = {Severity.ERROR: 0, Severity.WARNING: 1, Severity.INFO: 2}
-    for (_severity, code), group in sorted(
-        grouped.items(), key=lambda item: (severity_rank.get(item[0][0], 99), -len(item[1]))
+    for (severity, code), count in sorted(
+        report.finding_counts.items(),
+        key=lambda item: (severity_rank.get(item[0][0], 99), -item[1]),
     ):
-        first = group[0]
-        offsets = [f.offset for f in group if f.offset is not None]
-        first_offset = "" if not offsets else str(min(offsets))
+        first = samples[severity, code]
+        first_offset = "" if first.offset is None else str(first.offset)
         table.add_row(
             _severity_text(first),
-            code,
-            f"{len(group):,}",
+            code.value,
+            f"{count:,}",
             first_offset,
             first.message,
         )

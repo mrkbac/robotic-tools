@@ -3,13 +3,14 @@ from __future__ import annotations
 import io
 import json
 import struct
+import tracemalloc
 import zlib
 from typing import TYPE_CHECKING
 
 from lz4.frame import compress as lz4_compress
 from pymcap_cli import doctor as doctor_module
 from pymcap_cli.cmd import doctor_cmd
-from pymcap_cli.doctor import DoctorReport, examine_mcap
+from pymcap_cli.doctor import DoctorReport, FindingCode, examine_mcap
 from rich.console import Console
 from small_mcap import CompressionType, McapWriter
 from small_mcap.records import (
@@ -758,6 +759,45 @@ def test_doctor_reports_missing_trailing_magic() -> None:
 
     assert report.error_count >= 1
     assert "BAD_TRAILING_MAGIC" in _codes(report)
+
+
+def test_doctor_retains_bounded_finding_samples_with_exact_counts() -> None:
+    data = bytearray(MAGIC)
+    data += _record_bytes(Header(profile="", library="doctor-test"))
+    for _ in range(20):
+        data += struct.pack("<BQ", 0, 0)
+    report = _report(_finish_data_section(bytes(data)))
+
+    assert report.finding_count(FindingCode.INVALID_OPCODE_ZERO) == 20
+    assert sum(finding.code is FindingCode.INVALID_OPCODE_ZERO for finding in report.findings) == 3
+
+
+def test_doctor_message_scan_memory_does_not_scale_with_message_count() -> None:
+    data = bytearray(MAGIC)
+    data += _record_bytes(Header(profile="", library="doctor-test"))
+    data += _record_bytes(Schema(id=1, name="test", encoding="json", data=b"{}"))
+    data += _record_bytes(
+        Channel(id=1, schema_id=1, topic="/test", message_encoding="json", metadata={})
+    )
+    for log_time in range(5_000):
+        data += _record_bytes(
+            Message(
+                channel_id=1,
+                sequence=log_time,
+                log_time=log_time,
+                publish_time=log_time,
+                data=b"{}",
+            )
+        )
+    recording = _finish_data_section(bytes(data))
+
+    tracemalloc.start()
+    report = _report(recording)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert report.message_count == 5_000
+    assert peak < 1_000_000
 
 
 def test_doctor_registered_command_accepts_valid_file(

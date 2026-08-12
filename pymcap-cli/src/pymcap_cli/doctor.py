@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import pickle
 import struct
+import tempfile
 import zlib
 from collections import Counter
 from dataclasses import dataclass, field
@@ -14,7 +16,7 @@ from small_mcap.records import MAGIC, MAGIC_SIZE, Opcode
 from pymcap_cli.types.qos import Durability, History, Liveliness, Reliability
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
 
 _QOS_POLICY_FIELDS: tuple[
@@ -140,6 +142,7 @@ _KNOWN_SCHEMA_ENCODINGS = frozenset(
 _LARGE_CHUNK_BYTES = 64 * 1024 * 1024
 _SMALL_CHUNK_MEDIAN_BYTES = 64 * 1024
 _SMALL_CHUNK_MIN_COUNT = 10
+_FINDING_SAMPLES_PER_CODE = 3
 
 
 class Section(str, Enum):
@@ -577,6 +580,55 @@ class Frame:
         return opcode_name(self.opcode)
 
 
+class _FrameStore:
+    """Disk-backed replayable frame sequence with constant resident frame state."""
+
+    def __init__(self) -> None:
+        # The store deliberately spans the full validation lifecycle and is closed
+        # by McapDoctor.examine(), so a with-statement cannot own this handle.
+        self._stream = tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115
+        self._count = 0
+        self._section_for_frame: Callable[[Frame], Section] | None = None
+
+    def append(self, frame: Frame) -> None:
+        # All later checks use the compact parsed representation. Keeping the raw
+        # record body would duplicate chunks and large attachments in the spool.
+        frame.body = b""
+        pickle.dump(frame, self._stream, protocol=pickle.HIGHEST_PROTOCOL)
+        self._count += 1
+
+    def __iter__(self) -> Iterator[Frame]:
+        self._stream.flush()
+        self._stream.seek(0)
+        try:
+            while True:
+                try:
+                    # This private temporary file contains only frames serialized
+                    # by append() in this process; no untrusted pickle is accepted.
+                    frame = pickle.load(self._stream)  # noqa: S301
+                except EOFError:
+                    return
+                if not isinstance(frame, Frame):
+                    raise TypeError(f"invalid doctor frame spool entry: {type(frame).__name__}")
+                if self._section_for_frame is not None:
+                    frame.section = self._section_for_frame(frame)
+                yield frame
+        finally:
+            self._stream.seek(0, 2)
+
+    def __len__(self) -> int:
+        return self._count
+
+    def first(self) -> Frame | None:
+        return next(iter(self), None)
+
+    def set_section_resolver(self, resolver: Callable[[Frame], Section]) -> None:
+        self._section_for_frame = resolver
+
+    def close(self) -> None:
+        self._stream.close()
+
+
 @dataclass(slots=True)
 class ChunkIndexSequence:
     chunk: Frame
@@ -590,18 +642,44 @@ class DoctorReport:
     record_count: int
     message_count: int
     chunk_count: int
+    finding_counts: dict[tuple[Severity, FindingCode], int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.finding_counts:
+            self.finding_counts = dict(
+                Counter((finding.severity, finding.code) for finding in self.findings)
+            )
 
     @property
     def error_count(self) -> int:
-        return sum(1 for finding in self.findings if finding.severity is Severity.ERROR)
+        return sum(
+            count
+            for (severity, _code), count in self.finding_counts.items()
+            if severity is Severity.ERROR
+        )
 
     @property
     def warning_count(self) -> int:
-        return sum(1 for finding in self.findings if finding.severity is Severity.WARNING)
+        return sum(
+            count
+            for (severity, _code), count in self.finding_counts.items()
+            if severity is Severity.WARNING
+        )
 
     @property
     def info_count(self) -> int:
-        return sum(1 for finding in self.findings if finding.severity is Severity.INFO)
+        return sum(
+            count
+            for (severity, _code), count in self.finding_counts.items()
+            if severity is Severity.INFO
+        )
+
+    def finding_count(self, code: FindingCode) -> int:
+        return sum(
+            count
+            for (_severity, finding_code), count in self.finding_counts.items()
+            if finding_code is code
+        )
 
 
 class ParseError(ValueError):
@@ -617,10 +695,11 @@ class McapDoctor:
         finding_sink: FindingSink | None = None,
     ) -> None:
         self.findings: list[Finding] = []
-        self.frames: list[Frame] = []
+        self.frames = _FrameStore()
         self._file_size = 0
         self._data_end_checksum: int | None = None
         self._finding_sink = finding_sink
+        self._finding_counts: Counter[tuple[Severity, FindingCode]] = Counter()
         self.strict_message_order = strict_message_order
         self._severity: dict[FindingCode, Severity] = {
             code: default_severity(code) for code in FindingCode
@@ -632,27 +711,33 @@ class McapDoctor:
 
     def examine(self, stream: IO[bytes], size: int, path: str) -> DoctorReport:
         self.findings = []
-        self.frames = []
+        self.frames.close()
+        self.frames = _FrameStore()
         self._file_size = size
         self._data_end_checksum = None
+        self._finding_counts.clear()
 
-        self._scan(stream)
-        self._classify_sections()
-        self._validate_file_structure(stream)
-        self._validate_records()
-        self._validate_summary_offsets()
-        self._validate_indexes()
-        counts = self._actual_counts()
-        self._validate_statistics(counts)
-        self._validate_advisory_findings(counts)
+        try:
+            self._scan(stream)
+            self._classify_sections()
+            self._validate_file_structure(stream)
+            self._validate_records()
+            self._validate_summary_offsets()
+            self._validate_indexes()
+            counts = self._actual_counts()
+            self._validate_statistics(counts)
+            self._validate_advisory_findings(counts)
 
-        return DoctorReport(
-            path=path,
-            findings=self.findings,
-            record_count=len(self.frames),
-            message_count=counts.message_count,
-            chunk_count=counts.chunk_count,
-        )
+            return DoctorReport(
+                path=path,
+                findings=self.findings,
+                record_count=len(self.frames),
+                message_count=counts.message_count,
+                chunk_count=counts.chunk_count,
+                finding_counts=dict(self._finding_counts),
+            )
+        finally:
+            self.frames.close()
 
     def _emit(
         self,
@@ -665,7 +750,10 @@ class McapDoctor:
     ) -> None:
         severity = self._severity[code]
         finding = Finding(severity, code, message, offset, section, record)
-        self.findings.append(finding)
+        key = (severity, code)
+        self._finding_counts[key] += 1
+        if self._finding_counts[key] <= _FINDING_SAMPLES_PER_CODE:
+            self.findings.append(finding)
         if self._finding_sink is not None:
             self._finding_sink.emit(finding)
 
@@ -1365,29 +1453,32 @@ class McapDoctor:
         )
         data_end_frame = self._first_frame(Opcode.DATA_END)
 
-        for frame in self.frames:
+        def section_for_frame(frame: Frame) -> Section:
             if frame.opcode == Opcode.FOOTER:
-                frame.section = Section.FOOTER
-            elif footer_frame and frame.offset > footer_frame.offset:
-                frame.section = Section.AFTER_FOOTER
-            elif (
+                return Section.FOOTER
+            if footer_frame and frame.offset > footer_frame.offset:
+                return Section.AFTER_FOOTER
+            if (
                 footer is not None
                 and footer.summary_offset_start
                 and frame.offset >= footer.summary_offset_start
             ):
-                frame.section = Section.SUMMARY_OFFSET
-            elif (
+                return Section.SUMMARY_OFFSET
+            if (
                 footer is not None and footer.summary_start and frame.offset >= footer.summary_start
             ) or (data_end_frame is not None and frame.offset > data_end_frame.offset):
-                frame.section = Section.SUMMARY
-            else:
-                frame.section = Section.DATA
+                return Section.SUMMARY
+            return Section.DATA
+
+        self.frames.set_section_resolver(section_for_frame)
 
     def _validate_file_structure(self, stream: IO[bytes]) -> None:
         if not self.frames:
             return
 
-        first = self.frames[0]
+        first = self.frames.first()
+        if first is None:
+            return
         if first.opcode != Opcode.HEADER:
             self._emit(
                 FindingCode.HEADER_NOT_FIRST,
@@ -2973,7 +3064,16 @@ class McapDoctor:
         attachments = 0
         metadata = 0
         chunks = 0
-        message_times: list[int] = []
+        message_start_time: int | None = None
+        message_end_time: int | None = None
+
+        def observe_message(message: MessageRecord) -> None:
+            nonlocal message_start_time, message_end_time
+            channel_message_counts[message.channel_id] += 1
+            if message_start_time is None or message.log_time < message_start_time:
+                message_start_time = message.log_time
+            if message_end_time is None or message.log_time > message_end_time:
+                message_end_time = message.log_time
 
         for frame in self.frames:
             if frame.section != Section.DATA:
@@ -2984,8 +3084,7 @@ class McapDoctor:
             elif isinstance(parsed, ChannelRecord):
                 channels.add(parsed.channel_id)
             elif isinstance(parsed, MessageRecord):
-                channel_message_counts[parsed.channel_id] += 1
-                message_times.append(parsed.log_time)
+                observe_message(parsed)
             elif isinstance(parsed, AttachmentRecord):
                 attachments += 1
             elif isinstance(parsed, MetadataRecord):
@@ -2998,8 +3097,7 @@ class McapDoctor:
                     elif isinstance(inner.parsed, ChannelRecord):
                         channels.add(inner.parsed.channel_id)
                     elif isinstance(inner.parsed, MessageRecord):
-                        channel_message_counts[inner.parsed.channel_id] += 1
-                        message_times.append(inner.parsed.log_time)
+                        observe_message(inner.parsed)
 
         return ActualCounts(
             message_count=sum(channel_message_counts.values()),
@@ -3008,8 +3106,8 @@ class McapDoctor:
             attachment_count=attachments,
             metadata_count=metadata,
             chunk_count=chunks,
-            message_start_time=min(message_times) if message_times else 0,
-            message_end_time=max(message_times) if message_times else 0,
+            message_start_time=message_start_time or 0,
+            message_end_time=message_end_time or 0,
             channel_message_counts=dict(channel_message_counts),
         )
 
