@@ -75,6 +75,23 @@ def _write_json_mcap_with_clocks(
         writer.finish()
 
 
+def _write_pipeline_mcap(
+    path: Path,
+    events: list[tuple[str, int, int, str]],
+) -> None:
+    topics = sorted({topic for topic, _, _, _ in events})
+    channel_ids = {topic: index for index, topic in enumerate(topics, start=1)}
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, chunk_size=256, compression=CompressionType.NONE)
+        writer.start()
+        writer.add_schema(1, "example/msg/Sample", "jsonschema", b"{}")
+        for topic, channel_id in channel_ids.items():
+            writer.add_channel(channel_id, topic, "json", 1)
+        for topic, log_time, publish_time, payload in events:
+            writer.add_message(channel_ids[topic], log_time, payload.encode(), publish_time)
+        writer.finish()
+
+
 def _write_ros2_imu_mcap(path: Path) -> None:
     with path.open("wb") as stream:
         writer = McapWriter(
@@ -514,6 +531,246 @@ topics:
 
     assert result.level == ERROR
     assert "must be integer nanoseconds" in result.summary
+
+
+def _pipeline_spec(extra: str = ""):
+    return _spec(
+        f"""
+version: 2
+topics:
+  input:
+    topic: /input
+  output:
+    topic: /output
+pipelines:
+  detector:
+    input: input
+    output: output
+    match:
+      input: {{source: message, path: .key}}
+      output: {{source: message, path: .key}}
+      max_lateness: 10ns
+      max_pending: 10
+    outputs_per_input: {{min: 1, max: 1}}
+    inputs_per_output: {{max: 1}}
+{extra}
+"""
+    )
+
+
+def test_parse_check_v2_accepts_pipeline_contract() -> None:
+    spec = _pipeline_spec(
+        """    latency:
+      from: {side: input, source: publish}
+      to: {side: output, source: publish}
+      max: 50ms
+    grace: {start: 1s, end: 1s}
+"""
+    )
+
+    pipeline = spec.pipelines[0]
+    assert pipeline.input_rule_index == 0
+    assert pipeline.output_rule_index == 1
+    assert pipeline.match.maximum_pending == 10
+    assert pipeline.latency is not None
+    assert pipeline.latency.maximum_ns == 50_000_000
+
+
+def test_check_pipeline_accepts_one_to_one_with_latency(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 100, '{"key": 1}'),
+            ("/output", 1, 120, '{"key": 1}'),
+            ("/input", 2, 200, '{"key": 20}'),
+            ("/output", 3, 240, '{"key": 20}'),
+        ],
+    )
+    spec = _pipeline_spec(
+        """    latency:
+      from: {side: input, source: publish}
+      to: {side: output, source: publish}
+      max: 50ns
+"""
+    )
+
+    report = check_mcap(str(path), spec)
+
+    assert _result(report, "detector/outputs_per_input").level == OK
+    assert _result(report, "detector/inputs_per_output").level == OK
+    latency = _result(report, "detector/latency")
+    assert latency.level == OK
+    assert latency.values["maximum_latency_ns"] == 40
+
+
+def test_check_pipeline_reports_excess_latency(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 100, '{"key": 1}'),
+            ("/output", 1, 200, '{"key": 1}'),
+        ],
+    )
+    spec = _pipeline_spec(
+        """    latency:
+      from: {side: input, source: publish}
+      to: {side: output, source: publish}
+      max: 50ns
+"""
+    )
+
+    result = _result(check_mcap(str(path), spec), "detector/latency")
+
+    assert result.level == ERROR
+    assert result.values["failure_count"] == 1
+    assert result.values["maximum_latency_ns"] == 100
+
+
+def test_check_pipeline_decodes_each_payload_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 0, '{"key": 1, "stamp": 10}'),
+            ("/output", 1, 1, '{"key": 1, "stamp": 20}'),
+        ],
+    )
+    spec = _pipeline_spec(
+        """    latency:
+      from: {side: input, source: message, path: .stamp}
+      to: {side: output, source: message, path: .stamp}
+      max: 50ns
+"""
+    )
+    decoded_count = 0
+    original = check_module._decoded_payload
+
+    def count_decode(message):
+        nonlocal decoded_count
+        decoded_count += 1
+        return original(message)
+
+    monkeypatch.setattr(check_module, "_decoded_payload", count_decode)
+
+    report = check_mcap(str(path), spec)
+
+    assert report.error_count == 0
+    assert decoded_count == 2
+
+
+def test_check_pipeline_reports_missing_and_fan_in(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 0, '{"key": 1}'),
+            ("/input", 1, 1, '{"key": 2}'),
+            ("/input", 2, 2, '{"key": 2}'),
+            ("/output", 3, 3, '{"key": 2}'),
+        ],
+    )
+
+    report = check_mcap(str(path), _pipeline_spec())
+
+    outputs = _result(report, "detector/outputs_per_input")
+    inputs = _result(report, "detector/inputs_per_output")
+    assert outputs.level == ERROR
+    assert outputs.values["failure_count"] == 2
+    assert inputs.level == ERROR
+    assert inputs.values["failure_count"] == 2
+
+
+def test_check_pipeline_allows_out_of_order_keys_within_lateness(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 0, '{"key": 10}'),
+            ("/input", 1, 1, '{"key": 5}'),
+            ("/output", 2, 2, '{"key": 5}'),
+            ("/output", 3, 3, '{"key": 10}'),
+        ],
+    )
+
+    report = check_mcap(str(path), _pipeline_spec())
+
+    assert _result(report, "detector/matching").level == OK
+
+
+def test_check_pipeline_reports_late_key(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 0, '{"key": 1}'),
+            ("/input", 1, 1, '{"key": 20}'),
+            ("/output", 2, 2, '{"key": 1}'),
+            ("/output", 3, 3, '{"key": 20}'),
+        ],
+    )
+
+    result = _result(check_mcap(str(path), _pipeline_spec()), "detector/matching")
+
+    assert result.level == ERROR
+    assert result.values["late_message_count"] == 1
+
+
+def test_check_pipeline_reports_pending_limit_without_growing_state(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 0, '{"key": 1}'),
+            ("/input", 1, 1, '{"key": 2}'),
+        ],
+    )
+    spec = _spec(
+        """
+version: 2
+topics:
+  input: {topic: /input}
+  output: {topic: /output}
+pipelines:
+  detector:
+    input: input
+    output: output
+    match:
+      input: {source: message, path: .key}
+      output: {source: message, path: .key}
+      max_lateness: 10ns
+      max_pending: 1
+    outputs_per_input: {min: 1}
+"""
+    )
+
+    result = _result(check_mcap(str(path), spec), "detector/matching")
+
+    assert result.level == ERROR
+    assert result.values["pending_limit_count"] == 1
+    assert result.values["maximum_pending_observed"] == 1
+
+
+def test_check_pipeline_grace_excludes_boundary_cardinality(tmp_path: Path) -> None:
+    path = tmp_path / "recording.mcap"
+    _write_pipeline_mcap(
+        path,
+        [
+            ("/input", 0, 0, '{"key": 1}'),
+            ("/input", 2 * NS, 2 * NS, '{"key": 20}'),
+            ("/output", 2 * NS + 1, 2 * NS + 1, '{"key": 20}'),
+        ],
+    )
+    spec = _pipeline_spec("    grace: {start: 1s, end: 0.5s}\n")
+
+    result = _result(check_mcap(str(path), spec), "detector/outputs_per_input")
+
+    assert result.level == OK
+    assert result.values["excluded_key_count"] == 1
 
 
 def test_check_sliding_frequency_reports_worst_window(tmp_path: Path) -> None:

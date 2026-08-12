@@ -6,7 +6,7 @@ import math
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast, runtime_checkable
 
 import yaml
@@ -26,12 +26,17 @@ from pymcap_cli.core.message_filter import MessageFilterOptions
 from pymcap_cli.core.named_message_path import query_result_is_empty
 from pymcap_cli.display.cat_helpers import SchemaCache
 from pymcap_cli.types.check_spec_types import (
+    CardinalitySpec,
     CheckSpecInput,
     ComparableValue,
     EndpointRuleSpec,
     LiveNodeRuleSpec,
     LiveRootSpec,
     LiveTopicRuleSpec,
+    PipelineGraceSpec,
+    PipelineLatencySpec,
+    PipelineMatchSpec,
+    PipelineRuleSpec,
     SchemaRuleSpec,
     Severity,
     TopicRuleSpec,
@@ -97,6 +102,51 @@ class TimeSource:
     @property
     def label(self) -> str:
         return self.source if self.path_source is None else f"message:{self.path_source}"
+
+
+@dataclass(frozen=True, slots=True)
+class CardinalityRule:
+    minimum: int | None = None
+    maximum: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineMatchRule:
+    input_clock: TimeSource
+    output_clock: TimeSource
+    maximum_lateness_ns: int
+    maximum_pending: int
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineSideClock:
+    side: str
+    clock: TimeSource
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineLatencyRule:
+    from_clock: PipelineSideClock
+    to_clock: PipelineSideClock
+    maximum_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineGraceRule:
+    start_ns: int = 0
+    end_ns: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineRule:
+    name: str
+    input_rule_index: int
+    output_rule_index: int
+    match: PipelineMatchRule
+    outputs_per_input: CardinalityRule | None = None
+    inputs_per_output: CardinalityRule | None = None
+    latency: PipelineLatencyRule | None = None
+    grace: PipelineGraceRule = PipelineGraceRule()
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +219,7 @@ class TopicRule:
 @dataclass(frozen=True, slots=True)
 class CheckSpec:
     topics: tuple[TopicRule, ...]
+    pipelines: tuple[PipelineRule, ...] = ()
     live_nodes: tuple[LiveNodeRule, ...] = ()
     version: int = 1
 
@@ -214,6 +265,8 @@ def parse_check_spec(text: str, *, source: str = "<spec>") -> CheckSpec:
     version = _integer(root.get("version"), f"{source}.version")
     if version not in (1, 2):
         raise CheckSpecError(f"{source}: version must be 1 or 2, got {version}")
+    if version == 1 and "pipelines" in root:
+        raise CheckSpecError(f"{source}: unknown key 'pipelines'")
 
     topics_value = root.get("topics")
     if not isinstance(topics_value, dict):
@@ -223,8 +276,18 @@ def parse_check_spec(text: str, *, source: str = "<spec>") -> CheckSpec:
         _parse_topic_rule(name, value, f"{source}.topics.{name}", version=version)
         for name, value in topics.items()
     )
+    pipelines = (
+        _parse_pipelines(root["pipelines"], rules, f"{source}.pipelines")
+        if "pipelines" in root
+        else ()
+    )
     live_nodes = _parse_live_root(root["live"], f"{source}.live") if "live" in root else ()
-    return CheckSpec(topics=rules, live_nodes=live_nodes, version=version)
+    return CheckSpec(
+        topics=rules,
+        pipelines=pipelines,
+        live_nodes=live_nodes,
+        version=version,
+    )
 
 
 def load_check_spec(path: Path) -> CheckSpec:
@@ -393,6 +456,145 @@ def _parse_time_source(value: YamlValue, path: str) -> TimeSource:
         path_source=path_source,
         path=parsed_path,
         is_reported=True,
+    )
+
+
+def _parse_pipelines(
+    value: YamlValue,
+    topics: tuple[TopicRule, ...],
+    path: str,
+) -> tuple[PipelineRule, ...]:
+    if not isinstance(value, dict):
+        raise CheckSpecError(f"{path} must be a mapping")
+    mapping = cast("dict[str, YamlValue]", value)
+    topic_indexes = {rule.name: index for index, rule in enumerate(topics)}
+    return tuple(
+        _parse_pipeline_rule(name, item, topic_indexes, topics, f"{path}.{name}")
+        for name, item in mapping.items()
+    )
+
+
+def _parse_pipeline_rule(
+    name: str,
+    value: YamlValue,
+    topic_indexes: dict[str, int],
+    topics: tuple[TopicRule, ...],
+    path: str,
+) -> PipelineRule:
+    if not isinstance(name, str) or not name:
+        raise CheckSpecError(f"{path}: pipeline rule names must be non-empty strings")
+    mapping = _mapping(value, path, set(PipelineRuleSpec.__annotations__))
+    input_name = _string(mapping.get("input"), f"{path}.input")
+    output_name = _string(mapping.get("output"), f"{path}.output")
+    try:
+        input_index = topic_indexes[input_name]
+    except KeyError as exc:
+        raise CheckSpecError(f"{path}.input references unknown topic rule {input_name!r}") from exc
+    try:
+        output_index = topic_indexes[output_name]
+    except KeyError as exc:
+        raise CheckSpecError(
+            f"{path}.output references unknown topic rule {output_name!r}"
+        ) from exc
+    if not topics[input_index].expected or not topics[output_index].expected:
+        raise CheckSpecError(f"{path} cannot reference a forbidden topic rule")
+
+    if "match" not in mapping:
+        raise CheckSpecError(f"{path}.match is required")
+    match = _parse_pipeline_match(mapping["match"], f"{path}.match")
+    outputs_per_input = (
+        _parse_cardinality(mapping["outputs_per_input"], f"{path}.outputs_per_input")
+        if "outputs_per_input" in mapping
+        else None
+    )
+    inputs_per_output = (
+        _parse_cardinality(mapping["inputs_per_output"], f"{path}.inputs_per_output")
+        if "inputs_per_output" in mapping
+        else None
+    )
+    latency = (
+        _parse_pipeline_latency(mapping["latency"], f"{path}.latency")
+        if "latency" in mapping
+        else None
+    )
+    if outputs_per_input is None and inputs_per_output is None and latency is None:
+        raise CheckSpecError(f"{path} must define outputs_per_input, inputs_per_output, or latency")
+    grace = (
+        _parse_pipeline_grace(mapping["grace"], f"{path}.grace")
+        if "grace" in mapping
+        else PipelineGraceRule()
+    )
+    return PipelineRule(
+        name=name,
+        input_rule_index=input_index,
+        output_rule_index=output_index,
+        match=match,
+        outputs_per_input=outputs_per_input,
+        inputs_per_output=inputs_per_output,
+        latency=latency,
+        grace=grace,
+    )
+
+
+def _parse_pipeline_match(value: YamlValue, path: str) -> PipelineMatchRule:
+    mapping = _mapping(value, path, set(PipelineMatchSpec.__annotations__))
+    missing = [
+        key for key in ("input", "output", "max_lateness", "max_pending") if key not in mapping
+    ]
+    if missing:
+        raise CheckSpecError(f"{path}.{missing[0]} is required")
+    maximum_pending = _integer(mapping["max_pending"], f"{path}.max_pending")
+    if maximum_pending <= 0:
+        raise CheckSpecError(f"{path}.max_pending must be greater than zero")
+    return PipelineMatchRule(
+        input_clock=_parse_time_source(mapping["input"], f"{path}.input"),
+        output_clock=_parse_time_source(mapping["output"], f"{path}.output"),
+        maximum_lateness_ns=_duration(mapping["max_lateness"], f"{path}.max_lateness"),
+        maximum_pending=maximum_pending,
+    )
+
+
+def _parse_cardinality(value: YamlValue, path: str) -> CardinalityRule:
+    mapping = _mapping(value, path, set(CardinalitySpec.__annotations__))
+    minimum = _optional_non_negative_integer(mapping, "min", path)
+    maximum = _optional_non_negative_integer(mapping, "max", path)
+    if minimum is None and maximum is None:
+        raise CheckSpecError(f"{path} must define min or max")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise CheckSpecError(f"{path}.min must not exceed max")
+    return CardinalityRule(minimum=minimum, maximum=maximum)
+
+
+def _parse_pipeline_side_clock(value: YamlValue, path: str) -> PipelineSideClock:
+    mapping = _mapping(value, path, {"side", "source", "path"})
+    side = _string(mapping.get("side"), f"{path}.side")
+    if side not in ("input", "output"):
+        raise CheckSpecError(f"{path}.side must be 'input' or 'output'")
+    clock_value: dict[str, YamlValue] = {
+        key: item for key, item in mapping.items() if key != "side"
+    }
+    return PipelineSideClock(side, _parse_time_source(clock_value, path))
+
+
+def _parse_pipeline_latency(value: YamlValue, path: str) -> PipelineLatencyRule:
+    mapping = _mapping(value, path, set(PipelineLatencySpec.__annotations__))
+    missing = [key for key in ("from", "to", "max") if key not in mapping]
+    if missing:
+        raise CheckSpecError(f"{path}.{missing[0]} is required")
+    return PipelineLatencyRule(
+        from_clock=_parse_pipeline_side_clock(mapping["from"], f"{path}.from"),
+        to_clock=_parse_pipeline_side_clock(mapping["to"], f"{path}.to"),
+        maximum_ns=_duration(mapping["max"], f"{path}.max"),
+    )
+
+
+def _parse_pipeline_grace(value: YamlValue, path: str) -> PipelineGraceRule:
+    mapping = _mapping(value, path, set(PipelineGraceSpec.__annotations__))
+    if not mapping:
+        raise CheckSpecError(f"{path} must define start or end")
+    return PipelineGraceRule(
+        start_ns=_duration(mapping["start"], f"{path}.start") if "start" in mapping else 0,
+        end_ns=_duration(mapping["end"], f"{path}.end") if "end" in mapping else 0,
     )
 
 
@@ -828,6 +1030,322 @@ def _evaluate_time_source(
     return _time_value_ns(path.apply(decoded_supplier(), variables))
 
 
+@dataclass(slots=True)
+class _PipelineGroup:
+    input_count: int = 0
+    output_count: int = 0
+    minimum_log_time_ns: int | None = None
+    maximum_log_time_ns: int | None = None
+    earliest_from_ns: int | None = None
+    latest_to_ns: int | None = None
+
+    def observe_log_time(self, log_time_ns: int) -> None:
+        self.minimum_log_time_ns = (
+            log_time_ns
+            if self.minimum_log_time_ns is None
+            else min(self.minimum_log_time_ns, log_time_ns)
+        )
+        self.maximum_log_time_ns = (
+            log_time_ns
+            if self.maximum_log_time_ns is None
+            else max(self.maximum_log_time_ns, log_time_ns)
+        )
+
+
+@dataclass(slots=True)
+class PipelineTracker:
+    rule: PipelineRule
+    pending: dict[int, _PipelineGroup] = field(default_factory=dict)
+    pending_message_count: int = 0
+    maximum_pending_observed: int = 0
+    largest_seen_key: int | None = None
+    finalized_before_ns: int | None = None
+    late_message_count: int = 0
+    pending_limit_count: int = 0
+    evaluation_error_count: int = 0
+    failure_samples: list[str] = field(default_factory=list)
+    finalized_key_count: int = 0
+    excluded_key_count: int = 0
+    outputs_per_input_failure_count: int = 0
+    inputs_per_output_failure_count: int = 0
+    latency_failure_count: int = 0
+    maximum_latency_ns: int | None = None
+
+    def observe(
+        self,
+        side: str,
+        log_time_ns: int,
+        variables: dict[str, int],
+        decoded_supplier: Callable[[], object],
+        recording_start_ns: int | None,
+        recording_end_ns: int | None,
+    ) -> None:
+        match_clock = (
+            self.rule.match.input_clock if side == "input" else self.rule.match.output_clock
+        )
+        try:
+            key = _evaluate_time_source(
+                match_clock,
+                log_time_ns,
+                variables,
+                decoded_supplier,
+            )
+        except (MessagePathError, TypeError, ValueError) as exc:
+            self._record_evaluation_error(f"{side} match clock failed: {exc}")
+            return
+
+        if self.largest_seen_key is None or key > self.largest_seen_key:
+            self.largest_seen_key = key
+            watermark = key - self.rule.match.maximum_lateness_ns
+            self._finalize_before(watermark, recording_start_ns, recording_end_ns)
+        if self.finalized_before_ns is not None and key < self.finalized_before_ns:
+            self.late_message_count += 1
+            self._sample(f"late {side} key {key}")
+            return
+        if self.pending_message_count >= self.rule.match.maximum_pending:
+            self.pending_limit_count += 1
+            self._sample(f"pending limit reached at {side} key {key}")
+            return
+
+        group = self.pending.setdefault(key, _PipelineGroup())
+        if side == "input":
+            group.input_count += 1
+        else:
+            group.output_count += 1
+        group.observe_log_time(log_time_ns)
+        self.pending_message_count += 1
+        self.maximum_pending_observed = max(
+            self.maximum_pending_observed,
+            self.pending_message_count,
+        )
+        self._observe_latency(side, group, log_time_ns, variables, decoded_supplier)
+
+    def _observe_latency(
+        self,
+        side: str,
+        group: _PipelineGroup,
+        log_time_ns: int,
+        variables: dict[str, int],
+        decoded_supplier: Callable[[], object],
+    ) -> None:
+        latency = self.rule.latency
+        if latency is None:
+            return
+        try:
+            if side == latency.from_clock.side:
+                timestamp_ns = _evaluate_time_source(
+                    latency.from_clock.clock,
+                    log_time_ns,
+                    variables,
+                    decoded_supplier,
+                )
+                group.earliest_from_ns = (
+                    timestamp_ns
+                    if group.earliest_from_ns is None
+                    else min(group.earliest_from_ns, timestamp_ns)
+                )
+            if side == latency.to_clock.side:
+                timestamp_ns = _evaluate_time_source(
+                    latency.to_clock.clock,
+                    log_time_ns,
+                    variables,
+                    decoded_supplier,
+                )
+                group.latest_to_ns = (
+                    timestamp_ns
+                    if group.latest_to_ns is None
+                    else max(group.latest_to_ns, timestamp_ns)
+                )
+        except (MessagePathError, TypeError, ValueError) as exc:
+            self._record_evaluation_error(f"{side} latency clock failed: {exc}")
+
+    def _finalize_before(
+        self,
+        watermark_ns: int,
+        recording_start_ns: int | None,
+        recording_end_ns: int | None,
+    ) -> None:
+        if self.rule.grace.end_ns and recording_end_ns is None:
+            return
+        for key in [candidate for candidate in self.pending if candidate < watermark_ns]:
+            self._finalize_group(key, recording_start_ns, recording_end_ns)
+        self.finalized_before_ns = (
+            watermark_ns
+            if self.finalized_before_ns is None
+            else max(self.finalized_before_ns, watermark_ns)
+        )
+
+    def finish(self, recording_start_ns: int | None, recording_end_ns: int | None) -> None:
+        for key in list(self.pending):
+            self._finalize_group(key, recording_start_ns, recording_end_ns)
+
+    def _finalize_group(
+        self,
+        key: int,
+        recording_start_ns: int | None,
+        recording_end_ns: int | None,
+    ) -> None:
+        group = self.pending.pop(key)
+        self.pending_message_count -= group.input_count + group.output_count
+        self.finalized_key_count += 1
+        outputs_failed = _cardinality_failed(
+            group.output_count,
+            group.input_count,
+            self.rule.outputs_per_input,
+        )
+        inputs_failed = _cardinality_failed(
+            group.input_count,
+            group.output_count,
+            self.rule.inputs_per_output,
+        )
+        is_in_grace = self._is_in_grace(group, recording_start_ns, recording_end_ns)
+        if is_in_grace and (outputs_failed or inputs_failed):
+            self.excluded_key_count += 1
+        else:
+            if outputs_failed:
+                self.outputs_per_input_failure_count += 1
+                self._sample(
+                    f"key {key}: {group.output_count} outputs for {group.input_count} inputs"
+                )
+            if inputs_failed:
+                self.inputs_per_output_failure_count += 1
+                self._sample(
+                    f"key {key}: {group.input_count} inputs for {group.output_count} outputs"
+                )
+
+        if self.rule.latency is None:
+            return
+        if group.earliest_from_ns is None or group.latest_to_ns is None:
+            if not is_in_grace:
+                self.latency_failure_count += 1
+            return
+        latency_ns = group.latest_to_ns - group.earliest_from_ns
+        self.maximum_latency_ns = (
+            latency_ns
+            if self.maximum_latency_ns is None
+            else max(self.maximum_latency_ns, latency_ns)
+        )
+        if latency_ns > self.rule.latency.maximum_ns:
+            self.latency_failure_count += 1
+            self._sample(f"key {key}: latency {latency_ns}ns")
+
+    def _is_in_grace(
+        self,
+        group: _PipelineGroup,
+        recording_start_ns: int | None,
+        recording_end_ns: int | None,
+    ) -> bool:
+        if (
+            self.rule.grace.start_ns
+            and recording_start_ns is not None
+            and group.minimum_log_time_ns is not None
+            and group.minimum_log_time_ns < recording_start_ns + self.rule.grace.start_ns
+        ):
+            return True
+        return bool(
+            self.rule.grace.end_ns
+            and recording_end_ns is not None
+            and group.maximum_log_time_ns is not None
+            and group.maximum_log_time_ns > recording_end_ns - self.rule.grace.end_ns
+        )
+
+    def _record_evaluation_error(self, sample: str) -> None:
+        self.evaluation_error_count += 1
+        self._sample(sample)
+
+    def _sample(self, sample: str) -> None:
+        if len(self.failure_samples) < _FAILURE_SAMPLE_LIMIT:
+            self.failure_samples.append(sample)
+
+
+def _cardinality_failed(
+    observed_count: int,
+    counterpart_count: int,
+    rule: CardinalityRule | None,
+) -> bool:
+    if rule is None:
+        return False
+    minimum_failed = rule.minimum is not None and observed_count < counterpart_count * rule.minimum
+    maximum_failed = rule.maximum is not None and observed_count > counterpart_count * rule.maximum
+    return minimum_failed or maximum_failed
+
+
+def _pipeline_results(tracker: PipelineTracker) -> list[CheckResult]:
+    rule = tracker.rule
+    matching_failure_count = (
+        tracker.late_message_count + tracker.pending_limit_count + tracker.evaluation_error_count
+    )
+    matching_values: dict[str, ObservationValue] = {
+        "late_message_count": tracker.late_message_count,
+        "pending_limit_count": tracker.pending_limit_count,
+        "clock_error_count": tracker.evaluation_error_count,
+        "maximum_pending_observed": tracker.maximum_pending_observed,
+        "maximum_pending": rule.match.maximum_pending,
+    }
+    if tracker.failure_samples:
+        matching_values["failure_samples"] = "; ".join(tracker.failure_samples)
+    results = [
+        CheckResult(
+            ERROR if matching_failure_count else OK,
+            f"{rule.name}/matching",
+            "pipeline matching failed"
+            if matching_failure_count
+            else "pipeline matching is within bounds",
+            matching_values,
+        )
+    ]
+    common_values: dict[str, ObservationValue] = {
+        "evaluated_key_count": tracker.finalized_key_count,
+        "excluded_key_count": tracker.excluded_key_count,
+    }
+    if rule.outputs_per_input is not None:
+        results.append(
+            CheckResult(
+                ERROR if tracker.outputs_per_input_failure_count else OK,
+                f"{rule.name}/outputs_per_input",
+                "outputs per input are outside bounds"
+                if tracker.outputs_per_input_failure_count
+                else "outputs per input are within bounds",
+                {
+                    **common_values,
+                    "failure_count": tracker.outputs_per_input_failure_count,
+                },
+            )
+        )
+    if rule.inputs_per_output is not None:
+        results.append(
+            CheckResult(
+                ERROR if tracker.inputs_per_output_failure_count else OK,
+                f"{rule.name}/inputs_per_output",
+                "inputs per output are outside bounds"
+                if tracker.inputs_per_output_failure_count
+                else "inputs per output are within bounds",
+                {
+                    **common_values,
+                    "failure_count": tracker.inputs_per_output_failure_count,
+                },
+            )
+        )
+    if rule.latency is not None:
+        latency_values: dict[str, ObservationValue] = {
+            "failure_count": tracker.latency_failure_count,
+            "maximum_allowed_ns": rule.latency.maximum_ns,
+        }
+        if tracker.maximum_latency_ns is not None:
+            latency_values["maximum_latency_ns"] = tracker.maximum_latency_ns
+        results.append(
+            CheckResult(
+                ERROR if tracker.latency_failure_count else OK,
+                f"{rule.name}/latency",
+                "pipeline latency exceeded"
+                if tracker.latency_failure_count
+                else "pipeline latency is within bounds",
+                latency_values,
+            )
+        )
+    return results
+
+
 def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckReport:
     """Evaluate one MCAP file against a compiled recording check specification."""
     if num_workers < 0:
@@ -839,8 +1357,11 @@ def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckRepo
         scan_rule_indexes = {
             index for index, rule in enumerate(spec.topics) if rule.expected and rule.needs_messages
         }
+        for pipeline in spec.pipelines:
+            scan_rule_indexes.update((pipeline.input_rule_index, pipeline.output_rule_index))
         needs_scan = bool(scan_rule_indexes) or not has_complete_summary
         runtimes: dict[tuple[int, str], _TopicRuntime] = {}
+        pipeline_trackers = [PipelineTracker(rule) for rule in spec.pipelines]
         recording_start_ns, recording_end_ns = _summary_time_bounds(summary)
 
         if needs_scan:
@@ -861,6 +1382,7 @@ def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckRepo
                         recording_start_ns,
                         recording_end_ns,
                         num_workers,
+                        pipeline_trackers,
                     )
                 finally:
                     progress.stop()
@@ -875,6 +1397,7 @@ def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckRepo
                     recording_start_ns,
                     recording_end_ns,
                     num_workers,
+                    pipeline_trackers,
                 )
 
     results = build_results(
@@ -883,6 +1406,7 @@ def check_mcap(file: str, spec: CheckSpec, *, num_workers: int = 4) -> CheckRepo
         runtimes,
         recording_start_ns,
         recording_end_ns,
+        pipeline_trackers,
     )
     return CheckReport(path=file, results=results)
 
@@ -928,6 +1452,7 @@ def _scan_messages(
     recording_start_ns: int | None,
     recording_end_ns: int | None,
     num_workers: int,
+    pipeline_trackers: list[PipelineTracker],
 ) -> tuple[int | None, int | None]:
     predicates = [rule.selector.create_channel_predicate() for rule in spec.topics]
     if has_complete_summary:
@@ -944,6 +1469,10 @@ def _scan_messages(
     matched_by_channel: dict[int, tuple[int, ...]] = {}
     known_channels: set[tuple[int, int]] = set()
     evaluator = MessageRuleEvaluator(spec, runtimes)
+    pipeline_sides: dict[int, list[tuple[PipelineTracker, str]]] = {}
+    for tracker in pipeline_trackers:
+        pipeline_sides.setdefault(tracker.rule.input_rule_index, []).append((tracker, "input"))
+        pipeline_sides.setdefault(tracker.rule.output_rule_index, []).append((tracker, "output"))
     # Without summary statistics the recording end is unknown until the scan
     # completes; rules referencing $recording_end_ns then fail explicitly
     # instead of comparing against a bogus per-message value.
@@ -971,6 +1500,7 @@ def _scan_messages(
             matched_by_channel[channel.id] = matched_indexes
 
         variables: dict[str, int] | None = None
+        decoded_supplier = cache(partial(_decoded_payload, message))
         for index in matched_indexes:
             rule = spec.topics[index]
             if not has_complete_summary:
@@ -998,8 +1528,17 @@ def _scan_messages(
                 timestamp_ns,
                 recording_start_ns,
                 variables,
-                partial(_decoded_payload, message),
+                decoded_supplier,
             )
+            for tracker, side in pipeline_sides.get(index, ()):
+                tracker.observe(
+                    side,
+                    timestamp_ns,
+                    variables,
+                    decoded_supplier,
+                    recording_start_ns,
+                    known_end_ns,
+                )
 
     return recording_start_ns, recording_end_ns
 
@@ -1109,6 +1648,7 @@ def build_results(
     runtimes: dict[tuple[int, str], _TopicRuntime],
     recording_start_ns: int | None,
     recording_end_ns: int | None,
+    pipeline_trackers: list[PipelineTracker] | None = None,
 ) -> list[CheckResult]:
     final_variables: dict[str, int] = {}
     if recording_start_ns is not None:
@@ -1187,6 +1727,10 @@ def build_results(
                 _value_result(rule, topic, runtime, value_index)
                 for value_index in range(len(rule.values))
             )
+    if pipeline_trackers is not None:
+        for tracker in pipeline_trackers:
+            tracker.finish(recording_start_ns, recording_end_ns)
+            results.extend(_pipeline_results(tracker))
     return results
 
 

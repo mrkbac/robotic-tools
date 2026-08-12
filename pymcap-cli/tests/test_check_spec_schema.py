@@ -119,6 +119,28 @@ topics:
     monotonic: true
     timeout: 50ms
 """,
+    "pipeline": """
+version: 2
+topics:
+  input: {topic: /input}
+  output: {topic: /output}
+pipelines:
+  detector:
+    input: input
+    output: output
+    match:
+      input: {source: message, path: .header.stamp}
+      output: {source: message, path: .header.stamp}
+      max_lateness: 500ms
+      max_pending: 10000
+    outputs_per_input: {min: 1, max: 1}
+    inputs_per_output: {max: 1}
+    latency:
+      from: {side: input, source: publish}
+      to: {side: output, source: publish}
+      max: 50ms
+    grace: {start: 1s, end: 1s}
+""",
 }
 
 
@@ -147,6 +169,11 @@ topics: {}
     "version_3": """
 version: 3
 topics: {}
+""",
+    "pipeline_in_version_1": """
+version: 1
+topics: {}
+pipelines: {}
 """,
     "version_true": """
 version: true

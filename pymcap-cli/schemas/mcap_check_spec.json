@@ -4,6 +4,17 @@
   "description": "Versioned recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Regex validity, MessagePath validity, and cross-field constraints are enforced by the parser.",
   "type": "object",
   "required": ["version", "topics"],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "version": { "const": 1 } },
+        "required": ["version"]
+      },
+      "then": {
+        "propertyNames": { "enum": ["version", "topics", "live"] }
+      }
+    }
+  ],
   "properties": {
     "version": {
       "enum": [1, 2],
@@ -18,6 +29,17 @@
       },
       "additionalProperties": {
         "$ref": "#/definitions/TopicRuleSpec"
+      }
+    },
+    "pipelines": {
+      "type": "object",
+      "description": "Bounded exact-key contracts between one input and one output topic rule. Version 2 only.",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/PipelineRuleSpec"
       }
     },
     "live": {
@@ -172,6 +194,109 @@
       },
       "then": { "required": ["path"] },
       "else": { "not": { "required": ["path"] } },
+      "additionalProperties": false
+    },
+    "PipelineRuleSpec": {
+      "title": "PipelineRuleSpec",
+      "description": "Exact-key cardinality and latency contract from one topic rule to another.",
+      "type": "object",
+      "required": ["input", "output", "match"],
+      "anyOf": [
+        { "required": ["outputs_per_input"] },
+        { "required": ["inputs_per_output"] },
+        { "required": ["latency"] }
+      ],
+      "properties": {
+        "input": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the input topic rule."
+        },
+        "output": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the output topic rule."
+        },
+        "match": { "$ref": "#/definitions/PipelineMatchSpec" },
+        "outputs_per_input": { "$ref": "#/definitions/CardinalitySpec" },
+        "inputs_per_output": { "$ref": "#/definitions/CardinalitySpec" },
+        "latency": { "$ref": "#/definitions/PipelineLatencySpec" },
+        "grace": { "$ref": "#/definitions/PipelineGraceSpec" }
+      },
+      "additionalProperties": false
+    },
+    "PipelineMatchSpec": {
+      "title": "PipelineMatchSpec",
+      "description": "Exact-key join clocks and mandatory memory/lateness bounds.",
+      "type": "object",
+      "required": ["input", "output", "max_lateness", "max_pending"],
+      "properties": {
+        "input": { "$ref": "#/definitions/TimeSourceSpec" },
+        "output": { "$ref": "#/definitions/TimeSourceSpec" },
+        "max_lateness": { "$ref": "#/definitions/Duration" },
+        "max_pending": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum pending messages, including repeated keys."
+        }
+      },
+      "additionalProperties": false
+    },
+    "CardinalitySpec": {
+      "title": "CardinalitySpec",
+      "description": "Inclusive cardinality bounds; at least one bound is required.",
+      "type": "object",
+      "minProperties": 1,
+      "anyOf": [{ "required": ["min"] }, { "required": ["max"] }],
+      "properties": {
+        "min": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "PipelineSideTimeSourceSpec": {
+      "title": "PipelineSideTimeSourceSpec",
+      "description": "Clock evaluated on one side of a pipeline group.",
+      "type": "object",
+      "required": ["side", "source"],
+      "properties": {
+        "side": { "enum": ["input", "output"] },
+        "source": { "enum": ["log", "publish", "message"] },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative MessagePath required for source=message."
+        }
+      },
+      "if": {
+        "properties": { "source": { "const": "message" } },
+        "required": ["source"]
+      },
+      "then": { "required": ["path"] },
+      "else": { "not": { "required": ["path"] } },
+      "additionalProperties": false
+    },
+    "PipelineLatencySpec": {
+      "title": "PipelineLatencySpec",
+      "description": "Maximum selected-clock latency within each exact-key group.",
+      "type": "object",
+      "required": ["from", "to", "max"],
+      "properties": {
+        "from": { "$ref": "#/definitions/PipelineSideTimeSourceSpec" },
+        "to": { "$ref": "#/definitions/PipelineSideTimeSourceSpec" },
+        "max": { "$ref": "#/definitions/Duration" }
+      },
+      "additionalProperties": false
+    },
+    "PipelineGraceSpec": {
+      "title": "PipelineGraceSpec",
+      "description": "Recording-boundary intervals excluded from incomplete cardinality checks.",
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "start": { "$ref": "#/definitions/Duration" },
+        "end": { "$ref": "#/definitions/Duration" }
+      },
       "additionalProperties": false
     },
     "Duration": {

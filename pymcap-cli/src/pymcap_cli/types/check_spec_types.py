@@ -6,12 +6,47 @@ from typing import Literal, TypedDict, Union
 from typing_extensions import Required
 
 
+class CardinalitySpec(TypedDict, total=False):
+    r"""
+    CardinalitySpec.
+
+    Inclusive cardinality bounds; at least one bound is required.
+
+    minProperties: 1
+    anyOf:
+      - required:
+        - min
+      - required:
+        - max
+    """
+
+    min: int
+    r""" minimum: 0 """
+
+    max: int
+    r""" minimum: 0 """
+
+
 class CheckSpecInput(TypedDict, total=False):
     r"""
     CheckSpecInput.
 
     Versioned recording contract for `pymcap-cli check` and `pymcap-cli bridge check`. Regex validity,
     MessagePath validity, and cross-field constraints are enforced by the parser.
+
+    allOf:
+      - if:
+          properties:
+            version:
+              const: 1
+          required:
+          - version
+        then:
+          propertyNames:
+            enum:
+            - version
+            - topics
+            - live
     """
 
     version: Required["_CheckSpecInputversion"]
@@ -30,6 +65,15 @@ class CheckSpecInput(TypedDict, total=False):
       minLength: 1
 
     Required property
+    """
+
+    pipelines: dict[str, "PipelineRuleSpec"]
+    r"""
+    Bounded exact-key contracts between one input and one output topic rule. Version 2 only.
+
+    propertyNames:
+      __type__: string
+      minLength: 1
     """
 
     live: "LiveRootSpec"
@@ -229,6 +273,212 @@ Relative MessagePath starting with '.' or '{' and ending in a predicate filter, 
 '.linear_acceleration.@norm{<=30}'.
 
 pattern: ^[.{].*\}\s*$
+"""
+
+
+class PipelineGraceSpec(TypedDict, total=False):
+    r"""
+    PipelineGraceSpec.
+
+    Recording-boundary intervals excluded from incomplete cardinality checks.
+
+    minProperties: 1
+    """
+
+    start: "Duration"
+    r"""
+    Duration.
+
+    Positive duration such as '500ms', '2s', or '1.5m'; a bare number means seconds.
+
+    pattern: ^\s*(?=[0-9.]*[1-9])[0-9]*\.?[0-9]+\s*(ns|us|ms|s|m|h)?\s*$
+    exclusiveMinimum: 0
+    """
+
+    end: "Duration"
+    r"""
+    Duration.
+
+    Positive duration such as '500ms', '2s', or '1.5m'; a bare number means seconds.
+
+    pattern: ^\s*(?=[0-9.]*[1-9])[0-9]*\.?[0-9]+\s*(ns|us|ms|s|m|h)?\s*$
+    exclusiveMinimum: 0
+    """
+
+
+# | PipelineLatencySpec.
+# |
+# | Maximum selected-clock latency within each exact-key group.
+PipelineLatencySpec = TypedDict(
+    "PipelineLatencySpec",
+    {
+        # | PipelineSideTimeSourceSpec.
+        # |
+        # | Clock evaluated on one side of a pipeline group.
+        # |
+        # | Required property
+        "from": Required["PipelineSideTimeSourceSpec"],
+        # | PipelineSideTimeSourceSpec.
+        # |
+        # | Clock evaluated on one side of a pipeline group.
+        # |
+        # | Required property
+        "to": Required["PipelineSideTimeSourceSpec"],
+        # | Duration.
+        # |
+        # | Positive duration such as '500ms', '2s', or '1.5m'; a bare number means seconds.
+        # |
+        # | pattern: ^\s*(?=[0-9.]*[1-9])[0-9]*\.?[0-9]+\s*(ns|us|ms|s|m|h)?\s*$
+        # | exclusiveMinimum: 0
+        # |
+        # | Required property
+        "max": Required["Duration"],
+    },
+    total=False,
+)
+
+
+class PipelineMatchSpec(TypedDict, total=False):
+    r"""
+    PipelineMatchSpec.
+
+    Exact-key join clocks and mandatory memory/lateness bounds.
+    """
+
+    input: Required["TimeSourceSpec"]
+    r"""
+    TimeSourceSpec.
+
+    Clock used by timing and value checks. A message clock requires a relative MessagePath.
+
+    Required property
+    """
+
+    output: Required["TimeSourceSpec"]
+    r"""
+    TimeSourceSpec.
+
+    Clock used by timing and value checks. A message clock requires a relative MessagePath.
+
+    Required property
+    """
+
+    max_lateness: Required["Duration"]
+    r"""
+    Duration.
+
+    Positive duration such as '500ms', '2s', or '1.5m'; a bare number means seconds.
+
+    pattern: ^\s*(?=[0-9.]*[1-9])[0-9]*\.?[0-9]+\s*(ns|us|ms|s|m|h)?\s*$
+    exclusiveMinimum: 0
+
+    Required property
+    """
+
+    max_pending: Required[int]
+    r"""
+    Maximum pending messages, including repeated keys.
+
+    minimum: 1
+
+    Required property
+    """
+
+
+class PipelineRuleSpec(TypedDict, total=False):
+    r"""
+    PipelineRuleSpec.
+
+    Exact-key cardinality and latency contract from one topic rule to another.
+
+    anyOf:
+      - required:
+        - outputs_per_input
+      - required:
+        - inputs_per_output
+      - required:
+        - latency
+    """
+
+    input: Required[str]
+    r"""
+    Name of the input topic rule.
+
+    minLength: 1
+
+    Required property
+    """
+
+    output: Required[str]
+    r"""
+    Name of the output topic rule.
+
+    minLength: 1
+
+    Required property
+    """
+
+    match: Required["PipelineMatchSpec"]
+    r"""
+    PipelineMatchSpec.
+
+    Exact-key join clocks and mandatory memory/lateness bounds.
+
+    Required property
+    """
+
+    outputs_per_input: "CardinalitySpec"
+    r"""
+    CardinalitySpec.
+
+    Inclusive cardinality bounds; at least one bound is required.
+
+    minProperties: 1
+    anyOf:
+      - required:
+        - min
+      - required:
+        - max
+    """
+
+    inputs_per_output: "CardinalitySpec"
+    r"""
+    CardinalitySpec.
+
+    Inclusive cardinality bounds; at least one bound is required.
+
+    minProperties: 1
+    anyOf:
+      - required:
+        - min
+      - required:
+        - max
+    """
+
+    latency: "PipelineLatencySpec"
+    r"""
+    PipelineLatencySpec.
+
+    Maximum selected-clock latency within each exact-key group.
+    """
+
+    grace: "PipelineGraceSpec"
+    r"""
+    PipelineGraceSpec.
+
+    Recording-boundary intervals excluded from incomplete cardinality checks.
+
+    minProperties: 1
+    """
+
+
+PipelineSideTimeSourceSpec = Union[
+    "_PipelineSideTimeSourceSpecthen", "_PipelineSideTimeSourceSpecelse"
+]
+r"""
+PipelineSideTimeSourceSpec.
+
+Clock evaluated on one side of a pipeline group.
 """
 
 
@@ -497,6 +747,54 @@ r""" Default value of the field path 'FrequencyRuleSpec tolerance' """
 
 _LIVENODERULESPEC_EXPECTED_DEFAULT = True
 r""" Default value of the field path 'LiveNodeRuleSpec expected' """
+
+
+class _PipelineSideTimeSourceSpecelse(TypedDict, total=False):
+    r"""
+    not:
+      required:
+      - path
+    """
+
+    side: Required["_PipelineSideTimeSourceSpecelseside"]
+    r""" Required property """
+
+    source: Required[Literal["message"]]
+    r""" Required property """
+
+    path: str
+    r"""
+    Relative MessagePath required for source=message.
+
+    minLength: 1
+    """
+
+
+_PipelineSideTimeSourceSpecelseside = Literal["input"] | Literal["output"]
+_PIPELINESIDETIMESOURCESPECELSESIDE_INPUT: Literal["input"] = "input"
+r"""The values for the '_PipelineSideTimeSourceSpecelseside' enum"""
+_PIPELINESIDETIMESOURCESPECELSESIDE_OUTPUT: Literal["output"] = "output"
+r"""The values for the '_PipelineSideTimeSourceSpecelseside' enum"""
+
+
+class _PipelineSideTimeSourceSpecthen(TypedDict, total=False):
+    side: "_PipelineSideTimeSourceSpecthenside"
+    source: Literal["message"]
+    path: Required[str]
+    r"""
+    Relative MessagePath required for source=message.
+
+    minLength: 1
+
+    Required property
+    """
+
+
+_PipelineSideTimeSourceSpecthenside = Literal["input"] | Literal["output"]
+_PIPELINESIDETIMESOURCESPECTHENSIDE_INPUT: Literal["input"] = "input"
+r"""The values for the '_PipelineSideTimeSourceSpecthenside' enum"""
+_PIPELINESIDETIMESOURCESPECTHENSIDE_OUTPUT: Literal["output"] = "output"
+r"""The values for the '_PipelineSideTimeSourceSpecthenside' enum"""
 
 
 _TOPICRULESPEC_EXPECTED_DEFAULT = True
