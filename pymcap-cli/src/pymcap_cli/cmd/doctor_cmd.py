@@ -1,9 +1,12 @@
 """Doctor command - validate MCAP container structure and indexes."""
 
+import json
 import logging
+import sys
 from collections import defaultdict
 from contextlib import ExitStack
-from typing import IO, Annotated
+from dataclasses import dataclass
+from typing import IO, Annotated, Literal, TextIO
 
 from cyclopts import Parameter
 from rich.console import Console
@@ -17,6 +20,32 @@ from pymcap_cli.utils import ProgressTrackingIO, file_progress
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+@dataclass(slots=True)
+class _JsonlFindingSink:
+    stream: TextIO
+
+    def emit(self, finding: Finding) -> None:
+        _write_jsonl(
+            self.stream,
+            {
+                "schema_version": 1,
+                "type": "finding",
+                "code": finding.code.value,
+                "severity": finding.severity.value,
+                "offset": finding.offset,
+                "section": finding.section.value,
+                "record": finding.record,
+                "message": finding.message,
+            },
+        )
+
+
+def _write_jsonl(stream: TextIO, record: dict[str, bool | int | str | None]) -> None:
+    stream.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False))
+    stream.write("\n")
+    stream.flush()
 
 
 def doctor(
@@ -36,12 +65,21 @@ def doctor(
             help="Print every finding individually instead of the grouped summary.",
         ),
     ] = False,
+    format: Annotated[
+        Literal["text", "jsonl"],
+        Parameter(
+            name=["--format"],
+            help="Output format: terminal text or one JSON object per line.",
+        ),
+    ] = "text",
 ) -> int:
     """Check an MCAP file structure against the MCAP container specification."""
+    jsonl_stream = sys.stdout
+    finding_sink = _JsonlFindingSink(jsonl_stream) if format == "jsonl" else None
     try:
         with open_input(file, buffering=0) as (stream, size), ExitStack() as stack:
             scanned: IO[bytes] = stream
-            if size:
+            if size and format == "text":
                 progress = file_progress("[bold blue]MCAP doctor scanning...")
                 progress.start()
                 stack.callback(progress.stop)
@@ -52,6 +90,7 @@ def doctor(
                 size,
                 str(file),
                 strict_message_order=strict_message_order,
+                finding_sink=finding_sink,
             )
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")
@@ -61,7 +100,24 @@ def doctor(
         logger.exception("Doctor command failed")
         return 1
 
-    _print_report(report, show_all=show_all)
+    if format == "jsonl":
+        _write_jsonl(
+            jsonl_stream,
+            {
+                "schema_version": 1,
+                "type": "summary",
+                "path": report.path,
+                "records": report.record_count,
+                "messages": report.message_count,
+                "chunks": report.chunk_count,
+                "errors": report.error_count,
+                "warnings": report.warning_count,
+                "info": report.info_count,
+                "complete": True,
+            },
+        )
+    else:
+        _print_report(report, show_all=show_all)
     return 1 if report.error_count else 0
 
 

@@ -5,7 +5,7 @@ import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import IO, TYPE_CHECKING, cast
+from typing import IO, TYPE_CHECKING, Protocol, cast
 
 import yaml
 from lz4.frame import decompress as lz4_decompress
@@ -364,6 +364,12 @@ class Finding:
     record: str = ""
 
 
+class FindingSink(Protocol):
+    """Receives findings as soon as the validator finalizes them."""
+
+    def emit(self, finding: Finding) -> None: ...
+
+
 @dataclass(slots=True)
 class DecodedString:
     value: str
@@ -608,11 +614,13 @@ class McapDoctor:
         *,
         strict_message_order: bool = False,
         severity_overrides: dict[FindingCode, Severity] | None = None,
+        finding_sink: FindingSink | None = None,
     ) -> None:
         self.findings: list[Finding] = []
         self.frames: list[Frame] = []
         self._file_size = 0
         self._data_end_checksum: int | None = None
+        self._finding_sink = finding_sink
         self.strict_message_order = strict_message_order
         self._severity: dict[FindingCode, Severity] = {
             code: default_severity(code) for code in FindingCode
@@ -656,7 +664,10 @@ class McapDoctor:
         record: str = "",
     ) -> None:
         severity = self._severity[code]
-        self.findings.append(Finding(severity, code, message, offset, section, record))
+        finding = Finding(severity, code, message, offset, section, record)
+        self.findings.append(finding)
+        if self._finding_sink is not None:
+            self._finding_sink.emit(finding)
 
     def _scan(self, stream: IO[bytes]) -> None:
         if self._file_size < MAGIC_SIZE * 2:
@@ -3095,5 +3106,9 @@ def examine_mcap(
     path: str,
     *,
     strict_message_order: bool = False,
+    finding_sink: FindingSink | None = None,
 ) -> DoctorReport:
-    return McapDoctor(strict_message_order=strict_message_order).examine(stream, size, path)
+    return McapDoctor(
+        strict_message_order=strict_message_order,
+        finding_sink=finding_sink,
+    ).examine(stream, size, path)

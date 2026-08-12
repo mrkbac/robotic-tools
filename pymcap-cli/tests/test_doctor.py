@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import struct
 import zlib
 from typing import TYPE_CHECKING
@@ -773,3 +774,52 @@ def test_doctor_registered_command_accepts_valid_file(
 
     assert doctor_cmd.doctor(str(path)) == 0
     assert "passed MCAP doctor checks" in " ".join(output.getvalue().split())
+
+
+def test_doctor_jsonl_valid_file_ends_with_one_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "valid.mcap"
+    path.write_bytes(_simple_chunked_mcap())
+
+    assert doctor_cmd.doctor(str(path), format="jsonl") == 0
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    summary = records[-1]
+    assert summary == {
+        "schema_version": 1,
+        "type": "summary",
+        "path": str(path),
+        "records": 15,
+        "messages": 3,
+        "chunks": 1,
+        "errors": 0,
+        "warnings": 0,
+        "info": len(records) - 1,
+        "complete": True,
+    }
+    assert sum(record["type"] == "summary" for record in records) == 1
+
+
+def test_doctor_jsonl_invalid_file_streams_finding_then_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "invalid.mcap"
+    path.write_bytes(_simple_chunked_mcap()[:-8] + b"notmagic")
+
+    assert doctor_cmd.doctor(str(path), format="jsonl") == 1
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert records[0] == {
+        "schema_version": 1,
+        "type": "finding",
+        "code": "BAD_TRAILING_MAGIC",
+        "severity": "error",
+        "offset": len(path.read_bytes()) - 8,
+        "section": "unknown",
+        "record": "",
+        "message": "file does not end with MCAP magic bytes",
+    }
+    assert records[-1]["type"] == "summary"
+    assert records[-1]["errors"] >= 1
+    assert sum(record["type"] == "summary" for record in records) == 1
