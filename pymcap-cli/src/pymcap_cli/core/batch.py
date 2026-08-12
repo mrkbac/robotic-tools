@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
@@ -165,6 +166,7 @@ def _run_job(
         if final.exists() and not force:
             raise FileExistsError(f"output already exists: {final}")
 
+        _require_free_space(final.parent, snapshot.size)
         transform.preflight(source)
         try:
             result = transform.run(source, partial)
@@ -200,6 +202,15 @@ def _snapshot(path: Path) -> _SourceSnapshot:
         mtime_ns=stat.st_mtime_ns,
         ctime_ns=stat.st_ctime_ns,
     )
+
+
+def _require_free_space(path: Path, required_bytes: int) -> None:
+    free_bytes = shutil.disk_usage(path).free
+    if free_bytes < required_bytes:
+        raise OSError(
+            f"insufficient free space in {path}: need at least {required_bytes} bytes, "
+            f"have {free_bytes}"
+        )
 
 
 def _source_fingerprint(path: Path, size: int) -> str:
