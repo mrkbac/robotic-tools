@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import time
 import zlib
@@ -36,7 +37,6 @@ from small_mcap.records import (
 )
 
 if TYPE_CHECKING:
-    import os
     from collections.abc import Iterator
     from types import TracebackType
     from typing import IO
@@ -92,10 +92,11 @@ class McapFollower:
     def open(cls, path: str | os.PathLike[str], *, validate_crc: bool = False) -> McapFollower:
         """Open an existing local regular file, including a zero-byte new file."""
         resolved = Path(path).resolve()
-        file_stat = resolved.stat()
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise ValueError(f"MCAP follower requires a local regular file: {path}")
         stream = resolved.open("rb", buffering=0)
+        file_stat = os.fstat(stream.fileno())
+        if not stat.S_ISREG(file_stat.st_mode):
+            stream.close()
+            raise ValueError(f"MCAP follower requires a local regular file: {path}")
         return cls(
             resolved,
             stream,
@@ -138,14 +139,14 @@ class McapFollower:
         messages: list[MessageTuple] = []
         output_bytes = self._drain_pending(messages, max_messages, max_bytes, 0)
         if self._pending or self._is_final:
-            return FollowBatch(tuple(messages), self._committed_offset, self._is_final)
+            return self._result(messages)
 
         read_bytes = 0
         if not self._is_magic_committed:
             magic = self._stream.read(MAGIC_SIZE)
             if len(magic) < MAGIC_SIZE:
                 self._stream.seek(self._committed_offset)
-                return FollowBatch(tuple(messages), self._committed_offset, False)
+                return self._result(messages)
             if magic != MAGIC:
                 raise InvalidMagicError(magic)
             self._is_magic_committed = True
@@ -173,6 +174,10 @@ class McapFollower:
             if self._pending:
                 break
 
+        return self._result(messages)
+
+    def _result(self, messages: list[MessageTuple]) -> FollowBatch:
+        self._check_file_identity()
         return FollowBatch(tuple(messages), self._committed_offset, self._is_final)
 
     def iter_messages(
@@ -276,6 +281,14 @@ class McapFollower:
             return
         if not isinstance(record, Message):
             return
+        if isinstance(record.data, memoryview):
+            record = Message(
+                channel_id=record.channel_id,
+                sequence=record.sequence,
+                log_time=record.log_time,
+                publish_time=record.publish_time,
+                data=bytes(record.data),
+            )
         channel = self._channels.get(record.channel_id)
         if channel is None:
             raise ChannelNotFoundError(record.channel_id)

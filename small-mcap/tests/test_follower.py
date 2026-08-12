@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -151,6 +153,61 @@ def test_follower_respects_message_budget_without_duplicates(tmp_path: Path) -> 
     ] == list(range(5))
 
 
+def test_follower_chunk_messages_own_payload_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "complete.mcap"
+    path.write_bytes(_recording_bytes(message_count=3, chunk_size=1024))
+
+    with McapFollower.open(path) as follower:
+        batch = follower.poll_messages()
+
+    assert batch.messages
+    assert all(isinstance(message.data, bytes) for _schema, _channel, message in batch.messages)
+
+
+def test_follower_concurrent_writer_soak_emits_every_message_once(tmp_path: Path) -> None:
+    data = _recording_bytes(
+        message_count=500,
+        chunk_size=512,
+        compression=CompressionType.ZSTD,
+    )
+    path = tmp_path / "growing.mcap"
+    path.touch()
+    writer_done = threading.Event()
+
+    def append_recording() -> None:
+        try:
+            with path.open("ab", buffering=0) as stream:
+                offset = 0
+                block_sizes = (1, 17, 257, 4096, 31)
+                while offset < len(data):
+                    block_size = block_sizes[offset % len(block_sizes)]
+                    end = min(offset + block_size, len(data))
+                    stream.write(data[offset:end])
+                    offset = end
+                    time.sleep(0.0001)
+        finally:
+            writer_done.set()
+
+    writer = threading.Thread(target=append_recording, daemon=True)
+    writer.start()
+    messages = []
+    deadline = time.monotonic() + 10
+    with McapFollower.open(path, validate_crc=True) as follower:
+        while time.monotonic() < deadline:
+            batch = follower.poll_messages(max_messages=7, max_bytes=2048)
+            messages.extend(batch.messages)
+            if batch.is_final:
+                break
+            if not batch.messages:
+                writer_done.wait(0.001)
+        else:
+            pytest.fail("follower did not reach trailing magic before timeout")
+    writer.join(timeout=1)
+
+    assert not writer.is_alive()
+    assert [message.sequence for _schema, _channel, message in messages] == list(range(500))
+
+
 def test_follower_raises_typed_truncation_error(tmp_path: Path) -> None:
     path = tmp_path / "recording.mcap"
     path.write_bytes(_recording_bytes())
@@ -174,3 +231,30 @@ def test_follower_raises_typed_replacement_error(tmp_path: Path) -> None:
         replacement.replace(path)
         with pytest.raises(McapFileReplacedError):
             follower.poll_messages()
+
+
+def test_follower_detects_replacement_during_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "recording.mcap"
+    data = _recording_bytes()
+    path.write_bytes(data)
+    replacement = tmp_path / "replacement.mcap"
+    replacement.write_bytes(data)
+    original = McapFollower._process_complete_record
+    was_replaced = False
+
+    def replace_after_record(self, opcode, record, header, body) -> None:
+        nonlocal was_replaced
+        original(self, opcode, record, header, body)
+        if not was_replaced:
+            replacement.replace(path)
+            was_replaced = True
+
+    monkeypatch.setattr(McapFollower, "_process_complete_record", replace_after_record)
+
+    with McapFollower.open(path) as follower, pytest.raises(McapFileReplacedError):
+        follower.poll_messages()
+
+    assert was_replaced
