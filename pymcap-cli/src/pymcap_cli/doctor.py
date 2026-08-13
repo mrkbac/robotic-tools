@@ -143,6 +143,7 @@ _LARGE_CHUNK_BYTES = 64 * 1024 * 1024
 _SMALL_CHUNK_MEDIAN_BYTES = 64 * 1024
 _SMALL_CHUNK_MIN_COUNT = 10
 _FINDING_SAMPLES_PER_CODE = 3
+_STREAM_BLOCK_BYTES = 256 * 1024
 
 
 class Section(str, Enum):
@@ -814,28 +815,151 @@ class McapDoctor:
                 )
                 break
 
-            body = stream.read(length)
-            if len(body) != length:
-                self._emit(
-                    FindingCode.TRUNCATED_RECORD_BODY,
-                    f"{opcode_name(opcode)} record body is truncated",
-                    offset=offset,
-                    record=opcode_name(opcode),
-                )
-                break
-
             checksum_before_frame = data_crc
             if is_before_data_end and opcode != Opcode.DATA_END:
+                assert data_crc is not None
                 data_crc = zlib.crc32(header, data_crc)
-                data_crc = zlib.crc32(body, data_crc)
-
-            parsed = self._parse_record(opcode, body, offset, Section.UNKNOWN, opcode_name(opcode))
+            if opcode == Opcode.ATTACHMENT:
+                parsed, data_crc = self._scan_attachment(
+                    stream,
+                    length,
+                    offset,
+                    data_crc if is_before_data_end else None,
+                )
+                body = b""
+            elif is_private_opcode(opcode) or opcode not in _KNOWN_OPCODES:
+                data_crc = self._scan_opaque_body(
+                    stream,
+                    length,
+                    data_crc if is_before_data_end else None,
+                )
+                parsed = self._parse_record(
+                    opcode,
+                    b"",
+                    offset,
+                    Section.UNKNOWN,
+                    opcode_name(opcode),
+                )
+                body = b""
+            else:
+                body = stream.read(length)
+                if len(body) != length:
+                    self._emit(
+                        FindingCode.TRUNCATED_RECORD_BODY,
+                        f"{opcode_name(opcode)} record body is truncated",
+                        offset=offset,
+                        record=opcode_name(opcode),
+                    )
+                    break
+                if is_before_data_end and opcode != Opcode.DATA_END:
+                    assert data_crc is not None
+                    data_crc = zlib.crc32(body, data_crc)
+                parsed = self._parse_record(
+                    opcode,
+                    body,
+                    offset,
+                    Section.UNKNOWN,
+                    opcode_name(opcode),
+                )
             frame = Frame(offset=offset, opcode=opcode, length=length, body=body, parsed=parsed)
             self.frames.append(frame)
 
             if opcode == Opcode.DATA_END and is_before_data_end:
                 self._data_end_checksum = checksum_before_frame
                 is_before_data_end = False
+
+    def _scan_opaque_body(
+        self,
+        stream: IO[bytes],
+        length: int,
+        checksum: int | None,
+    ) -> int | None:
+        remaining = length
+        while remaining:
+            block = stream.read(min(remaining, _STREAM_BLOCK_BYTES))
+            if not block:
+                break
+            if checksum is not None:
+                checksum = zlib.crc32(block, checksum)
+            remaining -= len(block)
+        return checksum
+
+    def _scan_attachment(
+        self,
+        stream: IO[bytes],
+        length: int,
+        record_offset: int,
+        data_checksum: int | None,
+    ) -> tuple[AttachmentRecord | None, int | None]:
+        remaining = length
+        attachment_checksum = 0
+
+        def consume(size: int, field: str, *, is_crc_input: bool = True) -> bytes:
+            nonlocal remaining, data_checksum, attachment_checksum
+            if size > remaining:
+                raise ParseError(f"Attachment.{field} extends past the end of the record")
+            value = stream.read(size)
+            if len(value) != size:
+                raise ParseError(f"Attachment.{field} is truncated")
+            remaining -= size
+            if data_checksum is not None:
+                data_checksum = zlib.crc32(value, data_checksum)
+            if is_crc_input:
+                attachment_checksum = zlib.crc32(value, attachment_checksum)
+            return value
+
+        def read_string(field: str) -> str:
+            string_length = _U32.unpack(consume(4, f"{field} length"))[0]
+            raw = consume(string_length, field)
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                self._emit(
+                    FindingCode.INVALID_UTF8,
+                    f"Attachment.{field} is not valid UTF-8",
+                    offset=record_offset,
+                    record="Attachment",
+                )
+                return raw.decode("utf-8", "replace")
+
+        parsed: AttachmentRecord | None = None
+        try:
+            log_time, create_time = struct.unpack("<QQ", consume(16, "times"))
+            name = read_string("name")
+            media_type = read_string("media_type")
+            data_size = _U64.unpack(consume(8, "data length"))[0]
+            data_remaining = data_size
+            while data_remaining:
+                block_size = min(data_remaining, _STREAM_BLOCK_BYTES)
+                consume(block_size, "data")
+                data_remaining -= block_size
+            crc = _U32.unpack(consume(4, "crc", is_crc_input=False))[0]
+            if crc not in (0, attachment_checksum):
+                self._emit(
+                    FindingCode.ATTACHMENT_CRC_MISMATCH,
+                    f"Attachment.crc is 0x{crc:08x}, calculated 0x{attachment_checksum:08x}",
+                    offset=record_offset,
+                    record="Attachment",
+                )
+            if remaining:
+                trailing = remaining
+                consume(trailing, "trailing bytes", is_crc_input=False)
+                self._emit(
+                    FindingCode.TRAILING_RECORD_BYTES,
+                    f"Attachment contains {trailing} trailing bytes ignored by this version",
+                    offset=record_offset,
+                    record="Attachment",
+                )
+            parsed = AttachmentRecord(log_time, create_time, name, media_type, data_size, crc)
+        except ParseError as exc:
+            self._emit(
+                FindingCode.RECORD_PARSE_ERROR,
+                str(exc),
+                offset=record_offset,
+                record="Attachment",
+            )
+            data_checksum = self._scan_opaque_body(stream, remaining, data_checksum)
+        return parsed, data_checksum
 
     def _read_at(self, stream: IO[bytes], offset: int, size: int) -> bytes:
         current = stream.tell()

@@ -800,6 +800,45 @@ def test_doctor_message_scan_memory_does_not_scale_with_message_count() -> None:
     assert peak < 1_000_000
 
 
+def test_doctor_large_attachment_memory_does_not_scale_with_payload() -> None:
+    data = bytearray(MAGIC)
+    data += _record_bytes(Header(profile="", library="doctor-test"))
+    data += _record_bytes(
+        Attachment(
+            log_time=1,
+            create_time=1,
+            name="recording.bin",
+            media_type="application/octet-stream",
+            data=b"x" * (16 * 1024 * 1024),
+        )
+    )
+    recording = _finish_data_section(bytes(data))
+
+    tracemalloc.start()
+    report = _report(recording)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert report.error_count == 0
+    assert peak < 2 * 1024 * 1024
+
+
+def test_doctor_large_private_record_memory_does_not_scale_with_payload() -> None:
+    data = bytearray(MAGIC)
+    data += _record_bytes(Header(profile="", library="doctor-test"))
+    data += struct.pack("<BQ", 0x80, 16 * 1024 * 1024)
+    data += b"x" * (16 * 1024 * 1024)
+    recording = _finish_data_section(bytes(data))
+
+    tracemalloc.start()
+    report = _report(recording)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert report.error_count == 0
+    assert peak < 2 * 1024 * 1024
+
+
 def test_doctor_registered_command_accepts_valid_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
