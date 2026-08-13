@@ -6,15 +6,30 @@ import time
 from typing import TYPE_CHECKING
 
 import pytest
+import small_mcap.follower as follower_module
 from small_mcap import (
+    MAGIC,
     MAGIC_SIZE,
+    Attachment,
+    Channel,
+    ChannelNotFoundError,
     CompressionType,
     CRCValidationError,
+    DataEnd,
+    Footer,
+    Header,
+    InvalidHeaderError,
+    InvalidMagicError,
     McapFileReplacedError,
     McapFileTruncatedError,
     McapFollower,
+    McapRecord,
     McapWriter,
+    Message,
     Opcode,
+    RecordLengthLimitExceededError,
+    Schema,
+    SchemaNotFoundError,
     try_read_record,
 )
 from small_mcap.records import OPCODE_AND_LEN_STRUCT
@@ -55,6 +70,15 @@ def _first_record_end(data: bytes, expected_opcode: Opcode) -> int:
     raise AssertionError(f"opcode {expected_opcode.name} not found")
 
 
+def _file_bytes(*records: McapRecord) -> bytes:
+    stream = io.BytesIO()
+    stream.write(MAGIC)
+    for record in records:
+        record.write_record_to(stream)
+    stream.write(MAGIC)
+    return stream.getvalue()
+
+
 @pytest.mark.parametrize("compression", [CompressionType.NONE, CompressionType.ZSTD])
 def test_follower_appended_one_byte_at_a_time_emits_exactly_once(
     tmp_path: Path,
@@ -92,6 +116,184 @@ def test_try_read_record_restores_offset_for_partial_record(missing_bytes: int) 
 
     assert try_read_record(stream) is None
     assert stream.tell() == 0
+
+
+def test_try_read_record_rejects_record_over_size_limit() -> None:
+    stream = io.BytesIO(OPCODE_AND_LEN_STRUCT.pack(Opcode.MESSAGE, 11))
+
+    with pytest.raises(RecordLengthLimitExceededError):
+        try_read_record(stream, record_size_limit=10)
+
+    assert stream.tell() == 0
+
+
+def test_follower_rejects_non_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "not-regular.mcap"
+    path.touch()
+    monkeypatch.setattr(follower_module.stat, "S_ISREG", lambda _mode: False)
+
+    with pytest.raises(ValueError, match="local regular file"):
+        McapFollower.open(path)
+
+
+def test_follower_rejects_closed_and_invalid_poll_budgets(tmp_path: Path) -> None:
+    path = tmp_path / "empty.mcap"
+    path.touch()
+    follower = McapFollower.open(path)
+
+    with pytest.raises(ValueError, match="max_messages"):
+        follower.poll_messages(max_messages=0)
+    with pytest.raises(ValueError, match="max_bytes"):
+        follower.poll_messages(max_bytes=0)
+
+    follower.close()
+    follower.close()
+    with pytest.raises(ValueError, match="closed"):
+        follower.poll_messages()
+
+
+def test_follower_iterates_complete_file_to_final(tmp_path: Path) -> None:
+    path = tmp_path / "complete.mcap"
+    path.write_bytes(_recording_bytes(message_count=3))
+
+    with McapFollower.open(path) as follower:
+        messages = list(follower.iter_messages(poll_interval=0.001))
+
+    assert [message.sequence for _schema, _channel, message in messages] == [0, 1, 2]
+
+
+def test_follower_iteration_validates_intervals_and_stops_when_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "empty.mcap"
+    path.touch()
+    ticks = iter((0.0, 0.0, 1.0))
+    sleeps: list[float] = []
+    monkeypatch.setattr(follower_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(follower_module.time, "sleep", sleeps.append)
+
+    with McapFollower.open(path) as follower:
+        with pytest.raises(ValueError, match="poll_interval"):
+            list(follower.iter_messages(poll_interval=0))
+        with pytest.raises(ValueError, match="idle_timeout"):
+            list(follower.iter_messages(idle_timeout=-1))
+        assert list(follower.iter_messages(poll_interval=0.25, idle_timeout=0.5)) == []
+
+    assert sleeps == [0.25]
+
+
+def test_follower_rejects_missing_followed_path(tmp_path: Path) -> None:
+    path = tmp_path / "removed.mcap"
+    path.touch()
+
+    with McapFollower.open(path) as follower:
+        path.unlink()
+        with pytest.raises(McapFileReplacedError):
+            follower.poll_messages()
+
+
+def test_follower_rejects_invalid_leading_and_trailing_magic(tmp_path: Path) -> None:
+    leading = tmp_path / "bad-leading.mcap"
+    leading.write_bytes(b"x" * MAGIC_SIZE)
+    with McapFollower.open(leading) as follower, pytest.raises(InvalidMagicError):
+        follower.poll_messages()
+
+    trailing = tmp_path / "bad-trailing.mcap"
+    data = bytearray(_file_bytes(Header("", "test"), DataEnd(0), Footer(0, 0, 0)))
+    data[-MAGIC_SIZE:] = b"x" * MAGIC_SIZE
+    trailing.write_bytes(data)
+    with McapFollower.open(trailing) as follower, pytest.raises(InvalidMagicError):
+        follower.poll_messages()
+
+
+def test_follower_rejects_non_header_first_record(tmp_path: Path) -> None:
+    path = tmp_path / "no-header.mcap"
+    path.write_bytes(_file_bytes(Schema(1, "example", "jsonschema", b"{}")))
+
+    with McapFollower.open(path) as follower, pytest.raises(InvalidHeaderError):
+        follower.poll_messages()
+
+
+def test_follower_rejects_data_section_crc_mismatch(tmp_path: Path) -> None:
+    path = tmp_path / "bad-data-crc.mcap"
+    path.write_bytes(_file_bytes(Header("", "test"), DataEnd(1), Footer(0, 0, 0)))
+
+    with McapFollower.open(path, validate_crc=True) as follower, pytest.raises(CRCValidationError):
+        follower.poll_messages()
+
+
+def test_follower_rejects_attachment_crc_mismatch(tmp_path: Path) -> None:
+    path = tmp_path / "bad-attachment-crc.mcap"
+    data = bytearray(
+        _file_bytes(
+            Header("", "test"),
+            Attachment(0, 0, "note", "text/plain", b"hello"),
+            DataEnd(0),
+            Footer(0, 0, 0),
+        )
+    )
+    attachment_end = _first_record_end(data, Opcode.ATTACHMENT)
+    data[attachment_end - 1] ^= 0xFF
+    path.write_bytes(data)
+
+    with McapFollower.open(path, validate_crc=True) as follower, pytest.raises(CRCValidationError):
+        follower.poll_messages()
+
+
+def test_follower_rejects_conflicting_schema_and_channel_ids(tmp_path: Path) -> None:
+    conflicting_schema = tmp_path / "conflicting-schema.mcap"
+    conflicting_schema.write_bytes(
+        _file_bytes(
+            Header("", "test"),
+            Schema(1, "first", "jsonschema", b"{}"),
+            Schema(1, "second", "jsonschema", b"{}"),
+        )
+    )
+    with (
+        McapFollower.open(conflicting_schema) as follower,
+        pytest.raises(ValueError, match="conflicting schema"),
+    ):
+        follower.poll_messages()
+
+    conflicting_channel = tmp_path / "conflicting-channel.mcap"
+    conflicting_channel.write_bytes(
+        _file_bytes(
+            Header("", "test"),
+            Channel(1, 0, "/first", "json", {}),
+            Channel(1, 0, "/second", "json", {}),
+        )
+    )
+    with (
+        McapFollower.open(conflicting_channel) as follower,
+        pytest.raises(ValueError, match="conflicting channel"),
+    ):
+        follower.poll_messages()
+
+
+def test_follower_rejects_missing_schema_and_channel_references(tmp_path: Path) -> None:
+    missing_schema = tmp_path / "missing-schema.mcap"
+    missing_schema.write_bytes(
+        _file_bytes(Header("", "test"), Channel(1, 1, "/sample", "json", {}))
+    )
+    with McapFollower.open(missing_schema) as follower, pytest.raises(SchemaNotFoundError):
+        follower.poll_messages()
+
+    missing_channel = tmp_path / "missing-channel.mcap"
+    missing_channel.write_bytes(_file_bytes(Header("", "test"), Message(1, 0, 0, 0, b"{}")))
+    with McapFollower.open(missing_channel) as follower, pytest.raises(ChannelNotFoundError):
+        follower.poll_messages()
+
+
+def test_follower_ignores_non_content_record(tmp_path: Path) -> None:
+    path = tmp_path / "empty.mcap"
+    path.touch()
+
+    with McapFollower.open(path) as follower:
+        follower._process_content_record(Header("", "test"))
 
 
 def test_follower_repeated_poll_without_growth_does_not_move_cursor(tmp_path: Path) -> None:
