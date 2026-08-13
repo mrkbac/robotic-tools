@@ -1,10 +1,12 @@
 """Split command - divide MCAP files into multiple output segments."""
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
+from uuid import uuid4
 
 from cyclopts import Group, Parameter, validators
 from rich.console import Console
@@ -38,10 +40,15 @@ from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     processing_had_errors,
     resolve_overwrite_policy,
+    validate_mcap_output,
 )
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
-from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
+from pymcap_cli.core.mcap_processor import (
+    InputOptions,
+    OutputOptions,
+    OverwriteCollisionPolicy,
+)
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.paired_event_window import (
@@ -53,7 +60,7 @@ from pymcap_cli.core.processors.size_split import SizeSplitProcessor
 from pymcap_cli.core.processors.timestamp_split import TimestampSplitProcessor
 from pymcap_cli.types.duration import duration_ns_token_converter, parse_duration_ns
 from pymcap_cli.types.size import parse_size_bytes
-from pymcap_cli.utils import bytes_to_human, parse_time_arg
+from pymcap_cli.utils import bytes_to_human, confirm_output_overwrite, parse_time_arg
 
 if TYPE_CHECKING:
     from pymcap_cli.core.processors.base import OutputRouter
@@ -123,8 +130,14 @@ def _ensure_source_unchanged(
         raise RuntimeError(f"source changed during paired-window {phase}")
 
 
-def _paired_output_paths(template: str, plan: PairedWindowPlan) -> set[Path]:
-    paths: set[Path] = set()
+def _ensure_paired_processing_succeeded(has_errors: bool) -> None:
+    if has_errors:
+        raise RuntimeError("paired-window processing reported errors")
+
+
+def _paired_output_paths(template: str, plan: PairedWindowPlan) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    resolved_paths: set[Path] = set()
     for index, window in enumerate(plan.windows):
         fields = {
             "index": index,
@@ -138,13 +151,52 @@ def _paired_output_paths(template: str, plan: PairedWindowPlan) -> set[Path]:
             "window_start": window.start_time,
             "window_end": window.end_time,
         }
-        paths.add(Path(template.format(**fields)))
-    return paths
+        path = Path(template.format(**fields))
+        resolved = path.resolve(strict=False)
+        if resolved in resolved_paths:
+            raise ValueError(
+                f"multiple paired windows resolve to output path {str(path)!r}; "
+                "add '{index}' to the output template"
+            )
+        paths.append(path)
+        resolved_paths.add(resolved)
+    return tuple(paths)
 
 
 def _cleanup_outputs(paths: set[Path]) -> None:
     for path in paths:
         path.unlink(missing_ok=True)
+
+
+def _prepare_paired_outputs(
+    paths: tuple[Path, ...],
+    policy: OverwriteCollisionPolicy,
+) -> None:
+    for path in paths:
+        if not path.exists():
+            continue
+        if policy is OverwriteCollisionPolicy.ERROR:
+            raise FileExistsError(f"output already exists: {path}")
+        if policy is OverwriteCollisionPolicy.ASK:
+            confirm_output_overwrite(path, force=False)
+
+
+def _publish_paired_outputs(staged: tuple[Path, ...], final: tuple[Path, ...]) -> None:
+    if len(staged) != len(final):
+        raise RuntimeError("paired-window staged output count mismatch")
+    invalid = [path for path in staged if not validate_mcap_output(path)]
+    if invalid:
+        raise RuntimeError(f"paired-window output failed validation: {invalid[0]}")
+    for path in staged:
+        with path.open("rb") as stream:
+            os.fsync(stream.fileno())
+    for staged_path, final_path in zip(staged, final, strict=True):
+        staged_path.replace(final_path)
+        descriptor = os.open(final_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _coerce_duration_ns(value: int | str | None) -> int | None:
@@ -438,6 +490,9 @@ def split(
     paired_router: PairedEventWindowProcessor | None = None
     paired_identity: _SourceIdentity | None = None
     owned_paired_outputs: set[Path] = set()
+    paired_final_paths: tuple[Path, ...] = ()
+    paired_staged_paths: tuple[Path, ...] = ()
+    processing_output_template = output_template
     if duration:
         try:
             duration_ns = parse_duration_ns(duration)
@@ -495,8 +550,12 @@ def split(
             _ensure_source_unchanged(source_path, paired_identity, "discovery")
             paired_router = PairedEventWindowProcessor(window_start, window_end, plan)
             processors.append(paired_router)
-            paired_paths = _paired_output_paths(output_template, plan)
-            owned_paired_outputs = {path for path in paired_paths if not path.exists()}
+            paired_final_paths = _paired_output_paths(output_template, plan)
+            _prepare_paired_outputs(paired_final_paths, overwrite_policy)
+            suffix = f".pymcap-partial-{os.getpid()}-{uuid4().hex}"
+            processing_output_template = f"{output_template}{suffix}"
+            paired_staged_paths = _paired_output_paths(processing_output_template, plan)
+            owned_paired_outputs = set(paired_staged_paths)
         except Exception:
             logger.exception("Error discovering paired event windows")
             return 1
@@ -570,16 +629,26 @@ def split(
             input_options=input_options,
             output_options=OutputOptions(
                 routers=processors,
-                output_template=output_template,
+                output_template=processing_output_template,
                 compression=compression,
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
             ),
         )
         if paired_router is not None:
+            _ensure_paired_processing_succeeded(processing_had_errors(result.stats))
             paired_router.validate_complete()
             assert paired_identity is not None
             _ensure_source_unchanged(Path(file), paired_identity, "processing")
+            _publish_paired_outputs(paired_staged_paths, paired_final_paths)
+            owned_paired_outputs.clear()
+            assert result.processor.output_manager is not None
+            segments = sorted(
+                result.processor.output_manager.segments.values(),
+                key=lambda segment: segment.index,
+            )
+            for segment, final_path in zip(segments, paired_final_paths, strict=True):
+                segment.path = str(final_path)
     except Exception:
         _cleanup_outputs(owned_paired_outputs)
         logger.exception("Error during splitting")

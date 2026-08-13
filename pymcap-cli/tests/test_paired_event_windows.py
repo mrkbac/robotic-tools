@@ -4,6 +4,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
+from mcap_ros2_support_fast.decoder import DecoderFactory as Ros2DecoderFactory
 from pymcap_cli.cmd import split_cmd
 from pymcap_cli.cmd.split_cmd import split
 from pymcap_cli.core.processors.paired_event_window import (
@@ -11,7 +12,7 @@ from pymcap_cli.core.processors.paired_event_window import (
     BoundaryMatcher,
     _pair_events,
 )
-from small_mcap import Channel, CompressionType, McapWriter, Message, stream_reader
+from small_mcap import Channel, CompressionType, McapWriter, Message, Schema, stream_reader
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,6 +35,22 @@ def _write_events(path: Path, events: list[tuple[str, int, str]]) -> None:
                 log_time,
                 sequence,
             )
+        writer.finish()
+
+
+def _write_one_message_chunks(path: Path, events: list[tuple[str, int, str]]) -> None:
+    topics = list(dict.fromkeys(topic for topic, _, _ in events))
+    channel_ids = {topic: index for index, topic in enumerate(topics, start=1)}
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, chunk_size=1024 * 1024, compression=CompressionType.NONE)
+        writer.start()
+        writer.add_schema(1, "example/msg/Event", "jsonschema", b"{}")
+        for topic, channel_id in channel_ids.items():
+            writer.add_channel(channel_id, topic, "json", 1)
+        for sequence, (topic, log_time, payload) in enumerate(events):
+            writer.add_message(channel_ids[topic], log_time, payload.encode(), log_time, sequence)
+            writer._submit_or_write_chunk()
+            writer.chunk_builder.reset()
         writer.finish()
 
 
@@ -318,3 +335,188 @@ def test_split_paired_windows_removes_new_outputs_when_source_changes(
     assert result == 1
     assert calls == 3
     assert not output.exists()
+
+
+def test_split_paired_windows_copies_inside_chunks_and_skips_outside_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "input.mcap"
+    output = tmp_path / "window.mcap"
+    _write_one_message_chunks(
+        source,
+        [
+            ("/data", 0, "{}"),
+            ("/start", 1, '{"data": true}'),
+            ("/data", 2, "{}"),
+            ("/stop", 3, '{"data": true}'),
+            ("/data", 4, "{}"),
+        ],
+    )
+    run_processor_multi = split_cmd.run_processor_multi
+    results = []
+
+    def capture_result(**kwargs):
+        result = run_processor_multi(**kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(split_cmd, "run_processor_multi", capture_result)
+
+    result = split_cmd.split(
+        str(source),
+        window_start="/start{data == true}",
+        window_end="/stop{data == true}",
+        output_template=str(output),
+        compression="none",
+    )
+
+    assert result == 0
+    assert _messages(output) == [("/start", 1, 1), ("/data", 2, 2), ("/stop", 3, 3)]
+    stats = results[0].stats
+    assert stats.chunks_processed == 5
+    assert stats.chunks_decoded == 2
+    assert stats.chunks_copied == 1
+
+
+def test_split_paired_windows_rejects_duplicate_output_mapping(tmp_path: Path) -> None:
+    source = tmp_path / "input.mcap"
+    output = tmp_path / "window.mcap"
+    _write_events(
+        source,
+        [
+            ("/start", 1, '{"data": true}'),
+            ("/stop", 2, '{"data": true}'),
+            ("/start", 3, '{"data": true}'),
+            ("/stop", 4, '{"data": true}'),
+        ],
+    )
+
+    result = split(
+        str(source),
+        window_start="/start{data == true}",
+        window_end="/stop{data == true}",
+        output_template=str(output),
+        compression="none",
+        force=True,
+    )
+
+    assert result == 1
+    assert not output.exists()
+
+
+def test_split_paired_windows_rejects_reported_processing_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "input.mcap"
+    output = tmp_path / "window.mcap"
+    _write_events(
+        source,
+        [
+            ("/start", 1, '{"data": true}'),
+            ("/stop", 2, '{"data": true}'),
+        ],
+    )
+    run_processor_multi = split_cmd.run_processor_multi
+
+    def report_error(**kwargs):
+        result = run_processor_multi(**kwargs)
+        result.stats.errors_encountered += 1
+        return result
+
+    monkeypatch.setattr(split_cmd, "run_processor_multi", report_error)
+
+    result = split_cmd.split(
+        str(source),
+        window_start="/start{data == true}",
+        window_end="/stop{data == true}",
+        output_template=str(output),
+        compression="none",
+    )
+
+    assert result == 1
+    assert not output.exists()
+
+
+def test_split_paired_windows_preserves_existing_output_on_late_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "input.mcap"
+    output = tmp_path / "window.mcap"
+    output.write_bytes(b"existing")
+    _write_events(
+        source,
+        [
+            ("/start", 1, '{"data": true}'),
+            ("/stop", 2, '{"data": true}'),
+        ],
+    )
+    run_processor_multi = split_cmd.run_processor_multi
+
+    def report_error(**kwargs):
+        result = run_processor_multi(**kwargs)
+        result.stats.errors_encountered += 1
+        return result
+
+    monkeypatch.setattr(split_cmd, "run_processor_multi", report_error)
+
+    result = split_cmd.split(
+        str(source),
+        window_start="/start{data == true}",
+        window_end="/stop{data == true}",
+        output_template=str(output),
+        compression="none",
+        force=True,
+    )
+
+    assert result == 1
+    assert output.read_bytes() == b"existing"
+    assert list(tmp_path.glob("*.pymcap-partial-*")) == []
+
+
+def test_split_paired_windows_preserves_decodable_ros2_payloads(tmp_path: Path) -> None:
+    source = tmp_path / "input.mcap"
+    output = tmp_path / "window.mcap"
+    cdr_true = b"\x00\x01\x00\x00\x01"
+    cdr_false = b"\x00\x01\x00\x00\x00"
+    with source.open("wb") as stream:
+        writer = McapWriter(stream, compression=CompressionType.ZSTD)
+        writer.start()
+        writer.add_schema(1, "example/msg/Event", "ros2msg", b"bool data")
+        writer.add_channel(1, "/start", "cdr", 1)
+        writer.add_channel(2, "/data", "cdr", 1)
+        writer.add_channel(3, "/stop", "cdr", 1)
+        writer.add_message(1, 1, cdr_true, 1, 1)
+        writer.add_message(2, 2, cdr_false, 2, 2)
+        writer.add_message(3, 3, cdr_true, 3, 3)
+        writer.finish()
+
+    result = split(
+        str(source),
+        window_start="/start{data == true}",
+        window_end="/stop{data == true}",
+        output_template=str(output),
+    )
+
+    assert result == 0
+    schemas: dict[int, Schema] = {}
+    channels: dict[int, Channel] = {}
+    decoded_values: list[bool] = []
+    with output.open("rb") as stream:
+        for record in stream_reader(stream):
+            if isinstance(record, Schema):
+                schemas[record.id] = record
+            elif isinstance(record, Channel):
+                channels[record.id] = record
+            elif isinstance(record, Message):
+                channel = channels[record.channel_id]
+                decoder = Ros2DecoderFactory().decoder_for(
+                    channel.message_encoding,
+                    schemas[channel.schema_id],
+                )
+                assert decoder is not None
+                decoded_values.append(decoder(record.data).data)
+
+    assert decoded_values == [True, False, True]
