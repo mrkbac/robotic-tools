@@ -4,6 +4,42 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.32.0, small-mcap 0.16.0
+
+Headline: recording reliability workflows gain bounded structural reports,
+cross-topic pipeline contracts, transactional directory compression, paired
+event windows, and safe non-blocking following of growing MCAP files.
+
+### pymcap-cli 0.32.0
+
+- `doctor --format jsonl` emits schema-backed machine-readable findings and a
+  final summary while retaining only bounded finding samples. Doctor also
+  streams large attachments and private records and replays compact validation
+  state from a temporary file instead of retaining the whole recording in
+  memory.
+- Version 2 `check` specifications can select log, publish, or decoded-message
+  clocks and validate cross-topic pipeline cardinality and latency with explicit
+  lateness, pending-message, and recording-boundary grace limits.
+- `roscompress --batch --output-dir ...` recursively processes recordings as
+  independent adjacent-partial transactions. Outputs are structurally
+  validated, fsynced, atomically published per file, and authenticated for
+  resume with the recipe, source fingerprint, and full output SHA-256.
+- `split --window-start ... --window-end ...` discovers paired MessagePath
+  boundaries before writing, applies explicit malformed-window policies, and
+  publishes only after every staged output validates and the source is proven
+  unchanged.
+- File and live `cat` now share one encapsulated query runtime for independent
+  stream state, projections, and terminal reducer naming.
+
+### small-mcap 0.16.0
+
+- Added `McapFollower`, a bounded non-blocking reader for append-only local MCAP
+  files. It preserves partial records across polls, emits complete chunks
+  without waiting for indexes, optionally validates CRCs, and raises explicit
+  errors when the followed file is truncated or replaced.
+
+---
+
 ## pymcap-cli 0.31.0
 
 Headline: indexed recording workflows gain per-file MessagePath statistics and
