@@ -149,9 +149,15 @@ def test_roscompress_exposes_transactional_batch_options(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     output = _help(capsys, "roscompress")
+    normalized_output = " ".join(output.split())
 
-    for option in ("--batch", "--output-dir", "--archive", "--continue-on-error"):
-        assert option in output
+    for description in (
+        "Process a directory recursively",
+        "Directory for batch outputs",
+        "JSONL archive for authenticated batch resume records",
+        "Continue batch processing after a file fails",
+    ):
+        assert description in normalized_output
     assert "--ffmpeg-args" in output
     assert "--video-topic-ffmpeg-args" in output
 

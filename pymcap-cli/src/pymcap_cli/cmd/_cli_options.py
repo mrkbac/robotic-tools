@@ -280,19 +280,35 @@ BatchCompatibleOutputPathOption = Annotated[
 ]
 BatchModeOption = Annotated[
     bool,
-    Parameter(name=["--batch"], group=PROCESSING_GROUP),
+    Parameter(
+        name=["--batch"],
+        group=PROCESSING_GROUP,
+        help="Process a directory recursively as independent transactions.",
+    ),
 ]
 BatchOutputDirectoryOption = Annotated[
     Path | None,
-    Parameter(name=["--output-dir"], group=OUTPUT_OPTIONS_GROUP),
+    Parameter(
+        name=["--output-dir"],
+        group=OUTPUT_OPTIONS_GROUP,
+        help="Directory for batch outputs, preserving relative input paths.",
+    ),
 ]
 BatchArchiveOption = Annotated[
     Path | None,
-    Parameter(name=["--archive"], group=OUTPUT_OPTIONS_GROUP),
+    Parameter(
+        name=["--archive"],
+        group=OUTPUT_OPTIONS_GROUP,
+        help="JSONL archive for authenticated batch resume records.",
+    ),
 ]
 ContinueOnErrorOption = Annotated[
     bool,
-    Parameter(name=["--continue-on-error"], group=PROCESSING_GROUP),
+    Parameter(
+        name=["--continue-on-error"],
+        group=PROCESSING_GROUP,
+        help="Continue batch processing after a file fails.",
+    ),
 ]
 ForceOverwriteOption = Annotated[
     bool,
