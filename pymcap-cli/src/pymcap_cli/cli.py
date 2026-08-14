@@ -27,6 +27,7 @@ from pymcap_cli.cmd import (
     export_json_cmd,
     filter_cmd,
     get_cmd,
+    hash_cmd,
     info_cmd,
     info_json_cmd,
     list_cmd,
@@ -222,6 +223,7 @@ app.command(name="doctor", group=inspect_group)(doctor_cmd.doctor)
 app.command(name="du", group=inspect_group)(du_cmd.du)
 app.command(name="diff", group=inspect_group)(diff_cmd.diff_cmd)
 app.command(name="duplicates", group=inspect_group)(duplicates_cmd.duplicates)
+app.command(name="hash", group=inspect_group)(hash_cmd.hash_mcap)
 app.command(name="info", group=inspect_group)(info_cmd.info)
 app.command(name="info-json", group=inspect_group)(info_json_cmd.info_json)
 msg_pkg.msg_app.group = (inspect_group,)

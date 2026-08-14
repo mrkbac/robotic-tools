@@ -738,6 +738,22 @@ pymcap-cli diff a.mcap b.mcap --skip-identical
 pymcap-cli diff a.mcap b.mcap --max-ranges 10
 ```
 
+### `hash` — Stable Recording Fingerprint
+
+Print a compression-independent structural hash. It covers normalized schemas,
+channels, counts, and every indexed message timestamp, while reusing the MCAP
+summary and message indexes when available.
+
+```bash
+pymcap-cli hash recording.mcap
+# mcap-index-v1:7f…
+```
+
+Compressed and uncompressed rewrites of the same recording have the same hash.
+Message payload bytes, publish timestamps, sequences, attachment contents, and
+metadata bodies are not hashed; use `diff --compare-payloads` when payload
+equality must be verified.
+
 ### `duplicates` — Find Duplicate Recordings
 
 Scan files and directories for likely duplicate MCAP recordings using summary
