@@ -46,9 +46,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-all = ["pymcap-cli[video,pointcloud,plot,image,draco,bridge,batch]"]
-lite = ["pymcap-cli[image,draco,bridge,batch]"]
-batch = ["pymcap-cli[xxhash]"]
+all = ["pymcap-cli[video,pointcloud,plot,image,draco,bridge,xxhash]"]
+lite = ["pymcap-cli[image,draco,bridge,xxhash]"]
 bridge = ["robo-ws-bridge>=0.7.0"]
 bridge-codecs = ["pymcap-cli[bridge,pointcloud,video]"]
 bridge-proxy = ["pymcap-cli[bridge-codecs]"]

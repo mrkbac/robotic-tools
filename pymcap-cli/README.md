@@ -874,16 +874,18 @@ pymcap-cli roscompress data.mcap -o compressed.mcap --backend ffmpeg-cli \
 pymcap-cli roscompress data.mcap -o compressed.mcap --delete-source
 
 # Recursively compress a directory as independent resumable transactions
-uvx 'pymcap-cli[video,pointcloud,batch]' roscompress recordings \
+uvx 'pymcap-cli[video,pointcloud]' roscompress recordings \
   --batch --output-dir compressed --continue-on-error
 ```
 
 Batch discovery is recursive and sorted. Each file is written to one adjacent
-partial, validated with the bounded-memory doctor, fsynced, and atomically
-renamed. The JSONL archive authenticates the recipe, bounded source fingerprint,
-and full output SHA-256 before a later run reports `verified-resumed`. Existing
-unverified outputs remain collisions unless `--force` is explicit. Batch mode
-does not support URLs, a single-file output, or `--delete-source`.
+partial, lightly validated for a readable MCAP header and summary, and atomically
+renamed. Message counts are compared per topic; `--topic` limits the topics that
+must be preserved, while `--exclude-topic` explicitly permits loss on matching
+topics. The JSONL archive records the recipe, source size and modification time,
+and output size so unchanged work can report `verified-resumed`. Existing unverified
+outputs remain collisions unless `--force` is explicit. Batch mode does not support
+URLs, a single-file output, or `--delete-source`.
 
 Topic profiles inherit every unspecified global option. The selector is a topic
 regex matched in full and case-insensitively, exactly like `--topic` /

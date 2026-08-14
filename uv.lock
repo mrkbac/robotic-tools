@@ -2340,9 +2340,6 @@ all = [
     { name = "robo-ws-bridge" },
     { name = "xxhash" },
 ]
-batch = [
-    { name = "xxhash" },
-]
 bridge = [
     { name = "robo-ws-bridge" },
 ]
@@ -2393,9 +2390,8 @@ requires-dist = [
     { name = "plotly", marker = "extra == 'plot'", specifier = ">=6.0.0" },
     { name = "pymcap-cli", extras = ["bridge", "pointcloud", "video"], marker = "extra == 'bridge-codecs'" },
     { name = "pymcap-cli", extras = ["bridge-codecs"], marker = "extra == 'bridge-proxy'" },
-    { name = "pymcap-cli", extras = ["image", "draco", "bridge", "batch"], marker = "extra == 'lite'" },
-    { name = "pymcap-cli", extras = ["video", "pointcloud", "plot", "image", "draco", "bridge", "batch"], marker = "extra == 'all'" },
-    { name = "pymcap-cli", extras = ["xxhash"], marker = "extra == 'batch'" },
+    { name = "pymcap-cli", extras = ["image", "draco", "bridge", "xxhash"], marker = "extra == 'lite'" },
+    { name = "pymcap-cli", extras = ["video", "pointcloud", "plot", "image", "draco", "bridge", "xxhash"], marker = "extra == 'all'" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "robo-ws-bridge", marker = "extra == 'bridge'", editable = "robo-ws-bridge" },
@@ -2404,7 +2400,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.15.0" },
     { name = "xxhash", marker = "extra == 'xxhash'", specifier = ">=3.0.0" },
 ]
-provides-extras = ["all", "lite", "batch", "bridge", "bridge-codecs", "bridge-proxy", "draco", "image", "plot", "pointcloud", "video", "xxhash"]
+provides-extras = ["all", "lite", "bridge", "bridge-codecs", "bridge-proxy", "draco", "image", "plot", "pointcloud", "video", "xxhash"]
 
 [[package]]
 name = "pytest"

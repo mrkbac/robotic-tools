@@ -9,12 +9,16 @@ from pymcap_cli.cmd import _run_processor
 from pymcap_cli.cmd._run_processor import (
     delete_source_files,
     finalize_delete_source,
-    validate_mcap_output,
 )
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.cmd.merge_cmd import merge
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
+from pymcap_cli.core.output_validation import (
+    McapOutputValidation,
+    mcap_message_count,
+    validate_mcap_output,
+)
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap, create_simple_mcap
 
@@ -187,10 +191,13 @@ def test_ros_transform_command_keeps_source_when_output_loses_messages(
 ) -> None:
     output = tmp_path / "out.mcap"
 
-    def message_count(path: Path) -> int:
-        return 1 if path == output else 2
-
-    monkeypatch.setattr(_run_processor, "mcap_message_count", message_count)
+    monkeypatch.setattr(
+        _run_processor,
+        "validate_mcap_outputs",
+        lambda *_args, **_kwargs: McapOutputValidation(
+            error="output lost messages on preserved topics"
+        ),
+    )
     if command == "roscompress":
         rc = roscompress(
             str(simple_mcap_copy),
@@ -232,13 +239,17 @@ def test_roscompress_filtered_delete_allows_intentional_message_loss(tmp_path: P
 
     assert rc == 0
     assert not source.exists()
-    assert _run_processor.mcap_message_count(output) == 2
+    assert mcap_message_count(output) == 2
 
 
 def test_compress_command_keeps_source_on_validation_failure(
     simple_mcap_copy: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(_run_processor, "validate_mcap_output", lambda _path: False)
+    monkeypatch.setattr(
+        _run_processor,
+        "validate_mcap_outputs",
+        lambda *_args, **_kwargs: McapOutputValidation(error="output failed MCAP validation"),
+    )
 
     output = tmp_path / "out.mcap"
     rc = compress(

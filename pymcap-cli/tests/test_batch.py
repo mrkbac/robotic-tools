@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.core import batch
-from pymcap_cli.core.batch import TransformResult, run_batch
+from pymcap_cli.core.batch import BatchRunResult
+from pymcap_cli.core.batch import run_batch as run_batch_core
+from pymcap_cli.core.output_validation import McapOutputValidation
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+_COPY_RECIPE = {"operation": "copy", "version": 1}
 
 
 @dataclass(slots=True)
@@ -20,14 +26,9 @@ class CopyTransform:
     interrupt: bool = False
     fail_run: bool = False
 
-    def recipe(self):
-        return {"operation": "copy", "version": 1}
-
-    def preflight(self, source: Path) -> None:
+    def __call__(self, source: Path, partial: Path) -> int:
         if source.name == self.fail_name:
             raise RuntimeError("preflight failed")
-
-    def run(self, source: Path, partial: Path) -> TransformResult:
         self.run_count += 1
         shutil.copyfile(source, partial)
         if self.interrupt:
@@ -36,17 +37,29 @@ class CopyTransform:
             raise RuntimeError("transform failed")
         if self.mutate_source:
             source.write_bytes(source.read_bytes() + b"changed")
-        return TransformResult()
+        return 0
 
-    def validate(
-        self,
-        source: Path,
-        partial: Path,
-        result: TransformResult,
-    ) -> None:
-        assert source.exists()
-        assert partial.exists()
-        assert result == TransformResult()
+
+def run_batch(
+    input_dir: Path,
+    output_dir: Path,
+    run_one: CopyTransform,
+    *,
+    continue_on_error: bool = False,
+    force: bool = False,
+    preserved_topic_patterns: Sequence[str] = (),
+    lossy_topic_patterns: Sequence[str] = (),
+) -> BatchRunResult:
+    return run_batch_core(
+        input_dir,
+        output_dir,
+        run_one,
+        recipe=_COPY_RECIPE,
+        continue_on_error=continue_on_error,
+        force=force,
+        preserved_topic_patterns=preserved_topic_patterns,
+        lossy_topic_patterns=lossy_topic_patterns,
+    )
 
 
 def _source_tree(tmp_path: Path, simple_mcap: Path) -> Path:
@@ -56,7 +69,7 @@ def _source_tree(tmp_path: Path, simple_mcap: Path) -> Path:
     return source
 
 
-def test_run_batch_commits_output_and_archive_atomically(
+def test_run_batch_commits_output_and_records_archive(
     tmp_path: Path,
     simple_mcap: Path,
 ) -> None:
@@ -70,8 +83,13 @@ def test_run_batch_commits_output_and_archive_atomically(
     assert result.failed_count == 0
     assert result.jobs[0].status == "committed"
     assert final.read_bytes() == simple_mcap.read_bytes()
-    assert (output / ".pymcap-roscompress-archive.jsonl").is_file()
-    assert list(output.rglob("*.partial-*")) == []
+    archive = output / ".pymcap-roscompress-archive.jsonl"
+    record = json.loads(archive.read_text().splitlines()[0])
+    assert "schema_version" not in record
+    assert "fingerprint" not in record["source"]
+    assert record["source"]["mtime_ns"] == (source / "nested" / "run.mcap").stat().st_mtime_ns
+    assert "sha256" not in record["output"]
+    assert list(output.rglob("*.partial")) == []
 
 
 def test_run_batch_resumes_only_after_output_authentication(
@@ -105,6 +123,30 @@ def test_run_batch_rebuilds_tampered_archived_output(
     assert result.jobs[0].status == "committed"
     assert transform.run_count == 2
     assert final.read_bytes() == simple_mcap.read_bytes()
+
+
+def test_run_batch_loads_archive_once(
+    tmp_path: Path,
+    simple_mcap: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_tree(tmp_path, simple_mcap)
+    shutil.copyfile(simple_mcap, source / "second.mcap")
+    output = tmp_path / "output"
+    original = batch._load_archive_records
+    load_count = 0
+
+    def count_loads(archive: Path, recipe: str):
+        nonlocal load_count
+        load_count += 1
+        return original(archive, recipe)
+
+    monkeypatch.setattr(batch, "_load_archive_records", count_loads)
+
+    result = run_batch(source, output, CopyTransform())
+
+    assert result.failed_count == 0
+    assert load_count == 1
 
 
 def test_run_batch_collision_preserves_existing_output(
@@ -141,7 +183,7 @@ def test_run_batch_continues_independent_jobs_and_cleans_partials(
     assert result.failed_count == 1
     assert (output / "good.mcap").is_file()
     assert not (output / "nested" / "run.mcap").exists()
-    assert list(output.rglob("*.partial-*")) == []
+    assert list(output.rglob("*.partial")) == []
 
 
 def test_run_batch_rejects_source_changed_during_transform(
@@ -156,7 +198,7 @@ def test_run_batch_rejects_source_changed_during_transform(
     assert result.failed_count == 1
     assert "source changed" in result.jobs[0].detail
     assert not (output / "nested" / "run.mcap").exists()
-    assert list(output.rglob("*.partial-*")) == []
+    assert list(output.rglob("*.partial")) == []
 
 
 def test_run_batch_excludes_nested_output_tree(
@@ -188,7 +230,7 @@ def test_run_batch_keyboard_interrupt_cleans_owned_partial(
 
     assert not (output / "nested" / "run.mcap").exists()
     assert not (output / ".pymcap-roscompress-archive.jsonl").exists()
-    assert list(output.rglob("*.partial-*")) == []
+    assert list(output.rglob("*.partial")) == []
 
 
 def test_run_batch_force_preserves_existing_output_when_transform_fails(
@@ -205,52 +247,31 @@ def test_run_batch_force_preserves_existing_output_when_transform_fails(
 
     assert result.failed_count == 1
     assert final.read_bytes() == b"existing"
-    assert list(output.rglob("*.partial-*")) == []
+    assert list(output.rglob("*.partial")) == []
 
 
-def test_run_batch_force_preserves_existing_output_when_partial_fsync_fails(
+def test_run_batch_rejects_output_failing_lightweight_validation(
     tmp_path: Path,
     simple_mcap: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source_tree(tmp_path, simple_mcap)
     output = tmp_path / "output"
-    final = output / "nested" / "run.mcap"
-    final.parent.mkdir(parents=True)
-    final.write_bytes(b"existing")
+    monkeypatch.setattr(
+        batch,
+        "validate_mcap_outputs",
+        lambda *_args, **_kwargs: McapOutputValidation(error="output failed MCAP validation"),
+    )
 
-    def fail_fsync(_path: Path) -> None:
-        raise OSError("fsync failed")
-
-    monkeypatch.setattr(batch, "_fsync_file", fail_fsync)
-
-    result = run_batch(source, output, CopyTransform(), force=True)
+    result = run_batch(source, output, CopyTransform())
 
     assert result.failed_count == 1
-    assert "fsync failed" in result.jobs[0].detail
-    assert final.read_bytes() == b"existing"
-    assert list(output.rglob("*.partial-*")) == []
+    assert "output failed MCAP validation" in result.jobs[0].detail
+    assert not (output / "nested" / "run.mcap").exists()
+    assert list(output.rglob("*.partial")) == []
 
 
-def test_run_batch_rejects_concurrent_output_lock(
-    tmp_path: Path,
-    simple_mcap: Path,
-) -> None:
-    source = _source_tree(tmp_path, simple_mcap)
-    output = tmp_path / "output"
-    final = output / "nested" / "run.mcap"
-    final.parent.mkdir(parents=True)
-    lock = final.with_name(f".{final.name}.batch-lock")
-
-    with batch._exclusive_lock(lock):
-        result = run_batch(source, output, CopyTransform())
-
-    assert result.failed_count == 1
-    assert "lock is already held" in result.jobs[0].detail
-    assert not final.exists()
-
-
-def test_run_batch_rejects_hard_link_output_alias(
+def test_run_batch_atomically_replaces_hard_link_without_changing_source(
     tmp_path: Path,
     simple_mcap: Path,
 ) -> None:
@@ -263,9 +284,10 @@ def test_run_batch_rejects_hard_link_output_alias(
 
     result = run_batch(source_root, output, CopyTransform(), force=True)
 
-    assert result.failed_count == 1
-    assert "hard-link aliases" in result.jobs[0].detail
-    assert final.samefile(source)
+    assert result.failed_count == 0
+    assert source.read_bytes() == simple_mcap.read_bytes()
+    assert final.read_bytes() == simple_mcap.read_bytes()
+    assert not final.samefile(source)
 
 
 def test_run_batch_ignores_truncated_archive_tail(
@@ -278,7 +300,7 @@ def test_run_batch_ignores_truncated_archive_tail(
     assert run_batch(source, output, transform).failed_count == 0
     archive = output / ".pymcap-roscompress-archive.jsonl"
     with archive.open("a", encoding="utf-8") as stream:
-        stream.write('{"schema_version":1')
+        stream.write('{"recipe":')
 
     result = run_batch(source, output, transform)
 
@@ -286,7 +308,7 @@ def test_run_batch_ignores_truncated_archive_tail(
     assert transform.run_count == 1
 
 
-def test_run_batch_rejects_insufficient_space_before_transform(
+def test_run_batch_relies_on_writes_for_available_space(
     tmp_path: Path,
     simple_mcap: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -296,13 +318,12 @@ def test_run_batch_rejects_insufficient_space_before_transform(
     transform = CopyTransform()
     usage = shutil.disk_usage(tmp_path)
     monkeypatch.setattr(
-        batch.shutil,
+        shutil,
         "disk_usage",
         lambda _path: usage._replace(free=simple_mcap.stat().st_size - 1),
     )
 
     result = run_batch(source, output, transform)
 
-    assert result.failed_count == 1
-    assert "insufficient free space" in result.jobs[0].detail
-    assert transform.run_count == 0
+    assert result.failed_count == 0
+    assert transform.run_count == 1

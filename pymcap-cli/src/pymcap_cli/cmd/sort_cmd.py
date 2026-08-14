@@ -72,7 +72,7 @@ def sort(
     no_clobber
         Fail instead of prompting if the output file already exists.
     delete_source
-        Delete source file(s) after the output is validated (header + summary).
+        Delete source file(s) after validating readability and message preservation.
     in_place
         Sort to a temp file next to the source and, after validation, atomically
         replace the source. Local files only; mutually exclusive with --output.
@@ -135,6 +135,6 @@ def sort(
         return finalize_replace_source(source=Path(file), tmp_output=output)
 
     if delete_source:
-        return finalize_delete_source(sources=[file], outputs=[output], require_lossless=True)
+        return finalize_delete_source(sources=[file], outputs=[output])
 
     return 0

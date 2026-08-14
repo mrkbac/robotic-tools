@@ -981,6 +981,19 @@ def process(
         else:
             assert output is not None
             outputs = [output]
-        return finalize_delete_source(sources=list(file), outputs=outputs)
+        has_unscoped_message_loss = bool(
+            start or end or where or dedup_identical or split_expression
+        )
+        lossy_topic_patterns = (
+            [".*"]
+            if has_unscoped_message_loss
+            else [*(exclude_topic or []), *decimate_rules, *rename_rules]
+        )
+        return finalize_delete_source(
+            sources=list(file),
+            outputs=outputs,
+            preserved_topic_patterns=topic or [],
+            lossy_topic_patterns=lossy_topic_patterns,
+        )
 
     return 0

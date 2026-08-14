@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pymcap_cli.cli import app
+from pymcap_cli.cmd import roscompress_cmd
 from pymcap_cli.cmd.roscompress_cmd import roscompress
+from pymcap_cli.core.output_validation import mcap_message_count
+
+from tests.fixtures.mcap_generator import create_multi_topic_mcap
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,6 +108,58 @@ def test_roscompress_batch_processes_recursive_tree(
     assert result == 0
     assert (output_dir / "nested" / "run.mcap").is_file()
     assert (output_dir / ".pymcap-roscompress-archive.jsonl").is_file()
+
+
+def test_roscompress_batch_validates_preserved_topics_with_lossy_topic_regex(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "run.mcap").write_bytes(
+        create_multi_topic_mcap(["/keep", "/drop"], messages_per_topic=2)
+    )
+    output_dir = tmp_path / "output"
+
+    result = roscompress(
+        str(input_dir),
+        None,
+        batch=True,
+        output_dir=output_dir,
+        image_format="none",
+        pointcloud=False,
+        exclude_topic=["/drop"],
+    )
+
+    assert result == 0
+    assert mcap_message_count(output_dir / "run.mcap") == 2
+
+
+def test_roscompress_batch_recipe_does_not_depend_on_package_version(
+    simple_mcap: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    shutil.copyfile(simple_mcap, input_dir / "run.mcap")
+    output_dir = tmp_path / "output"
+    monkeypatch.setattr(
+        roscompress_cmd,
+        "version",
+        lambda _package: pytest.fail("package version must not affect the recipe"),
+        raising=False,
+    )
+
+    result = roscompress(
+        str(input_dir),
+        None,
+        batch=True,
+        output_dir=output_dir,
+        image_format="none",
+        pointcloud=False,
+    )
+
+    assert result == 0
 
 
 def test_roscompress_cli_accepts_batch_without_single_output(

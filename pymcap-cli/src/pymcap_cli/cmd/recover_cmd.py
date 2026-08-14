@@ -64,7 +64,7 @@ def recover(
     no_clobber
         Fail instead of prompting if the output file already exists.
     delete_source
-        Delete source file(s) after the output is validated (header + summary).
+        Delete source after validating readability and unintended total message loss.
         URL inputs and any source whose path equals the output are skipped.
         Skipped if recovery yielded no valid MCAP data.
 
@@ -115,7 +115,11 @@ def recover(
         return 1
 
     if delete_source:
-        delete_code = finalize_delete_source(sources=[file], outputs=[output])
+        delete_code = finalize_delete_source(
+            sources=[file],
+            outputs=[output],
+            lossy_topic_patterns=[".*"],
+        )
         if delete_code != 0:
             return delete_code
 

@@ -180,7 +180,6 @@ def rosdecompress(
         return finalize_delete_source(
             sources=[file],
             outputs=[output],
-            require_lossless=True,
         )
 
     return 0

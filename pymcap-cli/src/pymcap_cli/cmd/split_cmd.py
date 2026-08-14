@@ -40,7 +40,6 @@ from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     processing_had_errors,
     resolve_overwrite_policy,
-    validate_mcap_output,
 )
 from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
@@ -49,6 +48,7 @@ from pymcap_cli.core.mcap_processor import (
     OutputOptions,
     OverwriteCollisionPolicy,
 )
+from pymcap_cli.core.output_validation import validate_mcap_outputs
 from pymcap_cli.core.processors.duration_split import DurationSplitProcessor
 from pymcap_cli.core.processors.expression_split import ExpressionSplitProcessor
 from pymcap_cli.core.processors.paired_event_window import (
@@ -184,9 +184,9 @@ def _prepare_paired_outputs(
 def _publish_paired_outputs(staged: tuple[Path, ...], final: tuple[Path, ...]) -> None:
     if len(staged) != len(final):
         raise RuntimeError("paired-window staged output count mismatch")
-    invalid = [path for path in staged if not validate_mcap_output(path)]
-    if invalid:
-        raise RuntimeError(f"paired-window output failed validation: {invalid[0]}")
+    validation = validate_mcap_outputs([], staged)
+    if not validation.is_valid:
+        raise RuntimeError(f"paired-window {validation.error}")
     for path in staged:
         with path.open("rb") as stream:
             os.fsync(stream.fileno())
@@ -441,8 +441,8 @@ def split(
     no_clobber
         Fail instead of prompting if any split output path already exists.
     delete_source
-        Delete the source file after every split output is validated
-        (header + summary). URL inputs and any source whose path equals one
+        Delete the source after validating every output for readability and
+        expected message preservation. URL inputs and any source whose path equals one
         of the outputs are skipped.
 
     Examples
@@ -687,6 +687,10 @@ def split(
         outputs = [
             Path(segment.path) for segment in result.processor.output_manager.segments.values()
         ]
-        return finalize_delete_source(sources=[file], outputs=outputs)
+        return finalize_delete_source(
+            sources=[file],
+            outputs=outputs,
+            lossy_topic_patterns=[".*"] if expression is not None or paired_router else [],
+        )
 
     return 0

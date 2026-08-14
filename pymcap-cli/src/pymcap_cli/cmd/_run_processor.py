@@ -4,13 +4,13 @@ import contextlib
 import logging
 import threading
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, cast
 from urllib.parse import urlparse
 
-from small_mcap import InvalidMagicError, McapError
 from typing_extensions import Self
 
 from pymcap_cli.core.input_handler import open_input
@@ -23,8 +23,11 @@ from pymcap_cli.core.mcap_processor import (
     ProcessingOptions,
     ProcessingStats,
 )
+from pymcap_cli.core.output_validation import (
+    validate_mcap_outputs,
+)
 from pymcap_cli.core.rosbag2_layout import expand_bag_paths
-from pymcap_cli.utils import confirm_output_overwrite, read_info
+from pymcap_cli.utils import confirm_output_overwrite
 
 logger = logging.getLogger(__name__)
 
@@ -242,78 +245,6 @@ def run_processor(
     return ProcessorResult(stats=stats, processor=processor)
 
 
-def validate_mcap_output(path: Path) -> bool:
-    """Return True iff the MCAP at ``path`` has a readable header and summary."""
-    try:
-        with path.open("rb") as f:
-            read_info(f)
-    except (McapError, InvalidMagicError, OSError, AssertionError) as e:
-        logger.debug(f"Output validation failed for {path}: {e}")
-        return False
-    return True
-
-
-def mcap_message_count(path: Path) -> int | None:
-    """Return the message count from an MCAP summary, or None if it can't be read."""
-    try:
-        with path.open("rb") as f:
-            info = read_info(f)
-    except (McapError, InvalidMagicError, OSError, AssertionError) as e:
-        logger.debug(f"Could not read message count for {path}: {e}")
-        return None
-    if info.summary.statistics is None:
-        return None
-    return info.summary.statistics.message_count
-
-
-def _outputs_dropped_all_messages(sources: list[str], outputs: list[Path]) -> bool:
-    """True if every output has zero messages while some local source had messages.
-
-    Guards against deleting sources when a transform silently produced empty output
-    (e.g. the source was truncated before being read). Partial drops — dedup, time or
-    channel filters — are intentionally not flagged; only total loss is.
-    """
-    out_total = 0
-    for p in outputs:
-        count = mcap_message_count(p)
-        if count is None:
-            return False  # unknown — validation already passed, don't second-guess it
-        out_total += count
-    if out_total > 0:
-        return False
-    for src in sources:
-        if urlparse(src).scheme in ("http", "https"):
-            continue  # URLs are never deleted, so their counts don't matter
-        count = mcap_message_count(Path(src))
-        if count:
-            return True
-    return False
-
-
-def _outputs_lost_messages(sources: list[str], outputs: list[Path]) -> bool:
-    """True if the outputs hold fewer messages in total than the local sources.
-
-    For lossless transforms (compress) every source message must appear in the
-    output, so any shortfall means data was dropped. Counts that can't be read
-    are treated as unknown and never trigger a block.
-    """
-    out_total = 0
-    for p in outputs:
-        count = mcap_message_count(p)
-        if count is None:
-            return False
-        out_total += count
-    src_total = 0
-    for src in sources:
-        if urlparse(src).scheme in ("http", "https"):
-            continue
-        count = mcap_message_count(Path(src))
-        if count is None:
-            return False
-        src_total += count
-    return out_total < src_total
-
-
 def processing_had_errors(stats: ProcessingStats) -> bool:
     """True if the processor swallowed read/validation errors during the run.
 
@@ -359,17 +290,17 @@ def in_place_temp_path(source: Path) -> Path:
 def finalize_replace_source(*, source: Path, tmp_output: Path) -> int:
     """Validate ``tmp_output`` and atomically replace ``source`` with it.
 
-    Returns 0 on success and 1 if the temp output failed validation or is empty
-    while the source had messages. In those cases the source is preserved and the
-    temp file is removed.
+    Returns 0 on success and 1 if the output is unreadable or has fewer messages
+    on any source topic. On failure the source is preserved and the temp is removed.
     """
-    if not validate_mcap_output(tmp_output):
-        logger.error(f"[red]Output failed validation: {tmp_output}[/red]")
+    validation = validate_mcap_outputs(
+        [source],
+        [tmp_output],
+        lossy_topic_patterns=(),
+    )
+    if not validation.is_valid:
+        logger.error(f"[red]{validation.error}[/red]")
         logger.error("Source file preserved — output not safe to replace source.")
-        tmp_output.unlink(missing_ok=True)
-        return 1
-    if _outputs_lost_messages([str(source)], [tmp_output]):
-        logger.error("Output has fewer messages than the source — source file preserved.")
         tmp_output.unlink(missing_ok=True)
         return 1
     tmp_output.replace(source)
@@ -381,33 +312,25 @@ def finalize_delete_source(
     *,
     sources: list[str],
     outputs: list[Path],
-    require_lossless: bool = False,
+    preserved_topic_patterns: Sequence[str] = (),
+    lossy_topic_patterns: Sequence[str] = (),
 ) -> int:
     """Validate every output and, if all valid, delete the eligible sources.
 
     Returns 0 on success (sources deleted or skipped with warning) and 1 if there
-    are no outputs, any output failed validation, or every output is empty while a
-    source had messages. No sources are deleted in those cases.
-
-    When ``require_lossless`` is set (transforms that must preserve every message,
-    e.g. ``compress``), any shortfall in total output messages versus the sources
-    also preserves them — not just total loss.
+    are no outputs, any output failed validation, or a preserved topic lost
+    messages. No sources are deleted in those cases. ``lossy_topic_patterns``
+    explicitly exempts topics from message-count preservation.
     """
-    if not outputs:
-        logger.error("No output files were produced — source file(s) preserved.")
-        return 1
-    invalid = [p for p in outputs if not validate_mcap_output(p)]
-    if invalid:
-        for p in invalid:
-            logger.error(f"[red]Output failed validation: {p}[/red]")
+    validation = validate_mcap_outputs(
+        sources,
+        outputs,
+        preserved_topic_patterns=preserved_topic_patterns,
+        lossy_topic_patterns=lossy_topic_patterns,
+    )
+    if not validation.is_valid:
+        logger.error(f"[red]{validation.error}[/red]")
         logger.error("Source file(s) preserved — output not safe to replace source.")
-        return 1
-    if require_lossless:
-        if _outputs_lost_messages(sources, outputs):
-            logger.error("Output has fewer messages than the source(s) — source file(s) preserved.")
-            return 1
-    elif _outputs_dropped_all_messages(sources, outputs):
-        logger.error("Output contains no messages but the source did — source file(s) preserved.")
         return 1
     delete_source_files(sources, outputs)
     return 0

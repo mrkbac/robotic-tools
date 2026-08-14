@@ -9,9 +9,9 @@ from pymcap_cli.cmd import _run_processor, compress_cmd
 from pymcap_cli.cmd._run_processor import (
     finalize_replace_source,
     in_place_temp_path,
-    validate_mcap_output,
 )
 from pymcap_cli.cmd.compress_cmd import compress
+from pymcap_cli.core.output_validation import McapOutputValidation, validate_mcap_output
 from pymcap_cli.utils import read_info
 
 from tests.fixtures.mcap_generator import create_simple_mcap
@@ -67,7 +67,11 @@ def test_compress_requires_output_or_in_place(simple_mcap_copy: Path) -> None:
 def test_compress_in_place_preserves_source_on_validation_failure(
     simple_mcap_copy: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_run_processor, "validate_mcap_output", lambda _path: False)
+    monkeypatch.setattr(
+        _run_processor,
+        "validate_mcap_outputs",
+        lambda *_args, **_kwargs: McapOutputValidation(error="output failed MCAP validation"),
+    )
     original = simple_mcap_copy.read_bytes()
 
     rc = compress(str(simple_mcap_copy), compression="lz4", in_place=True)

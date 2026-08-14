@@ -294,14 +294,6 @@ BatchOutputDirectoryOption = Annotated[
         help="Directory for batch outputs, preserving relative input paths.",
     ),
 ]
-BatchArchiveOption = Annotated[
-    Path | None,
-    Parameter(
-        name=["--archive"],
-        group=OUTPUT_OPTIONS_GROUP,
-        help="JSONL archive for authenticated batch resume records.",
-    ),
-]
 ContinueOnErrorOption = Annotated[
     bool,
     Parameter(

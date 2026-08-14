@@ -76,7 +76,7 @@ def merge(
     no_clobber
         Fail instead of prompting if the output file already exists.
     delete_source
-        Delete source file(s) after the output is validated (header + summary).
+        Delete source file(s) after validating readability and message preservation.
         URL inputs and any source whose path equals the output are skipped.
 
     Examples
@@ -129,6 +129,10 @@ def merge(
         if processing_had_errors(result.stats):
             logger.error("Processing reported errors — source file(s) preserved.")
             return 1
-        return finalize_delete_source(sources=list(files), outputs=[output])
+        return finalize_delete_source(
+            sources=list(files),
+            outputs=[output],
+            lossy_topic_patterns=[".*"] if dedup_identical else [],
+        )
 
     return 0

@@ -11,9 +11,7 @@ and composes with everything else. The heavy lifting lives in the processors
 import logging
 import re
 import shlex
-from collections.abc import Callable
 from dataclasses import dataclass, replace
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -27,7 +25,6 @@ from pymcap_cli.cmd._cli_options import (
     IMAGE_POINTCLOUD_MODE_CONSTRAINT,
     POINTCLOUD_GROUP,
     BackendOption,
-    BatchArchiveOption,
     BatchCompatibleOutputPathOption,
     BatchModeOption,
     BatchOutputDirectoryOption,
@@ -81,7 +78,7 @@ from pymcap_cli.cmd._run_processor import (
     run_processor,
 )
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
-from pymcap_cli.core.batch import JsonValue, TransformResult, run_batch
+from pymcap_cli.core.batch import JsonValue, run_batch
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.core.message_filter import TopicSelection
@@ -119,34 +116,6 @@ _INPUT_BUFFER_BYTES = 8 * 1024 * 1024
 _ASYNC_OUTPUT_BUFFER_BYTES = 16 * 1024 * 1024
 _VIDEO_INPUT_SCHEMAS = frozenset({"sensor_msgs/Image", "sensor_msgs/CompressedImage"})
 _POINTCLOUD_INPUT_SCHEMAS = frozenset({"sensor_msgs/PointCloud2"})
-
-
-@dataclass(frozen=True, slots=True)
-class _RoscompressBatchTransform:
-    recipe_value: dict[str, JsonValue]
-    run_one: Callable[[Path, Path], int]
-
-    def recipe(self) -> JsonValue:
-        return self.recipe_value
-
-    def preflight(self, source: Path) -> None:
-        if not source.is_file():
-            raise ValueError(f"batch source is not a file: {source}")
-
-    def run(self, source: Path, partial: Path) -> TransformResult:
-        code = self.run_one(source, partial)
-        if code:
-            raise RuntimeError(f"roscompress exited with code {code}")
-        return TransformResult()
-
-    def validate(
-        self,
-        _source: Path,
-        partial: Path,
-        _result: TransformResult,
-    ) -> None:
-        if not partial.is_file():
-            raise RuntimeError("roscompress did not create its partial output")
 
 
 def _resolve_pointcloud_topic_options(
@@ -292,7 +261,6 @@ def roscompress(
     delete_source: DeleteSourceOption = False,
     batch: BatchModeOption = False,
     output_dir: BatchOutputDirectoryOption = None,
-    archive: BatchArchiveOption = None,
     continue_on_error: ContinueOnErrorOption = False,
     quality: Annotated[
         QualityOption, Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
@@ -450,13 +418,8 @@ def roscompress(
         if not input_dir.is_dir():
             logger.error("--batch requires one local input directory")
             return 1
-        try:
-            package_version = version("pymcap-cli")
-        except PackageNotFoundError:
-            package_version = "unknown"
         recipe_value: dict[str, JsonValue] = {
             "schema_version": 1,
-            "pymcap_cli_version": package_version,
             "image_format": image_format,
             "codec": codec,
             "quality": quality,
@@ -516,13 +479,17 @@ def roscompress(
             )
 
         try:
+            preserved_topic_patterns = () if start or end else tuple(topic or ())
+            lossy_topic_patterns = (".*",) if start or end else tuple(exclude_topic or ())
             result = run_batch(
                 input_dir,
                 output_dir,
-                _RoscompressBatchTransform(recipe_value, run_one),
-                archive_path=archive,
+                run_one,
+                recipe=recipe_value,
                 continue_on_error=continue_on_error,
                 force=force,
+                preserved_topic_patterns=preserved_topic_patterns,
+                lossy_topic_patterns=lossy_topic_patterns,
             )
         except (OSError, ValueError) as exc:
             logger.error(str(exc))  # noqa: TRY400
@@ -534,8 +501,8 @@ def roscompress(
                 logger.info("%s: %s", job.relative_path, job.status)
         return 1 if result.failed_count else 0
 
-    if output_dir is not None or archive is not None or continue_on_error:
-        logger.error("--output-dir, --archive, and --continue-on-error require --batch")
+    if output_dir is not None or continue_on_error:
+        logger.error("--output-dir and --continue-on-error require --batch")
         return 1
     if output is None:
         logger.error("single-file roscompress requires --output")
@@ -807,7 +774,8 @@ def roscompress(
         return finalize_delete_source(
             sources=[file],
             outputs=[output],
-            require_lossless=not (topic or exclude_topic or start or end),
+            preserved_topic_patterns=[] if start or end else topic or [],
+            lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
         )
 
     return 0

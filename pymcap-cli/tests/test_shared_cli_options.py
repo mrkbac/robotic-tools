@@ -154,10 +154,10 @@ def test_roscompress_exposes_transactional_batch_options(
     for description in (
         "Process a directory recursively",
         "Directory for batch outputs",
-        "JSONL archive for authenticated batch resume records",
         "Continue batch processing after a file fails",
     ):
         assert description in normalized_output
+    assert "--archive" not in output
     assert "--ffmpeg-args" in output
     assert "--video-topic-ffmpeg-args" in output
 

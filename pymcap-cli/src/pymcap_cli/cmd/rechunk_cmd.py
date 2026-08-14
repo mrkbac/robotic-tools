@@ -144,7 +144,7 @@ def rechunk(
     no_clobber
         Fail instead of prompting if the output file already exists.
     delete_source
-        Delete source file(s) after the output is validated (header + summary).
+        Delete source file(s) after validating readability and message preservation.
         URL inputs and any source whose path equals the output are skipped.
 
     Examples
@@ -263,6 +263,9 @@ def rechunk(
         )
 
     if delete_source:
-        return finalize_delete_source(sources=[file], outputs=[output_file])
+        return finalize_delete_source(
+            sources=[file],
+            outputs=[output_file],
+        )
 
     return 0

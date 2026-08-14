@@ -145,7 +145,7 @@ def filter_cmd(
     no_clobber
         Fail instead of prompting if the output file already exists.
     delete_source
-        Delete source file(s) after the output is validated (header + summary).
+        Delete source file(s) after validating readability and preserved-topic counts.
         URL inputs and any source whose path equals the output are skipped.
 
     Examples
@@ -218,6 +218,12 @@ def filter_cmd(
             return 1
 
     if delete_source:
-        return finalize_delete_source(sources=[file], outputs=[output])
+        has_complex_filter = bool(start or end or invert_time or invert_topics)
+        return finalize_delete_source(
+            sources=[file],
+            outputs=[output],
+            preserved_topic_patterns=[] if has_complex_filter else topic or [],
+            lossy_topic_patterns=[".*"] if has_complex_filter else exclude_topic or [],
+        )
 
     return 0
