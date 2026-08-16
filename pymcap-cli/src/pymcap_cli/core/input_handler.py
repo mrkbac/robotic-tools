@@ -66,9 +66,7 @@ def open_input(
         original_stream, size = open_http_stream(result)
     elif result.scheme == "file":
         original_stream, size = _open_path_file(result.path)
-    elif not result.scheme or (
-        len(result.scheme) == 1 and not result.netloc and path[1:2] == ":"
-    ):
+    elif not result.scheme or (len(result.scheme) == 1 and not result.netloc and path[1:2] == ":"):
         original_stream, size = _open_path_file(path)
     else:
         raise ValueError(f"Unsupported URL scheme: {result.scheme}")
