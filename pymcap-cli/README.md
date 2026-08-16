@@ -876,10 +876,6 @@ pymcap-cli roscompress data.mcap -o compressed.mcap --delete-source
 # Recursively compress a directory as independent resumable transactions
 uvx 'pymcap-cli[video,pointcloud]' roscompress recordings \
   --batch --output-dir compressed --continue-on-error
-
-# Omit camera topics while still validating the count of every other topic
-uvx 'pymcap-cli[video,pointcloud]' roscompress recordings \
-  --batch --output-dir compressed --exclude-topic '/CAM_.*'
 ```
 
 Batch discovery is recursive and sorted. Each job uses a uniquely named adjacent
@@ -888,9 +884,6 @@ message counts, then atomically renames it. Counts are compared per topic when
 the source provides them; `--topic` limits the topics that must be preserved,
 while `--exclude-topic` explicitly permits loss on matching topics. A source
 without counts skips this comparison, but an output without counts is rejected.
-For example, if the source contains 100 `/CAM_FRONT/image` messages and 20
-`/imu` messages, excluding `/CAM_.*` permits the camera messages to be omitted;
-an output with only 19 `/imu` messages is still rejected.
 The JSONL archive records the recipe, source size and modification time, and
 output size; unchanged work is validated again before reporting
 `verified-resumed`. Existing unverified outputs remain collisions unless

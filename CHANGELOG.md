@@ -12,15 +12,10 @@ User-facing notes for releases.
 - Simplified `roscompress --batch` validation and resume handling. Batch jobs now
   use unique adjacent partials, require readable outputs with per-topic message
   counts, and compare preserved-topic counts whenever the source provides them.
-  For example, `--exclude-topic '/CAM_.*'` permits matching camera topics to be
-  omitted while a non-excluded `/imu` count drop from 20 to 19 still rejects the
-  output. If a source has no summary counts, the output must still be countable,
-  but source-to-output count comparison is skipped.
   Resume records use the recipe, source size and modification time, and output
   size, followed by the same lightweight output validation.
 - Removed the `batch` extra and its hashing dependency; batch mode is available
-  from the base package. Legacy archive entries are ignored rather than migrated;
-  their existing outputs remain collisions unless `--force` is used.
+  from the base package. Existing legacy batch archive records are not supported.
 - Local input dispatch now rejects unsupported URL schemes explicitly while
   continuing to treat Windows drive paths as local files.
 
