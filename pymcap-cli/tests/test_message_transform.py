@@ -15,8 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
-from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.cmd._run_processor_multi import run_processor_multi
+from pymcap_cli.cmd._run_processor import run_processor, run_processor_multi
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,

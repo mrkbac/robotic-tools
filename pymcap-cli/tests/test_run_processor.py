@@ -7,12 +7,15 @@ from pymcap_cli.cmd._run_processor import (
     _open_output_stream,
     resolve_overwrite_policy,
     run_processor,
+    run_processor_multi,
 )
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
     OutputOptions,
     OverwriteCollisionPolicy,
+    ProcessingStats,
 )
+from pymcap_cli.core.processors.base import InputProcessor
 from small_mcap import McapWriter
 
 
@@ -129,3 +132,29 @@ def test_run_processor_uses_configured_input_buffer(tmp_path: Path, monkeypatch)
     )
 
     assert observed == [123_456]
+
+
+def test_run_processor_multi_installs_extra_processors_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "input.mcap"
+    source.touch()
+    observed: list[int] = []
+
+    class FakeProcessor:
+        def __init__(self, options) -> None:
+            observed.append(len(options.inputs[0].options.extra_processors))
+
+        def process(self, output_stream) -> ProcessingStats:
+            assert output_stream is None
+            return ProcessingStats()
+
+    monkeypatch.setattr(run_processor_module, "McapProcessor", FakeProcessor)
+
+    run_processor_multi(
+        files=[str(source)],
+        input_options=InputOptions.from_args(extra_processors=[InputProcessor()]),
+        output_options=OutputOptions(),
+    )
+
+    assert observed == [1]

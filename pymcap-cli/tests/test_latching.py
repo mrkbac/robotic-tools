@@ -5,8 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from pymcap_cli.cmd._run_processor import run_processor
-from pymcap_cli.cmd._run_processor_multi import run_processor_multi
+from pymcap_cli.cmd._run_processor import run_processor, run_processor_multi
 from pymcap_cli.constants import NS_TO_SEC
 from pymcap_cli.core.input_handler import open_input
 from pymcap_cli.core.mcap_processor import (

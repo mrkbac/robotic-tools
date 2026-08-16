@@ -217,25 +217,65 @@ def run_processor(
 
     Raises any exception from McapProcessor.process() to the caller.
     """
+    return _run_processor(
+        files=files,
+        output=output,
+        input_options=input_options,
+        output_options=output_options,
+        input_buffer_bytes=input_buffer_bytes,
+    )
+
+
+def run_processor_multi(
+    *,
+    files: list[str],
+    output_options: OutputOptions,
+    input_options: InputOptions | None = None,
+) -> ProcessorResult:
+    """Run a processor whose output manager creates multiple files."""
+    return _run_processor(
+        files=files,
+        output=None,
+        input_options=input_options or InputOptions.from_args(),
+        output_options=output_options,
+        input_buffer_bytes=8192,
+    )
+
+
+def _run_processor(
+    *,
+    files: list[str],
+    output: Path | None,
+    input_options: InputOptions,
+    output_options: OutputOptions,
+    input_buffer_bytes: int,
+) -> ProcessorResult:
     files = expand_bag_paths(files)
+    if output is None:
+        output_options.input_paths = tuple(files)
+
     with contextlib.ExitStack() as stack:
         input_files: list[InputFile] = []
 
         for f in files:
             stream, size = stack.enter_context(open_input(f, buffering=input_buffer_bytes))
-            input_files.append(InputFile(stream=stream, size=size, options=input_options))
-
-        output_stream = stack.enter_context(
-            _open_output_stream(
-                output,
-                output_options.overwrite_policy,
-                async_buffer_bytes=output_options.async_output_buffer_bytes,
+            input_files.append(
+                InputFile(stream=stream, size=size, options=InputOptions.from_args())
             )
-        )
+
+        output_stream: BinaryIO | None = None
+        if output is not None:
+            output_stream = stack.enter_context(
+                _open_output_stream(
+                    output,
+                    output_options.overwrite_policy,
+                    async_buffer_bytes=output_options.async_output_buffer_bytes,
+                )
+            )
 
         processing_options = ProcessingOptions(
             inputs=input_files,
-            input_options=InputOptions.from_args(),
+            input_options=input_options,
             output_options=output_options,
         )
 

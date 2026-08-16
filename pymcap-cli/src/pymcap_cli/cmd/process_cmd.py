@@ -55,8 +55,8 @@ from pymcap_cli.cmd._run_processor import (
     finalize_delete_source,
     resolve_overwrite_policy,
     run_processor,
+    run_processor_multi,
 )
-from pymcap_cli.cmd._run_processor_multi import run_processor_multi
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE, DEFAULT_COMPRESSION
 from pymcap_cli.core.mcap_processor import (
     InputOptions,
