@@ -9,7 +9,6 @@ import pytest
 from pymcap_cli.core import batch
 from pymcap_cli.core.batch import BatchRunResult
 from pymcap_cli.core.batch import run_batch as run_batch_core
-from pymcap_cli.core.output_validation import McapOutputValidation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -85,10 +84,13 @@ def test_run_batch_commits_output_and_records_archive(
     assert final.read_bytes() == simple_mcap.read_bytes()
     archive = output / ".pymcap-roscompress-archive.jsonl"
     record = json.loads(archive.read_text().splitlines()[0])
-    assert "schema_version" not in record
-    assert "fingerprint" not in record["source"]
-    assert record["source"]["mtime_ns"] == (source / "nested" / "run.mcap").stat().st_mtime_ns
-    assert "sha256" not in record["output"]
+    assert record == {
+        "output_size": final.stat().st_size,
+        "path": "nested/run.mcap",
+        "recipe": record["recipe"],
+        "source_mtime_ns": (source / "nested" / "run.mcap").stat().st_mtime_ns,
+        "source_size": (source / "nested" / "run.mcap").stat().st_size,
+    }
     assert list(output.rglob("*.partial")) == []
 
 
@@ -260,7 +262,7 @@ def test_run_batch_rejects_output_failing_lightweight_validation(
     monkeypatch.setattr(
         batch,
         "validate_mcap_outputs",
-        lambda *_args, **_kwargs: McapOutputValidation(error="output failed MCAP validation"),
+        lambda *_args, **_kwargs: "output failed MCAP validation",
     )
 
     result = run_batch(source, output, CopyTransform())

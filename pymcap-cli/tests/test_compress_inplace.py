@@ -11,10 +11,10 @@ from pymcap_cli.cmd._run_processor import (
     in_place_temp_path,
 )
 from pymcap_cli.cmd.compress_cmd import compress
-from pymcap_cli.core.output_validation import McapOutputValidation, validate_mcap_output
 from pymcap_cli.utils import read_info
 
 from tests.fixtures.mcap_generator import create_simple_mcap
+from tests.helpers import validate_mcap_output
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +70,7 @@ def test_compress_in_place_preserves_source_on_validation_failure(
     monkeypatch.setattr(
         _run_processor,
         "validate_mcap_outputs",
-        lambda *_args, **_kwargs: McapOutputValidation(error="output failed MCAP validation"),
+        lambda *_args, **_kwargs: "output failed MCAP validation",
     )
     original = simple_mcap_copy.read_bytes()
 

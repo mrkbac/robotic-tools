@@ -419,7 +419,6 @@ def roscompress(
             logger.error("--batch requires one local input directory")
             return 1
         recipe_value: dict[str, JsonValue] = {
-            "schema_version": 1,
             "image_format": image_format,
             "codec": codec,
             "quality": quality,

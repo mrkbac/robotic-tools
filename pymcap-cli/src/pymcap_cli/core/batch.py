@@ -143,14 +143,14 @@ def _run_job(
             raise RuntimeError(f"transform exited with code {code}")
         if _snapshot(source) != snapshot:
             raise RuntimeError("source changed during transform")
-        validation = validate_mcap_outputs(
+        validation_error = validate_mcap_outputs(
             [source],
             [partial],
             preserved_topic_patterns=preserved_topic_patterns,
             lossy_topic_patterns=lossy_topic_patterns,
         )
-        if not validation.is_valid:
-            raise RuntimeError(validation.error)
+        if validation_error is not None:
+            raise RuntimeError(validation_error)
         output_size = partial.stat().st_size
         partial.replace(final)
         record_value = _archive_record(
@@ -188,18 +188,12 @@ def _archive_record(
     source_snapshot: _SourceSnapshot,
     output_size: int,
 ) -> dict[str, JsonValue]:
-    relative = relative_path.as_posix()
     return {
         "recipe": recipe,
-        "source": {
-            "relative_path": relative,
-            "size": source_snapshot.size,
-            "mtime_ns": source_snapshot.mtime_ns,
-        },
-        "output": {
-            "relative_path": relative,
-            "size": output_size,
-        },
+        "path": relative_path.as_posix(),
+        "source_size": source_snapshot.size,
+        "source_mtime_ns": source_snapshot.mtime_ns,
+        "output_size": output_size,
     }
 
 
@@ -221,13 +215,9 @@ def _load_archive_records(
             if not isinstance(value, dict):
                 continue
             record = cast("dict[str, JsonValue]", value)
-            source = record.get("source")
-            if (
-                record.get("recipe") == recipe
-                and isinstance(source, dict)
-                and isinstance(source.get("relative_path"), str)
-            ):
-                records[source["relative_path"]] = record
+            path = record.get("path")
+            if record.get("recipe") == recipe and isinstance(path, str):
+                records[path] = record
     return records
 
 
@@ -240,30 +230,27 @@ def _can_resume(
     preserved_topic_patterns: Sequence[str],
     lossy_topic_patterns: Sequence[str],
 ) -> bool:
-    source_record = record.get("source")
-    output = record.get("output")
-    if not isinstance(source_record, dict) or not isinstance(output, dict):
-        return False
-    expected_path = relative_path.as_posix()
     if (
-        source_record.get("relative_path") != expected_path
-        or source_record.get("size") != source_snapshot.size
-        or source_record.get("mtime_ns") != source_snapshot.mtime_ns
-        or output.get("relative_path") != expected_path
+        record.get("path") != relative_path.as_posix()
+        or record.get("source_size") != source_snapshot.size
+        or record.get("source_mtime_ns") != source_snapshot.mtime_ns
         or not final.is_file()
     ):
         return False
-    output_size = output.get("size")
+    output_size = record.get("output_size")
     if type(output_size) is not int:
         return False
     if final.stat().st_size != output_size:
         return False
-    return validate_mcap_outputs(
-        [source_path],
-        [final],
-        preserved_topic_patterns=preserved_topic_patterns,
-        lossy_topic_patterns=lossy_topic_patterns,
-    ).is_valid
+    return (
+        validate_mcap_outputs(
+            [source_path],
+            [final],
+            preserved_topic_patterns=preserved_topic_patterns,
+            lossy_topic_patterns=lossy_topic_patterns,
+        )
+        is None
+    )
 
 
 def _append_archive(archive: Path, record: dict[str, JsonValue]) -> None:

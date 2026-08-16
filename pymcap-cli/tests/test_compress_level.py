@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING
 import pytest
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.core import mcap_processor
-from pymcap_cli.core.output_validation import validate_mcap_output
 from small_mcap import Channel, CompressionType, Message, get_summary, stream_reader
+
+from tests.helpers import validate_mcap_output
 
 if TYPE_CHECKING:
     from pathlib import Path

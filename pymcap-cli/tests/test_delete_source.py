@@ -14,13 +14,9 @@ from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.cmd.merge_cmd import merge
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
-from pymcap_cli.core.output_validation import (
-    McapOutputValidation,
-    mcap_message_count,
-    validate_mcap_output,
-)
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap, create_simple_mcap
+from tests.helpers import mcap_message_count, validate_mcap_output
 
 
 def test_validate_mcap_output_returns_true_for_valid_file(simple_mcap: Path) -> None:
@@ -194,9 +190,7 @@ def test_ros_transform_command_keeps_source_when_output_loses_messages(
     monkeypatch.setattr(
         _run_processor,
         "validate_mcap_outputs",
-        lambda *_args, **_kwargs: McapOutputValidation(
-            error="output lost messages on preserved topics"
-        ),
+        lambda *_args, **_kwargs: "output lost messages on preserved topics",
     )
     if command == "roscompress":
         rc = roscompress(
@@ -248,7 +242,7 @@ def test_compress_command_keeps_source_on_validation_failure(
     monkeypatch.setattr(
         _run_processor,
         "validate_mcap_outputs",
-        lambda *_args, **_kwargs: McapOutputValidation(error="output failed MCAP validation"),
+        lambda *_args, **_kwargs: "output failed MCAP validation",
     )
 
     output = tmp_path / "out.mcap"

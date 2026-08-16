@@ -46,12 +46,9 @@ def test_validate_mcap_outputs_detects_per_topic_loss_when_total_is_unchanged(
     _write_topic_counts(source, {"/keep": 2, "/other": 2})
     _write_topic_counts(output, {"/keep": 1, "/other": 3})
 
-    result = validate_mcap_outputs([source], [output])
+    error = validate_mcap_outputs([source], [output])
 
-    assert result.is_valid is False
-    assert [(loss.topic, loss.source_count, loss.output_count) for loss in result.losses] == [
-        ("/keep", 2, 1)
-    ]
+    assert error == "output lost messages on preserved topics: /keep (2 -> 1)"
 
 
 def test_validate_mcap_outputs_allows_loss_only_on_matching_topics(tmp_path: Path) -> None:
@@ -60,14 +57,13 @@ def test_validate_mcap_outputs_allows_loss_only_on_matching_topics(tmp_path: Pat
     _write_topic_counts(source, {"/keep": 2, "/lossy/camera": 4})
     _write_topic_counts(output, {"/keep": 2, "/lossy/camera": 1})
 
-    result = validate_mcap_outputs(
+    error = validate_mcap_outputs(
         [source],
         [output],
         lossy_topic_patterns=[r"/lossy/.*"],
     )
 
-    assert result.is_valid is True
-    assert result.losses == ()
+    assert error is None
 
 
 def test_validate_mcap_outputs_preserves_selected_topics_only(tmp_path: Path) -> None:
@@ -76,15 +72,14 @@ def test_validate_mcap_outputs_preserves_selected_topics_only(tmp_path: Path) ->
     _write_topic_counts(source, {"/selected": 3, "/unselected": 3})
     _write_topic_counts(output, {"/selected": 2})
 
-    result = validate_mcap_outputs(
+    error = validate_mcap_outputs(
         [source],
         [output],
         preserved_topic_patterns=["/selected"],
         lossy_topic_patterns=(),
     )
 
-    assert result.is_valid is False
-    assert [loss.topic for loss in result.losses] == ["/selected"]
+    assert error == "output lost messages on preserved topics: /selected (3 -> 2)"
 
 
 def test_validate_mcap_outputs_does_not_claim_per_topic_validation_without_counts(
@@ -95,15 +90,14 @@ def test_validate_mcap_outputs_does_not_claim_per_topic_validation_without_count
     _write_topic_counts(source, {"/keep": 2}, use_statistics=False)
     _write_topic_counts(output, {"/keep": 2})
 
-    result = validate_mcap_outputs(
+    error = validate_mcap_outputs(
         [source],
         [output],
         lossy_topic_patterns=(),
     )
 
-    assert result.is_valid is False
-    assert result.error is not None
-    assert "per-topic message counts unavailable" in result.error
+    assert error is not None
+    assert "per-topic message counts unavailable" in error
 
 
 def test_validate_mcap_outputs_allows_explicit_loss_without_counts(tmp_path: Path) -> None:
@@ -112,10 +106,10 @@ def test_validate_mcap_outputs_allows_explicit_loss_without_counts(tmp_path: Pat
     _write_topic_counts(source, {"/lossy": 2}, use_statistics=False)
     _write_topic_counts(output, {}, use_statistics=False)
 
-    result = validate_mcap_outputs(
+    error = validate_mcap_outputs(
         [source],
         [output],
         lossy_topic_patterns=[".*"],
     )
 
-    assert result.is_valid is True
+    assert error is None

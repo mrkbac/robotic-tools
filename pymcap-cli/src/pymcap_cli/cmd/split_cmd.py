@@ -184,9 +184,9 @@ def _prepare_paired_outputs(
 def _publish_paired_outputs(staged: tuple[Path, ...], final: tuple[Path, ...]) -> None:
     if len(staged) != len(final):
         raise RuntimeError("paired-window staged output count mismatch")
-    validation = validate_mcap_outputs([], staged)
-    if not validation.is_valid:
-        raise RuntimeError(f"paired-window {validation.error}")
+    validation_error = validate_mcap_outputs([], staged)
+    if validation_error is not None:
+        raise RuntimeError(f"paired-window {validation_error}")
     for path in staged:
         with path.open("rb") as stream:
             os.fsync(stream.fileno())

@@ -8,12 +8,15 @@ import pytest
 from pymcap_cli.cli import app
 from pymcap_cli.cmd import roscompress_cmd
 from pymcap_cli.cmd.roscompress_cmd import roscompress
-from pymcap_cli.core.output_validation import mcap_message_count
+from pymcap_cli.core import batch as batch_core
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap
+from tests.helpers import mcap_message_count
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pymcap_cli.core.batch import JsonValue
 
 
 def test_roscompress_defaults_to_auto_backend() -> None:
@@ -143,6 +146,15 @@ def test_roscompress_batch_recipe_does_not_depend_on_package_version(
     input_dir.mkdir()
     shutil.copyfile(simple_mcap, input_dir / "run.mcap")
     output_dir = tmp_path / "output"
+    captured_recipe: dict[str, JsonValue] = {}
+    original_recipe_digest = batch_core._recipe_digest
+
+    def capture_recipe(recipe: JsonValue) -> str:
+        assert isinstance(recipe, dict)
+        captured_recipe.update(recipe)
+        return original_recipe_digest(recipe)
+
+    monkeypatch.setattr(batch_core, "_recipe_digest", capture_recipe)
     monkeypatch.setattr(
         roscompress_cmd,
         "version",
@@ -160,6 +172,7 @@ def test_roscompress_batch_recipe_does_not_depend_on_package_version(
     )
 
     assert result == 0
+    assert "schema_version" not in captured_recipe
 
 
 def test_roscompress_cli_accepts_batch_without_single_output(

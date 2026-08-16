@@ -293,13 +293,13 @@ def finalize_replace_source(*, source: Path, tmp_output: Path) -> int:
     Returns 0 on success and 1 if the output is unreadable or has fewer messages
     on any source topic. On failure the source is preserved and the temp is removed.
     """
-    validation = validate_mcap_outputs(
+    validation_error = validate_mcap_outputs(
         [source],
         [tmp_output],
         lossy_topic_patterns=(),
     )
-    if not validation.is_valid:
-        logger.error(f"[red]{validation.error}[/red]")
+    if validation_error is not None:
+        logger.error(f"[red]{validation_error}[/red]")
         logger.error("Source file preserved — output not safe to replace source.")
         tmp_output.unlink(missing_ok=True)
         return 1
@@ -322,14 +322,14 @@ def finalize_delete_source(
     messages. No sources are deleted in those cases. ``lossy_topic_patterns``
     explicitly exempts topics from message-count preservation.
     """
-    validation = validate_mcap_outputs(
+    validation_error = validate_mcap_outputs(
         sources,
         outputs,
         preserved_topic_patterns=preserved_topic_patterns,
         lossy_topic_patterns=lossy_topic_patterns,
     )
-    if not validation.is_valid:
-        logger.error(f"[red]{validation.error}[/red]")
+    if validation_error is not None:
+        logger.error(f"[red]{validation_error}[/red]")
         logger.error("Source file(s) preserved — output not safe to replace source.")
         return 1
     delete_source_files(sources, outputs)

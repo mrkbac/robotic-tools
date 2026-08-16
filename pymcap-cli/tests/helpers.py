@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 from pymcap_cli.core.processors.base import (
     ChannelContext,
@@ -9,7 +10,29 @@ from pymcap_cli.core.processors.base import (
     MessageContext,
     PipelineContext,
 )
-from small_mcap import LazyChunk
+from pymcap_cli.utils import read_info
+from small_mcap import InvalidMagicError, LazyChunk, McapError
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def validate_mcap_output(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            read_info(stream)
+    except (McapError, InvalidMagicError, OSError, AssertionError):
+        return False
+    return True
+
+
+def mcap_message_count(path: Path) -> int | None:
+    try:
+        with path.open("rb") as stream:
+            statistics = read_info(stream).summary.statistics
+    except (McapError, InvalidMagicError, OSError, AssertionError):
+        return None
+    return statistics.message_count if statistics is not None else None
 
 
 def lazy_chunk(start: int, end: int) -> LazyChunk:
