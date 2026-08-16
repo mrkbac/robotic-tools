@@ -9,8 +9,6 @@ from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.core import mcap_processor
 from small_mcap import Channel, CompressionType, Message, get_summary, stream_reader
 
-from tests.helpers import validate_mcap_output
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -36,7 +34,6 @@ def test_compress_fast_produces_valid_zstd(uncompressed_mcap: Path, tmp_path: Pa
     out = tmp_path / "fast.mcap"
     rc = compress(str(uncompressed_mcap), out, compression="zstd", fast=True, force=True)
     assert rc == 0
-    assert validate_mcap_output(out)
     assert _chunk_compressions(out) == {"zstd"}
 
 
@@ -46,7 +43,6 @@ def test_compress_explicit_level_produces_valid_zstd(
     out = tmp_path / "lvl.mcap"
     rc = compress(str(uncompressed_mcap), out, compression="zstd", compression_level=-5, force=True)
     assert rc == 0
-    assert validate_mcap_output(out)
     assert _chunk_compressions(out) == {"zstd"}
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 from typing import TYPE_CHECKING
 
+import pytest
 from pymcap_cli.core.output_validation import validate_mcap_outputs
 from small_mcap import McapWriter
 
@@ -36,6 +37,27 @@ def _write_topic_counts(
             )
     writer.finish()
     path.write_bytes(output.getvalue())
+
+
+def test_validate_mcap_outputs_accepts_readable_output(simple_mcap: Path) -> None:
+    assert validate_mcap_outputs([], [simple_mcap], lossy_topic_patterns=[".*"]) is None
+
+
+@pytest.mark.parametrize("case", ["garbage", "truncated", "missing"])
+def test_validate_mcap_outputs_rejects_unreadable_output(
+    case: str,
+    tmp_path: Path,
+    truncated_mcap: Path,
+) -> None:
+    output = tmp_path / "output.mcap"
+    if case == "garbage":
+        output.write_bytes(b"not an mcap file at all")
+    elif case == "truncated":
+        output.write_bytes(truncated_mcap.read_bytes())
+
+    error = validate_mcap_outputs([], [output], lossy_topic_patterns=[".*"])
+
+    assert error == f"output failed MCAP validation: {output}"
 
 
 def test_validate_mcap_outputs_detects_per_topic_loss_when_total_is_unchanged(
@@ -82,7 +104,7 @@ def test_validate_mcap_outputs_preserves_selected_topics_only(tmp_path: Path) ->
     assert error == "output lost messages on preserved topics: /selected (3 -> 2)"
 
 
-def test_validate_mcap_outputs_does_not_claim_per_topic_validation_without_counts(
+def test_validate_mcap_outputs_allows_source_without_per_topic_counts(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.mcap"
@@ -96,11 +118,25 @@ def test_validate_mcap_outputs_does_not_claim_per_topic_validation_without_count
         lossy_topic_patterns=(),
     )
 
-    assert error is not None
-    assert "per-topic message counts unavailable" in error
+    assert error is None
 
 
-def test_validate_mcap_outputs_allows_explicit_loss_without_counts(tmp_path: Path) -> None:
+def test_validate_mcap_outputs_rejects_output_without_per_topic_counts(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mcap"
+    output = tmp_path / "output.mcap"
+    _write_topic_counts(source, {"/keep": 2})
+    _write_topic_counts(output, {"/keep": 2}, use_statistics=False)
+
+    error = validate_mcap_outputs([source], [output])
+
+    assert error == f"per-topic message counts unavailable: {output}"
+
+
+def test_validate_mcap_outputs_rejects_uncountable_output_for_explicit_loss(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source.mcap"
     output = tmp_path / "output.mcap"
     _write_topic_counts(source, {"/lossy": 2}, use_statistics=False)
@@ -112,4 +148,4 @@ def test_validate_mcap_outputs_allows_explicit_loss_without_counts(tmp_path: Pat
         lossy_topic_patterns=[".*"],
     )
 
-    assert error is None
+    assert error == f"per-topic message counts unavailable: {output}"

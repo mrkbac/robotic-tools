@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import struct
 from pathlib import Path
 
 import pytest
@@ -9,32 +11,38 @@ from pymcap_cli.cmd import _run_processor
 from pymcap_cli.cmd._run_processor import (
     delete_source_files,
     finalize_delete_source,
+    finalize_replace_source,
 )
 from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.cmd.merge_cmd import merge
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.cmd.rosdecompress_cmd import rosdecompress
+from pymcap_cli.utils import read_info
+from small_mcap import MAGIC, Footer
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap, create_simple_mcap
-from tests.helpers import mcap_message_count, validate_mcap_output
 
 
-def test_validate_mcap_output_returns_true_for_valid_file(simple_mcap: Path) -> None:
-    assert validate_mcap_output(simple_mcap) is True
+def _remove_summary(path: Path) -> None:
+    data = path.read_bytes()
+    summary_start = struct.unpack_from("<Q", data, len(data) - 28)[0]
+    assert summary_start > 0
+    output = io.BytesIO(data[:summary_start])
+    Footer(summary_start=0, summary_offset_start=0, summary_crc=0).write_record_to(output)
+    output.write(MAGIC)
+    path.write_bytes(output.getvalue())
 
 
-def test_validate_mcap_output_returns_false_for_garbage(tmp_path: Path) -> None:
-    bad = tmp_path / "garbage.mcap"
-    bad.write_bytes(b"not an mcap file at all")
-    assert validate_mcap_output(bad) is False
+def _assert_readable_mcap(path: Path) -> None:
+    with path.open("rb") as stream:
+        read_info(stream)
 
 
-def test_validate_mcap_output_returns_false_for_truncated(truncated_mcap: Path) -> None:
-    assert validate_mcap_output(truncated_mcap) is False
-
-
-def test_validate_mcap_output_returns_false_for_missing(tmp_path: Path) -> None:
-    assert validate_mcap_output(tmp_path / "does-not-exist.mcap") is False
+def _message_count(path: Path) -> int:
+    with path.open("rb") as stream:
+        statistics = read_info(stream).summary.statistics
+    assert statistics is not None
+    return statistics.message_count
 
 
 def test_delete_source_files_removes_local_paths(tmp_path: Path) -> None:
@@ -143,7 +151,39 @@ def test_compress_command_deletes_source_on_success(simple_mcap_copy: Path, tmp_
     assert rc == 0
     assert not simple_mcap_copy.exists()
     assert output.exists()
-    assert validate_mcap_output(output)
+    _assert_readable_mcap(output)
+
+
+def test_finalize_delete_source_allows_summaryless_source(
+    simple_mcap_copy: Path,
+    tmp_path: Path,
+) -> None:
+    _remove_summary(simple_mcap_copy)
+    output = tmp_path / "out.mcap"
+    output.write_bytes(create_simple_mcap())
+
+    result = finalize_delete_source(
+        sources=[str(simple_mcap_copy)],
+        outputs=[output],
+    )
+
+    assert result == 0
+    assert not simple_mcap_copy.exists()
+    _assert_readable_mcap(output)
+
+
+def test_finalize_replace_source_allows_summaryless_source(
+    simple_mcap_copy: Path,
+    tmp_path: Path,
+) -> None:
+    _remove_summary(simple_mcap_copy)
+    output = tmp_path / "out.mcap"
+    output.write_bytes(create_simple_mcap())
+
+    result = finalize_replace_source(source=simple_mcap_copy, tmp_output=output)
+
+    assert result == 0
+    _assert_readable_mcap(simple_mcap_copy)
 
 
 @pytest.mark.parametrize("command", ["roscompress", "rosdecompress"])
@@ -175,7 +215,7 @@ def test_ros_transform_command_deletes_source_on_success(
 
     assert rc == 0
     assert not simple_mcap_copy.exists()
-    assert validate_mcap_output(output)
+    _assert_readable_mcap(output)
 
 
 @pytest.mark.parametrize("command", ["roscompress", "rosdecompress"])
@@ -213,7 +253,7 @@ def test_ros_transform_command_keeps_source_when_output_loses_messages(
 
     assert rc == 1
     assert simple_mcap_copy.exists()
-    assert validate_mcap_output(output)
+    _assert_readable_mcap(output)
 
 
 def test_roscompress_filtered_delete_allows_intentional_message_loss(tmp_path: Path) -> None:
@@ -233,7 +273,7 @@ def test_roscompress_filtered_delete_allows_intentional_message_loss(tmp_path: P
 
     assert rc == 0
     assert not source.exists()
-    assert mcap_message_count(output) == 2
+    assert _message_count(output) == 2
 
 
 def test_compress_command_keeps_source_on_validation_failure(
@@ -300,7 +340,6 @@ def test_finalize_delete_source_preserves_when_output_lost_messages(
     src.write_bytes(simple_mcap.read_bytes())  # 200 messages
     empty_out = tmp_path / "empty.mcap"
     empty_out.write_bytes(create_simple_mcap(num_messages=0))
-    assert validate_mcap_output(empty_out) is True  # valid header+summary, 0 messages
 
     rc = finalize_delete_source(sources=[str(src)], outputs=[empty_out])
 
@@ -351,4 +390,4 @@ def test_merge_command_deletes_all_sources(simple_mcap: Path, tmp_path: Path) ->
     assert rc == 0
     assert not s1.exists()
     assert not s2.exists()
-    assert validate_mcap_output(output)
+    _assert_readable_mcap(output)

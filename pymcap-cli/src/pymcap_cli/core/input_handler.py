@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, cast
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import urlparse
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.http_utils import open_http_stream
@@ -50,8 +50,8 @@ def resolve_mcap_path(path: str) -> str:
     )
 
 
-def _open_path_file(url: ParseResult) -> tuple[io.RawIOBase, int]:
-    file_path = Path(resolve_mcap_path(url.path))
+def _open_path_file(path: str) -> tuple[io.RawIOBase, int]:
+    file_path = Path(resolve_mcap_path(path))
     raw_stream = file_path.open("rb", buffering=0)
     size = file_path.stat().st_size
     return raw_stream, size
@@ -63,18 +63,19 @@ def open_input(
 ) -> Iterator[tuple[IO[bytes], int]]:
     result = urlparse(path)
     if result.scheme in ("http", "https"):
-        opener = open_http_stream
-    elif result.scheme in ("", "file"):
-        opener = _open_path_file
+        original_stream, size = open_http_stream(result)
+    elif result.scheme == "file":
+        original_stream, size = _open_path_file(result.path)
+    elif not result.scheme or (
+        len(result.scheme) == 1 and not result.netloc and path[1:2] == ":"
+    ):
+        original_stream, size = _open_path_file(path)
     else:
         raise ValueError(f"Unsupported URL scheme: {result.scheme}")
 
     base_stream: io.RawIOBase | io.BufferedIOBase | None = None
     debug_wrapper: DebugStreamWrapper | None = None
-    size = 0
     try:
-        original_stream, size = opener(result)
-
         # Optionally wrap in debug wrapper (cast since DebugStreamWrapper implements interface)
         if debug or _is_debug_io_enabled:
             debug_wrapper = DebugStreamWrapper(original_stream)

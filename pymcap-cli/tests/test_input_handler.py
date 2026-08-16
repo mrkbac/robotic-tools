@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
 
 import pytest
@@ -72,6 +73,31 @@ def test_open_input_rejects_unsupported_url_scheme() -> None:
         open_input("s3://bucket/recording.mcap"),
     ):
         pass
+
+    with (
+        pytest.raises(ValueError, match="Unsupported URL scheme: x"),
+        open_input("x://host/recording.mcap"),
+    ):
+        pass
+
+
+def test_open_input_treats_windows_drive_as_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = r"C:\recording.mcap"
+    opened: list[str] = []
+
+    def open_local(local_path: str) -> tuple[io.BytesIO, int]:
+        opened.append(local_path)
+        return io.BytesIO(b"mcap"), 4
+
+    monkeypatch.setattr(input_handler, "_open_path_file", open_local)
+
+    with open_input(path) as (stream, size):
+        assert stream.read() == b"mcap"
+
+    assert size == 4
+    assert opened == [path]
 
 
 def test_open_input_explicit_debug_prints_stats(

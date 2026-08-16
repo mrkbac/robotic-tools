@@ -64,9 +64,10 @@ def recover(
     no_clobber
         Fail instead of prompting if the output file already exists.
     delete_source
-        Delete source after validating readability and unintended total message loss.
-        URL inputs and any source whose path equals the output are skipped.
-        Skipped if recovery yielded no valid MCAP data.
+        Delete source after validating output readability. Message-count comparison is
+        skipped because recovery may intentionally salvage only readable data. URL inputs
+        and any source whose path equals the output are skipped. Skipped if recovery
+        yielded no valid MCAP data.
 
     Examples
     --------

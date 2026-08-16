@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, cast
+from uuid import uuid4
 
 from pymcap_cli.core.output_validation import validate_mcap_outputs
 
@@ -119,7 +121,7 @@ def _run_job(
     lossy_topic_patterns: Sequence[str],
 ) -> str:
     final.parent.mkdir(parents=True, exist_ok=True)
-    partial = final.with_name(f".{final.name}.partial")
+    partial = final.with_name(f".{final.name}.partial-{os.getpid()}-{uuid4().hex}")
     snapshot = _snapshot(source)
     record = archive_records.get(relative_path.as_posix())
     if record is not None and _can_resume(

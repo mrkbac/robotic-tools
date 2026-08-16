@@ -77,6 +77,13 @@ def validate_mcap_outputs(
         paths = ", ".join(str(path) for path in invalid_outputs)
         return f"output failed MCAP validation: {paths}"
 
+    unavailable_outputs = [
+        path for path, counts in output_counts if counts.message_counts_by_topic is None
+    ]
+    if unavailable_outputs:
+        paths = ", ".join(str(path) for path in unavailable_outputs)
+        return f"per-topic message counts unavailable: {paths}"
+
     if ".*" in lossy_topic_patterns:
         return None
 
@@ -85,14 +92,8 @@ def validate_mcap_outputs(
     ]
     source_counts = [(path, _read_mcap_counts(path)) for path in local_sources]
 
-    unavailable = [
-        path
-        for path, counts in (*source_counts, *output_counts)
-        if counts.message_counts_by_topic is None
-    ]
-    if unavailable:
-        paths = ", ".join(str(path) for path in unavailable)
-        return f"per-topic message counts unavailable: {paths}"
+    if any(counts.message_counts_by_topic is None for _, counts in source_counts):
+        return None
 
     source_by_topic = _sum_topic_counts(source_counts)
     output_by_topic = _sum_topic_counts(output_counts)

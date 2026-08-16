@@ -9,14 +9,21 @@ from pymcap_cli.cli import app
 from pymcap_cli.cmd import roscompress_cmd
 from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.core import batch as batch_core
+from pymcap_cli.utils import read_info
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap
-from tests.helpers import mcap_message_count
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pymcap_cli.core.batch import JsonValue
+
+
+def _message_count(path: Path) -> int:
+    with path.open("rb") as stream:
+        statistics = read_info(stream).summary.statistics
+    assert statistics is not None
+    return statistics.message_count
 
 
 def test_roscompress_defaults_to_auto_backend() -> None:
@@ -175,7 +182,7 @@ def test_roscompress_batch_validates_preserved_topics_with_lossy_topic_regex(
     )
 
     assert result == 0
-    assert mcap_message_count(output_dir / "run.mcap") == 2
+    assert _message_count(output_dir / "run.mcap") == 2
 
 
 def test_roscompress_batch_recipe_does_not_depend_on_package_version(

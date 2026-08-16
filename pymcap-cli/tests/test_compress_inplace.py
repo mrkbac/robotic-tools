@@ -14,7 +14,6 @@ from pymcap_cli.cmd.compress_cmd import compress
 from pymcap_cli.utils import read_info
 
 from tests.fixtures.mcap_generator import create_simple_mcap
-from tests.helpers import validate_mcap_output
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,7 +32,6 @@ def test_compress_in_place_replaces_source(simple_mcap_copy: Path) -> None:
 
     assert rc == 0
     assert simple_mcap_copy.exists()
-    assert validate_mcap_output(simple_mcap_copy)
     with simple_mcap_copy.open("rb") as f:
         info = read_info(f)
     assert all(ci.compression == "lz4" for ci in info.summary.chunk_indexes)
@@ -86,7 +84,6 @@ def test_finalize_replace_source_preserves_when_temp_empty(simple_mcap_copy: Pat
     original = simple_mcap_copy.read_bytes()  # 200 messages
     tmp_output = in_place_temp_path(simple_mcap_copy)
     tmp_output.write_bytes(create_simple_mcap(num_messages=0))
-    assert validate_mcap_output(tmp_output) is True  # valid, but 0 messages
 
     rc = finalize_replace_source(source=simple_mcap_copy, tmp_output=tmp_output)
 

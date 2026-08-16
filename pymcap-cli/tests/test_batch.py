@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -91,7 +93,7 @@ def test_run_batch_commits_output_and_records_archive(
         "source_mtime_ns": (source / "nested" / "run.mcap").stat().st_mtime_ns,
         "source_size": (source / "nested" / "run.mcap").stat().st_size,
     }
-    assert list(output.rglob("*.partial")) == []
+    assert list(output.rglob("*.partial-*")) == []
 
 
 def test_run_batch_resumes_only_after_output_authentication(
@@ -185,7 +187,7 @@ def test_run_batch_continues_independent_jobs_and_cleans_partials(
     assert result.failed_count == 1
     assert (output / "good.mcap").is_file()
     assert not (output / "nested" / "run.mcap").exists()
-    assert list(output.rglob("*.partial")) == []
+    assert list(output.rglob("*.partial-*")) == []
 
 
 def test_run_batch_rejects_source_changed_during_transform(
@@ -200,7 +202,7 @@ def test_run_batch_rejects_source_changed_during_transform(
     assert result.failed_count == 1
     assert "source changed" in result.jobs[0].detail
     assert not (output / "nested" / "run.mcap").exists()
-    assert list(output.rglob("*.partial")) == []
+    assert list(output.rglob("*.partial-*")) == []
 
 
 def test_run_batch_excludes_nested_output_tree(
@@ -232,7 +234,43 @@ def test_run_batch_keyboard_interrupt_cleans_owned_partial(
 
     assert not (output / "nested" / "run.mcap").exists()
     assert not (output / ".pymcap-roscompress-archive.jsonl").exists()
-    assert list(output.rglob("*.partial")) == []
+    assert list(output.rglob("*.partial-*")) == []
+
+
+def test_run_batch_concurrent_jobs_use_independent_partials(
+    tmp_path: Path,
+    simple_mcap: Path,
+) -> None:
+    source = _source_tree(tmp_path, simple_mcap)
+    output = tmp_path / "output"
+    barrier = threading.Barrier(2)
+    partials: set[Path] = set()
+    partials_lock = threading.Lock()
+
+    def transform(input_path: Path, partial: Path) -> int:
+        shutil.copyfile(input_path, partial)
+        with partials_lock:
+            partials.add(partial)
+        barrier.wait()
+        return 0
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                run_batch_core,
+                source,
+                output,
+                transform,
+                recipe=_COPY_RECIPE,
+                force=True,
+            )
+            for _ in range(2)
+        ]
+        results = [future.result() for future in futures]
+
+    assert len(partials) == 2
+    assert all(result.failed_count == 0 for result in results)
+    assert list(output.rglob("*.partial-*")) == []
 
 
 def test_run_batch_force_preserves_existing_output_when_transform_fails(
@@ -249,7 +287,7 @@ def test_run_batch_force_preserves_existing_output_when_transform_fails(
 
     assert result.failed_count == 1
     assert final.read_bytes() == b"existing"
-    assert list(output.rglob("*.partial")) == []
+    assert list(output.rglob("*.partial-*")) == []
 
 
 def test_run_batch_rejects_output_failing_lightweight_validation(
@@ -270,7 +308,7 @@ def test_run_batch_rejects_output_failing_lightweight_validation(
     assert result.failed_count == 1
     assert "output failed MCAP validation" in result.jobs[0].detail
     assert not (output / "nested" / "run.mcap").exists()
-    assert list(output.rglob("*.partial")) == []
+    assert list(output.rglob("*.partial-*")) == []
 
 
 def test_run_batch_atomically_replaces_hard_link_without_changing_source(
