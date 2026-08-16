@@ -1,9 +1,8 @@
 """Unified input handler for local files and HTTP URLs."""
 
 import io
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, cast
 from urllib.parse import ParseResult, urlparse
@@ -11,13 +10,7 @@ from urllib.parse import ParseResult, urlparse
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.http_utils import open_http_stream
 
-
-@dataclass(slots=True)
-class _InputConfig:
-    is_debug_io_enabled: bool = False
-
-
-_input_config = _InputConfig()
+_is_debug_io_enabled = False
 
 
 def set_debug_io_default(enabled: bool) -> None:
@@ -26,7 +19,8 @@ def set_debug_io_default(enabled: bool) -> None:
     Set by the CLI's global ``--debug-io`` flag; individual call sites can still
     opt in explicitly via ``open_input(..., debug=True)``.
     """
-    _input_config.is_debug_io_enabled = enabled
+    global _is_debug_io_enabled  # noqa: PLW0603
+    _is_debug_io_enabled = enabled
 
 
 def resolve_mcap_path(path: str) -> str:
@@ -63,21 +57,16 @@ def _open_path_file(url: ParseResult) -> tuple[io.RawIOBase, int]:
     return raw_stream, size
 
 
-REGISTRY: dict[str, Callable[[ParseResult], tuple[io.RawIOBase, int]]] = {
-    "http": open_http_stream,
-    "https": open_http_stream,
-    "file": _open_path_file,
-    "": _open_path_file,
-}
-
-
 @contextmanager
 def open_input(
     path: str, buffering: int = 8192, *, debug: bool = False
 ) -> Iterator[tuple[IO[bytes], int]]:
     result = urlparse(path)
-    opener = REGISTRY.get(result.scheme, _open_path_file)
-    if opener is None:
+    if result.scheme in ("http", "https"):
+        opener = open_http_stream
+    elif result.scheme in ("", "file"):
+        opener = _open_path_file
+    else:
         raise ValueError(f"Unsupported URL scheme: {result.scheme}")
 
     base_stream: io.RawIOBase | io.BufferedIOBase | None = None
@@ -87,7 +76,7 @@ def open_input(
         original_stream, size = opener(result)
 
         # Optionally wrap in debug wrapper (cast since DebugStreamWrapper implements interface)
-        if debug or _input_config.is_debug_io_enabled:
+        if debug or _is_debug_io_enabled:
             debug_wrapper = DebugStreamWrapper(original_stream)
             base_stream = debug_wrapper
         else:
@@ -107,5 +96,3 @@ def open_input(
 
         if debug_wrapper:
             debug_wrapper.print_stats(size, name=path)
-
-    return

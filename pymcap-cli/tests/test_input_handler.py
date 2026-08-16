@@ -66,6 +66,14 @@ def test_open_input_no_debug_by_default(
     assert "Debug I/O Statistics" not in capsys.readouterr().out
 
 
+def test_open_input_rejects_unsupported_url_scheme() -> None:
+    with (
+        pytest.raises(ValueError, match="Unsupported URL scheme: s3"),
+        open_input("s3://bucket/recording.mcap"),
+    ):
+        pass
+
+
 def test_open_input_explicit_debug_prints_stats(
     simple_mcap: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -80,7 +88,7 @@ def test_open_input_debug_io_default_prints_stats(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(input_handler._input_config, "is_debug_io_enabled", True)
+    monkeypatch.setattr(input_handler, "_is_debug_io_enabled", True)
 
     with open_input(str(simple_mcap)) as (stream, _size):
         stream.read(16)
@@ -97,7 +105,7 @@ def test_cli_debug_io_flag_applies_to_any_command(
 ) -> None:
     from pymcap_cli.cli import app  # noqa: PLC0415
 
-    monkeypatch.setattr(input_handler._input_config, "is_debug_io_enabled", False)
+    monkeypatch.setattr(input_handler, "_is_debug_io_enabled", False)
 
     with pytest.raises(SystemExit) as exc_info:
         app.meta(["--debug-io", "du", str(simple_mcap)])

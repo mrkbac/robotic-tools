@@ -128,9 +128,6 @@ def plot(
     if not paths:
         logger.error("At least one message path is required")
         return 1
-    if "--xy" in paths:
-        logger.error("--xy was removed; use --kind xy")
-        return 1
 
     output_path = Path(output) if output else None
 
