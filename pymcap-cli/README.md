@@ -878,14 +878,17 @@ uvx 'pymcap-cli[video,pointcloud]' roscompress recordings \
   --batch --output-dir compressed --continue-on-error
 ```
 
-Batch discovery is recursive and sorted. Each file is written to one adjacent
-partial, lightly validated for a readable MCAP header and summary, and atomically
-renamed. Message counts are compared per topic; `--topic` limits the topics that
-must be preserved, while `--exclude-topic` explicitly permits loss on matching
-topics. The JSONL archive records the recipe, source size and modification time,
-and output size so unchanged work can report `verified-resumed`. Existing unverified
-outputs remain collisions unless `--force` is explicit. Batch mode does not support
-URLs, a single-file output, or `--delete-source`.
+Batch discovery is recursive and sorted. Each job uses a uniquely named adjacent
+partial, lightly validates it for a readable MCAP header, summary, and per-topic
+message counts, then atomically renames it. Counts are compared per topic when
+the source provides them; `--topic` limits the topics that must be preserved,
+while `--exclude-topic` explicitly permits loss on matching topics. A source
+without counts skips this comparison, but an output without counts is rejected.
+The JSONL archive records the recipe, source size and modification time, and
+output size; unchanged work is validated again before reporting
+`verified-resumed`. Existing unverified outputs remain collisions unless
+`--force` is explicit. Batch mode does not support URLs, a single-file output,
+or `--delete-source`.
 
 Topic profiles inherit every unspecified global option. The selector is a topic
 regex matched in full and case-insensitively, exactly like `--topic` /

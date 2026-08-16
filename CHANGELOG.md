@@ -4,6 +4,23 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.33.0
+
+- Added `hash`, which prints a stable, compression-independent structural
+  fingerprint derived from schemas, channels, message counts, and indexed log
+  timestamps. It is intentionally not a payload or byte-for-byte hash.
+- Simplified `roscompress --batch` validation and resume handling. Batch jobs now
+  use unique adjacent partials, require readable outputs with per-topic message
+  counts, and compare preserved-topic counts whenever the source provides them.
+  Resume records use the recipe, source size and modification time, and output
+  size, followed by the same lightweight output validation.
+- Removed the `batch` extra and its hashing dependency; batch mode is available
+  from the base package. Existing legacy batch archive records are not supported.
+- Local input dispatch now rejects unsupported URL schemes explicitly while
+  continuing to treat Windows drive paths as local files.
+
+---
+
 ## pymcap-cli 0.32.0, small-mcap 0.16.0
 
 Headline: recording reliability workflows gain bounded structural reports,
