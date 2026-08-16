@@ -113,6 +113,47 @@ def test_roscompress_batch_processes_recursive_tree(
     assert (output_dir / ".pymcap-roscompress-archive.jsonl").is_file()
 
 
+def test_roscompress_batch_invokes_worker_without_command_recursion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    public_calls = 0
+    worker_calls = 0
+    original_roscompress = roscompress_cmd.roscompress
+
+    def unexpected_recursive_call(*_args, **_kwargs) -> int:
+        nonlocal public_calls
+        public_calls += 1
+        return 0
+
+    def fake_worker(*_args, **_kwargs) -> int:
+        nonlocal worker_calls
+        worker_calls += 1
+        return 0
+
+    def fake_run_batch(_input_dir, _output_dir, run_one, **_kwargs):
+        assert run_one(input_dir / "run.mcap", tmp_path / "partial.mcap") == 0
+        return batch_core.BatchRunResult([])
+
+    monkeypatch.setattr(roscompress_cmd, "roscompress", unexpected_recursive_call)
+    monkeypatch.setattr(roscompress_cmd, "_run_roscompress", fake_worker, raising=False)
+    monkeypatch.setattr(roscompress_cmd, "run_batch", fake_run_batch)
+
+    result = original_roscompress(
+        str(input_dir),
+        batch=True,
+        output_dir=tmp_path / "output",
+        image_format="none",
+        pointcloud=False,
+    )
+
+    assert result == 0
+    assert public_calls == 0
+    assert worker_calls == 1
+
+
 def test_roscompress_batch_validates_preserved_topics_with_lossy_topic_regex(
     tmp_path: Path,
 ) -> None:
@@ -146,12 +187,12 @@ def test_roscompress_batch_recipe_does_not_depend_on_package_version(
     input_dir.mkdir()
     shutil.copyfile(simple_mcap, input_dir / "run.mcap")
     output_dir = tmp_path / "output"
-    captured_recipe: dict[str, JsonValue] = {}
+    captured_recipe: list[str] = []
     original_recipe_digest = batch_core._recipe_digest
 
     def capture_recipe(recipe: JsonValue) -> str:
-        assert isinstance(recipe, dict)
-        captured_recipe.update(recipe)
+        assert isinstance(recipe, str)
+        captured_recipe.append(recipe)
         return original_recipe_digest(recipe)
 
     monkeypatch.setattr(batch_core, "_recipe_digest", capture_recipe)
@@ -172,7 +213,7 @@ def test_roscompress_batch_recipe_does_not_depend_on_package_version(
     )
 
     assert result == 0
-    assert "schema_version" not in captured_recipe
+    assert "schema_version" not in captured_recipe[0]
 
 
 def test_roscompress_cli_accepts_batch_without_single_output(

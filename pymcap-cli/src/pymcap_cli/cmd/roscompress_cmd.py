@@ -78,7 +78,7 @@ from pymcap_cli.cmd._run_processor import (
     run_processor,
 )
 from pymcap_cli.constants import DEFAULT_ROSCOMPRESS_CHUNK_SPAN_NS
-from pymcap_cli.core.batch import JsonValue, run_batch
+from pymcap_cli.core.batch import run_batch
 from pymcap_cli.core.mcap_processor import InputOptions, OutputOptions
 from pymcap_cli.core.mcap_transform import print_size_comparison
 from pymcap_cli.core.message_filter import TopicSelection
@@ -177,6 +177,17 @@ class _ProfiledProcessor:
     kind: str
     pattern: str | None
     processor: TopicMatchingProcessor
+
+
+@dataclass(frozen=True, slots=True)
+class _RoscompressOptions:
+    defaults: RoscompressConfig
+    video_topic_settings: dict[str, RoscompressConfig]
+    pointcloud_topic_settings: dict[str, RoscompressConfig]
+    topics: tuple[str, ...]
+    excluded_topics: tuple[str, ...]
+    start: str
+    end: str
 
 
 class _KeptTopicObserver(InputProcessor):
@@ -404,6 +415,7 @@ def roscompress(
         Drop topics matching a full-match regex (repeatable). Excluded topics
         are skipped before decoding, e.g. ``-x '/debug/.*'``.
     """
+    input_dir: Path | None = None
     if batch:
         if output is not None:
             logger.error("--batch rejects the single-file --output option")
@@ -418,97 +430,18 @@ def roscompress(
         if not input_dir.is_dir():
             logger.error("--batch requires one local input directory")
             return 1
-        recipe_value: dict[str, JsonValue] = {
-            "image_format": image_format,
-            "codec": codec,
-            "quality": quality,
-            "encoder": encoder,
-            "backend": backend,
-            "video_topic_options": [repr(item) for item in video_topic_options or []],
-            "ffmpeg_args": ffmpeg_args,
-            "video_topic_ffmpeg_args": video_topic_ffmpeg_args or [],
-            "scale": scale,
-            "jpeg_quality": jpeg_quality,
-            "pointcloud": pointcloud,
-            "resolution": resolution,
-            "pointcloud_topic_options": [repr(item) for item in pointcloud_topic_options or []],
-            "pc_format": pc_format,
-            "pc_schema": pc_schema,
-            "pc_encoding": pc_encoding,
-            "pc_compression": pc_compression,
-            "draco_compression_level": draco_compression_level,
-            "pointcloud_drop_invalid": pointcloud_drop_invalid,
-            "pointcloud_sort_field": pointcloud_sort_field,
-            "topic": topic or [],
-            "exclude_topic": exclude_topic or [],
-            "start": start,
-            "end": end,
-        }
-
-        def run_one(source: Path, partial: Path) -> int:
-            return roscompress(
-                str(source),
-                partial,
-                force=True,
-                delete_source=False,
-                quality=quality,
-                codec=codec,
-                encoder=encoder,
-                video_topic_options=video_topic_options,
-                ffmpeg_args=ffmpeg_args,
-                video_topic_ffmpeg_args=video_topic_ffmpeg_args,
-                resolution=resolution,
-                pointcloud_topic_options=pointcloud_topic_options,
-                pc_format=pc_format,
-                pc_schema=pc_schema,
-                pc_encoding=pc_encoding,
-                pc_compression=pc_compression,
-                draco_compression_level=draco_compression_level,
-                scale=scale,
-                image_format=image_format,
-                jpeg_quality=jpeg_quality,
-                backend=backend,
-                pointcloud=pointcloud,
-                pointcloud_drop_invalid=pointcloud_drop_invalid,
-                pointcloud_sort_field=pointcloud_sort_field,
-                topic=topic,
-                exclude_topic=exclude_topic,
-                start=start,
-                end=end,
-            )
-
-        try:
-            preserved_topic_patterns = () if start or end else tuple(topic or ())
-            lossy_topic_patterns = (".*",) if start or end else tuple(exclude_topic or ())
-            result = run_batch(
-                input_dir,
-                output_dir,
-                run_one,
-                recipe=recipe_value,
-                continue_on_error=continue_on_error,
-                force=force,
-                preserved_topic_patterns=preserved_topic_patterns,
-                lossy_topic_patterns=lossy_topic_patterns,
-            )
-        except (OSError, ValueError) as exc:
-            logger.error(str(exc))  # noqa: TRY400
+    else:
+        if output_dir is not None or continue_on_error:
+            logger.error("--output-dir and --continue-on-error require --batch")
             return 1
-        for job in result.jobs:
-            if job.status == "failed":
-                logger.error("%s: %s", job.relative_path, job.detail)
-            else:
-                logger.info("%s: %s", job.relative_path, job.status)
-        return 1 if result.failed_count else 0
-
-    if output_dir is not None or continue_on_error:
-        logger.error("--output-dir and --continue-on-error require --batch")
-        return 1
-    if output is None:
-        logger.error("single-file roscompress requires --output")
-        return 1
-    if output_overwrites_input(file, output):
-        logger.error("Output path is the same file as the input; choose a different output file.")
-        return 1
+        if output is None:
+            logger.error("single-file roscompress requires --output")
+            return 1
+        if output_overwrites_input(file, output):
+            logger.error(
+                "Output path is the same file as the input; choose a different output file."
+            )
+            return 1
 
     if (video_topic_options or ffmpeg_args or video_topic_ffmpeg_args) and image_format != "video":
         logger.error("video topic and FFmpeg options require --image-format video")
@@ -537,18 +470,88 @@ def roscompress(
             pointcloud_sort_field=pointcloud_sort_field,
             ffmpeg_args=_parse_ffmpeg_args(ffmpeg_args),
         )
-        video_topic_settings = _resolve_video_topic_options(
-            video_topic_options,
-            defaults,
-            video_topic_ffmpeg_args,
+        options = _RoscompressOptions(
+            defaults=defaults,
+            video_topic_settings=_resolve_video_topic_options(
+                video_topic_options,
+                defaults,
+                video_topic_ffmpeg_args,
+            ),
+            pointcloud_topic_settings=_resolve_pointcloud_topic_options(
+                pointcloud_topic_options, defaults
+            ),
+            topics=tuple(topic or ()),
+            excluded_topics=tuple(exclude_topic or ()),
+            start=start,
+            end=end,
         )
-        pointcloud_topic_settings = _resolve_pointcloud_topic_options(
-            pointcloud_topic_options, defaults
-        )
-        cleanup = resolve_cleanup(defaults)
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
         return 1
+
+    if batch:
+        assert input_dir is not None
+        assert output_dir is not None
+
+        def run_one(source: Path, partial: Path) -> int:
+            return _run_roscompress(
+                str(source),
+                partial,
+                options,
+                force=True,
+                delete_source=False,
+            )
+
+        try:
+            has_time_filter = bool(options.start or options.end)
+            result = run_batch(
+                input_dir,
+                output_dir,
+                run_one,
+                recipe=repr(options),
+                continue_on_error=continue_on_error,
+                force=force,
+                preserved_topic_patterns=() if has_time_filter else options.topics,
+                lossy_topic_patterns=(".*",) if has_time_filter else options.excluded_topics,
+            )
+        except (OSError, ValueError) as exc:
+            logger.error(str(exc))  # noqa: TRY400
+            return 1
+        for job in result.jobs:
+            if job.status == "failed":
+                logger.error("%s: %s", job.relative_path, job.detail)
+            else:
+                logger.info("%s: %s", job.relative_path, job.status)
+        return 1 if result.failed_count else 0
+
+    assert output is not None
+    return _run_roscompress(
+        file,
+        output,
+        options,
+        force=force,
+        delete_source=delete_source,
+    )
+
+
+def _run_roscompress(
+    file: str,
+    output: Path,
+    options: _RoscompressOptions,
+    *,
+    force: bool,
+    delete_source: bool,
+) -> int:
+    defaults = options.defaults
+    video_topic_settings = options.video_topic_settings
+    pointcloud_topic_settings = options.pointcloud_topic_settings
+    image_format = defaults.image_format
+    pointcloud = defaults.pointcloud
+    topic = list(options.topics) or None
+    exclude_topic = list(options.excluded_topics) or None
+    start = options.start
+    end = options.end
+    cleanup = resolve_cleanup(defaults)
 
     overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
     assert overwrite_policy is not None  # no_clobber is fixed False here
@@ -609,7 +612,7 @@ def roscompress(
                 extras.append(processor)
                 profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, processor))
     except ImportError:
-        uses_draco = pc_format == "draco" or any(
+        uses_draco = defaults.pc_format == "draco" or any(
             settings.pc_format == "draco" for settings in pointcloud_topic_settings.values()
         )
         extra = "draco" if uses_draco else "pointcloud"
@@ -627,8 +630,13 @@ def roscompress(
     if exclude_topic:
         logger.info(f"Excluding topics matching: {', '.join(exclude_topic)}")
     if image_format == "video":
-        logger.info(f"Image mode: video ({encoder or 'auto'}, {codec}, backend={backend})")
-        logger.info(f"Quality (CRF): {quality}")
+        logger.info(
+            "Image mode: video (%s, %s, backend=%s)",
+            defaults.encoder or "auto",
+            defaults.codec,
+            defaults.backend,
+        )
+        logger.info(f"Quality (CRF): {defaults.quality}")
         if defaults.ffmpeg_args:
             logger.info("FFmpeg args: %s", shlex.join(defaults.ffmpeg_args))
         for pattern, settings in video_topic_settings.items():
@@ -651,15 +659,15 @@ def roscompress(
                     shlex.join(settings.ffmpeg_args),
                 )
     elif image_format == "jpeg":
-        logger.info(f"Image mode: jpeg (raw → CompressedImage, q={jpeg_quality})")
+        logger.info(f"Image mode: jpeg (raw → CompressedImage, q={defaults.jpeg_quality})")
     elif image_format == "png":
         logger.info("Image mode: png (raw → CompressedImage)")
     else:
         logger.info("Image mode: none (copy unchanged)")
-    if scale is not None and image_format != "none":
-        logger.info(f"Scale (max dim): {scale}px")
+    if defaults.scale is not None and image_format != "none":
+        logger.info(f"Scale (max dim): {defaults.scale}px")
     if pointcloud:
-        logger.info(f"Point cloud: {pc_format} (schema={pc_schema})")
+        logger.info(f"Point cloud: {defaults.pc_format} (schema={defaults.pc_schema})")
         for pattern, settings in pointcloud_topic_settings.items():
             if not settings.pointcloud:
                 logger.info("Point cloud topics matching %s: keep unchanged", pattern)
