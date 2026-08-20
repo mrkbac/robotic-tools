@@ -18,6 +18,7 @@ from small_mcap import (
     Channel,
     Chunk,
     ChunkIndex,
+    Message,
     RebuildInfo,
     Schema,
     Summary,
@@ -25,6 +26,7 @@ from small_mcap import (
     get_summary,
     read_info_approximate,
     rebuild_summary,
+    stream_reader,
 )
 from small_mcap.reader import _get_chunk_data_stream
 from small_mcap.records import OPCODE_AND_LEN_STRUCT, Opcode
@@ -546,10 +548,7 @@ def recording_identity_from_info(info: RebuildInfo) -> McapIdentity:
     return _identity_from_intermediates(info, _build_identity_intermediates(info))
 
 
-def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
-    intermediates = _build_identity_intermediates(info)
-    summary_identity = _identity_from_intermediates(info, intermediates)
-
+def _timestamps_from_chunk_information(info: RebuildInfo) -> dict[int, list[int]]:
     timestamps_by_channel: dict[int, list[int]] = {}
     if info.chunk_information:
         for indexes in info.chunk_information.values():
@@ -557,6 +556,27 @@ def message_index_identity_from_info(info: RebuildInfo) -> MessageIndexIdentity:
                 timestamps_by_channel.setdefault(message_index.channel_id, []).extend(
                     message_index.timestamps
                 )
+    return timestamps_by_channel
+
+
+def message_index_identity_from_info(
+    info: RebuildInfo,
+    *,
+    timestamps_by_channel: dict[int, list[int]] | None = None,
+) -> MessageIndexIdentity:
+    """Hash the summary plus every message's log time.
+
+    ``timestamps_by_channel`` overrides the message indexes as the timestamp
+    source, for files whose messages live outside chunks and are therefore not
+    covered by any message index.
+    """
+    intermediates = _build_identity_intermediates(info)
+    summary_identity = _identity_from_intermediates(info, intermediates)
+
+    if timestamps_by_channel is None:
+        timestamps_by_channel = _timestamps_from_chunk_information(info)
+    else:
+        timestamps_by_channel = dict(timestamps_by_channel)
 
     indexed_entries = [
         (entry, sorted(timestamps_by_channel.pop(entry.channel_id, [])))
@@ -1414,6 +1434,63 @@ def read_message_index_identity_file(
             size_bytes=size_bytes,
             identity=message_index_identity_from_info(info),
             read_mode=read_mode,
+        )
+
+
+def _scan_message_timestamps(stream: IO[bytes]) -> dict[int, list[int]]:
+    timestamps_by_channel: dict[int, list[int]] = {}
+    stream.seek(0)
+    for record in stream_reader(stream):
+        if isinstance(record, Message):
+            timestamps_by_channel.setdefault(record.channel_id, []).append(record.log_time)
+    return timestamps_by_channel
+
+
+def read_structural_identity_file(path: str) -> MessageIndexIdentityReadResult | None:
+    """Read a message-index identity, reading messages when indexes are missing.
+
+    Messages stored outside chunks carry no message index, so their log times
+    come from a full record scan. The resulting identity is the same one an
+    equivalent chunked recording produces.
+    """
+    with open_input(path, buffering=0) as (stream, size_bytes):
+        info = read_info_approximate(stream)
+        if (
+            info is not None
+            and info.summary.statistics is not None
+            and _has_complete_message_indexes(info)
+        ):
+            return MessageIndexIdentityReadResult(
+                path=path,
+                size_bytes=size_bytes,
+                identity=message_index_identity_from_info(info),
+                read_mode="index",
+            )
+
+        stream.seek(0)
+        rebuilt = rebuild_summary(
+            stream,
+            validate_crc=False,
+            calculate_channel_sizes=False,
+            exact_sizes=False,
+        )
+        statistics = rebuilt.summary.statistics
+        if statistics is None:
+            return None
+        if _has_complete_message_indexes(rebuilt):
+            timestamps_by_channel = _timestamps_from_chunk_information(rebuilt)
+        else:
+            timestamps_by_channel = _scan_message_timestamps(stream)
+            if sum(map(len, timestamps_by_channel.values())) != statistics.message_count:
+                return None
+        return MessageIndexIdentityReadResult(
+            path=path,
+            size_bytes=size_bytes,
+            identity=message_index_identity_from_info(
+                rebuilt,
+                timestamps_by_channel=timestamps_by_channel,
+            ),
+            read_mode="rebuild",
         )
 
 

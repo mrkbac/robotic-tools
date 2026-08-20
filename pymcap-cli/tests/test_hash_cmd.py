@@ -104,3 +104,52 @@ def test_hash_is_registered_in_top_level_cli_help(
     assert "Usage: pymcap-cli hash" in output
     assert "compression-independent" in output
     assert "does not hash message payload bytes" in output
+
+
+def _write_unchunked_mcap(path: Path) -> None:
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, use_chunking=False, compression=CompressionType.NONE)
+        writer.start(profile="ros2", library="hash-test")
+        writer.add_schema(1, "std_msgs/msg/String", "ros2msg", b"string data\n")
+        writer.add_channel(1, "/chatter", "cdr", 1)
+        for index, payload in enumerate((b"one", b"two", b"three")):
+            timestamp = (index + 1) * 1_000_000_000
+            writer.add_message(1, timestamp, payload, timestamp, index)
+        writer.finish()
+
+
+def test_hash_is_stable_without_chunks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    chunked = tmp_path / "chunked.mcap"
+    unchunked = tmp_path / "unchunked.mcap"
+    _write_mcap(chunked)
+    _write_unchunked_mcap(unchunked)
+
+    assert hash_cmd.hash_mcap(str(chunked)) == 0
+    chunked_hash = capsys.readouterr().out
+    assert hash_cmd.hash_mcap(str(unchunked)) == 0
+    unchunked_hash = capsys.readouterr().out
+
+    assert chunked_hash == unchunked_hash
+
+
+def test_hash_reports_unreadable_input_without_traceback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    not_mcap = tmp_path / "not.mcap"
+    not_mcap.write_bytes(b"definitely not an mcap file")
+
+    assert hash_cmd.hash_mcap(str(not_mcap)) == 1
+    assert not any(record.exc_info for record in caplog.records)
+    assert "invalid magic" in caplog.text.lower()
+
+
+def test_hash_reports_missing_input_without_traceback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert hash_cmd.hash_mcap(str(tmp_path / "absent.mcap")) == 1
+    assert not any(record.exc_info for record in caplog.records)

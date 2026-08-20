@@ -741,7 +741,7 @@ pymcap-cli diff a.mcap b.mcap --max-ranges 10
 ### `hash` — Stable Recording Fingerprint
 
 Print a compression-independent structural hash. It covers normalized schemas,
-channels, counts, and every indexed message timestamp, while reusing the MCAP
+channels, counts, and every message log timestamp, while reusing the MCAP
 summary and message indexes when available.
 
 ```bash
@@ -749,7 +749,8 @@ pymcap-cli hash recording.mcap
 # mcap-index-v1:7f…
 ```
 
-Compressed and uncompressed rewrites of the same recording have the same hash.
+Compressed, uncompressed, and unchunked rewrites of the same recording have the
+same hash.
 Message payload bytes, publish timestamps, sequences, attachment contents, and
 metadata bodies are not hashed; use `diff --compare-payloads` when payload
 equality must be verified.
