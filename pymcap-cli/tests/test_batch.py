@@ -367,3 +367,21 @@ def test_run_batch_relies_on_writes_for_available_space(
 
     assert result.failed_count == 0
     assert transform.run_count == 1
+
+
+def test_run_batch_fails_source_that_is_not_an_mcap(
+    tmp_path: Path,
+    simple_mcap: Path,
+) -> None:
+    source = _source_tree(tmp_path, simple_mcap)
+    (source / "broken.mcap").write_bytes(b"not an mcap file")
+    output = tmp_path / "output"
+    transform = CopyTransform()
+
+    result = run_batch(source, output, transform, continue_on_error=True)
+
+    statuses = {job.relative_path.as_posix(): job.status for job in result.jobs}
+    assert statuses["broken.mcap"] == "failed"
+    assert statuses["nested/run.mcap"] == "committed"
+    assert transform.run_count == 1
+    assert not (output / "broken.mcap").exists()

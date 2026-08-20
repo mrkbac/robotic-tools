@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, cast
 from uuid import uuid4
 
+from small_mcap import get_header
+
 from pymcap_cli.core.output_validation import validate_mcap_outputs
 
 if TYPE_CHECKING:
@@ -120,6 +122,7 @@ def _run_job(
     preserved_topic_patterns: Sequence[str],
     lossy_topic_patterns: Sequence[str],
 ) -> str:
+    _require_mcap_header(source)
     final.parent.mkdir(parents=True, exist_ok=True)
     partial = final.with_name(f".{final.name}.partial-{os.getpid()}-{uuid4().hex}")
     snapshot = _snapshot(source)
@@ -166,6 +169,16 @@ def _run_job(
         return "committed"
     finally:
         partial.unlink(missing_ok=True)
+
+
+def _require_mcap_header(source: Path) -> None:
+    """Reject a source no transform can read, before it produces empty output.
+
+    Only the header is read, so recordings without a summary section stay
+    eligible for batch processing.
+    """
+    with source.open("rb") as stream:
+        get_header(stream)
 
 
 def _snapshot(path: Path) -> _SourceSnapshot:

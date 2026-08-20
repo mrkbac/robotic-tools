@@ -35,11 +35,9 @@ def _read_mcap_counts(path: Path) -> _McapCounts:
 
     channel_counts = statistics.channel_message_counts
     if not channel_counts:
-        counts_by_topic = {} if statistics.message_count == 0 else None
-        return _McapCounts(
-            is_readable=True,
-            message_counts_by_topic=counts_by_topic,
-        )
+        if statistics.message_count != 0:
+            return _McapCounts(is_readable=True)
+        return _McapCounts(is_readable=True, message_counts_by_topic={})
     if sum(channel_counts.values()) != statistics.message_count:
         return _McapCounts(is_readable=True)
 
