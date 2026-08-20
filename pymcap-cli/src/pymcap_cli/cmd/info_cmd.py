@@ -125,14 +125,15 @@ def _build_file_info_and_summary(data: McapInfoOutput) -> Table:
     info_table.add_column()
     info_table.add_row("File:", f"[green]{data['file']['path']}[/]")
 
-    bytes_per_sec = data["file"]["size_bytes"] / (duration_ns / NS_TO_SEC)
-    bytes_per_hour = bytes_per_sec * 3600
-    info_table.add_row(
-        "Size:",
-        f"[green]{bytes_to_human(data['file']['size_bytes'])}[/]"
-        f" [red]{bytes_to_human(bytes_per_sec)}/s[/]"
-        f" [orange]{bytes_to_human(bytes_per_hour)}/h[/]",
-    )
+    size_bytes = data["file"]["size_bytes"]
+    size_text = f"[green]{bytes_to_human(size_bytes)}[/]"
+    if duration_ns > 0:
+        bytes_per_sec = size_bytes / (duration_ns / NS_TO_SEC)
+        size_text += (
+            f" [red]{bytes_to_human(bytes_per_sec)}/s[/]"
+            f" [orange]{bytes_to_human(bytes_per_sec * 3600)}/h[/]"
+        )
+    info_table.add_row("Size:", size_text)
     info_table.add_row("Library:", f"[yellow]{data['header']['library']}[/]")
     info_table.add_row("Profile:", f"[yellow]{data['header']['profile']}[/]")
     info_table.add_row("Messages:", f"[green]{stats['message_count']:,}[/]")

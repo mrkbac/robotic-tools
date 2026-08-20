@@ -7,13 +7,19 @@ User-facing notes for releases.
 ## pymcap-cli 0.33.0
 
 - Added `hash`, which prints a stable, compression-independent structural
-  fingerprint derived from schemas, channels, message counts, and indexed log
-  timestamps. It is intentionally not a payload or byte-for-byte hash.
+  fingerprint derived from schemas, channels, message counts, and every message
+  log timestamp. Recordings whose messages live outside chunks are read directly,
+  so chunked and unchunked rewrites of one recording hash identically. It is
+  intentionally not a payload or byte-for-byte hash, and unreadable inputs are
+  reported as errors instead of tracebacks.
 - Simplified `roscompress --batch` validation and resume handling. Batch jobs now
   use unique adjacent partials, require readable outputs with per-topic message
   counts, and compare preserved-topic counts whenever the source provides them.
   Resume records use the recipe, source size and modification time, and output
-  size, followed by the same lightweight output validation.
+  size, followed by the same lightweight output validation. A source that is not
+  a readable MCAP file fails its job instead of committing an empty output.
+- `info` no longer crashes on a recording whose messages share a single
+  timestamp; the throughput rate is omitted when the duration is zero.
 - Removed the `batch` extra and its hashing dependency; batch mode is available
   from the base package. Existing legacy batch archive records are not supported.
 - Local input dispatch now rejects unsupported URL schemes explicitly while

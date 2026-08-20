@@ -84,3 +84,23 @@ def test_info_rebuild_returns_partial_summary_for_truncated_final_chunk(tmp_path
     assert data["statistics"]["message_count"] > 0
     assert data["statistics"]["message_count"] < 24
     assert data["channels"][0]["topic"] == "/test"
+
+
+def test_info_renders_recording_without_duration(tmp_path: Path) -> None:
+    path = tmp_path / "single.mcap"
+    with path.open("wb") as stream:
+        writer = McapWriter(stream, compression=CompressionType.NONE)
+        writer.start(profile="test", library="test")
+        writer.add_schema(1, "Test", "json", b"{}")
+        writer.add_channel(1, "/test", "json", 1)
+        writer.add_message(1, 1_000, b"{}", 1_000)
+        writer.finish()
+
+    out = io.StringIO()
+    console = Console(file=out, force_terminal=False, color_system=None, width=200)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(info_cmd, "console", console)
+        code = info_cmd.info([str(path)])
+
+    assert code == 0
+    assert "Duration:" in out.getvalue()
