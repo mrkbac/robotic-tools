@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pymcap_cli.core.mcap_processor as mcap_processor
 import pytest
 from pymcap_cli.constants import DEFAULT_CHUNK_SIZE
 from pymcap_cli.core.mcap_processor import (
@@ -64,6 +65,28 @@ class TestOutputManagerLazyCreation:
     def test_creates_file(self, manager, tmp_path: Path):
         manager.get_or_create_segment(0)
         assert (tmp_path / "output_000.mcap").exists()
+
+    def test_uses_explicit_compression_worker_count(
+        self, output_options, schemas, channels, header, monkeypatch
+    ):
+        real_create_mcap_writer = mcap_processor.create_mcap_writer
+        worker_counts: list[int] = []
+
+        def create_mcap_writer(*args, num_workers: int, **kwargs):
+            worker_counts.append(num_workers)
+            return real_create_mcap_writer(*args, num_workers=num_workers, **kwargs)
+
+        monkeypatch.setattr(mcap_processor, "create_mcap_writer", create_mcap_writer)
+        output_options.compression_workers = 7
+        manager = OutputManager(output_options, schemas, channels, header)
+
+        manager.get_or_create_segment(0)
+
+        assert worker_counts == [7]
+
+    def test_rejects_non_positive_compression_worker_count(self):
+        with pytest.raises(ValueError, match="compression_workers must be positive"):
+            OutputOptions(compression_workers=0)
 
     def test_formats_typed_template_fields(
         self, output_options, schemas, channels, header, tmp_path

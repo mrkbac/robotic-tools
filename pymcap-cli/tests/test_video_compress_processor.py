@@ -221,6 +221,11 @@ def test_split_decode_workers_divides_the_pool_across_a_processor_chain() -> Non
     assert split_decode_workers(4) == max(1, single // 4)
 
 
+def test_split_decode_workers_divides_an_explicit_worker_budget() -> None:
+    assert split_decode_workers(1, worker_budget=6) == 6
+    assert split_decode_workers(4, worker_budget=6) == 1
+
+
 def test_split_decode_workers_rejects_non_positive_processor_count() -> None:
     with pytest.raises(ValueError, match="processor_count must be positive"):
         split_decode_workers(0)

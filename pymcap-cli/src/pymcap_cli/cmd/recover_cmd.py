@@ -7,6 +7,7 @@ from pymcap_cli.cmd._cli_options import (
     AlwaysDecodeChunkOption,
     ChunkSizeOption,
     CompressionOption,
+    CompressionWorkersOption,
     DeleteSourceOption,
     ForceOverwriteOption,
     NoClobberOption,
@@ -34,6 +35,7 @@ def recover(
     *,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     always_decode_chunk: AlwaysDecodeChunkOption = False,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
@@ -87,6 +89,7 @@ def recover(
             output_options=OutputOptions(
                 compression=compression,
                 chunk_size=chunk_size,
+                compression_workers=compression_workers,
                 overwrite_policy=overwrite_policy,
             ),
         )

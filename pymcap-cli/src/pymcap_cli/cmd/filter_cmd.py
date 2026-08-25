@@ -13,6 +13,7 @@ from pymcap_cli.cmd._cli_options import (
     AttachmentsModeOption,
     ChunkSizeOption,
     CompressionOption,
+    CompressionWorkersOption,
     DeleteSourceOption,
     EarlyBailOption,
     EndTimeOption,
@@ -91,6 +92,7 @@ def filter_cmd(
     order: OrderOption = "preserve",
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     no_crc: NoCrcOption = False,
     no_chunks: NoChunksOption = False,
     force: ForceOverwriteOption = False,
@@ -194,6 +196,7 @@ def filter_cmd(
                 chunk_size=chunk_size,
                 enable_crcs=not no_crc,
                 use_chunking=not no_chunks,
+                compression_workers=compression_workers,
                 overwrite_policy=overwrite_policy,
             ),
         )

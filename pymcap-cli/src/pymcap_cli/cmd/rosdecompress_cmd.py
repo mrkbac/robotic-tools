@@ -18,6 +18,7 @@ from pymcap_cli.cmd._arg_constraints import constraint_group, requires_value
 from pymcap_cli.cmd._cli_options import (
     ENCODING_GROUP,
     BackendOption,
+    CompressionWorkersOption,
     DeleteSourceOption,
     ForceOverwriteOption,
     OutputPathOption,
@@ -55,6 +56,7 @@ def rosdecompress(
     *,
     force: ForceOverwriteOption = False,
     delete_source: DeleteSourceOption = False,
+    compression_workers: CompressionWorkersOption = None,
     video: Annotated[
         bool,
         Parameter(
@@ -151,7 +153,11 @@ def rosdecompress(
         extras.append(PointcloudDecompressProcessor())
 
     input_options = InputOptions.from_args(extra_processors=extras or None)
-    output_options = OutputOptions(output_processors=[], overwrite_policy=overwrite_policy)
+    output_options = OutputOptions(
+        output_processors=[],
+        overwrite_policy=overwrite_policy,
+        compression_workers=compression_workers,
+    )
 
     try:
         result = run_processor(

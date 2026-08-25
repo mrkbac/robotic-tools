@@ -32,6 +32,39 @@ def test_roscompress_defaults_to_auto_backend() -> None:
     assert backend.default == "auto"
 
 
+def test_roscompress_propagates_worker_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[roscompress_cmd._RoscompressOptions] = []
+
+    def fake_run(
+        _file: str,
+        _output: Path,
+        options: roscompress_cmd._RoscompressOptions,
+        *,
+        force: bool,
+        delete_source: bool,
+    ) -> int:
+        assert force is False
+        assert delete_source is False
+        captured.append(options)
+        return 0
+
+    monkeypatch.setattr(roscompress_cmd, "_run_roscompress", fake_run)
+
+    result = roscompress(
+        "input.mcap",
+        tmp_path / "output.mcap",
+        compression_workers=3,
+        video_decode_workers=5,
+    )
+
+    assert result == 0
+    assert captured[0].compression_workers == 3
+    assert captured[0].video_decode_workers == 5
+
+
 def test_roscompress_accepts_explicit_auto_backend(simple_mcap: Path, tmp_path: Path) -> None:
     output = tmp_path / "compressed.mcap"
 

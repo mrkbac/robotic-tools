@@ -22,6 +22,7 @@ from pymcap_cli.cmd._cli_options import (
     MESSAGE_PATH_GROUP,
     ChunkSizeOption,
     CompressionOption,
+    CompressionWorkersOption,
     DeleteSourceOption,
     ForceOverwriteOption,
     LatchFromMetadataOption,
@@ -408,6 +409,7 @@ def split(
     latch_from_metadata: LatchFromMetadataOption = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -632,6 +634,7 @@ def split(
                 output_template=processing_output_template,
                 compression=compression,
                 chunk_size=chunk_size,
+                compression_workers=compression_workers,
                 overwrite_policy=overwrite_policy,
             ),
         )

@@ -21,6 +21,7 @@ from pymcap_cli.cmd._cli_options import (
     ChunkSizeOption,
     CompressionLevelOption,
     CompressionOption,
+    CompressionWorkersOption,
     DedupIdenticalOption,
     DeleteSourceOption,
     EarlyBailOption,
@@ -39,6 +40,7 @@ from pymcap_cli.cmd._cli_options import (
     SplitAtOption,
     StartTimeOption,
     TopicOption,
+    VideoDecodeWorkersOption,
 )
 from pymcap_cli.cmd._message_filter_options import create_message_filter
 from pymcap_cli.cmd._message_path_options import (
@@ -342,6 +344,7 @@ def process(
             help="Force a specific encoder (e.g. h264_nvenc, libx264). Auto-detect if unset.",
         ),
     ] = None,
+    video_decode_workers: VideoDecodeWorkersOption = None,
     pc_resolution: Annotated[
         float,
         Parameter(
@@ -522,6 +525,7 @@ def process(
     # ----- Output -----
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     zstd_level: CompressionLevelOption = None,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
@@ -773,6 +777,7 @@ def process(
                         scale=video_scale,
                         backend=EncoderMode(video_backend),
                         encoder=video_encoder,
+                        decode_workers=video_decode_workers,
                     )
                 )
             use_fused_cloudini_cleanup = compress_pointcloud
@@ -918,6 +923,7 @@ def process(
         compression=compression,
         chunk_size=chunk_size,
         zstd_level=zstd_level,
+        compression_workers=compression_workers,
         output_processors=output_processors,
         max_chunk_groups=rechunk_max_groups,
         max_chunk_memory_bytes=rechunk_max_memory_bytes,

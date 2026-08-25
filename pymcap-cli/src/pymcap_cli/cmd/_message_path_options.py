@@ -8,12 +8,13 @@ import re
 from string import Formatter
 from typing import TYPE_CHECKING, cast
 
+from pymcap_cli.environment import MESSAGE_PATH_VARIABLE_ENV_PREFIX
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ros_parser.message_path import MessagePathVariable, MessagePathVariables
 
-MESSAGE_PATH_VARIABLE_ENV_PREFIX = "PYMCAP_VAR_"
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 

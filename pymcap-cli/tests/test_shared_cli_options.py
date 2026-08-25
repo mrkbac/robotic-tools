@@ -9,6 +9,7 @@ import pytest
 from pymcap_cli.cli import app
 
 CMD_DIR = Path(__file__).parents[1] / "src" / "pymcap_cli" / "cmd"
+README = Path(__file__).parents[1] / "README.md"
 
 
 def _parameter_names(path: Path) -> set[str]:
@@ -162,6 +163,145 @@ def test_roscompress_exposes_transactional_batch_options(
     assert "--video-topic-ffmpeg-args" in output
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "compress",
+        "filter",
+        "merge",
+        "process",
+        "rechunk",
+        "recover",
+        "roscompress",
+        "rosdecompress",
+        "split",
+    ],
+)
+def test_compressed_output_commands_share_compression_worker_configuration(
+    command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = _help(capsys, command)
+
+    assert "--compression-workers" in output
+    assert "PYMCAP_COMPRESSION_WORKERS" in output
+    assert "MCAP_COMPRESS_WORKERS" in output
+
+
+@pytest.mark.parametrize("command", ["process", "roscompress"])
+def test_video_compression_commands_share_decode_worker_configuration(
+    command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = _help(capsys, command)
+
+    assert "--video-decode-workers" in output
+    assert "PYMCAP_VIDEO_DECODE_WORKERS" in output
+    assert "VC_DECODE" in output
+
+
+def test_bridge_target_help_documents_its_environment_variable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "PYMCAP_BRIDGE" in _help(capsys, "bridge", "play")
+
+
+def test_message_path_help_documents_environment_variable_pattern(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "PYMCAP_VAR_NAME" in _help(capsys, "cat")
+
+
+def test_message_definition_help_documents_ros_search_environment(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "AMENT_PREFIX_PATH" in _help(capsys, "msg", "def")
+
+
+def test_canonical_worker_environment_variables_parse_as_typed_options(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("PYMCAP_COMPRESSION_WORKERS", "6")
+    monkeypatch.setenv("PYMCAP_VIDEO_DECODE_WORKERS", "5")
+    monkeypatch.setenv("MCAP_COMPRESS_WORKERS", "8")
+    monkeypatch.setenv("VC_DECODE", "9")
+
+    _command, compress_arguments, _ignored = app.parse_args(
+        ["compress", "in.mcap", "-o", "out.mcap"]
+    )
+    _command, roscompress_arguments, _ignored = app.parse_args(
+        ["roscompress", "in.mcap", "-o", "out.mcap"]
+    )
+
+    assert compress_arguments.arguments["compression_workers"] == 6
+    assert roscompress_arguments.arguments["video_decode_workers"] == 5
+    assert "deprecated" not in caplog.text
+
+
+def test_legacy_worker_environment_variables_parse_with_deprecation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("MCAP_COMPRESS_WORKERS", "6")
+    monkeypatch.setenv("VC_DECODE", "5")
+
+    _command, compress_arguments, _ignored = app.parse_args(
+        ["compress", "in.mcap", "-o", "out.mcap"]
+    )
+    _command, roscompress_arguments, _ignored = app.parse_args(
+        ["roscompress", "in.mcap", "-o", "out.mcap"]
+    )
+
+    assert compress_arguments.arguments["compression_workers"] == 6
+    assert roscompress_arguments.arguments["video_decode_workers"] == 5
+    assert "MCAP_COMPRESS_WORKERS is deprecated" in caplog.text
+    assert "VC_DECODE is deprecated" in caplog.text
+
+
+def test_worker_cli_options_override_canonical_environment_variables(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("PYMCAP_COMPRESSION_WORKERS", "6")
+    monkeypatch.setenv("PYMCAP_VIDEO_DECODE_WORKERS", "5")
+    monkeypatch.setenv("MCAP_COMPRESS_WORKERS", "8")
+    monkeypatch.setenv("VC_DECODE", "9")
+
+    _command, compress_arguments, _ignored = app.parse_args(
+        ["compress", "in.mcap", "-o", "out.mcap", "--compression-workers", "2"]
+    )
+    _command, roscompress_arguments, _ignored = app.parse_args(
+        ["roscompress", "in.mcap", "-o", "out.mcap", "--video-decode-workers", "3"]
+    )
+
+    assert compress_arguments.arguments["compression_workers"] == 2
+    assert roscompress_arguments.arguments["video_decode_workers"] == 3
+    assert "deprecated" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "PYMCAP_BRIDGE",
+        "PYMCAP_COMPRESSION_WORKERS",
+        "PYMCAP_VIDEO_DECODE_WORKERS",
+        "PYMCAP_VAR_<NAME>",
+        "MCAP_COMPRESS_WORKERS",
+        "VC_DECODE",
+        "AMENT_PREFIX_PATH",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "WT_SESSION",
+        "ConEmuPID",
+        "ConEmuBuild",
+        "TERM_PROGRAM",
+    ],
+)
+def test_readme_documents_supported_environment(env_name: str) -> None:
+    assert f"`{env_name}`" in README.read_text()
+
+
 @pytest.mark.parametrize("command", ["roscompress", "rosdecompress"])
 def test_ros_transforms_expose_delete_source(
     command: str,
@@ -212,6 +352,7 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--call-timeout",
         "--changed",
         "--codec",
+        "--compression-workers",
         "--connect-timeout",
         "--db",
         "--dedup-identical",
@@ -246,6 +387,7 @@ def test_shared_options_are_declared_only_in_central_lookup() -> None:
         "--split-at",
         "--start",
         "--var",
+        "--video-decode-workers",
         "--window",
     }
     # Sanctioned overrides: commands that deliberately redeclare a shared name with different

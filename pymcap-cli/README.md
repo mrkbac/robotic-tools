@@ -50,6 +50,36 @@ Each extra is tested from the built wheel in an isolated environment. Adding a
 new optional dependency requires assigning it to a feature module in the import
 contracts and adding its promised command to that wheel matrix.
 
+## Environment variables
+
+pymcap-cli-owned environment variables use the `PYMCAP_` prefix and have an
+equivalent CLI option. An explicit CLI value takes precedence over the
+environment, which takes precedence over the automatic or built-in default.
+Relevant command help also shows the accepted environment variable.
+
+| Environment variable | CLI equivalent | Scope |
+| --- | --- | --- |
+| `PYMCAP_BRIDGE` | `--target TARGET` | Default Foxglove WebSocket target for bridge client commands |
+| `PYMCAP_COMPRESSION_WORKERS` | `--compression-workers N` | MCAP chunk-compression workers for compressed-output transform commands |
+| `PYMCAP_VIDEO_DECODE_WORKERS` | `--video-decode-workers N` | Total image-decode worker budget for `process --compress-video` and `roscompress` |
+| `PYMCAP_VAR_<NAME>` | `--var NAME=VALUE` | MessagePath variables; a matching `--var` overrides the environment value |
+
+Worker counts must be positive integers. Their defaults are chosen from the
+available CPU count; set them explicitly mainly when several pymcap-cli
+processes run concurrently and would otherwise oversubscribe the machine.
+
+The legacy `MCAP_COMPRESS_WORKERS` and `VC_DECODE` names remain supported as
+fallbacks for backward compatibility. They emit a deprecation warning; migrate
+to `PYMCAP_COMPRESSION_WORKERS` and `PYMCAP_VIDEO_DECODE_WORKERS`, respectively.
+
+The remaining environment reads are platform inputs, not pymcap-cli settings:
+
+| External environment variable | Use |
+| --- | --- |
+| `AMENT_PREFIX_PATH` | ROS 2 message-definition discovery; use `--extra-path` / `-I` to add explicit roots |
+| `DISPLAY`, `WAYLAND_DISPLAY` | Detect whether `bridge serve` can auto-open its browser UI; `--no-browser` disables auto-open |
+| `WT_SESSION`, `ConEmuPID`, `ConEmuBuild`, `TERM_PROGRAM` | Detect terminal support for OSC progress reporting |
+
 ## Why pymcap-cli over the official Go CLI?
 
 - **Advanced Recovery** — handles corrupt MCAP files with intelligent chunk-level recovery and MessageIndex validation

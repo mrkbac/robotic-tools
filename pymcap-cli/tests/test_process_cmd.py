@@ -114,6 +114,15 @@ class TestOutputDispatch:
         exit_code = process_cmd.process(**_kwargs(), force=True, no_clobber=True)
         assert exit_code == 1
 
+    def test_compression_workers_propagate_to_output_options(self, monkeypatch: pytest.MonkeyPatch):
+        rec = _Recorder()
+        _patch_single(monkeypatch, rec)
+
+        assert process_cmd.process(**_kwargs(), compression_workers=3) == 0
+
+        assert rec.output_options is not None
+        assert rec.output_options.compression_workers == 3
+
 
 # ---------------------------------------------------------------------------
 # Per-flag wiring: every new flag lands in the right place.

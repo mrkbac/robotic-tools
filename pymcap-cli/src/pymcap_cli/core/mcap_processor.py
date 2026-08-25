@@ -335,6 +335,7 @@ class OutputOptions:
     # zstd compression level; None uses the library default (3). Negative levels
     # select the fast modes (much higher throughput, slightly larger output).
     zstd_level: int | None = None
+    compression_workers: int | None = None
     async_output_buffer_bytes: int = 0
 
     # Output processors (chunk grouping). When non-empty, each surviving
@@ -361,6 +362,10 @@ class OutputOptions:
     # Resolved input paths, used to refuse opening a segment that would truncate
     # a file currently being read. Populated by the multi-output runner.
     input_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.compression_workers is not None and self.compression_workers < 1:
+            raise ValueError("compression_workers must be positive")
 
     @property
     def compression_type(self) -> CompressionType:
@@ -718,16 +723,10 @@ class OutputManager:
         compression_type = self.output_options.compression_type
         if compression_type == CompressionType.NONE:
             num_workers = 0
+        elif self.output_options.compression_workers is not None:
+            num_workers = self.output_options.compression_workers
         else:
             num_workers = min(4, os.cpu_count() or 1)
-            env = os.environ.get("MCAP_COMPRESS_WORKERS")
-            if env:
-                try:
-                    num_workers = max(1, int(env))
-                except ValueError:
-                    console.print(
-                        f"[yellow]Ignoring non-integer MCAP_COMPRESS_WORKERS={env!r}[/yellow]"
-                    )
         writer = create_mcap_writer(
             stream,
             self.output_options.to_writer_options(),

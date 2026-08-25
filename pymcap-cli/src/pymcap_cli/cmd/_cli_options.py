@@ -18,6 +18,12 @@ from pymcap_cli.cmd._roscompress_topic_options import (
 )
 from pymcap_cli.core.msg_resolver import ROS2Distro
 from pymcap_cli.display.message_render import SMART_BYTES_INLINE_LIMIT, BytesMode
+from pymcap_cli.environment import (
+    BRIDGE_TARGET_ENV,
+    COMPRESSION_WORKERS_ENVS,
+    VIDEO_DECODE_WORKERS_ENVS,
+    int_with_deprecated_env_warning,
+)
 from pymcap_cli.types.types_manual import CompressionName, OrderName
 from pymcap_cli.utils import AttachmentsMode, MetadataMode
 
@@ -119,7 +125,6 @@ IMAGE_POINTCLOUD_MODE_CONSTRAINT = constraint_group(
     requires_value("--draco-compression-level", "--pc-format", "draco", hint="--pc-format draco"),
 )
 
-BRIDGE_TARGET_ENV = "PYMCAP_BRIDGE"
 IndexOutputFormat = Literal["table", "json", "paths-only"]
 
 BridgeTarget = Annotated[
@@ -224,6 +229,20 @@ CompressionOption = Annotated[
     CompressionName,
     Parameter(name=["--compression"], group=OUTPUT_OPTIONS_GROUP),
 ]
+CompressionWorkersOption = Annotated[
+    int | None,
+    Parameter(
+        name=["--compression-workers"],
+        env_var=COMPRESSION_WORKERS_ENVS,
+        converter=int_with_deprecated_env_warning,
+        group=OUTPUT_OPTIONS_GROUP,
+        validator=validators.Number(gte=1),
+        help=(
+            "MCAP chunk-compression worker threads. Defaults to an automatic "
+            "CPU-based count; ignored for uncompressed output."
+        ),
+    ),
+]
 CompressionLevelOption = Annotated[
     int | None,
     Parameter(
@@ -233,6 +252,20 @@ CompressionLevelOption = Annotated[
             "zstd compression level (negative = fastest, up to 22 = smallest). "
             "Higher levels cost a lot of time; mostly-incompressible camera/lidar "
             "payloads gain little above ~1."
+        ),
+    ),
+]
+VideoDecodeWorkersOption = Annotated[
+    int | None,
+    Parameter(
+        name=["--video-decode-workers"],
+        env_var=VIDEO_DECODE_WORKERS_ENVS,
+        converter=int_with_deprecated_env_warning,
+        group=ENCODING_GROUP,
+        validator=validators.Number(gte=1),
+        help=(
+            "Total image-decode worker threads for video compression. "
+            "Defaults to an automatic CPU-based count."
         ),
     ),
 ]
@@ -777,7 +810,10 @@ ExtraMessagePathOption = Annotated[
     Parameter(
         name=["-I", "--extra-path"],
         group=MESSAGE_SCHEMA_GROUP,
-        help="Additional root paths to search for custom message definitions.",
+        help=(
+            "Additional roots for custom message definitions, searched before "
+            "$AMENT_PREFIX_PATH and the user cache."
+        ),
     ),
 ]
 

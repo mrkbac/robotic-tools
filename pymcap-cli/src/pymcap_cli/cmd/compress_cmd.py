@@ -10,6 +10,7 @@ from pymcap_cli.cmd._cli_options import (
     ChunkSizeOption,
     CompressionLevelOption,
     CompressionOption,
+    CompressionWorkersOption,
     DeleteSourceOption,
     FastCompressionOption,
     ForceOverwriteOption,
@@ -47,6 +48,7 @@ def compress(
     *,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -138,6 +140,7 @@ def compress(
                 chunk_size=chunk_size,
                 overwrite_policy=overwrite_policy,
                 zstd_level=zstd_level,
+                compression_workers=compression_workers,
             ),
         )
         logger.info("[green]✓ Compression completed successfully![/green]")

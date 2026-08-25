@@ -18,8 +18,7 @@ one topic's packets in frame order (``max_b_frames = 0``).
 To compress many time windows of one recording in parallel and merge the
 results, run several of these in separate processes over disjoint ``--start``/
 ``--end`` ranges: each window's stream is self-contained (its first frame is an
-IDR), so the merged output stays valid. ``VC_DECODE`` caps the decode-pool size
-per process so N parallel compressors don't oversubscribe the CPU.
+IDR), so the merged output stays valid.
 """
 
 from __future__ import annotations
@@ -80,17 +79,15 @@ _GSTREAMER_INFLIGHT_PER_TOPIC = 8
 
 
 def _decode_pool_size() -> int:
-    """Decode-pool worker count, overridable via ``VC_DECODE`` for parallel runs."""
-    env = os.environ.get("VC_DECODE")
-    if env:
-        try:
-            return max(1, int(env))
-        except ValueError:
-            logger.warning("Ignoring non-integer VC_DECODE=%r", env)
+    """Return the automatic image-decode worker count."""
     return min(8, max(2, (os.cpu_count() or 4) - 2))
 
 
-def split_decode_workers(processor_count: int) -> int | None:
+def split_decode_workers(
+    processor_count: int,
+    *,
+    worker_budget: int | None = None,
+) -> int | None:
     """Per-processor decode-pool size when several compressors run in one chain.
 
     Each processor owns its pool, so a chain of per-topic compressors would
@@ -99,9 +96,12 @@ def split_decode_workers(processor_count: int) -> int | None:
     """
     if processor_count < 1:
         raise ValueError("processor_count must be positive")
+    if worker_budget is not None and worker_budget < 1:
+        raise ValueError("worker_budget must be positive")
     if processor_count == 1:
-        return None
-    return max(1, _decode_pool_size() // processor_count)
+        return worker_budget
+    total_workers = _decode_pool_size() if worker_budget is None else worker_budget
+    return max(1, total_workers // processor_count)
 
 
 @dataclass(slots=True)

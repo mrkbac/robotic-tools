@@ -29,6 +29,7 @@ from pymcap_cli.cmd._cli_options import (
     BatchModeOption,
     BatchOutputDirectoryOption,
     CodecOption,
+    CompressionWorkersOption,
     ContinueOnErrorOption,
     DeleteSourceOption,
     DracoCompressionLevelOption,
@@ -52,6 +53,7 @@ from pymcap_cli.cmd._cli_options import (
     ScaleOption,
     StartTimeOption,
     TopicOption,
+    VideoDecodeWorkersOption,
     VideoTopicFfmpegArgsOption,
     VideoTopicOptionsOption,
 )
@@ -188,6 +190,8 @@ class _RoscompressOptions:
     excluded_topics: tuple[str, ...]
     start: str
     end: str
+    compression_workers: int | None
+    video_decode_workers: int | None
 
 
 class _KeptTopicObserver(InputProcessor):
@@ -273,6 +277,7 @@ def roscompress(
     batch: BatchModeOption = False,
     output_dir: BatchOutputDirectoryOption = None,
     continue_on_error: ContinueOnErrorOption = False,
+    compression_workers: CompressionWorkersOption = None,
     quality: Annotated[
         QualityOption, Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = 28,
@@ -333,6 +338,7 @@ def roscompress(
     backend: Annotated[
         BackendOption, Parameter(group=[ENCODING_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = "auto",
+    video_decode_workers: VideoDecodeWorkersOption = None,
     pointcloud: Annotated[
         PointCloudOption, Parameter(group=[POINTCLOUD_GROUP, IMAGE_POINTCLOUD_MODE_CONSTRAINT])
     ] = True,
@@ -484,6 +490,8 @@ def roscompress(
             excluded_topics=tuple(exclude_topic or ()),
             start=start,
             end=end,
+            compression_workers=compression_workers,
+            video_decode_workers=video_decode_workers,
         )
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
@@ -577,6 +585,7 @@ def _run_roscompress(
                     entry.settings,
                     topics=entry.topics,
                     shared_by=video_processor_count,
+                    worker_budget=options.video_decode_workers,
                 )
                 extras.append(processor)
                 profiled.append(_ProfiledProcessor("video", entry.pattern, processor))
@@ -727,6 +736,7 @@ def _run_roscompress(
         overwrite_policy=overwrite_policy,
         max_chunk_span_ns=max_chunk_span_ns,
         async_output_buffer_bytes=_ASYNC_OUTPUT_BUFFER_BYTES,
+        compression_workers=options.compression_workers,
     )
 
     try:

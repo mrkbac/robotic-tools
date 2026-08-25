@@ -8,6 +8,7 @@ from pymcap_cli.cmd._cli_options import (
     AttachmentsModeOption,
     ChunkSizeOption,
     CompressionOption,
+    CompressionWorkersOption,
     DedupIdenticalOption,
     DeleteSourceOption,
     ForceOverwriteOption,
@@ -48,6 +49,7 @@ def merge(
     dedup_identical: DedupIdenticalOption = False,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -112,6 +114,7 @@ def merge(
             output_options=OutputOptions(
                 compression=compression,
                 chunk_size=chunk_size,
+                compression_workers=compression_workers,
                 overwrite_policy=overwrite_policy,
             ),
         )

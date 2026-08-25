@@ -202,6 +202,7 @@ def create_video_compress_processor(
     *,
     topics: TopicSelection = ALL_TOPICS,
     shared_by: int = 1,
+    worker_budget: int | None = None,
 ) -> VideoCompressProcessor:
     """Build a video compressor sharing its decode-worker budget with its peers."""
     from mcap_codec_support.video import EncoderMode  # noqa: PLC0415
@@ -219,5 +220,5 @@ def create_video_compress_processor(
         backend=EncoderMode(config.backend),
         ffmpeg_args=config.ffmpeg_args,
         topics=topics,
-        decode_workers=split_decode_workers(shared_by),
+        decode_workers=split_decode_workers(shared_by, worker_budget=worker_budget),
     )

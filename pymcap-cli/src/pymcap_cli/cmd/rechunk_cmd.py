@@ -10,6 +10,7 @@ from rich.console import Console
 from pymcap_cli.cmd._cli_options import (
     ChunkSizeOption,
     CompressionOption,
+    CompressionWorkersOption,
     DeleteSourceOption,
     ForceOverwriteOption,
     IncompressibleSchemaPatternOption,
@@ -101,6 +102,7 @@ def rechunk(
     incompressible_schema_pattern: IncompressibleSchemaPatternOption = None,
     chunk_size: ChunkSizeOption = DEFAULT_CHUNK_SIZE,
     compression: CompressionOption = DEFAULT_COMPRESSION,
+    compression_workers: CompressionWorkersOption = None,
     force: ForceOverwriteOption = False,
     no_clobber: NoClobberOption = False,
     delete_source: DeleteSourceOption = False,
@@ -235,6 +237,7 @@ def rechunk(
                 max_chunk_memory_bytes=max_memory_bytes,
                 compression=compression,
                 chunk_size=chunk_size,
+                compression_workers=compression_workers,
                 overwrite_policy=overwrite_policy,
             ),
         )
