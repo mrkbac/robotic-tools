@@ -7,6 +7,8 @@ import json
 import socket
 import struct
 import time
+from contextlib import contextmanager
+from threading import Event, Timer
 from typing import TYPE_CHECKING
 
 import pytest
@@ -420,6 +422,54 @@ def test_publish_playback_snapshot_reuses_open_recording_chunk(
         asyncio.run(publish(recording))
 
     assert calls == 1
+
+
+def test_publish_playback_snapshot_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "snapshot.mcap"
+    _write_mcap(path, "/camera", [(1, b"frame")])
+    prepared = prepare_playback([str(path)], MessageFilterOptions.from_args())
+    sink = _CollectingSink()
+    release_scan = Event()
+
+    @contextmanager
+    def slow_open_playback_messages(*_args, **_kwargs):
+        class SlowMessages:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                release_scan.wait()
+                raise StopIteration
+
+        yield SlowMessages()
+
+    monkeypatch.setattr(_playback, "open_playback_messages", slow_open_playback_messages)
+
+    async def publish() -> bool:
+        await sink.start(prepared.channels)
+        release_timer = Timer(0.5, release_scan.set)
+        release_timer.start()
+        try:
+            task = asyncio.create_task(
+                _playback.publish_playback_snapshot(
+                    prepared,
+                    sink,
+                    timestamp_ns=prepared.recording_end_ns,
+                )
+            )
+            await asyncio.sleep(0.05)
+            was_responsive = not release_scan.is_set()
+            release_scan.set()
+            await task
+            return was_responsive
+        finally:
+            release_timer.cancel()
+            release_timer.join()
+
+    assert asyncio.run(publish())
 
 
 def test_run_playback_waits_while_controller_is_paused(tmp_path: Path) -> None:
@@ -926,6 +976,57 @@ def test_adaptive_quality_session_restarts_encoder_at_new_rung() -> None:
     assert [bytes(output.payload) for output in outputs] == [b"\x00", b"\x01"]
     assert created == [0, 1]
     assert closed == [0, 1]
+
+
+def test_jit_transform_cancellation_finishes_worker_before_close() -> None:
+    channel = PlaybackChannel("/camera", "raw", "example/Raw", "text", "bytes")
+    is_processing = Event()
+    release_process = Event()
+    did_close_during_process = Event()
+
+    class BlockingTransform:
+        def process(
+            self,
+            _payload: bytes | memoryview,
+            _timestamp_ns: int,
+        ) -> tuple[PlaybackOutput, ...]:
+            is_processing.set()
+            release_process.wait()
+            is_processing.clear()
+            return ()
+
+        def finish(self) -> tuple[PlaybackOutput, ...]:
+            return ()
+
+        def close(self) -> None:
+            if is_processing.is_set():
+                did_close_during_process.set()
+
+    spec = _playback_transforms._ChannelTransformSpec(
+        source=channel,
+        output=channel,
+        factories=(BlockingTransform,),
+    )
+    session = _playback_transforms._JitPlaybackTransformSession((spec,))
+
+    async def cancel_transform() -> None:
+        release_timer = Timer(0.2, release_process.set)
+        task = asyncio.create_task(session.transform(channel, 1, b"frame"))
+        assert await asyncio.to_thread(is_processing.wait, 1)
+        release_timer.start()
+        try:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await session.close()
+        finally:
+            release_process.set()
+            release_timer.cancel()
+            release_timer.join()
+
+    asyncio.run(cancel_transform())
+
+    assert not did_close_during_process.is_set()
 
 
 def test_adaptive_video_frame_rate_rung_drops_frames_before_transform() -> None:

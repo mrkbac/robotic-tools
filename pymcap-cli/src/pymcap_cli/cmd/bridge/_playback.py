@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar
 
 from rich.console import Group, RenderableType
 from rich.live import Live
@@ -71,6 +71,18 @@ PlaybackState: TypeAlias = Literal[
     "Finished",
     "Error",
 ]
+_T = TypeVar("_T")
+
+
+async def _run_in_thread(call: Callable[[], _T]) -> _T:
+    """Run synchronous work without letting cancellation overtake its cleanup."""
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await worker
+        raise
 
 
 class PlaybackError(RuntimeError):
@@ -580,34 +592,38 @@ async def publish_playback_snapshot(
     if end_time_ns <= resolved.start_time_ns:
         return 0
 
-    latest: dict[str, _PlaybackSnapshotMessage] = {}
-    with open_playback_messages(
-        prepared,
-        end_time_ns=end_time_ns,
-        reverse=True,
-        should_include=should_include,
-        recordings=recordings,
-    ) as messages:
-        for schema, channel, message in messages:
-            if channel.topic in latest:
-                continue
-            playback_channel = _playback_channel(schema, channel)
-            selected_channel = selected_channels.get(playback_channel.topic)
-            if selected_channel is None or not _channel_definitions_are_compatible(
-                playback_channel,
-                selected_channel,
-            ):
-                raise PlaybackError(
-                    f"Topic {playback_channel.topic!r} changed to an incompatible "
-                    "channel definition during playback"
+    def collect_latest() -> dict[str, _PlaybackSnapshotMessage]:
+        latest: dict[str, _PlaybackSnapshotMessage] = {}
+        with open_playback_messages(
+            prepared,
+            end_time_ns=end_time_ns,
+            reverse=True,
+            should_include=should_include,
+            recordings=recordings,
+        ) as messages:
+            for schema, channel, message in messages:
+                if channel.topic in latest:
+                    continue
+                playback_channel = _playback_channel(schema, channel)
+                selected_channel = selected_channels.get(playback_channel.topic)
+                if selected_channel is None or not _channel_definitions_are_compatible(
+                    playback_channel,
+                    selected_channel,
+                ):
+                    raise PlaybackError(
+                        f"Topic {playback_channel.topic!r} changed to an incompatible "
+                        "channel definition during playback"
+                    )
+                latest[channel.topic] = _PlaybackSnapshotMessage(
+                    channel=selected_channel,
+                    timestamp_ns=message.log_time,
+                    payload=bytes(message.data),
                 )
-            latest[channel.topic] = _PlaybackSnapshotMessage(
-                channel=selected_channel,
-                timestamp_ns=message.log_time,
-                payload=bytes(message.data),
-            )
-            if len(latest) == len(active_topics):
-                break
+                if len(latest) == len(active_topics):
+                    break
+        return latest
+
+    latest = await _run_in_thread(collect_latest)
 
     transform_session = None if transform_plan is None else transform_plan.create_session()
     published = 0

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -45,6 +44,7 @@ from pymcap_cli.cmd.bridge._playback import (
     PlaybackOutput,
     PlaybackTransformPlan,
     PlaybackTransformSession,
+    _run_in_thread,
 )
 
 if TYPE_CHECKING:
@@ -406,7 +406,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         if previous.quality != current.quality or previous.scale_factor != current.scale_factor:
             transform = self._transforms.pop(channel, None)
             if transform is not None:
-                await asyncio.to_thread(transform.close)
+                await _run_in_thread(transform.close)
         logger.info(
             "Adaptive video for %s: q%d @ %.1f%% / %s fps -> q%d @ %.1f%% / %s fps",
             channel.topic,
@@ -429,7 +429,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
             transform = self._factories[channel][self._governor.active_index(channel)]()
             self._transforms[channel] = transform
         try:
-            return await asyncio.to_thread(transform.process, payload, timestamp_ns)
+            return await _run_in_thread(partial(transform.process, payload, timestamp_ns))
         except PlaybackError:
             raise
         except Exception as exc:
@@ -439,7 +439,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         outputs: list[PlaybackOutput] = []
         for transform in self._transforms.values():
             try:
-                outputs.extend(await asyncio.to_thread(transform.finish))
+                outputs.extend(await _run_in_thread(transform.finish))
             except PlaybackError:
                 raise
             except Exception as exc:
@@ -451,7 +451,7 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         self._governor.clear_frame_timing(channel)
         transform = self._transforms.pop(channel, None)
         if transform is not None:
-            await asyncio.to_thread(transform.close)
+            await _run_in_thread(transform.close)
 
     async def restart(self) -> None:
         # Close every live transform so the next message rebuilds it. Video
@@ -462,11 +462,11 @@ class _JitPlaybackTransformSession(PlaybackTransformSession):
         self._transforms.clear()
         self._governor.reset_all_frame_timing()
         for transform in transforms:
-            await asyncio.to_thread(transform.close)
+            await _run_in_thread(transform.close)
 
     async def close(self) -> None:
         for transform in self._transforms.values():
-            await asyncio.to_thread(transform.close)
+            await _run_in_thread(transform.close)
 
 
 def create_playback_transform_plan(
