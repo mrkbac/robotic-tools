@@ -4,6 +4,20 @@ User-facing notes for releases.
 
 ---
 
+## pymcap-cli 0.34.0
+
+- Standardized worker configuration with documented `PYMCAP_` environment
+  variables and matching command-line options. Compressed-output commands accept
+  `--compression-workers`; `process` and `roscompress` accept
+  `--video-decode-workers`. Legacy `MCAP_COMPRESS_WORKERS` and `VC_DECODE` remain
+  supported with deprecation warnings, and explicit command-line values take
+  precedence.
+- Fixed Foxglove bridge seeking so reverse snapshot lookup does not block the
+  WebSocket event loop and cancellation waits for in-flight transforms before
+  closing their encoder, preventing seek-time FFmpeg broken-pipe races.
+
+---
+
 ## pymcap-cli 0.33.0
 
 - Added `hash`, which prints a stable, compression-independent structural
