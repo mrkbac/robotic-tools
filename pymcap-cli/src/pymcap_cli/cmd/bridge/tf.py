@@ -2,8 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
-from typing import Any
+from typing import cast
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from robo_ws_bridge import WebSocketBridgeClient
@@ -17,13 +16,19 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd.bridge._shared import (
     BridgeFetchError,
+    ChannelDecoderCache,
     ChannelSubscriptionManager,
-    channel_to_schema,
     console,
     to_ws_url,
 )
 from pymcap_cli.core.tf_findings import collect_tf_findings, has_error_findings
-from pymcap_cli.core.tf_tree import TF_STATIC_TOPIC, TF_TOPIC, TfGraph, add_tf_message
+from pymcap_cli.core.tf_tree import (
+    TF_STATIC_TOPIC,
+    TF_TOPIC,
+    TfGraph,
+    TfMessageLike,
+    add_tf_message,
+)
 from pymcap_cli.display.tf_render import TF_COMPACT_WIDTH, build_findings_table, build_tf_table
 from pymcap_cli.log_setup import ERR
 
@@ -44,23 +49,10 @@ async def _collect_tf_graph_async(
     server_info_event = asyncio.Event()
     client.on_server_info(lambda *_: server_info_event.set())
 
-    factory = DecoderFactory()
-    decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-
-    def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
-        cid = channel["id"]
-        if cid in decoders:
-            return decoders[cid]
-        try:
-            decoder = factory.decoder_for(channel["encoding"], channel_to_schema(channel))
-        except Exception:
-            logger.exception(f"Decoder construction failed for {channel['topic']}")
-            decoder = None
-        decoders[cid] = decoder
-        return decoder
+    decoder_cache = ChannelDecoderCache([DecoderFactory()])
 
     def _on_message(channel: ChannelInfo, _log_time_ns: int, payload: bytes) -> None:
-        decoder = _decoder_for(channel)
+        decoder = decoder_cache.decoder_for(channel)
         if decoder is None:
             return
         try:
@@ -68,11 +60,13 @@ async def _collect_tf_graph_async(
         except Exception:
             logger.exception(f"Failed to decode TF message on {channel['topic']}")
             return
-        add_tf_message(graph, channel["topic"], decoded)
+        add_tf_message(graph, channel["topic"], cast("TfMessageLike", decoded))
 
     subscriber = ChannelSubscriptionManager(
         client,
-        lambda channel: channel["topic"] in tf_topics and _decoder_for(channel) is not None,
+        lambda channel: (
+            channel["topic"] in tf_topics and decoder_cache.decoder_for(channel) is not None
+        ),
     )
     subscriber.install()
     client.on_message(_on_message)

@@ -112,15 +112,6 @@ async function saveToIDB(entry: CacheEntry): Promise<void> {
   }
 }
 
-async function clearIDB(): Promise<void> {
-  try {
-    const db = await getDB();
-    await db.clear(STORE_NAME);
-  } catch {
-    // best-effort
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -235,11 +226,6 @@ export function useMcapCache() {
     [],
   );
 
-  const invalidate = useCallback(() => {
-    cacheRef.current = null;
-    clearIDB();
-  }, []);
-
   return {
     tryGetCachedRaw,
     readAndCache,
@@ -248,6 +234,5 @@ export function useMcapCache() {
     getTfData,
     getTfDataByIdentity,
     getTimelapseVideos,
-    invalidate,
   };
 }

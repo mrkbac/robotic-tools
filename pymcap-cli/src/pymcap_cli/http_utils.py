@@ -68,7 +68,6 @@ class HTTPRangeStream(io.RawIOBase):
         self.url = url
         self.size = size
         self._position = 0
-        self._closed = False
 
         # Verify Range request support with a small initial request
         self._verify_range_support()
@@ -116,7 +115,7 @@ class HTTPRangeStream(io.RawIOBase):
         Returns:
             The bytes read
         """
-        if self._closed:
+        if self.closed:
             raise ValueError("I/O operation on closed file")
 
         if size == -1:
@@ -169,7 +168,7 @@ class HTTPRangeStream(io.RawIOBase):
         Returns:
             The new absolute position
         """
-        if self._closed:
+        if self.closed:
             raise ValueError("I/O operation on closed file")
 
         if whence == io.SEEK_SET:
@@ -189,7 +188,7 @@ class HTTPRangeStream(io.RawIOBase):
 
     def tell(self) -> int:
         """Return the current position in the stream."""
-        if self._closed:
+        if self.closed:
             raise ValueError("I/O operation on closed file")
         return self._position
 
@@ -200,19 +199,6 @@ class HTTPRangeStream(io.RawIOBase):
     def readable(self) -> bool:
         """Return whether the stream supports reading."""
         return True
-
-    def writable(self) -> bool:
-        """Return whether the stream supports writing (always False)."""
-        return False
-
-    def close(self) -> None:
-        """Close the stream."""
-        self._closed = True
-
-    @property
-    def closed(self) -> bool:
-        """Return whether the stream is closed."""
-        return self._closed
 
 
 def open_http_stream(url: ParseResult) -> tuple[io.RawIOBase, int]:

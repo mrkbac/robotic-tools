@@ -41,6 +41,15 @@ if TYPE_CHECKING:
     import pytest
 
 
+def test_summary_groups_preserves_consecutive_runs() -> None:
+    frames = [
+        doctor_module.Frame(offset=i, opcode=opcode, length=0, body=b"", parsed=None)
+        for i, opcode in enumerate([Opcode.SCHEMA, Opcode.SCHEMA, Opcode.CHANNEL, Opcode.SCHEMA])
+    ]
+    assert doctor_module.summary_groups([]) == []
+    assert doctor_module.summary_groups(frames) == [frames[:2], frames[2:3], frames[3:]]
+
+
 def _record_bytes(record: McapRecord) -> bytes:
     buffer = io.BytesIO()
     record.write_record_to(buffer)

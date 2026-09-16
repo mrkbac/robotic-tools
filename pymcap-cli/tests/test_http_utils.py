@@ -243,6 +243,14 @@ class TestHTTPRangeStreamClosed:
         stream.close()
         assert stream.closed
 
+    def test_context_manager_closes_read_only_stream(self) -> None:
+        with _make_stream() as stream:
+            assert not stream.closed
+            assert not stream.writable()
+        assert stream.closed
+        stream.close()
+        assert stream.closed
+
 
 # ---------------------------------------------------------------------------
 # _verify_range_support edge cases

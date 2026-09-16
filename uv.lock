@@ -625,7 +625,6 @@ name = "digitalis"
 version = "0.13.0"
 source = { editable = "digitalis" }
 dependencies = [
-    { name = "lark" },
     { name = "mcap-ros2-support-fast" },
     { name = "pointcloud2" },
     { name = "robo-ws-bridge" },
@@ -648,7 +647,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lark", specifier = ">=1.2.2" },
     { name = "mcap-ros2-support-fast", editable = "mcap-ros2-support-fast" },
     { name = "pointcloud2", editable = "pointcloud2" },
     { name = "robo-ws-bridge", editable = "robo-ws-bridge" },
