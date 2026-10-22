@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pymcap_cli.cmd.bridge._proxy_runtime as runtime
 import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
 from mcap_codec_support.pointcloud.schemas import POINTCLOUD2
@@ -763,3 +764,49 @@ def test_video_transformer_rebuilds_session_on_scale_factor_change(
     assert transformer.transform(decoded, 0) is not None
     assert built == [(0.5, 640, 480)]
     assert transformer._applied_scale_factor == 0.5
+
+
+def test_transform_worker_reports_consecutive_failures_once(monkeypatch):
+    errors = []
+    monkeypatch.setattr(runtime.logger, "exception", lambda *args: errors.append(args))
+    monkeypatch.setattr(TransformWorker, "_decoder_for", lambda *_args: lambda payload: payload)
+    monkeypatch.setattr(TransformWorker, "_encoder_for", lambda *_args: lambda _payload: b"ok")
+
+    class Transformer:
+        output_schema_name = "std_msgs/msg/String"
+        output_schema_text = "string data"
+        output_schema_encoding = "ros2msg"
+        output_message_encoding = "cdr"
+        worker_count = 1
+
+        def transform(self, decoded, _timestamp_ns):
+            if decoded == b"fail":
+                raise RuntimeError("ffprobe not found")
+            return TransformResult({"data": "ok"})
+
+        def close(self):
+            pass
+
+    async def run():
+        async def emit(_message):
+            pass
+
+        metrics = ProxyMetrics()
+        worker = TransformWorker(
+            channel={"id": 1, "topic": "/camera/image_raw", "encoding": "cdr"},
+            downstream_id=2,
+            transformer=Transformer(),
+            queue_size=1,
+            emit=emit,
+            metrics=metrics,
+        )
+        try:
+            for payload in (b"fail", b"fail", b"ok", b"fail", b"fail"):
+                worker.enqueue(IncomingMessage(1, payload))
+                await worker._queue.join()
+        finally:
+            await worker.close()
+        assert metrics.transform_errors == 4
+        assert len(errors) == 2
+
+    asyncio.run(run())

@@ -1,7 +1,7 @@
 """FFmpeg subprocess-based video compression and decompression backend.
 
 All ``ffmpeg`` / ``ffprobe`` subprocess usage is confined to this module.
-**No PyAV dependency** — only requires ``ffmpeg`` on PATH.
+**No PyAV dependency** — uses system binaries or portable-ffmpeg.
 """
 
 from __future__ import annotations
@@ -34,8 +34,30 @@ from mcap_codec_support.video.common import (
 
 
 def find_ffmpeg() -> str | None:
-    """Return the path to ``ffmpeg`` if it is on PATH, else None."""
-    return shutil.which("ffmpeg")
+    """Prefer system FFmpeg, downloading portable binaries only when missing."""
+    if path := shutil.which("ffmpeg"):
+        return path
+    paths = _portable_binaries()
+    return str(paths[0]) if paths is not None else None
+
+
+def find_ffprobe() -> str | None:
+    """Prefer system ffprobe, falling back to the portable binary."""
+    if path := shutil.which("ffprobe"):
+        return path
+    paths = _portable_binaries()
+    return str(paths[1]) if paths is not None else None
+
+
+def _portable_binaries() -> tuple[Path, Path] | None:
+    try:
+        from portable_ffmpeg import get_ffmpeg  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        return get_ffmpeg()
+    except Exception as exc:
+        raise VideoEncoderError(f"Could not obtain portable FFmpeg: {exc}") from exc
 
 
 def check_encoder_cli(encoder_name: str) -> bool:
@@ -492,10 +514,10 @@ def _use_cuda_mjpeg_path(
     )
 
 
-def probe_image_dimensions(data: bytes) -> tuple[int, int]:
+def probe_image_dimensions(data: bytes, *, use_ffprobe: bool = True) -> tuple[int, int]:
     """Extract (width, height) from a JPEG or PNG image header.
 
-    Falls back to ffprobe if the header cannot be parsed.
+    Falls back to ffprobe if the header cannot be parsed and ``use_ffprobe`` is true.
     """
     if data[:2] == _JPEG_MAGIC:
         dims = parse_jpeg_dimensions(data)
@@ -506,7 +528,8 @@ def probe_image_dimensions(data: bytes) -> tuple[int, int]:
         height = int.from_bytes(data[20:24], "big")
         return width, height
 
-    # Fallback: use ffprobe.
+    if not use_ffprobe:
+        raise VideoEncoderError("Cannot read image dimensions from JPEG or PNG header")
     return _ffprobe_image_dimensions(data)
 
 
@@ -532,7 +555,7 @@ def parse_jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
 
 def _ffprobe_image_dimensions(data: bytes) -> tuple[int, int]:
     """Probe image dimensions via ffprobe subprocess."""
-    ffprobe = shutil.which("ffprobe")
+    ffprobe = find_ffprobe()
     if not ffprobe:
         raise VideoEncoderError("ffprobe not found (needed for image dimension probing)")
     cmd = [
@@ -921,7 +944,7 @@ class FFmpegVideoDecompressor:
 
     def _detect_dimensions(self, data: bytes, codec: str) -> tuple[int, int]:
         """Detect video dimensions via ffprobe."""
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = find_ffprobe()
         if not ffprobe:
             raise VideoEncoderError("ffprobe not found on PATH")
 

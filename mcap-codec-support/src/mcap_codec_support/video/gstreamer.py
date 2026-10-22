@@ -484,7 +484,7 @@ def probe_hw_jpeg_pipeline(codec: str = "h264", timeout: float = 8.0) -> bool:
 
     encoder: GStreamerVideoEncoder | None = None
     try:
-        width, height = probe_image_dimensions(GSTREAMER_PROBE_JPEG)
+        width, height = probe_image_dimensions(GSTREAMER_PROBE_JPEG, use_ffprobe=False)
         encoder = GStreamerVideoEncoder(
             width, height, encoder_name, quality=28, gop_size=1, scale=(256, 256)
         )
@@ -542,7 +542,7 @@ class GStreamerCompressionBackend:
         return resolve_encoder(codec)
 
     def decode_compressed(self, data: bytes) -> tuple[bytes, int, int]:
-        width, height = probe_image_dimensions(data)
+        width, height = probe_image_dimensions(data, use_ffprobe=False)
         return data, width, height
 
     def decode_image(self, msg: DecodableImageMessage, schema_name: str) -> tuple[bytes, int, int]:

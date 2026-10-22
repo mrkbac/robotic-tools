@@ -211,6 +211,7 @@ type = "forbidden"
 source_modules = ["mcap_codec_support"]
 forbidden_modules = [
     "av",
+    "portable_ffmpeg",
     "DracoPy",
     "mcap_ros2_support_fast",
     "numpy",
@@ -234,6 +235,7 @@ ignore_imports = [
     "mcap_codec_support.pointcloud.preprocess -> pureini",
     "mcap_codec_support.pointcloud._pureini -> pureini",
     "mcap_codec_support.video.pyav -> av",
+    "mcap_codec_support.video.ffmpeg -> portable_ffmpeg",
     "mcap_codec_support.video.factories -> mcap_ros2_support_fast.decoder",
     "mcap_codec_support.video.common -> PIL",
     "mcap_codec_support.video.compression -> PIL",

@@ -96,6 +96,7 @@ class TransformWorker:
         self._encoder = self._encoder_for(transformer)
         self._next_arrival_index = 0
         self._latest_emitted_index = -1
+        self._has_reported_error = False
         self._tasks = tuple(
             asyncio.create_task(self._run()) for _ in range(max(1, transformer.worker_count))
         )
@@ -125,8 +126,11 @@ class TransformWorker:
                     outbound = await loop.run_in_executor(self._executor, self._process, message)
                 except Exception:
                     self._metrics.transform_errors += 1
-                    logger.exception("Transform failed for %s", self._channel["topic"])
+                    if not self._has_reported_error:
+                        logger.exception("Transform failed for %s", self._channel["topic"])
+                        self._has_reported_error = True
                     continue
+                self._has_reported_error = False
                 if outbound is not None:
                     if message.arrival_index < self._latest_emitted_index:
                         self._metrics.transform_stale_drops += 1

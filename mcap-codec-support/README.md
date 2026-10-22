@@ -24,6 +24,13 @@ without loading any codec backend. Install only the capability needed:
 Video, point-cloud, and Draco extras remain separate because their compiled
 dependencies account for most of the download and installed footprint.
 
+FFmpeg CLI operations prefer `ffmpeg` and `ffprobe` on `PATH`. When missing,
+`portable-ffmpeg` (included in the `video` extra) downloads and caches the binaries
+on first use. The GStreamer hardware path does not discover or download FFmpeg;
+FFmpeg is used only if it needs a software fallback after a hardware failure.
+After both encoders fail, the topic's encoder session reports one error and stops
+encoding until the session is recreated.
+
 Read every supported message type with `small-mcap`:
 
 ```python

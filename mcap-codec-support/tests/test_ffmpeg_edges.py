@@ -5,6 +5,7 @@ from queue import Queue
 from types import SimpleNamespace
 
 import mcap_codec_support.video.ffmpeg as ffmpeg
+import portable_ffmpeg
 import pytest
 from mcap_codec_support.video.common import PROBE_JPEG, DecompressedFrame, VideoEncoderError
 
@@ -226,7 +227,7 @@ def test_image_dimension_and_ffprobe_helpers(monkeypatch) -> None:
     assert ffmpeg.probe_image_dimensions(png) == (7, 5)
     assert ffmpeg.parse_jpeg_dimensions(b"not jpeg") is None
 
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(ffmpeg, "find_ffprobe", lambda: "/usr/bin/ffprobe")
     monkeypatch.setattr(
         ffmpeg.subprocess,
         "run",
@@ -239,11 +240,11 @@ def test_image_dimension_and_ffprobe_helpers(monkeypatch) -> None:
 
 
 def test_image_probe_errors_are_reported(monkeypatch) -> None:
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ffmpeg, "find_ffprobe", lambda: None)
     with pytest.raises(VideoEncoderError, match="ffprobe not found"):
         ffmpeg.probe_image_dimensions(b"unknown")
 
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(ffmpeg, "find_ffprobe", lambda: "/usr/bin/ffprobe")
     monkeypatch.setattr(
         ffmpeg.subprocess,
         "run",
@@ -643,7 +644,7 @@ def test_ffmpeg_decompressor_reports_start_error(monkeypatch) -> None:
 
 def test_ffmpeg_decompressor_dimension_probe_paths(monkeypatch) -> None:
     decoder = ffmpeg.FFmpegVideoDecompressor("raw")
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(ffmpeg, "find_ffprobe", lambda: "/usr/bin/ffprobe")
     monkeypatch.setattr(
         ffmpeg.subprocess,
         "run",
@@ -651,11 +652,11 @@ def test_ffmpeg_decompressor_dimension_probe_paths(monkeypatch) -> None:
     )
     assert decoder._detect_dimensions(b"stream", "h264") == (4, 3)
 
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ffmpeg, "find_ffprobe", lambda: None)
     with pytest.raises(VideoEncoderError, match="ffprobe not found"):
         decoder._detect_dimensions(b"stream", "h264")
 
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(ffmpeg, "find_ffprobe", lambda: "/usr/bin/ffprobe")
     monkeypatch.setattr(
         ffmpeg.subprocess,
         "run",
@@ -830,3 +831,46 @@ def test_ffmpeg_decompressor_destructor_kills_running_process() -> None:
     decoder.__del__()
 
     assert process.killed is True
+
+
+@pytest.mark.parametrize("binary", ["ffmpeg", "ffprobe"])
+def test_find_binary_uses_portable_fallback(monkeypatch, binary, tmp_path):
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    paths = (tmp_path / "ffmpeg", tmp_path / "ffprobe")
+    monkeypatch.setattr(portable_ffmpeg, "get_ffmpeg", lambda: paths)
+    if binary == "ffmpeg":
+        assert ffmpeg.find_ffmpeg() == str(paths[0])
+    else:
+        assert ffmpeg.find_ffprobe() == str(paths[1])
+
+
+def test_probe_image_dimensions_can_disable_ffprobe(monkeypatch):
+    def fail(_data):
+        pytest.fail("GStreamer must not invoke ffprobe")
+
+    monkeypatch.setattr(ffmpeg, "_ffprobe_image_dimensions", fail)
+    assert ffmpeg.probe_image_dimensions(PROBE_JPEG, use_ffprobe=False) == (32, 32)
+    with pytest.raises(VideoEncoderError, match="image dimensions"):
+        ffmpeg.probe_image_dimensions(b"invalid", use_ffprobe=False)
+
+
+def test_find_binary_prefers_system_install(monkeypatch):
+    def fail():
+        pytest.fail("System binaries must take precedence")
+
+    monkeypatch.setattr(portable_ffmpeg, "get_ffmpeg", fail)
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert ffmpeg.find_ffmpeg() == "/usr/bin/ffmpeg"
+    assert ffmpeg.find_ffprobe() == "/usr/bin/ffprobe"
+
+
+def test_find_binary_wraps_portable_download_failure(monkeypatch):
+    def fail():
+        raise OSError("download failed")
+
+    monkeypatch.setattr(portable_ffmpeg, "get_ffmpeg", fail)
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    with pytest.raises(
+        VideoEncoderError, match="Could not obtain portable FFmpeg: download failed"
+    ):
+        ffmpeg.find_ffmpeg()

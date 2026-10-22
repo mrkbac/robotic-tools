@@ -1286,6 +1286,7 @@ all = [
     { name = "nvidia-nvjpeg", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
     { name = "pillow" },
     { name = "pointcloud2" },
+    { name = "portable-ffmpeg" },
     { name = "pureini" },
 ]
 draco = [
@@ -1309,6 +1310,7 @@ video = [
     { name = "mcap-ros2-support-fast" },
     { name = "nvidia-nvjpeg", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
     { name = "pillow" },
+    { name = "portable-ffmpeg" },
 ]
 
 [package.dev-dependencies]
@@ -1331,6 +1333,7 @@ requires-dist = [
     { name = "nvidia-nvjpeg", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'video'", specifier = "==13.0.0.40" },
     { name = "pillow", marker = "extra == 'video'", specifier = ">=10.0" },
     { name = "pointcloud2", marker = "extra == 'draco'", editable = "pointcloud2" },
+    { name = "portable-ffmpeg", marker = "extra == 'video'", specifier = ">=0.3.0" },
     { name = "pureini", marker = "extra == 'pointcloud'", editable = "pureini" },
     { name = "small-mcap", editable = "small-mcap" },
     { name = "typing-extensions", specifier = ">=4.15.0" },
@@ -2065,11 +2068,11 @@ requires-dist = [{ name = "numpy", specifier = ">1" }]
 
 [[package]]
 name = "portable-ffmpeg"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/38/a3/80798d3050b6533041d1ba30957cfaccebe3d8a631a05493d59d809ce9f1/portable_ffmpeg-0.2.0.tar.gz", hash = "sha256:727793d625128a33b6e7c2a9143d9ef9399781344aade848cebfc56357ba4c7c", size = 32789, upload-time = "2026-03-22T22:32:35.944Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/02/646e45043d305a51020c64c944dccf9cc74de02096d136f371b66aca918f/portable_ffmpeg-0.3.0.tar.gz", hash = "sha256:3d9ee9c2067b451ec026779c08cff8a539c168d47e106a69190e68276fe51a1d", size = 35267, upload-time = "2026-08-04T21:25:35.697Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/08/9dca3d72455dc456d01573353ddb613e0d1fa89d42e1839210f91e5341ed/portable_ffmpeg-0.2.0-py3-none-any.whl", hash = "sha256:ec3963b3f49849b54a26f687d89ee0a3534e46e87644e08bd59b0a706fdf7c6f", size = 8416, upload-time = "2026-03-22T22:32:34.71Z" },
+    { url = "https://files.pythonhosted.org/packages/10/6b/11038a5da5846c49687fd8eda78341e73cd81fc6227a2c769cb62a7b5f42/portable_ffmpeg-0.3.0-py3-none-any.whl", hash = "sha256:076e3921ed96cb8f2bd27ba5b1e91069ef7d2574ecbd057c900ccbb2bd49c855", size = 9227, upload-time = "2026-08-04T21:25:34.833Z" },
 ]
 
 [[package]]

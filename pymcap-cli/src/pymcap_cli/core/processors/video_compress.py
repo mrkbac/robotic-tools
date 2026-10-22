@@ -271,6 +271,7 @@ class VideoEncoderSession:
         self._encoder: VideoEncoderProtocol[Any] | None = None
         self._settings: VideoEncoderSettings | None = None
         self._is_aborting = Event()
+        self._has_failed = False
 
     @property
     def backend(self) -> AnyVideoBackend:
@@ -372,7 +373,9 @@ class VideoEncoderSession:
         return True
 
     def encode_with_fallback(self, frame: Any, width: int, height: int) -> EncodeOutcome:
-        """Encode one frame, retrying on the software encoder if hardware fails."""
+        """Encode one frame; stop after both hardware and software have failed."""
+        if self._has_failed:
+            return EncodeOutcome(data=None, swapped=False, failed=True)
         try:
             encoder = self.ensure_encoder(width, height)
             return EncodeOutcome(data=encoder.encode(frame), swapped=False, failed=False)
@@ -387,8 +390,12 @@ class VideoEncoderSession:
             if encoder is None:  # pragma: no cover - swap_to_software raises instead
                 return EncodeOutcome(data=None, swapped=swapped, failed=True)
             return EncodeOutcome(data=encoder.encode(frame), swapped=swapped, failed=False)
-        except Exception:
-            logger.exception("Software encode failed for %s; dropping frame", self._topic)
+        except Exception as exc:  # noqa: BLE001 — encoder failures disable this session
+            self._has_failed = True
+            self.close()
+            logger.error(  # noqa: TRY400 — report the terminal failure once without a traceback
+                "Video encoding stopped for %s: %s", self._topic, exc
+            )
             return EncodeOutcome(data=None, swapped=swapped, failed=True)
 
     def close(self) -> None:
