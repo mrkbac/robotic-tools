@@ -17,6 +17,7 @@ from mcap_codec_support.video.common import (
     calculate_downscale_dimensions,
     raw_image_to_buffer,
     raw_image_to_pil,
+    validate_jpeg_boundaries,
 )
 from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS
 
@@ -68,7 +69,9 @@ class _PyAVCompressionBackend:
         self, msg: DecodableImageMessage, schema_name: str
     ) -> tuple[VideoFrame, int, int]:
         if schema_name in COMPRESSED_SCHEMAS:
-            return self.decode_compressed(bytes(msg.decoded_message.data))
+            data = bytes(msg.decoded_message.data)
+            validate_jpeg_boundaries(data, msg.decoded_message.format)
+            return self.decode_compressed(data)
 
         from mcap_codec_support.video.pyav import raw_image_to_frame  # noqa: PLC0415
 
@@ -129,6 +132,20 @@ class _FfmpegCliCompressionBackend:
         return resolve_encoder(codec)
 
     def decode_compressed(self, data: bytes) -> tuple[bytes, int, int]:
+        if data.startswith(b"\xff\xd8"):
+            try:
+                from mcap_codec_support.video.pyav import (  # noqa: PLC0415
+                    decode_jpeg_frame,
+                    video_frame_to_rgb_bytes,
+                )
+            except ImportError as exc:
+                raise VideoEncoderError(
+                    "PyAV is required for safe JPEG decoding with ffmpeg-cli. "
+                    "Install with: uv add 'mcap-codec-support[video]'"
+                ) from exc
+            frame = decode_jpeg_frame(data)
+            return video_frame_to_rgb_bytes(frame), frame.width, frame.height
+
         from mcap_codec_support.video.ffmpeg import probe_image_dimensions  # noqa: PLC0415
 
         width, height = probe_image_dimensions(data)
@@ -139,6 +156,11 @@ class _FfmpegCliCompressionBackend:
         topic = msg.channel.topic
 
         if schema_name in COMPRESSED_SCHEMAS:
+            validate_jpeg_boundaries(data, msg.decoded_message.format)
+            if data.startswith(b"\xff\xd8"):
+                frame, width, height = self.decode_compressed(data)
+                self._topic_pix_fmt[topic] = "rgb24"
+                return frame, width, height
             mode = self._compressed_topic_modes.get(topic)
             if mode == "rgb24":
                 self._topic_pix_fmt[topic] = "rgb24"

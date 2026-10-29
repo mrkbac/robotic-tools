@@ -12,14 +12,136 @@ import mcap_codec_support.video.gstreamer as gstreamer
 import mcap_codec_support.video.pyav as pyav
 import pytest
 from mcap_codec_support.video import EncoderMode
-from mcap_codec_support.video.common import VideoEncoderError
+from mcap_codec_support.video.common import CorruptImageError, VideoEncoderError
 from mcap_codec_support.video.schemas import COMPRESSED_SCHEMAS
 from PIL import Image
 
 
-def _message(data: bytes = b"image", *, topic: str = "/camera") -> SimpleNamespace:
+def _jpeg_with_truncated_entropy() -> tuple[bytes, bytes]:
+    pixels = bytes(
+        (x * 17 + y * 29 + component * 41) % 256
+        for y in range(64)
+        for x in range(96)
+        for component in range(3)
+    )
+    buffer = BytesIO()
+    Image.frombytes("RGB", (96, 64), pixels).save(buffer, format="JPEG")
+    jpeg = buffer.getvalue()
+    scan = jpeg.index(b"\xff\xda")
+    entropy_start = scan + 2 + int.from_bytes(jpeg[scan + 2 : scan + 4], "big")
+    return jpeg, jpeg[: entropy_start + 4] + b"\xff\xd9"
+
+
+@pytest.mark.parametrize("backend_name", ["pyav", "ffmpeg", "gstreamer"])
+def test_compression_backend_rejects_jpeg_with_valid_header_and_incomplete_pixels(
+    backend_name: str,
+) -> None:
+    _jpeg, corrupt = _jpeg_with_truncated_entropy()
+    backends = {
+        "pyav": compression._PyAVCompressionBackend,
+        "ffmpeg": compression._FfmpegCliCompressionBackend,
+        "gstreamer": gstreamer.GStreamerCompressionBackend,
+    }
+    backend = backends[backend_name]()
+
+    with pytest.raises(CorruptImageError):
+        backend.decode_image(_message(corrupt), "sensor_msgs/CompressedImage")
+
+
+@pytest.mark.parametrize("backend_name", ["pyav", "ffmpeg", "gstreamer"])
+def test_compression_backend_rejects_jpeg_with_bogus_comment_in_entropy(
+    backend_name: str,
+) -> None:
+    jpeg, _corrupt = _jpeg_with_truncated_entropy()
+    scan = jpeg.index(b"\xff\xda")
+    entropy_start = scan + 2 + int.from_bytes(jpeg[scan + 2 : scan + 4], "big")
+    offset = entropy_start + (len(jpeg) - 2 - entropy_start) // 2
+    corrupt = jpeg[:offset] + b"\xff\xfe\xff\xff" + jpeg[offset + 4 :]
+    assert len(corrupt) == len(jpeg)
+    assert corrupt[:2] == b"\xff\xd8"
+    assert corrupt[-2:] == b"\xff\xd9"
+    backends = {
+        "pyav": compression._PyAVCompressionBackend,
+        "ffmpeg": compression._FfmpegCliCompressionBackend,
+        "gstreamer": gstreamer.GStreamerCompressionBackend,
+    }
+    backend = backends[backend_name]()
+
+    with pytest.raises(CorruptImageError):
+        backend.decode_image(_message(corrupt), "sensor_msgs/CompressedImage")
+
+
+def test_ffmpeg_backend_decodes_jpegs_before_the_shared_encoder_pipe() -> None:
+    jpeg, _corrupt = _jpeg_with_truncated_entropy()
+    backend = compression._FfmpegCliCompressionBackend()
+
+    pixels, width, height = backend.decode_image(_message(jpeg), "sensor_msgs/CompressedImage")
+
+    assert (width, height) == (96, 64)
+    assert len(pixels) == width * height * 3
+    assert backend.get_pix_fmt("/camera") == "rgb24"
+
+
+@pytest.mark.parametrize("backend_name", ["ffmpeg", "gstreamer"])
+def test_compression_backend_reports_missing_strict_jpeg_decoder(
+    backend_name: str,
+    monkeypatch,
+) -> None:
+    jpeg, _corrupt = _jpeg_with_truncated_entropy()
+    original_import = builtins.__import__
+
+    def block_pyav(name, *args, **kwargs):
+        if name == "mcap_codec_support.video.pyav":
+            raise ImportError("missing PyAV")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_pyav)
+    backend = (
+        compression._FfmpegCliCompressionBackend()
+        if backend_name == "ffmpeg"
+        else gstreamer.GStreamerCompressionBackend()
+    )
+
+    with pytest.raises(VideoEncoderError, match="PyAV is required") as error:
+        backend.decode_compressed(jpeg)
+
+    assert not isinstance(error.value, CorruptImageError)
+
+
+def test_strict_jpeg_decoder_recovers_after_a_corrupt_image() -> None:
+    jpeg, corrupt = _jpeg_with_truncated_entropy()
+    expected = pyav.video_frame_to_rgb_bytes(pyav.decode_jpeg_frame(jpeg))
+
+    with pytest.raises(CorruptImageError):
+        pyav.decode_jpeg_frame(corrupt)
+
+    assert pyav.video_frame_to_rgb_bytes(pyav.decode_jpeg_frame(jpeg)) == expected
+
+
+@pytest.mark.parametrize("backend_name", ["pyav", "ffmpeg", "gstreamer"])
+@pytest.mark.parametrize("image_format", ["jpeg", "JPG", "bgr8; jpeg compressed bgr8"])
+def test_compression_backend_recognizes_declared_jpeg_with_damaged_start_marker(
+    backend_name: str,
+    image_format: str,
+) -> None:
+    jpeg, _corrupt = _jpeg_with_truncated_entropy()
+    backends = {
+        "pyav": compression._PyAVCompressionBackend,
+        "ffmpeg": compression._FfmpegCliCompressionBackend,
+        "gstreamer": gstreamer.GStreamerCompressionBackend,
+    }
+    backend = backends[backend_name]()
+    message = _message(b"xx" + jpeg[2:], image_format=image_format)
+
+    with pytest.raises(CorruptImageError, match="start or end marker"):
+        backend.decode_image(message, "sensor_msgs/CompressedImage")
+
+
+def _message(
+    data: bytes = b"image", *, topic: str = "/camera", image_format: str = ""
+) -> SimpleNamespace:
     return SimpleNamespace(
-        decoded_message=SimpleNamespace(data=data),
+        decoded_message=SimpleNamespace(data=data, format=image_format),
         channel=SimpleNamespace(topic=topic),
     )
 
@@ -86,15 +208,15 @@ def test_ffmpeg_backend_delegates_and_selects_compressed_decode_mode(monkeypatch
     assert backend.decode_image(message, next(iter(COMPRESSED_SCHEMAS))) == (b"unused", 8, 6)
 
 
-def test_ffmpeg_backend_uses_image_pipe_fast_path_and_reuses_it(monkeypatch) -> None:
+def test_ffmpeg_backend_uses_png_pipe_fast_path_and_reuses_it(monkeypatch) -> None:
     backend = compression._FfmpegCliCompressionBackend()
-    monkeypatch.setattr(backend, "decode_compressed", lambda _data: (b"jpeg", 2, 2))
-    message = _message(b"\xff\xd8jpeg")
+    monkeypatch.setattr(backend, "decode_compressed", lambda _data: (b"png", 2, 2))
+    message = _message(b"\x89PNG\r\n\x1a\npng")
     schema = next(iter(COMPRESSED_SCHEMAS))
 
-    assert backend.decode_image(message, schema) == (b"jpeg", 2, 2)
+    assert backend.decode_image(message, schema) == (b"png", 2, 2)
     assert backend.get_pix_fmt("/camera") is None
-    assert backend.decode_image(message, schema) == (b"jpeg", 2, 2)
+    assert backend.decode_image(message, schema) == (b"png", 2, 2)
 
 
 def test_ffmpeg_backend_raw_encoding_paths(monkeypatch) -> None:

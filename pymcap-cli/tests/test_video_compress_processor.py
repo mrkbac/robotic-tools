@@ -8,11 +8,17 @@ composition with topic-drop, and that the emitted H.264 decodes back.
 from __future__ import annotations
 
 import io
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 import pymcap_cli.core.processors.video_compress as video_compress
 import pytest
-from mcap_codec_support.video import EncoderMode, VideoEncoderError, get_software_encoder
+from mcap_codec_support.video import (
+    CorruptImageError,
+    EncoderMode,
+    VideoEncoderError,
+    get_software_encoder,
+)
 from mcap_codec_support.video.common import EncoderConfig
 from mcap_codec_support.video.ffmpeg import check_encoder_cli, find_ffmpeg
 from mcap_ros2_support_fast.decoder import DecoderFactory
@@ -391,6 +397,257 @@ class _CreateFailsHwBackend:
         return _StubSoftwareEncoder()
 
 
+class _BufferedImageEncoder:
+    def __init__(self) -> None:
+        self.config = EncoderConfig(width=_W, height=_H, codec_name=get_software_encoder("h264"))
+        self._pending: bytes | None = None
+
+    def encode(self, frame: bytes) -> bytes | None:
+        previous, self._pending = self._pending, frame
+        return previous
+
+    def flush_packets(self) -> list[bytes]:
+        return [self._pending] if self._pending is not None else []
+
+    def close(self) -> None:
+        pass
+
+
+class _CorruptImageBackend:
+    label = "fake"
+
+    def __init__(self, corrupt_frames: set[int], *, prefetch_supported: bool) -> None:
+        self.prefetch_supported = prefetch_supported
+        self._corrupt_frames = corrupt_frames
+
+    def resolve_encoder(self, _codec: str) -> str:
+        return get_software_encoder("h264")
+
+    def get_pix_fmt(self, _topic: str) -> str | None:
+        return None
+
+    def decode_image(self, dm, _schema_name: str) -> tuple[bytes, int, int]:
+        index = dm.decoded_message.header.stamp.sec
+        if index in self._corrupt_frames:
+            raise CorruptImageError("invalid JPEG entropy data")
+        return f"packet-{index}".encode(), _W, _H
+
+    def create_encoder(self, *_args, **_kwargs) -> _BufferedImageEncoder:
+        return _BufferedImageEncoder()
+
+
+def _write_timestamped_camera(path: Path, n: int, *, images: list[bytes] | None = None) -> None:
+    output = io.BytesIO()
+    writer = McapWriter(output, encoder_factory=ROS2EncoderFactory())
+    writer.start(profile="ros2")
+    writer.add_schema(
+        1,
+        "sensor_msgs/msg/CompressedImage",
+        "ros2msg",
+        SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA.encode(),
+    )
+    writer.add_channel(1, "/CAM_FRONT/image", "cdr", 1)
+    for index in range(n):
+        writer.add_message_encode(
+            1,
+            1_000_000 + index * 100,
+            {
+                "header": {
+                    "stamp": {"sec": index, "nanosec": index + 7},
+                    "frame_id": f"camera-{index}",
+                },
+                "format": "jpeg",
+                "data": images[index] if images is not None else f"source-{index}".encode(),
+            },
+            2_000_000 + index * 100,
+        )
+    writer.finish()
+    path.write_bytes(output.getvalue())
+
+
+@pytest.mark.parametrize("prefetch_supported", [False, True])
+@pytest.mark.parametrize("corrupt_frames", [{1}, {0}, {2}, {0, 1}, {0, 1, 2}])
+@pytest.mark.parametrize("max_inflight", [1, 128])
+def test_video_processor_corrupt_frames_preserve_buffered_frame_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefetch_supported: bool,
+    corrupt_frames: set[int],
+    max_inflight: int,
+) -> None:
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_timestamped_camera(src, n=3)
+    monkeypatch.setattr(
+        video_compress,
+        "create_video_compression_backend",
+        lambda *_args, **_kwargs: _CorruptImageBackend(
+            corrupt_frames, prefetch_supported=prefetch_supported
+        ),
+    )
+    monkeypatch.setattr(video_compress, "_DEFAULT_INFLIGHT_PER_TOPIC", max_inflight)
+
+    processor = VideoCompressProcessor(codec="h264")
+    _run(src, out, extra_processors=[processor])
+
+    with out.open("rb") as stream:
+        messages = list(read_message_decoded(stream, decoder_factories=[DecoderFactory()]))
+    assert [
+        (
+            message.message.log_time,
+            message.message.publish_time,
+            message.decoded_message.timestamp.sec,
+            message.decoded_message.timestamp.nanosec,
+            message.decoded_message.frame_id,
+            bytes(message.decoded_message.data),
+        )
+        for message in messages
+    ] == [
+        (
+            1_000_000 + index * 100,
+            2_000_000 + index * 100,
+            index,
+            index + 7,
+            f"camera-{index}",
+            f"packet-{index}".encode(),
+        )
+        for index in range(3)
+        if index not in corrupt_frames
+    ]
+    assert isinstance(processor.dropped_frames, tuple)
+    assert [
+        (
+            dropped.topic,
+            dropped.log_time,
+            dropped.publish_time,
+            dropped.stamp_sec,
+            dropped.stamp_nanosec,
+            dropped.frame_id,
+            dropped.reason,
+            dropped.sha256,
+        )
+        for dropped in processor.dropped_frames
+    ] == [
+        (
+            "/CAM_FRONT/image",
+            1_000_000 + index * 100,
+            2_000_000 + index * 100,
+            index,
+            index + 7,
+            f"camera-{index}",
+            "invalid JPEG entropy data",
+            sha256(f"source-{index}".encode()).hexdigest(),
+        )
+        for index in sorted(corrupt_frames)
+    ]
+
+
+@pytest.mark.parametrize("backend", [EncoderMode.PYAV, EncoderMode.FFMPEG_CLI])
+def test_video_processor_corrupt_jpeg_between_healthy_images_is_audited_and_dropped(
+    tmp_path: Path, backend: EncoderMode
+) -> None:
+    av = pytest.importorskip("av")
+    image_module = pytest.importorskip("PIL.Image")
+    if backend is EncoderMode.FFMPEG_CLI and (
+        find_ffmpeg() is None or not check_encoder_cli("libx264")
+    ):
+        pytest.skip("ffmpeg/libx264 not available")
+    images = [_pillow_frame(image_module, _W, _H, index, "JPEG") for index in range(3)]
+    scan = images[1].index(b"\xff\xda")
+    entropy_start = scan + 2 + int.from_bytes(images[1][scan + 2 : scan + 4], "big")
+    images[1] = images[1][: entropy_start + 4] + b"\xff\xd9"
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_timestamped_camera(src, n=3, images=images)
+    processor = VideoCompressProcessor(encoder="libx264", backend=backend)
+
+    _run(src, out, extra_processors=[processor])
+
+    with out.open("rb") as stream:
+        messages = list(read_message_decoded(stream, decoder_factories=[DecoderFactory()]))
+    assert [message.message.log_time for message in messages] == [1_000_000, 1_000_200]
+    assert [message.message.publish_time for message in messages] == [2_000_000, 2_000_200]
+    assert [message.decoded_message.timestamp.sec for message in messages] == [0, 2]
+    assert [message.decoded_message.timestamp.nanosec for message in messages] == [7, 9]
+    assert [message.decoded_message.frame_id for message in messages] == ["camera-0", "camera-2"]
+    assert len(processor.dropped_frames) == 1
+    assert processor.dropped_frames[0].sha256 == sha256(images[1]).hexdigest()
+    assert processor.dropped_frames[0].log_time == 1_000_100
+    assert processor.dropped_frames[0].reason
+    decoder = av.CodecContext.create("h264", "r")
+    decoded_frames = sum(
+        len(decoder.decode(av.Packet(bytes(message.decoded_message.data)))) for message in messages
+    )
+    decoded_frames += len(decoder.decode(None))
+    assert decoded_frames == 2
+
+
+class _LostFlushEncoder(_BufferedImageEncoder):
+    def flush_packets(self) -> list[bytes]:
+        return []
+
+
+class _FailingFlushEncoder(_BufferedImageEncoder):
+    def flush_packets(self) -> list[bytes]:
+        raise VideoEncoderError("failed to drain encoder")
+
+
+class _ExtraFlushEncoder(_BufferedImageEncoder):
+    def flush_packets(self) -> list[bytes]:
+        return [*super().flush_packets(), b"unexpected-extra-packet"]
+
+
+class _FailingEncodeEncoder(_BufferedImageEncoder):
+    def encode(self, _frame: bytes) -> bytes | None:
+        raise VideoEncoderError("encoder rejected frame")
+
+
+@pytest.mark.parametrize(
+    "encoder_class",
+    [_LostFlushEncoder, _FailingFlushEncoder, _ExtraFlushEncoder, _FailingEncodeEncoder],
+)
+def test_video_processor_unexplained_encoder_loss_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoder_class
+) -> None:
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_timestamped_camera(src, n=3)
+    backend = _CorruptImageBackend(set(), prefetch_supported=False)
+    monkeypatch.setattr(backend, "create_encoder", lambda *_args, **_kwargs: encoder_class())
+    monkeypatch.setattr(
+        video_compress, "create_video_compression_backend", lambda *_args, **_kwargs: backend
+    )
+
+    with pytest.raises(VideoEncoderError):
+        _run(src, out, extra_processors=[VideoCompressProcessor(codec="h264")])
+
+
+@pytest.mark.parametrize("prefetch_supported", [False, True])
+@pytest.mark.parametrize("error_index", [0, 1])
+@pytest.mark.parametrize("error_type", [RuntimeError, VideoEncoderError])
+def test_video_processor_unexpected_decode_error_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefetch_supported: bool,
+    error_index: int,
+    error_type: type[Exception],
+) -> None:
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_timestamped_camera(src, n=3)
+    backend = _CorruptImageBackend(set(), prefetch_supported=prefetch_supported)
+    decode_image = backend.decode_image
+
+    def decode_with_failure(dm, schema_name: str) -> tuple[bytes, int, int]:
+        if dm.decoded_message.header.stamp.sec == error_index:
+            raise error_type("decoder dependency unavailable")
+        return decode_image(dm, schema_name)
+
+    monkeypatch.setattr(backend, "decode_image", decode_with_failure)
+    monkeypatch.setattr(
+        video_compress, "create_video_compression_backend", lambda *_args, **_kwargs: backend
+    )
+
+    with pytest.raises(error_type, match="decoder dependency unavailable"):
+        _run(src, out, extra_processors=[VideoCompressProcessor(codec="h264")])
+
+
 def test_video_session_does_not_fallback_while_aborting():
     backend = _FallbackBackend(buffer_depth=0)
     session = VideoEncoderSession(
@@ -438,16 +695,10 @@ def test_video_processor_falls_back_to_software_when_hw_create_fails(
     assert summary.schemas[chans[0].schema_id].name == _VIDEO_SCHEMA
 
 
-def test_video_processor_fallback_after_hw_crash_keeps_timestamps_aligned(
+def test_video_processor_hw_crash_with_buffered_frames_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A crashed hardware encoder must not shift surviving packets' timestamps.
-
-    The encoder accepts (buffers) 2 frames, then dies. Those 2 frames are
-    unrecoverable, but the remaining 3 must keep THEIR OWN log_times — before
-    the fix their metadata was reused for the wrong frames, shifting every
-    output timestamp by the buffer depth.
-    """
+    """A hardware crash cannot silently discard accepted, buffered images."""
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_cameras(src, ["/cam/front"], n=5)
 
@@ -456,6 +707,21 @@ def test_video_processor_fallback_after_hw_crash_keeps_timestamps_aligned(
         "create_video_compression_backend",
         lambda *_a, **_k: _FallbackBackend(buffer_depth=2),
     )
+    with pytest.raises(VideoEncoderError):
+        _run(src, out, extra_processors=[VideoCompressProcessor(codec="h264")])
+
+
+def test_video_processor_fallback_without_buffered_frames_preserves_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
+    _write_cameras(src, ["/cam/front"], n=5)
+
+    monkeypatch.setattr(
+        video_compress,
+        "create_video_compression_backend",
+        lambda *_args, **_kwargs: _FallbackBackend(buffer_depth=0),
+    )
     _run(src, out, extra_processors=[VideoCompressProcessor(codec="h264")])
 
     with out.open("rb") as f:
@@ -463,4 +729,4 @@ def test_video_processor_fallback_after_hw_crash_keeps_timestamps_aligned(
 
     # _write_cameras stamps frame i (single topic, cid=1) at log_time i*step + 1.
     step = 1_000_000
-    assert times == [2 * step + 1, 3 * step + 1, 4 * step + 1]
+    assert times == [index * step + 1 for index in range(5)]

@@ -940,6 +940,26 @@ it does not keep the source topic unchanged. FFmpeg arguments use shell-style qu
 Per-topic arguments append to `--ffmpeg-args` and require `ffmpeg-cli`; use
 `PATTERN:none` to clear them for the matching topics.
 
+JPEG images are decoded independently with strict error detection before video
+encoding. Malformed or incomplete JPEGs are skipped; each warning identifies the
+topic, original log/publish/header timestamps, frame ID, payload SHA-256, and
+decoder error. Surviving frames keep their own timestamps, including when the
+encoder buffers output. The Python `VideoCompressProcessor.dropped_frames`
+property exposes the same rejected-image records as an immutable tuple.
+
+The FFmpeg backend sends validated JPEG pixels as raw video instead of joining
+JPEG byte streams. This requires the `video` extra's PyAV decoder and increases
+pipe traffic; benchmark throughput on the target hardware. GStreamer validates
+each JPEG before handing its original bytes to the hardware decoder.
+
+Only malformed JPEGs are intentionally discarded. Decoder infrastructure errors,
+unexplained missing or extra encoded frames, and failed encoder flushes fail the
+run. A hardware fallback also fails if it loses already-buffered frames.
+JPEG validation detects malformed data, not every alteration that still forms a
+valid image. Batch publication, `--delete-source`, and external wrappers retain
+their independent count-preservation checks: an audited JPEG drop does not
+automatically authorize source deletion or relax those checks.
+
 ### `rosdecompress` — ROS Decompression
 
 Decompress CompressedVideo, CompressedPointCloud2, and Foxglove CompressedPointCloud topics back to standard ROS formats. Requires the `video` and `pointcloud` extras.

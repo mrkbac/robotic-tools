@@ -3,6 +3,7 @@
 from mcap_codec_support._protocols import AnyVideoBackend, VideoCompressionBackend
 from mcap_codec_support.video._messages import CompressedImage, Image
 from mcap_codec_support.video.common import (
+    CorruptImageError,
     EncoderBackend,
     EncoderConfig,
     EncoderMode,
@@ -36,6 +37,7 @@ __all__ = [
     "RAW_SCHEMAS",
     "AnyVideoBackend",
     "CompressedImage",
+    "CorruptImageError",
     "EncoderBackend",
     "EncoderConfig",
     "EncoderMode",

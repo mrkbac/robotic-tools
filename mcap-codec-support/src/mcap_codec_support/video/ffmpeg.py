@@ -781,23 +781,30 @@ class FFmpegVideoEncoder:
 
         self._stdout_thread.join(timeout=10)
         self._stderr_thread.join(timeout=5)
-        self._process.wait(timeout=10)
+        try:
+            self._process.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            self.close()
+            raise VideoEncoderError("ffmpeg timed out while flushing encoder output") from exc
 
-        packets: list[bytes] = []
-        while True:
-            try:
-                item = self._output_queue.get_nowait()
-            except Empty:
-                break
-            if item is None:
-                break
-            packets.append(item)
+        if self._stdout_thread.is_alive() or self._stderr_thread.is_alive():
+            raise VideoEncoderError("ffmpeg output readers did not finish while flushing")
 
         if self._process.returncode and self._process.returncode != 0:
             stderr_tail = "\n".join(self._stderr_lines[-5:])
             raise VideoEncoderError(
                 f"ffmpeg exited with code {self._process.returncode}:\n{stderr_tail}"
             )
+
+        packets: list[bytes] = []
+        while True:
+            try:
+                item = self._output_queue.get_nowait()
+            except Empty as exc:
+                raise VideoEncoderError("ffmpeg output ended without an EOF marker") from exc
+            if item is None:
+                break
+            packets.append(item)
 
         return packets
 

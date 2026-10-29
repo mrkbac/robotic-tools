@@ -59,6 +59,7 @@ from mcap_codec_support.video.common import (
     EncoderConfig,
     VideoEncoderError,
     raw_image_to_buffer,
+    validate_jpeg_boundaries,
 )
 from mcap_codec_support.video.ffmpeg import (
     ROS_ENCODING_TO_PIX_FMT,
@@ -520,9 +521,9 @@ class GStreamerCompressionBackend:
     """CompressedVideo backend using Jetson hardware JPEG decode + V4L2 encode.
 
     Shape mirrors the ffmpeg-cli backend (``FrameT = bytes``): JPEG/raw bytes are
-    passed straight through as the "frame" and decoded inside the encoder
-    pipeline, so no separate decode step runs on the CPU. Software fallback (used
-    only if the hardware encoder dies mid-stream) is delegated to
+    passed through as the "frame" and decoded inside the encoder pipeline. JPEGs
+    are validated with a strict CPU decoder before reaching that pipeline.
+    Software fallback (used only if the hardware encoder dies mid-stream) is delegated to
     :class:`FFmpegVideoEncoder`.
     """
 
@@ -542,6 +543,16 @@ class GStreamerCompressionBackend:
         return resolve_encoder(codec)
 
     def decode_compressed(self, data: bytes) -> tuple[bytes, int, int]:
+        if data.startswith(b"\xff\xd8"):
+            try:
+                from mcap_codec_support.video.pyav import decode_jpeg_frame  # noqa: PLC0415
+            except ImportError as exc:
+                raise VideoEncoderError(
+                    "PyAV is required for safe JPEG decoding with gstreamer. "
+                    "Install with: uv add 'mcap-codec-support[video]'"
+                ) from exc
+            frame = decode_jpeg_frame(data)
+            return data, frame.width, frame.height
         width, height = probe_image_dimensions(data)
         return data, width, height
 
@@ -549,6 +560,7 @@ class GStreamerCompressionBackend:
         data = bytes(msg.decoded_message.data)
         topic = msg.channel.topic
         if schema_name in COMPRESSED_SCHEMAS:
+            validate_jpeg_boundaries(data, msg.decoded_message.format)
             self._topic_pix_fmt[topic] = None
             return self.decode_compressed(data)
 

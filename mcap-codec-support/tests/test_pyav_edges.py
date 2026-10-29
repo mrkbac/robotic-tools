@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import av
 import mcap_codec_support.video.pyav as pyav_module
 import pytest
-from mcap_codec_support.video.common import DecompressedFrame, VideoEncoderError
+from mcap_codec_support.video.common import CorruptImageError, DecompressedFrame, VideoEncoderError
 
 
 class _FakeContext:
@@ -87,6 +87,7 @@ def test_image_decoder_contexts_are_thread_local_and_reused(monkeypatch) -> None
 
     mjpeg = pyav_module._get_mjpeg_ctx()
     assert pyav_module._get_mjpeg_ctx() is mjpeg
+    assert mjpeg.options == {"err_detect": "explode"}
     png = pyav_module._get_png_ctx()
     assert pyav_module._get_png_ctx() is png
     assert [context.codec for context in created] == ["mjpeg", "png"]
@@ -152,12 +153,12 @@ def test_decode_via_container_rejects_empty_container(monkeypatch) -> None:
 
 
 def test_decode_compressed_frame_uses_jpeg_context(monkeypatch) -> None:
-    frame = object()
+    frame = SimpleNamespace(is_corrupt=False)
     context = _FakeContext("mjpeg", "r")
     context.decode = lambda _packet: [frame]
     monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
 
-    assert pyav_module.decode_compressed_frame(b"\xff\xd8jpeg") is frame
+    assert pyav_module.decode_compressed_frame(b"\xff\xd8jpeg\xff\xd9") is frame
 
 
 def test_decode_compressed_frame_uses_png_context(monkeypatch) -> None:
@@ -186,15 +187,59 @@ def test_decode_compressed_frame_wraps_decoder_error(monkeypatch) -> None:
     monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
 
     with pytest.raises(VideoEncoderError, match="Failed to decode compressed image"):
-        pyav_module.decode_compressed_frame(b"\xff\xd8bad")
+        pyav_module.decode_compressed_frame(b"\xff\xd8bad\xff\xd9")
 
 
 def test_decode_compressed_frame_rejects_decoder_without_frames(monkeypatch) -> None:
     context = _FakeContext("mjpeg", "r")
     monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
 
-    with pytest.raises(VideoEncoderError, match="Decoder produced no frames"):
-        pyav_module.decode_compressed_frame(b"\xff\xd8empty")
+    with pytest.raises(VideoEncoderError, match="produced 0 frames"):
+        pyav_module.decode_compressed_frame(b"\xff\xd8empty\xff\xd9")
+
+
+@pytest.mark.parametrize("data", [b"\xff\xd8unfinished", b"missing start\xff\xd9"])
+def test_decode_jpeg_frame_rejects_missing_boundaries(data: bytes) -> None:
+    with pytest.raises(CorruptImageError, match="start or end marker"):
+        pyav_module.decode_jpeg_frame(data)
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [[SimpleNamespace(is_corrupt=True)], [SimpleNamespace(is_corrupt=False)] * 2],
+)
+def test_decode_jpeg_frame_rejects_invalid_output_and_resets_context(
+    frames,
+    monkeypatch,
+) -> None:
+    context = _FakeContext("mjpeg", "r")
+    context.decode = lambda _packet: frames
+    monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
+    monkeypatch.setattr(pyav_module._decoder_local, "mjpeg_ctx", context)
+
+    with pytest.raises(CorruptImageError):
+        pyav_module.decode_jpeg_frame(b"\xff\xd8jpeg\xff\xd9")
+
+    assert pyav_module._decoder_local.mjpeg_ctx is None
+
+
+def test_decode_jpeg_frame_does_not_classify_decoder_failure_as_corrupt_input(
+    monkeypatch,
+) -> None:
+    context = _FakeContext("mjpeg", "r")
+
+    def decode(_packet):
+        raise av.error.FFmpegError(12, "decoder allocation failed")
+
+    context.decode = decode
+    monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
+    monkeypatch.setattr(pyav_module._decoder_local, "mjpeg_ctx", context)
+
+    with pytest.raises(VideoEncoderError, match="decoder allocation failed") as error:
+        pyav_module.decode_jpeg_frame(b"\xff\xd8jpeg\xff\xd9")
+
+    assert not isinstance(error.value, CorruptImageError)
+    assert pyav_module._decoder_local.mjpeg_ctx is None
 
 
 def test_raw_image_to_frame_uses_pyav_stride_without_repacking() -> None:

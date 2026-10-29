@@ -14,11 +14,13 @@ from av import Packet, VideoFrame
 from typing_extensions import Self
 
 from mcap_codec_support.video.common import (
+    CorruptImageError,
     DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
     raw_image_to_buffer,
+    validate_jpeg_boundaries,
 )
 from mcap_codec_support.video.common import (
     resolve_encoder as _resolve_encoder,
@@ -85,6 +87,7 @@ def _get_mjpeg_ctx() -> VideoCodecContext:
     ctx = _decoder_local.mjpeg_ctx
     if ctx is None:
         ctx = _create_codec_context("mjpeg", "r")
+        ctx.options = {"err_detect": "explode"}
         ctx.open()
         _decoder_local.mjpeg_ctx = ctx
     return ctx
@@ -123,10 +126,12 @@ def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
     Uses persistent thread-local codec contexts for performance.
     """
     fmt = _detect_image_format(compressed_data)
+    if fmt == "mjpeg":
+        return decode_jpeg_frame(compressed_data)
     if fmt == "unknown":
         return _decode_via_container(compressed_data)
 
-    ctx = _get_mjpeg_ctx() if fmt == "mjpeg" else _get_png_ctx()
+    ctx = _get_png_ctx()
     try:
         for frame in ctx.decode(Packet(compressed_data)):
             return frame
@@ -134,6 +139,29 @@ def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
         raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
 
     raise VideoEncoderError("Decoder produced no frames")
+
+
+def decode_jpeg_frame(data: bytes) -> VideoFrame:
+    """Decode one complete JPEG packet without concealing damaged pixels."""
+    validate_jpeg_boundaries(data, "jpeg")
+
+    try:
+        frames = _get_mjpeg_ctx().decode(Packet(data))
+    except av.error.InvalidDataError as exc:
+        _decoder_local.mjpeg_ctx = None
+        raise CorruptImageError(f"Failed to decode compressed image: {exc}") from exc
+    except av.error.FFmpegError as exc:
+        _decoder_local.mjpeg_ctx = None
+        raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
+
+    if len(frames) != 1:
+        _decoder_local.mjpeg_ctx = None
+        raise CorruptImageError(f"JPEG decoder produced {len(frames)} frames; expected one")
+    frame = frames[0]
+    if frame.is_corrupt:
+        _decoder_local.mjpeg_ctx = None
+        raise CorruptImageError("JPEG decoder returned a corrupt frame")
+    return frame
 
 
 _RAW_IMAGE_FORMATS: dict[str, str] = {

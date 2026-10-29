@@ -72,12 +72,13 @@ def _create_internal_dependency_repo(tmp_path: Path) -> tuple[Path, Path]:
         ),
         "mcap-codec-support": (
             "0.14.0",
-            '\n[project.optional-dependencies]\npointcloud = ["pureini>=0.8.0"]\n',
+            '\n[project.optional-dependencies]\npointcloud = ["pureini>=0.8.0"]\nvideo = []\n',
         ),
         "pymcap-cli": (
             "0.26.0",
             "\n[project.optional-dependencies]\n"
-            'pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]\n',
+            'pointcloud = ["mcap-codec-support[pointcloud]>=0.14.0"]\n'
+            'video = ["mcap-codec-support[video]"]\n',
         ),
     }
     for package_name, (version, extra_metadata) in packages.items():
@@ -337,6 +338,19 @@ def test_bump_updates_internal_dependency_floors(tmp_path: Path) -> None:
     assert cli_pyproject["project"]["version"] == "0.27.0"
     assert cli_pyproject["project"]["optional-dependencies"]["pointcloud"] == [
         "mcap-codec-support[pointcloud]>=0.15.0"
+    ]
+    assert not _git_status(repo)
+
+
+def test_bump_updates_video_codec_dependency_floor(tmp_path: Path) -> None:
+    repo, fake_bin = _create_internal_dependency_repo(tmp_path)
+
+    result = _run_bump(repo, fake_bin, answer="y\n")
+
+    assert result.returncode == 0, result.stderr
+    cli_pyproject = tomllib.loads((repo / "pymcap-cli" / "pyproject.toml").read_text())
+    assert cli_pyproject["project"]["optional-dependencies"]["video"] == [
+        "mcap-codec-support[video]>=0.15.0"
     ]
     assert not _git_status(repo)
 

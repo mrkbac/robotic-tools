@@ -24,6 +24,13 @@ without loading any codec backend. Install only the capability needed:
 Video, point-cloud, and Draco extras remain separate because their compiled
 dependencies account for most of the download and installed footprint.
 
+JPEG compression inputs are decoded independently with strict PyAV validation.
+Malformed JPEGs raise `CorruptImageError`; missing dependencies and encoder failures
+remain `VideoEncoderError`. The FFmpeg backend receives validated RGB pixels, so
+a damaged JPEG cannot consume bytes from the next image. GStreamer validates each
+JPEG before handing it to the hardware pipeline. Install the `video` extra for all
+three compression backends, including `ffmpeg-cli` and `gstreamer`.
+
 Read every supported message type with `small-mcap`:
 
 ```python

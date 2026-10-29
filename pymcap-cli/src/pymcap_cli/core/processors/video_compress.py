@@ -28,6 +28,7 @@ import os
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from threading import Event
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -36,6 +37,7 @@ from mcap_codec_support.video import (
     COMPRESSED_VIDEO_SCHEMA,
     FOXGLOVE_COMPRESSED_VIDEO,
     IMAGE_SCHEMAS,
+    CorruptImageError,
     EncoderMode,
     VideoEncoderError,
     calculate_downscale_dimensions,
@@ -115,6 +117,28 @@ class _FrameMeta:
     frame_id: str
     stream_id: int
     input_channel_id: int | None
+    topic: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class DroppedVideoFrame:
+    """An independently rejected image, identified by its original payload."""
+
+    topic: str
+    log_time: int
+    publish_time: int
+    stamp_sec: int
+    stamp_nanosec: int
+    frame_id: str
+    reason: str
+    sha256: str
+
+
+@dataclass(slots=True)
+class _QueuedFrame:
+    meta: _FrameMeta
+    future: Future[EncodeOutcome]
 
 
 @dataclass(slots=True)
@@ -123,7 +147,7 @@ class _TopicState:
     pool: ThreadPoolExecutor
     out_channel_id: int
     schema_name: str
-    futures: deque[Future[EncodeOutcome]]
+    futures: deque[_QueuedFrame]
     pending: deque[_FrameMeta]
 
 
@@ -141,7 +165,7 @@ class VideoGeometryBackend(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class VideoEncoderSettings:
-    """Resolved output geometry and pixel format for video compression."""
+    """Encoder input geometry, pixel format, and optional output scaling."""
 
     width: int
     height: int
@@ -187,18 +211,27 @@ def resolve_video_encoder_settings(
 ) -> VideoEncoderSettings:
     """Resolve scaled video dimensions exactly like roscompress."""
     pix_fmt = backend.get_pix_fmt(topic)
-    scale_dims: tuple[int, int] | None = None
+    source_width, source_height = width, height
     if scale is not None:
         width, height = calculate_downscale_dimensions(width, height, scale)
-        if pix_fmt is None:
-            scale_dims = (width, height)
     width -= width % 2
     height -= height % 2
+    if pix_fmt is not None:
+        # rawvideo has no frame headers: its input dimensions must describe
+        # the submitted bytes, while resizing belongs to the output filter.
+        return VideoEncoderSettings(
+            width=source_width,
+            height=source_height,
+            pix_fmt=pix_fmt,
+            scale_dims=(width, height)
+            if (width, height) != (source_width, source_height)
+            else None,
+        )
     return VideoEncoderSettings(
         width=width,
         height=height,
         pix_fmt=pix_fmt,
-        scale_dims=scale_dims,
+        scale_dims=(width, height) if scale is not None else None,
     )
 
 
@@ -232,6 +265,7 @@ class EncodeOutcome:
     data: bytes | None
     swapped: bool
     failed: bool
+    decode_error: CorruptImageError | None = None
 
 
 class VideoEncoderSession:
@@ -442,6 +476,7 @@ class VideoCompressProcessor(InputProcessor):
         self._targets: dict[int, tuple[Channel, Schema, str]] = {}
         self._streams_with_summary: set[int] = set()
         self._states: dict[str, _TopicState] = {}
+        self._dropped_frames: list[DroppedVideoFrame] = []
         self._out_schema_id: int | None = None
         self._video_encoder_fn: Any = None
         # Decode and encode are two pipelined stages: a shared pool decodes
@@ -459,6 +494,11 @@ class VideoCompressProcessor(InputProcessor):
     def matched_topics(self) -> frozenset[str]:
         """Image topics this processor selected, known after channels were read."""
         return frozenset(channel.topic for channel, _schema, _name in self._targets.values())
+
+    @property
+    def dropped_frames(self) -> tuple[DroppedVideoFrame, ...]:
+        """Images rejected before encoding; unexplained encoder losses are errors."""
+        return tuple(self._dropped_frames)
 
     # ---------------------------------------------------------------- scoping
     @override
@@ -494,27 +534,31 @@ class VideoCompressProcessor(InputProcessor):
         channel, schema, schema_name = target
         dm = DecodedMessage(schema, channel, message, self._decode)
 
+        decoded = dm.decoded_message
+        meta = _FrameMeta(
+            log_time=message.log_time,
+            publish_time=message.publish_time,
+            stamp_sec=decoded.header.stamp.sec,
+            stamp_nanosec=decoded.header.stamp.nanosec,
+            frame_id=decoded.header.frame_id,
+            stream_id=context.input.stream_id,
+            input_channel_id=context.input_channel_id,
+            topic=channel.topic,
+            sha256=sha256(bytes(decoded.data)).hexdigest(),
+        )
+
         state = self._states.get(channel.topic)
         if state is None:
-            state = self._start_topic(context, channel, schema_name, dm)
+            try:
+                state = self._start_topic(context, channel, schema_name, dm)
+            except CorruptImageError as exc:
+                self._record_corrupt_frame(meta, exc)
+                return
             if state is None:
                 # Encoder init failed — pass the raw frame through rather than lose it.
                 yield message
                 return
 
-        # Cheap CDR decode (cached on dm) for the output timestamp/frame_id.
-        decoded = dm.decoded_message
-        state.pending.append(
-            _FrameMeta(
-                log_time=message.log_time,
-                publish_time=message.publish_time,
-                stamp_sec=decoded.header.stamp.sec,
-                stamp_nanosec=decoded.header.stamp.nanosec,
-                frame_id=decoded.header.frame_id,
-                stream_id=context.input.stream_id,
-                input_channel_id=context.input_channel_id,
-            )
-        )
         # Two-stage pipeline: decode on the shared pool (parallel), encode on the
         # topic's single thread (serial, stateful). The encode task blocks on its
         # decode future, but later frames' decodes run ahead on the pool — so
@@ -526,7 +570,7 @@ class VideoCompressProcessor(InputProcessor):
         else:
             decode_future = self._decode_pool.submit(self._decode_frame, dm, schema_name)
             encode_future = state.pool.submit(self._encode_frame, state.session, decode_future)
-        state.futures.append(encode_future)
+        state.futures.append(_QueuedFrame(meta, encode_future))
 
         # Drain completed packets (bounded) and emit them in order.
         while len(state.futures) > self._inflight_per_topic:
@@ -539,6 +583,9 @@ class VideoCompressProcessor(InputProcessor):
         try:
             for topic, state in self._states.items():
                 yield from self._finalize_topic(topic, state)
+        except BaseException:
+            self.abort()
+            raise
         finally:
             for state in self._states.values():
                 state.session.close()
@@ -550,8 +597,8 @@ class VideoCompressProcessor(InputProcessor):
     def abort(self) -> None:
         for state in self._states.values():
             state.session.abort()
-            for future in state.futures:
-                future.cancel()
+            for queued in state.futures:
+                queued.future.cancel()
         if self._decode_pool is not None:
             self._decode_pool.shutdown(wait=False, cancel_futures=True)
         for state in self._states.values():
@@ -569,19 +616,19 @@ class VideoCompressProcessor(InputProcessor):
         # Flush the encoder's internal buffer; each packet pairs with the oldest
         # still-pending frame, in order.
         encoder = state.session.encoder
-        try:
-            packets = encoder.flush_packets() if encoder is not None else []
-        except VideoEncoderError:
-            logger.exception("Failed to flush encoder for %s", topic)
-            packets = []
+        packets = encoder.flush_packets() if encoder is not None else []
         for packet in packets:
             if not state.pending:
-                break
+                raise VideoEncoderError(f"Encoder emitted an unexpected extra frame for {topic}")
             meta = state.pending.popleft()
             yield MessageWithContext(
                 message=self._build_video_message(state, meta, packet),
                 stream_id=meta.stream_id,
                 input_channel_id=meta.input_channel_id,
+            )
+        if state.pending:
+            raise VideoEncoderError(
+                f"Encoder did not emit {len(state.pending)} accepted frame(s) for {topic}"
             )
 
     # ---------------------------------------------------------------- helpers
@@ -665,11 +712,8 @@ class VideoCompressProcessor(InputProcessor):
         """
         try:
             frame, width, height = decode_future.result()
-        except Exception:
-            if session.is_aborting:
-                return EncodeOutcome(data=None, swapped=False, failed=True)
-            logger.exception("Failed to decode frame on %s", session.topic)
-            return EncodeOutcome(data=None, swapped=False, failed=True)
+        except CorruptImageError as exc:
+            return EncodeOutcome(data=None, swapped=False, failed=True, decode_error=exc)
         return session.encode_with_fallback(frame, width, height)
 
     def _decode_encode_frame(
@@ -681,33 +725,30 @@ class VideoCompressProcessor(InputProcessor):
         """Decode/parse and encode on the topic thread for subprocess backends."""
         try:
             frame, width, height = self._decode_frame(dm, schema_name)
-        except Exception:
-            if session.is_aborting:
-                return EncodeOutcome(data=None, swapped=False, failed=True)
-            logger.exception("Failed to decode frame on %s", session.topic)
-            return EncodeOutcome(data=None, swapped=False, failed=True)
+        except CorruptImageError as exc:
+            return EncodeOutcome(data=None, swapped=False, failed=True, decode_error=exc)
         return session.encode_with_fallback(frame, width, height)
 
     def _drain_one(self, state: _TopicState) -> MessageWithContext | None:
         """Resolve the oldest in-flight encode; emit a packet if one came out.
 
-        When the frame triggered a hardware→software swap, the dead hardware
-        encoder's buffered frames are unrecoverable: their ``_FrameMeta`` entries
-        still sit at the head of ``pending``, ahead of the frames re-encoded on
-        software (this frame plus everything still queued in ``futures``). Drop
-        exactly those orphaned metas so surviving packets keep pairing with the
-        right frame instead of shifting by the dead encoder's buffer depth.
+        Rejected images never enter ``pending``. Metadata is queued only for
+        accepted frames, so a corrupt input cannot consume a buffered frame's
+        timestamp. A hardware swap losing accepted frames fails closed.
         """
-        outcome = state.futures.popleft().result()
-        if outcome.swapped:
-            orphaned = max(0, len(state.pending) - (len(state.futures) + 1))
-            for _ in range(orphaned):
-                state.pending.popleft()
-        if outcome.failed:
-            logger.warning("Dropping unencodable frame on %s", state.schema_name)
-            if state.pending:
-                state.pending.popleft()
+        queued = state.futures.popleft()
+        outcome = queued.future.result()
+        if outcome.decode_error is not None:
+            self._record_corrupt_frame(queued.meta, outcome.decode_error)
             return None
+        if outcome.swapped and state.pending:
+            raise VideoEncoderError(
+                f"Encoder fallback lost {len(state.pending)} accepted frame(s) "
+                f"for {queued.meta.topic}"
+            )
+        if outcome.failed:
+            raise VideoEncoderError(f"Failed to encode accepted frame for {queued.meta.topic}")
+        state.pending.append(queued.meta)
         if outcome.data is None:
             return None
         meta = state.pending.popleft()
@@ -715,6 +756,31 @@ class VideoCompressProcessor(InputProcessor):
             message=self._build_video_message(state, meta, outcome.data),
             stream_id=meta.stream_id,
             input_channel_id=meta.input_channel_id,
+        )
+
+    def _record_corrupt_frame(self, meta: _FrameMeta, error: CorruptImageError) -> None:
+        dropped = DroppedVideoFrame(
+            topic=meta.topic,
+            log_time=meta.log_time,
+            publish_time=meta.publish_time,
+            stamp_sec=meta.stamp_sec,
+            stamp_nanosec=meta.stamp_nanosec,
+            frame_id=meta.frame_id,
+            reason=str(error),
+            sha256=meta.sha256,
+        )
+        self._dropped_frames.append(dropped)
+        logger.warning(
+            "Dropping corrupt image topic=%s log_time=%d publish_time=%d "
+            "stamp=%d.%09d frame_id=%r sha256=%s reason=%s",
+            dropped.topic,
+            dropped.log_time,
+            dropped.publish_time,
+            dropped.stamp_sec,
+            dropped.stamp_nanosec,
+            dropped.frame_id,
+            dropped.sha256,
+            dropped.reason,
         )
 
     def _build_video_message(
