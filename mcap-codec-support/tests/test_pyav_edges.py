@@ -170,6 +170,31 @@ def test_decode_compressed_frame_uses_png_context(monkeypatch) -> None:
     assert pyav_module.decode_compressed_frame(b"\x89PNG\r\n\x1a\nimage") is frame
 
 
+def test_decode_compressed_frame_preserves_png_decoder_error_classification(monkeypatch) -> None:
+    context = _FakeContext("png", "r")
+
+    def decode(_packet):
+        raise av.error.InvalidDataError(1, "bad PNG image")
+
+    context.decode = decode
+    monkeypatch.setattr(pyav_module, "_get_png_ctx", lambda: context)
+
+    with pytest.raises(VideoEncoderError, match="bad PNG image") as error:
+        pyav_module.decode_compressed_frame(b"\x89PNG\r\n\x1a\nbad")
+
+    assert not isinstance(error.value, CorruptImageError)
+
+
+def test_decode_compressed_frame_rejects_png_decoder_without_frames(monkeypatch) -> None:
+    context = _FakeContext("png", "r")
+    monkeypatch.setattr(pyav_module, "_get_png_ctx", lambda: context)
+
+    with pytest.raises(VideoEncoderError, match="Decoder produced no frames") as error:
+        pyav_module.decode_compressed_frame(b"\x89PNG\r\n\x1a\nempty")
+
+    assert not isinstance(error.value, CorruptImageError)
+
+
 def test_decode_compressed_frame_uses_container_for_unknown_format(monkeypatch) -> None:
     frame = object()
     monkeypatch.setattr(pyav_module, "_decode_via_container", lambda _data: frame)
