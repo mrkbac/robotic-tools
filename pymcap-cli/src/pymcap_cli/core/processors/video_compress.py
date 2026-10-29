@@ -257,9 +257,9 @@ class EncodeOutcome:
     """Result of encoding one frame through a :class:`VideoEncoderSession`.
 
     ``swapped`` flags that this frame triggered a hardware→software fallback,
-    so a buffered/async caller can drop the metadata of the frames the dead
-    hardware encoder had swallowed (they are unrecoverable). ``failed`` means
-    both hardware and software encoding failed and the frame should be dropped.
+    so a buffered/async caller can detect frames lost with the dead encoder.
+    ``failed`` means encoding did not accept this frame. Batch compression fails
+    on either loss instead of treating an encoder failure as a corrupt image.
     """
 
     data: bytes | None
