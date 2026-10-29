@@ -1,6 +1,6 @@
 [project]
 name = "pymcap-cli"
-version = "0.34.0"
+version = "0.35.0"
 description = "High-performance Python CLI for MCAP file processing with advanced recovery, filtering, and optimization capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -58,9 +58,11 @@ plot = [
     "plotly>=6.0.0",
 ]
 pointcloud = [
-    "mcap-codec-support[pointcloud]>=0.17.0",
+    "mcap-codec-support[pointcloud]>=0.18.0",
 ]
-video = ["mcap-codec-support[video]"]
+video = [
+    "mcap-codec-support[video]>=0.18.0",
+]
 xxhash = ["xxhash>=3.0.0"]
 
 
