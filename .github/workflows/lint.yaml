@@ -50,6 +50,11 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Install PureINI minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: clippy, rustfmt
+
       - name: Install JS dependencies
         run: bun install
         working-directory: mcap-web-inspector
