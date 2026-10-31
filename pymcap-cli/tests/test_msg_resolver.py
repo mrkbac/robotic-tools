@@ -14,6 +14,7 @@ from pymcap_cli.core.msg_resolver import (
     ROS2Distro,
     _DistroIndex,
     _download,
+    _ensure_release_pkg_cached,
     _fetch_distro_index,
     _get_msg_def,
     _parse_distro_yaml,
@@ -286,6 +287,50 @@ def _make_release_zip(top_dir: str, files: dict[str, str]) -> bytes:
         for relative_path, content in files.items():
             zf.writestr(f"{top_dir}/{relative_path}", content)
     return buffer.getvalue()
+
+
+def test_ensure_release_pkg_cached_reuses_concurrently_published_package(tmp_path: Path) -> None:
+    winner: Path | None = None
+
+    def download(_url: str, target: Path) -> None:
+        nonlocal winner
+        (target / "msg").mkdir(parents=True)
+        (target / "msg" / "Image.msg").write_text("uint8 loser\n")
+        winner = target.parent.parent / "sensor_msgs"
+        (winner / "msg").mkdir(parents=True)
+        (winner / "msg" / "Image.msg").write_text("uint8 winner\n")
+
+    with (
+        patch(
+            "pymcap_cli.core.msg_resolver._get_distro_index",
+            return_value=_parse_distro_yaml(SAMPLE_DISTRO_DATA),
+        ),
+        patch("pymcap_cli.core.msg_resolver._download_and_extract", side_effect=download),
+    ):
+        result = _ensure_release_pkg_cached(tmp_path, ROS2Distro.HUMBLE, "sensor_msgs")
+
+    assert winner is not None
+    assert result == winner
+    assert (winner / "msg" / "Image.msg").read_text() == "uint8 winner\n"
+    assert not list(winner.parent.glob(".sensor_msgs.tmp.*"))
+
+
+def test_ensure_release_pkg_cached_propagates_publication_error_without_winner(
+    tmp_path: Path,
+) -> None:
+    def download(_url: str, target: Path) -> None:
+        target.mkdir()
+
+    with (
+        patch(
+            "pymcap_cli.core.msg_resolver._get_distro_index",
+            return_value=_parse_distro_yaml(SAMPLE_DISTRO_DATA),
+        ),
+        patch("pymcap_cli.core.msg_resolver._download_and_extract", side_effect=download),
+        patch.object(Path, "replace", side_effect=PermissionError("publication denied")),
+        pytest.raises(PermissionError, match="publication denied"),
+    ):
+        _ensure_release_pkg_cached(tmp_path, ROS2Distro.HUMBLE, "sensor_msgs")
 
 
 class TestListPackageMessages:
