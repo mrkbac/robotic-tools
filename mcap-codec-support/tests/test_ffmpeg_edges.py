@@ -1,6 +1,7 @@
 """Hermetic tests for FFmpeg CLI helpers and process lifecycles."""
 
 import subprocess
+import sys
 from queue import Queue
 from types import SimpleNamespace
 
@@ -869,6 +870,13 @@ def test_find_binary_uses_portable_fallback(monkeypatch, binary, tmp_path):
         assert ffmpeg.find_ffmpeg() == str(paths[0])
     else:
         assert ffmpeg.find_ffprobe() == str(paths[1])
+
+
+@pytest.mark.parametrize("find_binary", [ffmpeg.find_ffmpeg, ffmpeg.find_ffprobe])
+def test_find_binary_without_system_install_or_portable_dependency(monkeypatch, find_binary):
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setitem(sys.modules, "portable_ffmpeg", None)
+    assert find_binary() is None
 
 
 def test_probe_image_dimensions_can_disable_ffprobe(monkeypatch):
