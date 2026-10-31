@@ -7,6 +7,7 @@ import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from itertools import groupby
 from typing import IO, TYPE_CHECKING, Protocol, cast
 
 import yaml
@@ -3287,18 +3288,7 @@ def median_int(values: list[int]) -> int:
 
 
 def summary_groups(frames: list[Frame]) -> list[list[Frame]]:
-    if not frames:
-        return []
-    groups: list[list[Frame]] = []
-    current: list[Frame] = [frames[0]]
-    for frame in frames[1:]:
-        if frame.opcode == current[-1].opcode:
-            current.append(frame)
-        else:
-            groups.append(current)
-            current = [frame]
-    groups.append(current)
-    return groups
+    return [list(group) for _, group in groupby(frames, key=lambda frame: frame.opcode)]
 
 
 _KNOWN_OPCODES = {opcode.value for opcode in Opcode}

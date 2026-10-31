@@ -736,3 +736,29 @@ def test_video_processor_fallback_without_buffered_frames_preserves_timestamps(
     # _write_cameras stamps frame i (single topic, cid=1) at log_time i*step + 1.
     step = 1_000_000
     assert times == [index * step + 1 for index in range(5)]
+
+
+def test_video_session_reports_terminal_failure_once(monkeypatch):
+    backend = _CreateFailsHwBackend()
+    calls = []
+
+    def fail(*args, **_kwargs):
+        calls.append(args)
+        raise VideoEncoderError("ffmpeg not found on PATH")
+
+    monkeypatch.setattr(backend, "create_encoder", fail)
+    errors = []
+    monkeypatch.setattr(video_compress.logger, "error", lambda *args: errors.append(args))
+    monkeypatch.setattr(video_compress.logger, "exception", lambda *args: errors.append(args))
+    session = VideoEncoderSession(
+        backend=backend,
+        encoder_name="hw_enc",
+        codec="h264",
+        quality=28,
+        topic="/camera/image_raw",
+    )
+    for _ in range(3):
+        assert session.encode_with_fallback(b"frame", _W, _H).failed
+    assert len(calls) == 2
+    assert len(errors) == 1
+    assert "ffmpeg not found" in str(errors[0])

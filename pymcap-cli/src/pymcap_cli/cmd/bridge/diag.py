@@ -4,8 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Callable
-from typing import Any
+from typing import cast
 
 from mcap_ros2_support_fast.decoder import DecoderFactory
 from robo_ws_bridge import WebSocketBridgeClient
@@ -28,14 +27,15 @@ from pymcap_cli.cmd._cli_options import (
 )
 from pymcap_cli.cmd.bridge._shared import (
     BridgeFetchError,
+    ChannelDecoderCache,
     ChannelSubscriptionManager,
-    channel_to_schema,
     console,
     to_ws_url,
 )
 from pymcap_cli.core.diagnostics import (
     DEFAULT_TOPICS,
     DiagEntry,
+    DiagnosticArrayLike,
     add_diagnostic_message,
     filter_entries,
     level_totals,
@@ -72,23 +72,10 @@ async def _collect_diagnostics_async(
     server_info_event = asyncio.Event()
     client.on_server_info(lambda *_: server_info_event.set())
 
-    factory = DecoderFactory()
-    decoders: dict[int, Callable[[bytes | memoryview], Any] | None] = {}
-
-    def _decoder_for(channel: ChannelInfo) -> Callable[[bytes | memoryview], Any] | None:
-        cid = channel["id"]
-        if cid in decoders:
-            return decoders[cid]
-        try:
-            decoder = factory.decoder_for(channel["encoding"], channel_to_schema(channel))
-        except Exception:
-            logger.exception(f"Decoder construction failed for {channel['topic']}")
-            decoder = None
-        decoders[cid] = decoder
-        return decoder
+    decoder_cache = ChannelDecoderCache([DecoderFactory()])
 
     def _on_message(channel: ChannelInfo, log_time_ns: int, payload: bytes) -> None:
-        decoder = _decoder_for(channel)
+        decoder = decoder_cache.decoder_for(channel)
         if decoder is None:
             return
         try:
@@ -96,12 +83,13 @@ async def _collect_diagnostics_async(
         except Exception:
             logger.exception(f"Failed to decode diagnostics on {channel['topic']}")
             return
-        add_diagnostic_message(entries, log_time_ns, decoded)
+        add_diagnostic_message(entries, log_time_ns, cast("DiagnosticArrayLike", decoded))
 
     subscriber = ChannelSubscriptionManager(
         client,
         lambda channel: (
-            message_filter.matches_topic(channel["topic"]) and _decoder_for(channel) is not None
+            message_filter.matches_topic(channel["topic"])
+            and decoder_cache.decoder_for(channel) is not None
         ),
     )
     subscriber.install()

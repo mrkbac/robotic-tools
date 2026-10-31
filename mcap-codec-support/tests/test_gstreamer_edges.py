@@ -4,6 +4,7 @@ from queue import Queue
 from types import SimpleNamespace
 
 import mcap_codec_support.video.gstreamer as gst
+import portable_ffmpeg
 import pytest
 from mcap_codec_support.video.common import VideoEncoderError
 
@@ -410,7 +411,7 @@ def test_gstreamer_encoder_reads_large_frames_without_flush() -> None:
 
 def test_probe_hw_jpeg_pipeline_falls_back_and_succeeds(monkeypatch) -> None:
     monkeypatch.setattr(gst, "resolve_encoder", lambda _codec: "nvv4l2h264enc")
-    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data: (256, 256))
+    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data, **_kwargs: (256, 256))
     monkeypatch.setattr(gst.time, "monotonic", lambda: 0.0)
 
     class Encoder:
@@ -449,7 +450,7 @@ def test_probe_hw_jpeg_pipeline_falls_back_and_succeeds(monkeypatch) -> None:
 
 def test_probe_hw_jpeg_pipeline_handles_encoder_errors(monkeypatch) -> None:
     monkeypatch.setattr(gst, "resolve_encoder", lambda _codec: "nvv4l2h264enc")
-    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data: (256, 256))
+    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data, **_kwargs: (256, 256))
     monkeypatch.setattr(
         gst,
         "GStreamerVideoEncoder",
@@ -460,7 +461,7 @@ def test_probe_hw_jpeg_pipeline_handles_encoder_errors(monkeypatch) -> None:
 
 def test_probe_hw_jpeg_pipeline_times_out_without_output(monkeypatch) -> None:
     monkeypatch.setattr(gst, "resolve_encoder", lambda _codec: "nvv4l2h264enc")
-    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data: (256, 256))
+    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data, **_kwargs: (256, 256))
 
     class Encoder:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -479,7 +480,7 @@ def test_probe_hw_jpeg_pipeline_times_out_without_output(monkeypatch) -> None:
 
 def test_probe_hw_jpeg_pipeline_stops_on_output_sentinel(monkeypatch) -> None:
     monkeypatch.setattr(gst, "resolve_encoder", lambda _codec: "nvv4l2h264enc")
-    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data: (256, 256))
+    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data, **_kwargs: (256, 256))
 
     class Encoder:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -503,7 +504,7 @@ def test_compression_backend_delegates_and_falls_back(monkeypatch) -> None:
     backend = gst.GStreamerCompressionBackend()
     monkeypatch.setattr(gst, "check_encoder", lambda name: name == "good")
     monkeypatch.setattr(gst, "resolve_encoder", lambda _codec: "resolved")
-    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data: (4, 3))
+    monkeypatch.setattr(gst, "probe_image_dimensions", lambda _data, **_kwargs: (4, 3))
     assert backend.test_encoder("good") is True
     assert backend.resolve_encoder("h264") == "resolved"
     assert backend.decode_compressed(b"image") == (b"image", 4, 3)
@@ -544,3 +545,19 @@ def test_compression_backend_rejects_ffmpeg_arguments() -> None:
 
     with pytest.raises(VideoEncoderError, match="require the ffmpeg-cli backend"):
         backend.create_encoder(4, 4, "nvv4l2h264enc", 28, extra_args=("-preset", "slow"))
+
+
+def test_gstreamer_decode_and_hardware_encode_do_not_need_ffmpeg(monkeypatch):
+    def fail(*_args, **_kwargs):
+        pytest.fail("GStreamer must not discover or download FFmpeg")
+
+    monkeypatch.setattr(portable_ffmpeg, "get_ffmpeg", fail)
+    monkeypatch.setattr(gst.shutil, "which", fail)
+    monkeypatch.setattr(gst, "FFmpegVideoEncoder", fail)
+    encoder = SimpleNamespace()
+    monkeypatch.setattr(gst, "GStreamerVideoEncoder", lambda **_kwargs: encoder)
+    backend = gst.GStreamerCompressionBackend()
+    assert backend.decode_compressed(gst.GSTREAMER_PROBE_JPEG)[1:] == (256, 256)
+    assert backend.create_encoder(256, 256, "nvv4l2h264enc", 28) is encoder
+    with pytest.raises(VideoEncoderError, match="image dimensions"):
+        backend.decode_compressed(b"invalid")

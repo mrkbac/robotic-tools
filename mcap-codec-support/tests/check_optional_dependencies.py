@@ -15,7 +15,12 @@ class Scenario:
 
 
 SCENARIOS = (
-    Scenario(None, "import mcap_codec_support; import mcap_codec_support._schemas"),
+    Scenario(
+        None,
+        "import importlib.util; import mcap_codec_support; "
+        "import mcap_codec_support._schemas; "
+        "assert importlib.util.find_spec('portable_ffmpeg') is None",
+    ),
     Scenario(
         "ros2",
         "import mcap_codec_support; from mcap_ros2_support_fast.decoder import DecoderFactory",
@@ -24,7 +29,8 @@ SCENARIOS = (
         "video",
         "import importlib.util; "
         "from mcap_codec_support.video import VideoDecompressFactory; "
-        "VideoDecompressFactory(); assert importlib.util.find_spec('numpy') is None",
+        "VideoDecompressFactory(); assert importlib.util.find_spec('numpy') is None; "
+        "from portable_ffmpeg import get_ffmpeg; assert callable(get_ffmpeg)",
     ),
     Scenario(
         "pointcloud",

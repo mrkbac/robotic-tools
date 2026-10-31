@@ -39,6 +39,7 @@ video = [
     "mcap-ros2-support-fast",
     "nvidia-nvjpeg==13.0.0.40 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
     "pillow>=10.0",
+    "portable-ffmpeg>=0.3.0",
 ]
 pointcloud = [
     "mcap-ros2-support-fast",

@@ -14,6 +14,7 @@ def test_package_import_does_not_load_optional_dependencies() -> None:
         class BlockOptionalModules(importlib.abc.MetaPathFinder):
             blocked = (
                 "av",
+                "portable_ffmpeg",
                 "DracoPy",
                 "mcap_ros2_support_fast",
                 "numpy",

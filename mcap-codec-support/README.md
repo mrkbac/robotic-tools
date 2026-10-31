@@ -34,6 +34,13 @@ a damaged JPEG cannot consume bytes from the next image. GStreamer validates eac
 JPEG before handing it to the hardware pipeline. Install the `video` extra for all
 three compression backends, including `ffmpeg-cli` and `gstreamer`.
 
+FFmpeg CLI operations prefer `ffmpeg` and `ffprobe` on `PATH`. When missing,
+`portable-ffmpeg` (included in the `video` extra) downloads and caches the binaries
+on first use. The GStreamer hardware path does not discover or download FFmpeg;
+FFmpeg is used only if it needs a software fallback after a hardware failure.
+After both encoders fail, the topic's encoder session reports one error and stops
+encoding until the session is recreated.
+
 Read every supported message type with `small-mcap`:
 
 ```python
