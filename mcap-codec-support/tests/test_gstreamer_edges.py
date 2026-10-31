@@ -510,7 +510,8 @@ def test_compression_backend_delegates_and_falls_back(monkeypatch) -> None:
     assert backend.decode_compressed(b"image") == (b"image", 4, 3)
 
     compressed = SimpleNamespace(
-        decoded_message=SimpleNamespace(data=b"image"), channel=SimpleNamespace(topic="/camera")
+        decoded_message=SimpleNamespace(data=b"image", format=""),
+        channel=SimpleNamespace(topic="/camera"),
     )
     assert backend.decode_image(compressed, "sensor_msgs/CompressedImage") == (b"image", 4, 3)
     assert backend.get_pix_fmt("/camera") is None

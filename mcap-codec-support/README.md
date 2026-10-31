@@ -24,6 +24,16 @@ without loading any codec backend. Install only the capability needed:
 Video, point-cloud, and Draco extras remain separate because their compiled
 dependencies account for most of the download and installed footprint.
 
+JPEG compression inputs are decoded independently with strict PyAV validation.
+Each image uses a fresh decoder and must define the quantization tables its scans
+reference; tables from earlier images are never inherited. Standard MJPEG Huffman
+defaults remain supported.
+Malformed JPEGs raise `CorruptImageError`; missing dependencies and encoder failures
+remain `VideoEncoderError`. The FFmpeg backend receives validated RGB pixels, so
+a damaged JPEG cannot consume bytes from the next image. GStreamer validates each
+JPEG before handing it to the hardware pipeline. Install the `video` extra for all
+three compression backends, including `ffmpeg-cli` and `gstreamer`.
+
 FFmpeg CLI operations prefer `ffmpeg` and `ffprobe` on `PATH`. When missing,
 `portable-ffmpeg` (included in the `video` extra) downloads and caches the binaries
 on first use. The GStreamer hardware path does not discover or download FFmpeg;

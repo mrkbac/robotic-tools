@@ -20,6 +20,18 @@ class VideoEncoderError(Exception):
     """Raised when encoding fails."""
 
 
+class CorruptImageError(VideoEncoderError):
+    """Raised when a compressed image cannot be decoded without corruption."""
+
+
+def validate_jpeg_boundaries(data: bytes, image_format: str) -> None:
+    """Check JPEG boundaries when identified by bytes or the ROS format field."""
+    format_words = image_format.lower().replace(";", " ").split()
+    is_jpeg = data.startswith(b"\xff\xd8") or any(word in {"jpeg", "jpg"} for word in format_words)
+    if is_jpeg and (not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9")):
+        raise CorruptImageError("JPEG is missing its start or end marker")
+
+
 class VideoCodec(str, Enum):
     H264 = "h264"
     H265 = "h265"

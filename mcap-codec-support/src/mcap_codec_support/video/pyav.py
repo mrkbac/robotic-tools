@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 from fractions import Fraction
@@ -14,11 +15,13 @@ from av import Packet, VideoFrame
 from typing_extensions import Self
 
 from mcap_codec_support.video.common import (
+    CorruptImageError,
     DecompressedFrame,
     EncoderConfig,
     VideoEncoderError,
     build_encoder_options,
     raw_image_to_buffer,
+    validate_jpeg_boundaries,
 )
 from mcap_codec_support.video.common import (
     resolve_encoder as _resolve_encoder,
@@ -72,21 +75,19 @@ def resolve_encoder_for_backend(codec: str, backend: str) -> str:
 
 
 class _DecoderLocal(threading.local):
-    """Thread-local persistent codec contexts for JPEG and PNG decoding."""
+    """Thread-local persistent PNG decoder."""
 
-    mjpeg_ctx: VideoCodecContext | None = None
     png_ctx: VideoCodecContext | None = None
 
 
 _decoder_local = _DecoderLocal()
 
 
-def _get_mjpeg_ctx() -> VideoCodecContext:
-    ctx = _decoder_local.mjpeg_ctx
-    if ctx is None:
-        ctx = _create_codec_context("mjpeg", "r")
-        ctx.open()
-        _decoder_local.mjpeg_ctx = ctx
+def _create_mjpeg_ctx() -> VideoCodecContext:
+    # FFmpeg retains JPEG tables across packets, including tables omitted by the next image.
+    ctx = _create_codec_context("mjpeg", "r")
+    ctx.options = {"err_detect": "explode"}
+    ctx.open()
     return ctx
 
 
@@ -120,13 +121,15 @@ def _decode_via_container(data: bytes) -> VideoFrame:
 def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
     """Decode a compressed image (JPEG/PNG) to a VideoFrame.
 
-    Uses persistent thread-local codec contexts for performance.
+    PNG contexts are reused; JPEG images are decoded independently.
     """
     fmt = _detect_image_format(compressed_data)
+    if fmt == "mjpeg":
+        return decode_jpeg_frame(compressed_data)
     if fmt == "unknown":
         return _decode_via_container(compressed_data)
 
-    ctx = _get_mjpeg_ctx() if fmt == "mjpeg" else _get_png_ctx()
+    ctx = _get_png_ctx()
     try:
         for frame in ctx.decode(Packet(compressed_data)):
             return frame
@@ -134,6 +137,78 @@ def decode_compressed_frame(compressed_data: bytes) -> VideoFrame:
         raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
 
     raise VideoEncoderError("Decoder produced no frames")
+
+
+_JPEG_SCAN_MARKER = re.compile(rb"\xff[^\x00\xff\xd0-\xd7]")
+
+
+def _validate_jpeg_quantization_tables(data: bytes) -> None:
+    """Reject undefined DCT tables that FFmpeg silently replaces with zeros."""
+    tables: set[int] = set()
+    components: dict[int, int] = {}
+    offset = 2
+    while offset + 4 <= len(data):
+        if data[offset] != 0xFF:
+            raise CorruptImageError("Invalid JPEG marker")
+        marker = data[offset + 1]
+        if marker == 0xFF:
+            offset += 1
+            continue
+        length = (data[offset + 2] << 8) | data[offset + 3]
+        end = offset + 2 + length
+        if length < 2 or end > len(data):
+            raise CorruptImageError("Invalid JPEG segment length")
+        if marker == 0xDB:  # DQT
+            position = offset + 4
+            while position < end:
+                table = data[position]
+                size = 1 + 64 * (1 + (table >> 4))
+                if table >> 4 > 1 or position + size > end:
+                    raise CorruptImageError("Invalid JPEG quantization table")
+                tables.add(table & 15)
+                position += size
+        elif marker in (0xC0, 0xC1, 0xC2, 0xC5, 0xC6, 0xC9, 0xCA, 0xCD, 0xCE):
+            if length < 8 or length != 8 + 3 * data[offset + 9]:
+                raise CorruptImageError("Invalid JPEG frame header")
+            components = {
+                data[position]: data[position + 2] for position in range(offset + 10, end, 3)
+            }
+        elif marker == 0xDA:  # SOS
+            if length < 6 or length != 6 + 2 * data[offset + 4]:
+                raise CorruptImageError("Invalid JPEG scan header")
+            for component in data[offset + 5 : end - 3 : 2]:
+                if components and components.get(component) not in tables:
+                    raise CorruptImageError("JPEG scan references a missing quantization table")
+            if all(table in tables for table in components.values()):
+                return
+            # Progressive images may define other components' tables between scans.
+            match = _JPEG_SCAN_MARKER.search(data, end)
+            if match is None:
+                break
+            offset = match.start()
+            continue
+        offset = end
+    raise CorruptImageError("Incomplete JPEG quantization tables")
+
+
+def decode_jpeg_frame(data: bytes) -> VideoFrame:
+    """Decode one complete JPEG packet without concealing damaged pixels."""
+    validate_jpeg_boundaries(data, "jpeg")
+    _validate_jpeg_quantization_tables(data)
+
+    try:
+        frames = _create_mjpeg_ctx().decode(Packet(data))
+    except av.error.InvalidDataError as exc:
+        raise CorruptImageError(f"Failed to decode compressed image: {exc}") from exc
+    except av.error.FFmpegError as exc:
+        raise VideoEncoderError(f"Failed to decode compressed image: {exc}") from exc
+
+    if len(frames) != 1:
+        raise CorruptImageError(f"JPEG decoder produced {len(frames)} frames; expected one")
+    frame = frames[0]
+    if frame.is_corrupt:
+        raise CorruptImageError("JPEG decoder returned a corrupt frame")
+    return frame
 
 
 _RAW_IMAGE_FORMATS: dict[str, str] = {
@@ -284,8 +359,8 @@ class VideoEncoder:
         context = self._require_context()
         try:
             packets = list(context.encode(None))
-        except av.error.FFmpegError:
-            return []
+        except av.error.FFmpegError as exc:
+            raise VideoEncoderError(f"Flushing error: {exc}") from exc
         return [bytes(packet) for packet in packets]
 
 

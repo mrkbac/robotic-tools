@@ -550,7 +550,12 @@ def _ensure_release_pkg_cached(
         except ValueError:
             logger.debug(f"Failed to fetch release branch zip from {zip_url}", exc_info=True)
             return None
-        tmp_pkg.replace(pkg_dir)
+        try:
+            tmp_pkg.replace(pkg_dir)
+        except OSError:
+            # Another process may have atomically published the same package.
+            if not pkg_dir.is_dir():
+                raise
     return pkg_dir
 
 

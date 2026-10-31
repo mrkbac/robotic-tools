@@ -285,6 +285,9 @@ class _FakeThread:
     def join(self, timeout: float) -> None:
         pass
 
+    def is_alive(self) -> bool:
+        return False
+
 
 class _FakeStdin:
     def __init__(self) -> None:
@@ -571,6 +574,30 @@ def test_ffmpeg_encoder_close_is_idempotent() -> None:
     encoder.close()
     encoder.close()
     assert process.killed is True
+
+
+@pytest.mark.parametrize("failure", ["reader_timeout", "missing_eof", "process_timeout"])
+def test_ffmpeg_encoder_flush_rejects_incomplete_output(failure, monkeypatch) -> None:
+    encoder = ffmpeg.FFmpegVideoEncoder.__new__(ffmpeg.FFmpegVideoEncoder)
+    encoder._process = _FakeProcess()
+    encoder._stderr_lines = []
+    encoder._stdout_thread = _FakeThread(lambda: None, True)
+    encoder._stderr_thread = _FakeThread(lambda: None, True)
+    encoder._output_queue = Queue()
+    encoder._output_queue.put(b"tail")
+    if failure != "missing_eof":
+        encoder._output_queue.put(None)
+    if failure == "reader_timeout":
+        monkeypatch.setattr(encoder._stdout_thread, "is_alive", lambda: True)
+    elif failure == "process_timeout":
+
+        def timeout(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired("ffmpeg", 10)
+
+        monkeypatch.setattr(encoder._process, "wait", timeout)
+
+    with pytest.raises(VideoEncoderError):
+        encoder.flush_packets()
 
 
 def test_ffmpeg_decompressor_reports_dead_process_pipe() -> None:

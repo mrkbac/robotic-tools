@@ -149,7 +149,7 @@ class TestBackendDecode:
 
     def test_decode_image_jpeg_sets_no_pix_fmt(self) -> None:
         backend = GStreamerCompressionBackend()
-        msg = _FakeDecoded(_FakeImageMsg(PROBE_JPEG), "/cam")
+        msg = _FakeDecoded(_FakeImageMsg(PROBE_JPEG, format="jpeg"), "/cam")
         data, w, h = backend.decode_image(msg, "sensor_msgs/CompressedImage")
         assert data == PROBE_JPEG
         assert (w, h) == (32, 32)

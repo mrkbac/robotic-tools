@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import av
 import mcap_codec_support.video.pyav as pyav_module
 import pytest
-from mcap_codec_support.video.common import DecompressedFrame, VideoEncoderError
+from mcap_codec_support.video.common import (
+    HW_PROBE_JPEG,
+    CorruptImageError,
+    DecompressedFrame,
+    VideoEncoderError,
+)
 
 
 class _FakeContext:
@@ -73,7 +78,7 @@ def test_pyav_resolution_wrappers_delegate(monkeypatch) -> None:
     assert backend_calls[0][:2] == ("h264", "software")
 
 
-def test_image_decoder_contexts_are_thread_local_and_reused(monkeypatch) -> None:
+def test_image_decoder_recreates_jpeg_context_and_reuses_png_context(monkeypatch) -> None:
     created = []
 
     def create(name: str, direction: str):
@@ -82,14 +87,14 @@ def test_image_decoder_contexts_are_thread_local_and_reused(monkeypatch) -> None
         return context
 
     monkeypatch.setattr(pyav_module, "_create_codec_context", create)
-    monkeypatch.setattr(pyav_module._decoder_local, "mjpeg_ctx", None, raising=False)
     monkeypatch.setattr(pyav_module._decoder_local, "png_ctx", None, raising=False)
 
-    mjpeg = pyav_module._get_mjpeg_ctx()
-    assert pyav_module._get_mjpeg_ctx() is mjpeg
+    mjpeg = pyav_module._create_mjpeg_ctx()
+    assert pyav_module._create_mjpeg_ctx() is not mjpeg
+    assert mjpeg.options == {"err_detect": "explode"}
     png = pyav_module._get_png_ctx()
     assert pyav_module._get_png_ctx() is png
-    assert [context.codec for context in created] == ["mjpeg", "png"]
+    assert [context.codec for context in created] == ["mjpeg", "mjpeg", "png"]
 
 
 @pytest.mark.parametrize(
@@ -152,12 +157,12 @@ def test_decode_via_container_rejects_empty_container(monkeypatch) -> None:
 
 
 def test_decode_compressed_frame_uses_jpeg_context(monkeypatch) -> None:
-    frame = object()
+    frame = SimpleNamespace(is_corrupt=False)
     context = _FakeContext("mjpeg", "r")
     context.decode = lambda _packet: [frame]
-    monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
+    monkeypatch.setattr(pyav_module, "_create_mjpeg_ctx", lambda: context)
 
-    assert pyav_module.decode_compressed_frame(b"\xff\xd8jpeg") is frame
+    assert pyav_module.decode_compressed_frame(HW_PROBE_JPEG) is frame
 
 
 def test_decode_compressed_frame_uses_png_context(monkeypatch) -> None:
@@ -167,6 +172,31 @@ def test_decode_compressed_frame_uses_png_context(monkeypatch) -> None:
     monkeypatch.setattr(pyav_module, "_get_png_ctx", lambda: context)
 
     assert pyav_module.decode_compressed_frame(b"\x89PNG\r\n\x1a\nimage") is frame
+
+
+def test_decode_compressed_frame_preserves_png_decoder_error_classification(monkeypatch) -> None:
+    context = _FakeContext("png", "r")
+
+    def decode(_packet):
+        raise av.error.InvalidDataError(1, "bad PNG image")
+
+    context.decode = decode
+    monkeypatch.setattr(pyav_module, "_get_png_ctx", lambda: context)
+
+    with pytest.raises(VideoEncoderError, match="bad PNG image") as error:
+        pyav_module.decode_compressed_frame(b"\x89PNG\r\n\x1a\nbad")
+
+    assert not isinstance(error.value, CorruptImageError)
+
+
+def test_decode_compressed_frame_rejects_png_decoder_without_frames(monkeypatch) -> None:
+    context = _FakeContext("png", "r")
+    monkeypatch.setattr(pyav_module, "_get_png_ctx", lambda: context)
+
+    with pytest.raises(VideoEncoderError, match="Decoder produced no frames") as error:
+        pyav_module.decode_compressed_frame(b"\x89PNG\r\n\x1a\nempty")
+
+    assert not isinstance(error.value, CorruptImageError)
 
 
 def test_decode_compressed_frame_uses_container_for_unknown_format(monkeypatch) -> None:
@@ -183,18 +213,57 @@ def test_decode_compressed_frame_wraps_decoder_error(monkeypatch) -> None:
         raise av.error.InvalidDataError(1, "bad image")
 
     context.decode = decode
-    monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
+    monkeypatch.setattr(pyav_module, "_create_mjpeg_ctx", lambda: context)
 
     with pytest.raises(VideoEncoderError, match="Failed to decode compressed image"):
-        pyav_module.decode_compressed_frame(b"\xff\xd8bad")
+        pyav_module.decode_compressed_frame(HW_PROBE_JPEG)
 
 
 def test_decode_compressed_frame_rejects_decoder_without_frames(monkeypatch) -> None:
     context = _FakeContext("mjpeg", "r")
-    monkeypatch.setattr(pyav_module, "_get_mjpeg_ctx", lambda: context)
+    monkeypatch.setattr(pyav_module, "_create_mjpeg_ctx", lambda: context)
 
-    with pytest.raises(VideoEncoderError, match="Decoder produced no frames"):
-        pyav_module.decode_compressed_frame(b"\xff\xd8empty")
+    with pytest.raises(VideoEncoderError, match="produced 0 frames"):
+        pyav_module.decode_compressed_frame(HW_PROBE_JPEG)
+
+
+@pytest.mark.parametrize("data", [b"\xff\xd8unfinished", b"missing start\xff\xd9"])
+def test_decode_jpeg_frame_rejects_missing_boundaries(data: bytes) -> None:
+    with pytest.raises(CorruptImageError, match="start or end marker"):
+        pyav_module.decode_jpeg_frame(data)
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [[SimpleNamespace(is_corrupt=True)], [SimpleNamespace(is_corrupt=False)] * 2],
+)
+def test_decode_jpeg_frame_rejects_invalid_output(
+    frames,
+    monkeypatch,
+) -> None:
+    context = _FakeContext("mjpeg", "r")
+    context.decode = lambda _packet: frames
+    monkeypatch.setattr(pyav_module, "_create_mjpeg_ctx", lambda: context)
+
+    with pytest.raises(CorruptImageError):
+        pyav_module.decode_jpeg_frame(HW_PROBE_JPEG)
+
+
+def test_decode_jpeg_frame_does_not_classify_decoder_failure_as_corrupt_input(
+    monkeypatch,
+) -> None:
+    context = _FakeContext("mjpeg", "r")
+
+    def decode(_packet):
+        raise av.error.FFmpegError(12, "decoder allocation failed")
+
+    context.decode = decode
+    monkeypatch.setattr(pyav_module, "_create_mjpeg_ctx", lambda: context)
+
+    with pytest.raises(VideoEncoderError, match="decoder allocation failed") as error:
+        pyav_module.decode_jpeg_frame(HW_PROBE_JPEG)
+
+    assert not isinstance(error.value, CorruptImageError)
 
 
 def test_raw_image_to_frame_uses_pyav_stride_without_repacking() -> None:
@@ -295,17 +364,23 @@ def test_video_encoder_wraps_encode_error(monkeypatch) -> None:
         encoder.close()
 
 
-def test_video_encoder_flush_returns_empty_when_context_reports_error(monkeypatch) -> None:
+@pytest.mark.parametrize("error_type", [av.error.InvalidDataError, av.error.FFmpegError])
+def test_video_encoder_wraps_flush_error(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[av.error.FFmpegError]
+) -> None:
     context = _FakeContext("libx264", "w")
 
     def fail_encode(_frame) -> None:
-        raise av.error.InvalidDataError(1, "flush failed")
+        assert _frame is None
+        raise error_type(1, "flush failed")
 
     context.encode = fail_encode
     monkeypatch.setattr(pyav_module, "_create_codec_context", lambda *_args: context)
     encoder = pyav_module.VideoEncoder(16, 16, "libx264")
     try:
-        assert encoder.flush_packets() == []
+        with pytest.raises(VideoEncoderError, match=r"Flushing error:.*flush failed") as error:
+            encoder.flush_packets()
+        assert isinstance(error.value.__cause__, error_type)
     finally:
         encoder.close()
 
@@ -409,3 +484,75 @@ def test_pyav_decompressor_flushes_compressed_pending_frames(monkeypatch) -> Non
     assert decompressor.flush() == [
         DecompressedFrame(data=b"jpeg", width=1, height=1, is_jpeg=True)
     ]
+
+
+def _jpeg_segment(marker: int, payload: bytes) -> bytes:
+    return bytes((0xFF, marker)) + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+@pytest.mark.parametrize("precision", [0, 1])
+def test_validate_jpeg_quantization_tables_accepts_packed_tables_and_marker_fill(
+    precision: int,
+) -> None:
+    table = b"\x01" * 64 if precision == 0 else b"\x00\x01" * 64
+    tables = _jpeg_segment(0xDB, bytes((precision << 4,)) + table + b"\x01" + b"\x02" * 64)
+    frame = _jpeg_segment(0xC0, b"\x08\x00\x01\x00\x01\x02\x01\x11\x00\x02\x11\x01")
+    scan = _jpeg_segment(0xDA, b"\x02\x01\x00\x02\x11\x00\x3f\x00")
+    jpeg = b"\xff\xd8\xff" + tables + frame + scan + b"pixels\xff\xd9"
+    pyav_module._validate_jpeg_quantization_tables(jpeg)
+
+
+@pytest.mark.parametrize("has_later_table", [False, True])
+def test_validate_jpeg_quantization_tables_checks_tables_defined_between_progressive_scans(
+    has_later_table: bool,
+) -> None:
+    table0 = _jpeg_segment(0xDB, b"\x00" + b"\x01" * 64)
+    table1 = _jpeg_segment(0xDB, b"\x01" + b"\x02" * 64) if has_later_table else b""
+    frame = _jpeg_segment(0xC2, b"\x08\x00\x01\x00\x01\x02\x01\x11\x00\x02\x11\x01")
+    scan0 = _jpeg_segment(0xDA, b"\x01\x01\x00\x00\x00\x00")
+    scan1 = _jpeg_segment(0xDA, b"\x01\x02\x11\x00\x00\x00")
+    jpeg = (
+        b"\xff\xd8"
+        + table0
+        + frame
+        + scan0
+        + b"pixels\xff\x00stuffed\xff\xd0restart"
+        + table1
+        + scan1
+        + b"pixels\xff\xd9"
+    )
+    if has_later_table:
+        pyav_module._validate_jpeg_quantization_tables(jpeg)
+    else:
+        with pytest.raises(CorruptImageError, match="missing quantization table"):
+            pyav_module._validate_jpeg_quantization_tables(jpeg)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        b"bad marker",
+        b"\xff\xdb\x00\x01",
+        b"\xff\xdb\xff\xff",
+        _jpeg_segment(0xDB, b"\x00\x01"),
+        _jpeg_segment(0xDB, b"\x20" + b"\x01" * 192),
+        _jpeg_segment(0xC0, b"\x00"),
+        _jpeg_segment(0xC0, b"\x08\x00\x01\x00\x01\x02"),
+        _jpeg_segment(0xDA, b"\x00"),
+        _jpeg_segment(0xDA, b"\x02\x01\x00\x00\x3f\x00"),
+        b"",
+    ],
+)
+def test_validate_jpeg_quantization_tables_rejects_malformed_headers(header: bytes) -> None:
+    with pytest.raises(CorruptImageError):
+        pyav_module._validate_jpeg_quantization_tables(b"\xff\xd8" + header + b"\xff\xd9")
+
+
+def test_validate_jpeg_quantization_tables_rejects_unfinished_progressive_scans() -> None:
+    table = _jpeg_segment(0xDB, b"\x00" + b"\x01" * 64)
+    frame = _jpeg_segment(0xC2, b"\x08\x00\x01\x00\x01\x02\x01\x11\x00\x02\x11\x01")
+    scan = _jpeg_segment(0xDA, b"\x01\x01\x00\x00\x00\x00")
+    with pytest.raises(CorruptImageError, match="Incomplete JPEG"):
+        pyav_module._validate_jpeg_quantization_tables(
+            b"\xff\xd8" + table + frame + scan + b"pixels"
+        )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import shutil
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,11 +12,13 @@ from pymcap_cli.cmd.roscompress_cmd import roscompress
 from pymcap_cli.core import batch as batch_core
 from pymcap_cli.utils import read_info
 
+from tests.fixtures.image_mcap_generator import write_camera_mcap
 from tests.fixtures.mcap_generator import create_multi_topic_mcap
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from av import Packet, VideoFrame
     from pymcap_cli.core.batch import JsonValue
 
 
@@ -30,6 +33,58 @@ def test_roscompress_defaults_to_auto_backend() -> None:
     backend = inspect.signature(roscompress).parameters["backend"]
 
     assert backend.default == "auto"
+
+
+def test_roscompress_cli_pyav_flush_error_preserves_source_and_removes_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    av = pytest.importorskip("av")
+    from mcap_codec_support.video.pyav import VideoEncoder  # noqa: PLC0415 - optional video extra
+
+    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
+    write_camera_mcap(source, ["/CAM_FRONT/image"], 3, width=64, height=48)
+    original = source.read_bytes()
+    require_context = VideoEncoder._require_context
+    packets_emitted = 0
+    flush_attempted = False
+
+    def context_with_failed_flush(encoder: VideoEncoder) -> SimpleNamespace:
+        context = require_context(encoder)
+
+        def encode(frame: VideoFrame | None) -> list[Packet]:
+            nonlocal packets_emitted, flush_attempted
+            if frame is None:
+                flush_attempted = True
+                raise av.error.InvalidDataError(1, "injected flush failure")
+            packets = context.encode(frame)
+            packets_emitted += len(packets)
+            return packets
+
+        return SimpleNamespace(pix_fmt=context.pix_fmt, encode=encode)
+
+    monkeypatch.setattr(VideoEncoder, "_require_context", context_with_failed_flush)
+    with pytest.raises(SystemExit) as error:
+        app(
+            [
+                "roscompress",
+                str(source),
+                "-o",
+                str(output),
+                "--force",
+                "--no-pointcloud",
+                "--backend",
+                "pyav",
+                "--encoder",
+                "libx264",
+                "--delete-source",
+            ]
+        )
+
+    assert flush_attempted
+    assert packets_emitted == 3
+    assert error.value.code == 1
+    assert source.read_bytes() == original
+    assert not output.exists()
 
 
 def test_roscompress_propagates_worker_configuration(
