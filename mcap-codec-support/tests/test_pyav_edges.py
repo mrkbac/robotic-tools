@@ -364,17 +364,23 @@ def test_video_encoder_wraps_encode_error(monkeypatch) -> None:
         encoder.close()
 
 
-def test_video_encoder_flush_returns_empty_when_context_reports_error(monkeypatch) -> None:
+@pytest.mark.parametrize("error_type", [av.error.InvalidDataError, av.error.FFmpegError])
+def test_video_encoder_wraps_flush_error(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[av.error.FFmpegError]
+) -> None:
     context = _FakeContext("libx264", "w")
 
     def fail_encode(_frame) -> None:
-        raise av.error.InvalidDataError(1, "flush failed")
+        assert _frame is None
+        raise error_type(1, "flush failed")
 
     context.encode = fail_encode
     monkeypatch.setattr(pyav_module, "_create_codec_context", lambda *_args: context)
     encoder = pyav_module.VideoEncoder(16, 16, "libx264")
     try:
-        assert encoder.flush_packets() == []
+        with pytest.raises(VideoEncoderError, match=r"Flushing error:.*flush failed") as error:
+            encoder.flush_packets()
+        assert isinstance(error.value.__cause__, error_type)
     finally:
         encoder.close()
 

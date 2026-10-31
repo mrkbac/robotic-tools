@@ -359,8 +359,8 @@ class VideoEncoder:
         context = self._require_context()
         try:
             packets = list(context.encode(None))
-        except av.error.FFmpegError:
-            return []
+        except av.error.FFmpegError as exc:
+            raise VideoEncoderError(f"Flushing error: {exc}") from exc
         return [bytes(packet) for packet in packets]
 
 
