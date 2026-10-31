@@ -872,13 +872,6 @@ def test_find_binary_uses_portable_fallback(monkeypatch, binary, tmp_path):
         assert ffmpeg.find_ffprobe() == str(paths[1])
 
 
-@pytest.mark.parametrize("find_binary", [ffmpeg.find_ffmpeg, ffmpeg.find_ffprobe])
-def test_find_binary_without_system_install_or_portable_dependency(monkeypatch, find_binary):
-    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
-    monkeypatch.setitem(sys.modules, "portable_ffmpeg", None)
-    assert find_binary() is None
-
-
 def test_probe_image_dimensions_can_disable_ffprobe(monkeypatch):
     def fail(_data):
         pytest.fail("GStreamer must not invoke ffprobe")
@@ -909,3 +902,11 @@ def test_find_binary_wraps_portable_download_failure(monkeypatch):
         VideoEncoderError, match="Could not obtain portable FFmpeg: download failed"
     ):
         ffmpeg.find_ffmpeg()
+
+
+def test_find_binary_without_system_or_portable_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setitem(sys.modules, "portable_ffmpeg", None)
+
+    assert ffmpeg.find_ffmpeg() is None
+    assert ffmpeg.find_ffprobe() is None

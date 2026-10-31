@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -50,16 +50,16 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Install JS dependencies
+        run: bun install
+        working-directory: mcap-web-inspector
+
       - name: Install PureINI minimum Rust toolchain
         uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy, rustfmt
 
-      - name: Install JS dependencies
-        run: bun install
-        working-directory: mcap-web-inspector
-
-      - name: Set Python library path for Rust unit tests
+      - name: Expose Python shared library for Rust tests
         run: |
           python_libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
           echo "LD_LIBRARY_PATH=${python_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
