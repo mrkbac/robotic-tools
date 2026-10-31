@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from types import SimpleNamespace
 
+import av
 import mcap_codec_support.video.compression as compression
 import mcap_codec_support.video.ffmpeg as ffmpeg
 import mcap_codec_support.video.gstreamer as gstreamer
@@ -69,6 +70,61 @@ def test_compression_backend_rejects_jpeg_with_bogus_comment_in_entropy(
 
     with pytest.raises(CorruptImageError):
         backend.decode_image(_message(corrupt), "sensor_msgs/CompressedImage")
+
+
+@pytest.mark.parametrize("backend_name", ["pyav", "ffmpeg", "gstreamer"])
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("removed_table", [None, 0, 1])
+def test_compression_backend_rejects_missing_jpeg_quantization_tables(
+    backend_name: str, warm: bool, removed_table: int | None
+) -> None:
+    jpeg, _corrupt = _jpeg_with_truncated_entropy()
+    parts = [jpeg[:2]]
+    offset = 2
+    while jpeg[offset : offset + 2] != b"\xff\xda":
+        length = int.from_bytes(jpeg[offset + 2 : offset + 4], "big") + 2
+        is_removed = jpeg[offset : offset + 2] == b"\xff\xdb" and (
+            removed_table is None or jpeg[offset + 4] & 15 == removed_table
+        )
+        if not is_removed:
+            parts.append(jpeg[offset : offset + length])
+        offset += length
+    corrupt = b"".join(parts) + jpeg[offset:]
+    backends = {
+        "pyav": compression._PyAVCompressionBackend,
+        "ffmpeg": compression._FfmpegCliCompressionBackend,
+        "gstreamer": gstreamer.GStreamerCompressionBackend,
+    }
+    backend = backends[backend_name]()
+    if warm:
+        backend.decode_image(_message(jpeg, topic="/CAM_BACK/image"), "sensor_msgs/CompressedImage")
+    with pytest.raises(CorruptImageError, match="quantization table"):
+        backend.decode_image(_message(corrupt), "sensor_msgs/CompressedImage")
+
+
+@pytest.mark.parametrize("previous_quality", [20, 95])
+def test_decode_jpeg_frame_does_not_inherit_huffman_tables(previous_quality: int) -> None:
+    pixels = bytes((x * 13 + y * 7) % 256 for y in range(48) for x in range(64 * 3))
+    image = Image.frombytes("RGB", (64, 48), pixels)
+    previous = BytesIO()
+    image.save(previous, format="JPEG", quality=previous_quality, optimize=True)
+    current = BytesIO()
+    image.save(current, format="JPEG", quality=75)
+    jpeg = current.getvalue()
+    parts = [jpeg[:2]]
+    offset = 2
+    while jpeg[offset : offset + 2] != b"\xff\xda":
+        length = int.from_bytes(jpeg[offset + 2 : offset + 4], "big") + 2
+        if jpeg[offset : offset + 2] != b"\xff\xc4":
+            parts.append(jpeg[offset : offset + length])
+        offset += length
+    abbreviated = b"".join(parts) + jpeg[offset:]
+    # Camera MJPEG may omit standard Huffman tables; it must use defaults, not a previous image.
+    decoder = av.CodecContext.create("mjpeg", "r")
+    expected = decoder.decode(av.Packet(jpeg))[0].to_image().tobytes()
+    pyav.decode_jpeg_frame(previous.getvalue())
+    actual = pyav.video_frame_to_rgb_bytes(pyav.decode_jpeg_frame(abbreviated))
+    assert actual == expected
 
 
 def test_ffmpeg_backend_decodes_jpegs_before_the_shared_encoder_pipe() -> None:
@@ -494,3 +550,14 @@ def test_compression_module_handles_missing_pillow_resampling(monkeypatch) -> No
     assert compression._PIL_BILINEAR is None
     monkeypatch.setattr(builtins, "__import__", original_import)
     importlib.reload(compression)
+
+
+@pytest.mark.parametrize("mode", ["L", "RGB", "CMYK"])
+@pytest.mark.parametrize("progressive", [False, True])
+def test_decode_jpeg_frame_preserves_valid_image_modes(mode: str, progressive: bool) -> None:
+    image = Image.new(mode, (65, 49))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", progressive=progressive)
+    frame = pyav.decode_jpeg_frame(buffer.getvalue())
+    assert (frame.width, frame.height) == (65, 49)
+    assert not frame.is_corrupt

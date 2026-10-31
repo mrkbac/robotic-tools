@@ -542,8 +542,9 @@ def test_video_processor_corrupt_frames_preserve_buffered_frame_metadata(
 
 
 @pytest.mark.parametrize("backend", [EncoderMode.PYAV, EncoderMode.FFMPEG_CLI])
+@pytest.mark.parametrize("damage", ["entropy", "quantization"])
 def test_video_processor_corrupt_jpeg_between_healthy_images_is_audited_and_dropped(
-    tmp_path: Path, backend: EncoderMode
+    tmp_path: Path, backend: EncoderMode, damage: str
 ) -> None:
     av = pytest.importorskip("av")
     image_module = pytest.importorskip("PIL.Image")
@@ -552,9 +553,14 @@ def test_video_processor_corrupt_jpeg_between_healthy_images_is_audited_and_drop
     ):
         pytest.skip("ffmpeg/libx264 not available")
     images = [_pillow_frame(image_module, _W, _H, index, "JPEG") for index in range(3)]
-    scan = images[1].index(b"\xff\xda")
-    entropy_start = scan + 2 + int.from_bytes(images[1][scan + 2 : scan + 4], "big")
-    images[1] = images[1][: entropy_start + 4] + b"\xff\xd9"
+    if damage == "entropy":
+        scan = images[1].index(b"\xff\xda")
+        entropy_start = scan + 2 + int.from_bytes(images[1][scan + 2 : scan + 4], "big")
+        images[1] = images[1][: entropy_start + 4] + b"\xff\xd9"
+    else:
+        table = images[1].index(b"\xff\xdb")
+        end = table + 2 + int.from_bytes(images[1][table + 2 : table + 4], "big")
+        images[1] = images[1][:table] + images[1][end:]
     src, out = tmp_path / "in.mcap", tmp_path / "out.mcap"
     _write_timestamped_camera(src, n=3, images=images)
     processor = VideoCompressProcessor(encoder="libx264", backend=backend)

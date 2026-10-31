@@ -25,6 +25,9 @@ Video, point-cloud, and Draco extras remain separate because their compiled
 dependencies account for most of the download and installed footprint.
 
 JPEG compression inputs are decoded independently with strict PyAV validation.
+Each image uses a fresh decoder and must define the quantization tables its scans
+reference; tables from earlier images are never inherited. Standard MJPEG Huffman
+defaults remain supported.
 Malformed JPEGs raise `CorruptImageError`; missing dependencies and encoder failures
 remain `VideoEncoderError`. The FFmpeg backend receives validated RGB pixels, so
 a damaged JPEG cannot consume bytes from the next image. GStreamer validates each
