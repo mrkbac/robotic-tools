@@ -1,6 +1,7 @@
 """Hermetic tests for FFmpeg CLI helpers and process lifecycles."""
 
 import subprocess
+import sys
 from queue import Queue
 from types import SimpleNamespace
 
@@ -874,3 +875,11 @@ def test_find_binary_wraps_portable_download_failure(monkeypatch):
         VideoEncoderError, match="Could not obtain portable FFmpeg: download failed"
     ):
         ffmpeg.find_ffmpeg()
+
+
+def test_find_binary_without_system_or_portable_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setitem(sys.modules, "portable_ffmpeg", None)
+
+    assert ffmpeg.find_ffmpeg() is None
+    assert ffmpeg.find_ffprobe() is None
