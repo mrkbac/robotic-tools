@@ -11,7 +11,7 @@ and composes with everything else. The heavy lifting lives in the processors
 import logging
 import re
 import shlex
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -96,12 +96,15 @@ from pymcap_cli.core.processors.base import (
     TopicMatchingProcessor,
 )
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
-from pymcap_cli.utils import output_overwrites_input
+from pymcap_cli.core.rosbag2_layout import expand_bag_paths
+from pymcap_cli.utils import confirm_output_overwrite, output_overwrites_input
 
 if TYPE_CHECKING:
     from small_mcap import Channel, Schema
 
+    from pymcap_cli.core.mcap_processor import ProcessingStats
     from pymcap_cli.core.processors.base import OutputProcessor
+    from pymcap_cli.core.processors.video_compress import DroppedVideoFrame, VideoCompressProcessor
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -182,16 +185,30 @@ class _ProfiledProcessor:
 
 
 @dataclass(frozen=True, slots=True)
-class _RoscompressOptions:
-    defaults: RoscompressConfig
-    video_topic_settings: dict[str, RoscompressConfig]
-    pointcloud_topic_settings: dict[str, RoscompressConfig]
-    topics: tuple[str, ...]
-    excluded_topics: tuple[str, ...]
-    start: str
-    end: str
-    compression_workers: int | None
-    video_decode_workers: int | None
+class RoscompressOptions:
+    """Compression settings and per-topic overrides shared with the CLI."""
+
+    defaults: RoscompressConfig = field(default_factory=RoscompressConfig)
+    video_topic_settings: dict[str, RoscompressConfig] = field(default_factory=dict)
+    pointcloud_topic_settings: dict[str, RoscompressConfig] = field(default_factory=dict)
+    topics: tuple[str, ...] = ()
+    excluded_topics: tuple[str, ...] = ()
+    start: str = ""
+    end: str = ""
+    compression_workers: int | None = None
+    video_decode_workers: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoscompressResult:
+    """Processing statistics and all images intentionally rejected before encoding."""
+
+    stats: "ProcessingStats"
+    dropped_frames: "tuple[DroppedVideoFrame, ...]"
+
+
+class RoscompressError(RuntimeError):
+    """A reported compression or output-validation failure."""
 
 
 class _KeptTopicObserver(InputProcessor):
@@ -443,10 +460,10 @@ def roscompress(
         if output is None:
             logger.error("single-file roscompress requires --output")
             return 1
-        if output_overwrites_input(file, output):
-            logger.error(
-                "Output path is the same file as the input; choose a different output file."
-            )
+        try:
+            _prepare_input_files(file, output)
+        except (OSError, ValueError) as exc:
+            logger.error(str(exc))  # noqa: TRY400
             return 1
 
     if (video_topic_options or ffmpeg_args or video_topic_ffmpeg_args) and image_format != "video":
@@ -476,7 +493,7 @@ def roscompress(
             pointcloud_sort_field=pointcloud_sort_field,
             ffmpeg_args=_parse_ffmpeg_args(ffmpeg_args),
         )
-        options = _RoscompressOptions(
+        options = RoscompressOptions(
             defaults=defaults,
             video_topic_settings=_resolve_video_topic_options(
                 video_topic_options,
@@ -542,14 +559,57 @@ def roscompress(
     )
 
 
+def _prepare_input_files(file: str, output: Path) -> list[str]:
+    """Expand bag inputs and reject an output aliasing any file the processor will read."""
+    files = expand_bag_paths([file])
+    if any(output_overwrites_input(source, output) for source in files):
+        raise ValueError(
+            "Output path is the same file as the input; choose a different output file."
+        )
+    return files
+
+
 def _run_roscompress(
     file: str,
     output: Path,
-    options: _RoscompressOptions,
+    options: RoscompressOptions,
     *,
     force: bool,
     delete_source: bool,
 ) -> int:
+    """Apply CLI overwrite confirmation and map reported failures to an exit status."""
+    try:
+        confirm_output_overwrite(output, force=force)
+    except EOFError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+    try:
+        compress(file, output, options, force=True, delete_source=delete_source)
+    except RoscompressError:
+        return 1
+
+    return 0
+
+
+def compress(
+    file: str,
+    output: Path,
+    options: RoscompressOptions | None = None,
+    *,
+    force: bool = False,
+    delete_source: bool = False,
+) -> RoscompressResult:
+    """Compress one MCAP through the CLI's pipeline and return statistics and drops.
+
+    Reported failures raise RoscompressError, preserving underlying exceptions as causes.
+    Existing output is rejected unless force=True; this function never prompts.
+    Processing exceptions after opening output trigger partial-output cleanup;
+    cleanup failures are logged. Processing-reported errors retain the output.
+    With delete_source=True, validate the completed output before deleting the
+    eligible local source.
+    """
+    files = _prepare_input_files(file, output)
+    options = options or RoscompressOptions()
     defaults = options.defaults
     video_topic_settings = options.video_topic_settings
     pointcloud_topic_settings = options.pointcloud_topic_settings
@@ -561,14 +621,14 @@ def _run_roscompress(
     end = options.end
     cleanup = resolve_cleanup(defaults)
 
-    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
-    assert overwrite_policy is not None  # no_clobber is fixed False here
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=not force)
 
     # Build the transcode processor chain. Constructors do the real work
     # (encoder probing, codec dependency import), so a missing optional
     # dependency or unavailable encoder surfaces here as a clean CLI error.
     extras: list[InputProcessor] = []
     profiled: list[_ProfiledProcessor] = []
+    video_processors: list[VideoCompressProcessor] = []
     try:
         if image_format == "video":
             video_entries = _profile_entries(video_topic_settings, defaults)
@@ -587,6 +647,7 @@ def _run_roscompress(
                     shared_by=video_processor_count,
                     worker_budget=options.video_decode_workers,
                 )
+                video_processors.append(processor)
                 extras.append(processor)
                 profiled.append(_ProfiledProcessor("video", entry.pattern, processor))
         elif image_format in {"jpeg", "png"}:
@@ -620,7 +681,7 @@ def _run_roscompress(
                 )
                 extras.append(processor)
                 profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, processor))
-    except ImportError:
+    except ImportError as exc:
         uses_draco = defaults.pc_format == "draco" or any(
             settings.pc_format == "draco" for settings in pointcloud_topic_settings.values()
         )
@@ -629,10 +690,10 @@ def _run_roscompress(
             f"Optional dependencies are required for this mode. "
             f"Install with: uv add 'pymcap-cli[{extra}]'"
         )
-        return 1
+        raise RoscompressError(str(exc)) from exc
     except VideoEncoderError as exc:
         logger.error(str(exc))  # noqa: TRY400
-        return 1
+        raise RoscompressError(str(exc)) from exc
 
     logger.info(f"Input: {file}")
     logger.info(f"Output: {output}")
@@ -714,7 +775,7 @@ def _run_roscompress(
         )
     except ValueError as exc:
         logger.error(str(exc))  # noqa: TRY400
-        return 1
+        raise RoscompressError(str(exc)) from exc
 
     input_options = InputOptions.from_message_filter(
         message_filter,
@@ -741,19 +802,21 @@ def _run_roscompress(
 
     try:
         result = run_processor(
-            files=[file],
+            files=files,
             output=output,
             input_options=input_options,
             output_options=output_options,
             input_buffer_bytes=_INPUT_BUFFER_BYTES,
+            cleanup_on_error=True,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Error during compression")
-        # A failed run may have truncated/partially written the output; don't
-        # leave a corrupt file behind (the output was opened with an
-        # overwrite/truncate policy, so it is ours to remove).
-        output.unlink(missing_ok=True)
-        return 1
+        raise RoscompressError(str(exc)) from exc
+
+    if processing_had_errors(result.stats):
+        message = "Processing reported errors — source file preserved."
+        logger.error(message)
+        raise RoscompressError(message)
 
     topics_by_kind: dict[str, set[str]] = {}
     for profile in profiled:
@@ -780,22 +843,22 @@ def _run_roscompress(
     stats = result.stats.writer_statistics
     console.print(f"[cyan]Messages written:[/cyan] {stats.message_count:,}")
 
-    input_size = _local_size(file)
+    input_size = sum(_local_size(source) for source in files)
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
 
-    if delete_source:
-        if processing_had_errors(result.stats):
-            logger.error("Processing reported errors — source file preserved.")
-            return 1
-        return finalize_delete_source(
-            sources=[file],
-            outputs=[output],
-            preserved_topic_patterns=[] if start or end else topic or [],
-            lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
-        )
+    if delete_source and finalize_delete_source(
+        sources=files,
+        outputs=[output],
+        preserved_topic_patterns=[] if start or end else topic or [],
+        lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
+    ):
+        raise RoscompressError("Output validation failed; source file preserved.")
 
-    return 0
+    return RoscompressResult(
+        stats=result.stats,
+        dropped_frames=tuple(drop for video in video_processors for drop in video.dropped_frames),
+    )
 
 
 def _local_size(file: str) -> int:

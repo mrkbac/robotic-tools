@@ -3,12 +3,18 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from os import fsdecode
+from os import name as os_name
 from pathlib import Path
 from re import Pattern
+from socket import gethostname
 from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, cast, overload
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
+from urllib.request import url2pathname
 
 if TYPE_CHECKING:
+    from urllib.parse import ParseResult
+
     from _typeshed import WriteableBuffer
 
 from rich import filesize
@@ -551,15 +557,35 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
             raise SystemExit(1)
 
 
+def file_url_to_path(parsed: "ParseResult") -> str:
+    """Decode a file URI, preserving native paths and filename bytes."""
+    path = parsed.path
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        if os_name == "nt":
+            if re.fullmatch(r"[A-Za-z][:|]", parsed.netloc):
+                return url2pathname(f"/{parsed.netloc}{path}")
+            # Native decoders can reinterpret UNC hosts and colons on older Python versions.
+            return fsdecode(unquote_to_bytes(f"//{parsed.netloc}{path}")).replace("/", "\\")
+        if parsed.netloc.lower() != gethostname().lower():
+            raise ValueError("Non-local file URI authorities are only supported on Windows")
+    if os_name == "nt":
+        return url2pathname(path)
+    return fsdecode(unquote_to_bytes(path))
+
+
 def output_overwrites_input(input_path: str, output: Path) -> bool:
-    """Return True if a local ``input_path`` resolves to the same file as ``output``.
+    """Return True if local input and output refer to the same file, including hard links.
 
     Opening such an output with ``"wb"`` truncates the source before it is read,
     destroying the data. URL inputs never collide with a local output.
     """
-    if urlparse(input_path).scheme in ("http", "https"):
+    parsed = urlparse(input_path)
+    if parsed.scheme in ("http", "https"):
         return False
+    input_file = Path(file_url_to_path(parsed) if parsed.scheme == "file" else input_path)
+    if input_file.resolve() == output.resolve():
+        return True
     try:
-        return Path(input_path).resolve() == output.resolve()
-    except OSError:
+        return input_file.samefile(output)
+    except FileNotFoundError:
         return False

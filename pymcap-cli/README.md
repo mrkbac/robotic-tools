@@ -947,6 +947,33 @@ decoder error. Surviving frames keep their own timestamps, including when the
 encoder buffers output. The Python `VideoCompressProcessor.dropped_frames`
 property exposes the same rejected-image records as an immutable tuple.
 
+Python callers can run the same single-file pipeline and receive statistics and
+all dropped-frame records directly:
+
+```python
+from pathlib import Path
+
+from pymcap_cli.cmd.roscompress_cmd import RoscompressConfig, RoscompressOptions, compress
+
+result = compress(
+    "data.mcap",
+    Path("compressed.mcap"),
+    RoscompressOptions(defaults=RoscompressConfig(codec="h265")),
+)
+print(result.stats.writer_statistics.message_count)
+print(result.dropped_frames)
+```
+
+`RoscompressOptions` also accepts per-topic settings, topic/time filters and worker
+budgets. Reported failures raise `RoscompressError`, preserving underlying exceptions
+as causes. Processing exceptions after opening output trigger partial-output cleanup;
+cleanup failures are logged without replacing the original exception. Nonzero
+processing error counters also raise `RoscompressError`, but retain the output for
+inspection. Existing output is rejected unless `force=True`; Python calls never prompt.
+The source is retained by default. Pass `delete_source=True` to apply the CLI's
+existing output validation and source-deletion policy; failed validation preserves
+both source and output. Batch processing remains a CLI policy.
+
 The FFmpeg backend sends validated JPEG pixels as raw video instead of joining
 JPEG byte streams. This requires the `video` extra's PyAV decoder and increases
 pipe traffic; benchmark throughput on the target hardware. GStreamer validates

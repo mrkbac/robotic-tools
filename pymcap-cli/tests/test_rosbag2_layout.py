@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import nturl2path
+from pathlib import Path, PureWindowsPath
 
 import pytest
+from pymcap_cli import utils
 from pymcap_cli.cmd import info_cmd, merge_cmd
 from pymcap_cli.core.input_handler import resolve_mcap_path
 from pymcap_cli.core.rosbag2_layout import (
@@ -15,9 +17,6 @@ from pymcap_cli.core.rosbag2_layout import (
 from pymcap_cli.types.info_data import info_to_dict
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NS_TO_MS = 1_000_000
 
@@ -125,6 +124,25 @@ def test_expand_bag_paths_passes_plain_file_unchanged(tmp_path: Path) -> None:
     f = tmp_path / "rec.mcap"
     f.write_bytes(b"x")
     assert expand_bag_paths([str(f)]) == [str(f)]
+
+
+def test_expand_bag_paths_decodes_file_url_before_expanding(tmp_path: Path) -> None:
+    """An encoded bag URI expands into the local split paths opened by the processor."""
+    bag = _write_bag(tmp_path, "recording #%", [5, 5])
+
+    assert expand_bag_paths([bag.as_uri()]) == [
+        str(bag / f"{bag.name}_0.mcap"),
+        str(bag / f"{bag.name}_1.mcap"),
+    ]
+
+
+def test_expand_bag_paths_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A network authority survives decoding without performing network discovery."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+    monkeypatch.setattr(Path, "is_dir", lambda _path: False)
+    expected = str(PureWindowsPath("//server/share/bag recording"))
+    assert expand_bag_paths(["file://server/share/bag%20recording"]) == [expected]
 
 
 def test_expand_bag_paths_empty_dir_raises(tmp_path: Path) -> None:
