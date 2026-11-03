@@ -5,6 +5,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 import pytest
+from mcap_codec_support.video import VideoEncoderError
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd import roscompress_cmd
 from pymcap_cli.cmd.roscompress_cmd import RoscompressConfig, RoscompressOptions, compress
@@ -236,6 +237,68 @@ def test_compress_rejects_output_aliasing_source(
         compress(str(source), output, force=True)
 
     assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("error_type", "diagnostic"),
+    [
+        (ImportError, "Optional dependencies are required for this mode"),
+        (VideoEncoderError, "injected setup failure"),
+    ],
+)
+def test_compress_reports_processor_setup_errors(
+    simple_mcap: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_type: type[Exception],
+    diagnostic: str,
+) -> None:
+    error = error_type("injected setup failure")
+
+    def fail_setup(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(roscompress_cmd, "create_video_compress_processor", fail_setup)
+    output = tmp_path / "output.mcap"
+
+    with pytest.raises(roscompress_cmd.RoscompressError, match=str(error)) as failure:
+        compress(
+            str(simple_mcap),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(pointcloud=False)),
+        )
+
+    assert failure.value.__cause__ is error
+    caplog.clear()
+    assert roscompress_cmd.roscompress(str(simple_mcap), output, pointcloud=False) == 1
+    assert diagnostic in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+    assert not output.exists()
+
+
+def test_compress_reports_invalid_message_filter(
+    simple_mcap: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    output = tmp_path / "output.mcap"
+    options = RoscompressOptions(
+        defaults=RoscompressConfig(image_format="none", pointcloud=False), start="10", end="10"
+    )
+
+    with pytest.raises(roscompress_cmd.RoscompressError, match="must be less") as failure:
+        compress(str(simple_mcap), output, options)
+
+    assert isinstance(failure.value.__cause__, ValueError)
+    caplog.clear()
+    assert (
+        roscompress_cmd.roscompress(
+            str(simple_mcap), output, image_format="none", pointcloud=False, start="10", end="10"
+        )
+        == 1
+    )
+    assert str(failure.value.__cause__) in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("error_type", [ImportError, ValueError])
