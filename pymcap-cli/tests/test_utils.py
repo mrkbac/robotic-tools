@@ -40,6 +40,15 @@ def test_file_url_to_path_windows_drive_authority(
     assert file_url_to_path(urlparse(uri)) == r"C:\recording.mcap"
 
 
+@pytest.mark.parametrize("colon", [":", "%3A"])
+def test_file_url_to_path_preserves_unc_stream(colon: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy URL decoders must not turn UNC streams into unrelated drive-relative files."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", lambda _path: r"P:other.mcap")
+    uri = f"file://server/share/recording.mcap{colon}other.mcap"
+    assert file_url_to_path(urlparse(uri)) == r"\\server\share\recording.mcap:other.mcap"
+
+
 def test_file_url_to_path_preserves_this_host_unc(monkeypatch: pytest.MonkeyPatch) -> None:
     """A decoder that removes local authorities must still preserve UNC server names."""
     host = gethostname()
