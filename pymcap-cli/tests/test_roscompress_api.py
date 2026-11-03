@@ -436,6 +436,56 @@ def test_compress_preserves_files_when_identity_check_fails(
     assert output.read_bytes() == b"existing output"
 
 
+@pytest.mark.parametrize("file_url", [False, True])
+@pytest.mark.parametrize("split_index", [0, 1])
+@pytest.mark.parametrize("use_cli", [False, True])
+def test_compress_rejects_output_aliasing_bag_split(
+    simple_mcap: Path, tmp_path: Path, file_url: bool, split_index: int, use_cli: bool
+) -> None:
+    """Both entry points protect every split of a path or encoded file-URL bag input."""
+    bag = tmp_path / "recording #%"
+    bag.mkdir()
+    original = simple_mcap.read_bytes()
+    splits = [bag / f"{bag.name}_{index}.mcap" for index in range(2)]
+    for split in splits:
+        split.write_bytes(original)
+    file = bag.as_uri() if file_url else str(bag)
+    output = splits[split_index]
+
+    if use_cli:
+        assert roscompress_cmd.roscompress(file, output, force=True) == 1
+    else:
+        with pytest.raises(ValueError, match="same file as the input"):
+            compress(file, output, force=True)
+
+    assert all(split.read_bytes() == original for split in splits)
+
+
+@pytest.mark.parametrize("delete_source", [False, True])
+def test_compress_file_url_bag_preserves_or_deletes_resolved_splits(
+    simple_mcap: Path, tmp_path: Path, delete_source: bool
+) -> None:
+    """The pipeline and deletion validator use the same expanded local inputs."""
+    bag = tmp_path / "recording #%"
+    bag.mkdir()
+    splits = [bag / f"{bag.name}_{index}.mcap" for index in range(2)]
+    for split in splits:
+        split.write_bytes(simple_mcap.read_bytes())
+    output = tmp_path / "output.mcap"
+
+    result = compress(
+        bag.as_uri(),
+        output,
+        RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+        delete_source=delete_source,
+    )
+
+    assert result.stats.writer_statistics.message_count == 200
+    assert all(split.exists() is not delete_source for split in splits)
+    with output.open("rb") as stream:
+        assert sum(1 for _ in read_message(stream)) == 200
+
+
 @pytest.mark.parametrize(
     ("error_type", "diagnostic"),
     [

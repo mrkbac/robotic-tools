@@ -13,6 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from small_mcap import RebuildInfo, Statistics, Summary
 
@@ -73,18 +74,21 @@ def _is_url(path: str) -> bool:
 def expand_bag_paths(paths: list[str]) -> list[str]:
     """Flat-map input args, splicing rosbag2 directories into their split files.
 
-    URLs and plain files pass through unchanged. A directory expands to its
-    ordered split files (order preserved relative to surrounding args). A
-    directory with no resolvable MCAP raises ``ValueError`` naming it.
+    HTTP URLs and plain files pass through unchanged. File URLs are decoded before
+    directory expansion. A directory expands to its ordered split files (order
+    preserved relative to surrounding args). A directory with no resolvable MCAP
+    raises ``ValueError`` naming it.
     """
     expanded: list[str] = []
     for path in paths:
         if _is_url(path):
             expanded.append(path)
             continue
-        candidate = Path(path)
+        parsed = urlparse(path)
+        local_path = url2pathname(parsed.path) if parsed.scheme == "file" else path
+        candidate = Path(local_path)
         if not candidate.is_dir():
-            expanded.append(path)
+            expanded.append(local_path)
             continue
         splits = find_bag_splits(candidate)
         if not splits:

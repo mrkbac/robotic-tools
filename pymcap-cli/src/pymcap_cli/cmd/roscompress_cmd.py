@@ -96,6 +96,7 @@ from pymcap_cli.core.processors.base import (
     TopicMatchingProcessor,
 )
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
+from pymcap_cli.core.rosbag2_layout import expand_bag_paths
 from pymcap_cli.utils import confirm_output_overwrite, output_overwrites_input
 
 if TYPE_CHECKING:
@@ -459,10 +460,10 @@ def roscompress(
         if output is None:
             logger.error("single-file roscompress requires --output")
             return 1
-        if output_overwrites_input(file, output):
-            logger.error(
-                "Output path is the same file as the input; choose a different output file."
-            )
+        try:
+            _prepare_input_files(file, output)
+        except (OSError, ValueError) as exc:
+            logger.error(str(exc))  # noqa: TRY400
             return 1
 
     if (video_topic_options or ffmpeg_args or video_topic_ffmpeg_args) and image_format != "video":
@@ -558,6 +559,16 @@ def roscompress(
     )
 
 
+def _prepare_input_files(file: str, output: Path) -> list[str]:
+    """Expand bag inputs and reject an output aliasing any file the processor will read."""
+    files = expand_bag_paths([file])
+    if any(output_overwrites_input(source, output) for source in files):
+        raise ValueError(
+            "Output path is the same file as the input; choose a different output file."
+        )
+    return files
+
+
 def _run_roscompress(
     file: str,
     output: Path,
@@ -597,10 +608,7 @@ def compress(
     With delete_source=True, validate the completed output before deleting the
     eligible local source.
     """
-    if output_overwrites_input(file, output):
-        raise ValueError(
-            "Output path is the same file as the input; choose a different output file."
-        )
+    files = _prepare_input_files(file, output)
     options = options or RoscompressOptions()
     defaults = options.defaults
     video_topic_settings = options.video_topic_settings
@@ -794,7 +802,7 @@ def compress(
 
     try:
         result = run_processor(
-            files=[file],
+            files=files,
             output=output,
             input_options=input_options,
             output_options=output_options,
@@ -835,12 +843,12 @@ def compress(
     stats = result.stats.writer_statistics
     console.print(f"[cyan]Messages written:[/cyan] {stats.message_count:,}")
 
-    input_size = _local_size(file)
+    input_size = sum(_local_size(source) for source in files)
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
 
     if delete_source and finalize_delete_source(
-        sources=[file],
+        sources=files,
         outputs=[output],
         preserved_topic_patterns=[] if start or end else topic or [],
         lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],

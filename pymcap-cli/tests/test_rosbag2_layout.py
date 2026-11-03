@@ -127,6 +127,16 @@ def test_expand_bag_paths_passes_plain_file_unchanged(tmp_path: Path) -> None:
     assert expand_bag_paths([str(f)]) == [str(f)]
 
 
+def test_expand_bag_paths_decodes_file_url_before_expanding(tmp_path: Path) -> None:
+    """An encoded bag URI expands into the local split paths opened by the processor."""
+    bag = _write_bag(tmp_path, "recording #%", [5, 5])
+
+    assert expand_bag_paths([bag.as_uri()]) == [
+        str(bag / f"{bag.name}_0.mcap"),
+        str(bag / f"{bag.name}_1.mcap"),
+    ]
+
+
 def test_expand_bag_paths_empty_dir_raises(tmp_path: Path) -> None:
     bag = tmp_path / "rec"
     bag.mkdir()
