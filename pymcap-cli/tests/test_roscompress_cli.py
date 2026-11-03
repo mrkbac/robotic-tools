@@ -91,12 +91,12 @@ def test_roscompress_propagates_worker_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: list[roscompress_cmd._RoscompressOptions] = []
+    captured: list[roscompress_cmd.RoscompressOptions] = []
 
     def fake_run(
         _file: str,
         _output: Path,
-        options: roscompress_cmd._RoscompressOptions,
+        options: roscompress_cmd.RoscompressOptions,
         *,
         force: bool,
         delete_source: bool,

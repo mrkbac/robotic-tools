@@ -11,7 +11,7 @@ and composes with everything else. The heavy lifting lives in the processors
 import logging
 import re
 import shlex
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -101,7 +101,9 @@ from pymcap_cli.utils import output_overwrites_input
 if TYPE_CHECKING:
     from small_mcap import Channel, Schema
 
+    from pymcap_cli.core.mcap_processor import ProcessingStats
     from pymcap_cli.core.processors.base import OutputProcessor
+    from pymcap_cli.core.processors.video_compress import DroppedVideoFrame, VideoCompressProcessor
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -182,16 +184,26 @@ class _ProfiledProcessor:
 
 
 @dataclass(frozen=True, slots=True)
-class _RoscompressOptions:
-    defaults: RoscompressConfig
-    video_topic_settings: dict[str, RoscompressConfig]
-    pointcloud_topic_settings: dict[str, RoscompressConfig]
-    topics: tuple[str, ...]
-    excluded_topics: tuple[str, ...]
-    start: str
-    end: str
-    compression_workers: int | None
-    video_decode_workers: int | None
+class RoscompressOptions:
+    """Compression settings and per-topic overrides shared with the CLI."""
+
+    defaults: RoscompressConfig = field(default_factory=RoscompressConfig)
+    video_topic_settings: dict[str, RoscompressConfig] = field(default_factory=dict)
+    pointcloud_topic_settings: dict[str, RoscompressConfig] = field(default_factory=dict)
+    topics: tuple[str, ...] = ()
+    excluded_topics: tuple[str, ...] = ()
+    start: str = ""
+    end: str = ""
+    compression_workers: int | None = None
+    video_decode_workers: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoscompressResult:
+    """Processing statistics and all images intentionally rejected before encoding."""
+
+    stats: "ProcessingStats"
+    dropped_frames: "tuple[DroppedVideoFrame, ...]"
 
 
 class _KeptTopicObserver(InputProcessor):
@@ -476,7 +488,7 @@ def roscompress(
             pointcloud_sort_field=pointcloud_sort_field,
             ffmpeg_args=_parse_ffmpeg_args(ffmpeg_args),
         )
-        options = _RoscompressOptions(
+        options = RoscompressOptions(
             defaults=defaults,
             video_topic_settings=_resolve_video_topic_options(
                 video_topic_options,
@@ -545,11 +557,63 @@ def roscompress(
 def _run_roscompress(
     file: str,
     output: Path,
-    options: _RoscompressOptions,
+    options: RoscompressOptions,
     *,
     force: bool,
     delete_source: bool,
 ) -> int:
+    try:
+        result = compress(file, output, options, force=force)
+    except ImportError:
+        uses_draco = options.defaults.pc_format == "draco" or any(
+            settings.pc_format == "draco" for settings in options.pointcloud_topic_settings.values()
+        )
+        extra = "draco" if uses_draco else "pointcloud"
+        logger.error(  # noqa: TRY400
+            f"Optional dependencies are required for this mode. "
+            f"Install with: uv add 'pymcap-cli[{extra}]'"
+        )
+        return 1
+    except (VideoEncoderError, ValueError) as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+    except Exception:
+        logger.exception("Error during compression")
+        return 1
+
+    if delete_source:
+        if processing_had_errors(result.stats):
+            logger.error("Processing reported errors — source file preserved.")
+            return 1
+        return finalize_delete_source(
+            sources=[file],
+            outputs=[output],
+            preserved_topic_patterns=[] if options.start or options.end else list(options.topics),
+            lossy_topic_patterns=[".*"]
+            if options.start or options.end
+            else list(options.excluded_topics),
+        )
+
+    return 0
+
+
+def compress(
+    file: str,
+    output: Path,
+    options: RoscompressOptions | None = None,
+    *,
+    force: bool = False,
+) -> RoscompressResult:
+    """Compress one MCAP through the CLI's pipeline and return statistics and drops.
+
+    Errors propagate to the caller; a failed processing run removes its partial output.
+    The source is never deleted. Batch processing and source deletion remain CLI policies.
+    """
+    if output_overwrites_input(file, output):
+        raise ValueError(
+            "Output path is the same file as the input; choose a different output file."
+        )
+    options = options or RoscompressOptions()
     defaults = options.defaults
     video_topic_settings = options.video_topic_settings
     pointcloud_topic_settings = options.pointcloud_topic_settings
@@ -569,70 +633,58 @@ def _run_roscompress(
     # dependency or unavailable encoder surfaces here as a clean CLI error.
     extras: list[InputProcessor] = []
     profiled: list[_ProfiledProcessor] = []
-    try:
-        if image_format == "video":
-            video_entries = _profile_entries(video_topic_settings, defaults)
-            video_processor_count = sum(
-                entry.settings.image_format == "video" for entry in video_entries
+    video_processors: list[VideoCompressProcessor] = []
+    if image_format == "video":
+        video_entries = _profile_entries(video_topic_settings, defaults)
+        video_processor_count = sum(
+            entry.settings.image_format == "video" for entry in video_entries
+        )
+        for entry in video_entries:
+            if entry.settings.image_format == "none":
+                observer = _KeptTopicObserver(entry.topics, _VIDEO_INPUT_SCHEMAS)
+                extras.append(observer)
+                profiled.append(_ProfiledProcessor("video", entry.pattern, observer))
+                continue
+            processor = create_video_compress_processor(
+                entry.settings,
+                topics=entry.topics,
+                shared_by=video_processor_count,
+                worker_budget=options.video_decode_workers,
             )
-            for entry in video_entries:
-                if entry.settings.image_format == "none":
-                    observer = _KeptTopicObserver(entry.topics, _VIDEO_INPUT_SCHEMAS)
-                    extras.append(observer)
-                    profiled.append(_ProfiledProcessor("video", entry.pattern, observer))
-                    continue
-                processor = create_video_compress_processor(
-                    entry.settings,
-                    topics=entry.topics,
-                    shared_by=video_processor_count,
-                    worker_budget=options.video_decode_workers,
-                )
-                extras.append(processor)
-                profiled.append(_ProfiledProcessor("video", entry.pattern, processor))
-        elif image_format in {"jpeg", "png"}:
-            extras.append(create_image_processor(defaults))
+            video_processors.append(processor)
+            extras.append(processor)
+            profiled.append(_ProfiledProcessor("video", entry.pattern, processor))
+    elif image_format in {"jpeg", "png"}:
+        extras.append(create_image_processor(defaults))
 
-        if not pointcloud:
-            cleanup_only = create_pointcloud_cleanup_processor(defaults)
-            if cleanup_only is not None:
-                extras.append(cleanup_only)
-        else:
-            pointcloud_entries = _profile_entries(pointcloud_topic_settings, defaults)
-            workers = pointcloud_worker_count()
-            for entry in pointcloud_entries:
-                if not entry.settings.pointcloud:
-                    observer = _KeptTopicObserver(entry.topics, _POINTCLOUD_INPUT_SCHEMAS)
-                    extras.append(observer)
-                    profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, observer))
-                    continue
-                # Cloudini fuses cleanup into its native encode; every other
-                # format needs the standalone pass ahead of its compressor.
-                if not fuses_cloudini_cleanup(entry.settings):
-                    cleanup_processor = create_pointcloud_cleanup_processor(
-                        defaults, topics=entry.topics
-                    )
-                    if cleanup_processor is not None:
-                        extras.append(cleanup_processor)
-                processor = create_pointcloud_compress_processor(
-                    entry.settings,
-                    workers=workers,
-                    topics=entry.topics,
+    if not pointcloud:
+        cleanup_only = create_pointcloud_cleanup_processor(defaults)
+        if cleanup_only is not None:
+            extras.append(cleanup_only)
+    else:
+        pointcloud_entries = _profile_entries(pointcloud_topic_settings, defaults)
+        workers = pointcloud_worker_count()
+        for entry in pointcloud_entries:
+            if not entry.settings.pointcloud:
+                observer = _KeptTopicObserver(entry.topics, _POINTCLOUD_INPUT_SCHEMAS)
+                extras.append(observer)
+                profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, observer))
+                continue
+            # Cloudini fuses cleanup into its native encode; every other
+            # format needs the standalone pass ahead of its compressor.
+            if not fuses_cloudini_cleanup(entry.settings):
+                cleanup_processor = create_pointcloud_cleanup_processor(
+                    defaults, topics=entry.topics
                 )
-                extras.append(processor)
-                profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, processor))
-    except ImportError:
-        uses_draco = defaults.pc_format == "draco" or any(
-            settings.pc_format == "draco" for settings in pointcloud_topic_settings.values()
-        )
-        extra = "draco" if uses_draco else "pointcloud"
-        logger.error(  # noqa: TRY400
-            f"Optional dependencies are required for this mode. "
-            f"Install with: uv add 'pymcap-cli[{extra}]'"
-        )
-        return 1
-    except VideoEncoderError as exc:
-        logger.error(str(exc))  # noqa: TRY400
-        return 1
+                if cleanup_processor is not None:
+                    extras.append(cleanup_processor)
+            processor = create_pointcloud_compress_processor(
+                entry.settings,
+                workers=workers,
+                topics=entry.topics,
+            )
+            extras.append(processor)
+            profiled.append(_ProfiledProcessor("point-cloud", entry.pattern, processor))
 
     logger.info(f"Input: {file}")
     logger.info(f"Output: {output}")
@@ -704,17 +756,13 @@ def _run_roscompress(
     else:
         logger.info("Point cloud cleanup: disabled")
 
-    try:
-        message_filter = create_message_filter(
-            topic=topic,
-            exclude_topic=exclude_topic,
-            start=start,
-            end=end,
-            early_bail=False,
-        )
-    except ValueError as exc:
-        logger.error(str(exc))  # noqa: TRY400
-        return 1
+    message_filter = create_message_filter(
+        topic=topic,
+        exclude_topic=exclude_topic,
+        start=start,
+        end=end,
+        early_bail=False,
+    )
 
     input_options = InputOptions.from_message_filter(
         message_filter,
@@ -748,12 +796,11 @@ def _run_roscompress(
             input_buffer_bytes=_INPUT_BUFFER_BYTES,
         )
     except Exception:
-        logger.exception("Error during compression")
         # A failed run may have truncated/partially written the output; don't
         # leave a corrupt file behind (the output was opened with an
         # overwrite/truncate policy, so it is ours to remove).
         output.unlink(missing_ok=True)
-        return 1
+        raise
 
     topics_by_kind: dict[str, set[str]] = {}
     for profile in profiled:
@@ -784,18 +831,10 @@ def _run_roscompress(
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
 
-    if delete_source:
-        if processing_had_errors(result.stats):
-            logger.error("Processing reported errors — source file preserved.")
-            return 1
-        return finalize_delete_source(
-            sources=[file],
-            outputs=[output],
-            preserved_topic_patterns=[] if start or end else topic or [],
-            lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
-        )
-
-    return 0
+    return RoscompressResult(
+        stats=result.stats,
+        dropped_frames=tuple(drop for video in video_processors for drop in video.dropped_frames),
+    )
 
 
 def _local_size(file: str) -> int:
