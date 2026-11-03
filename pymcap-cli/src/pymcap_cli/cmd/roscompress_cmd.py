@@ -207,7 +207,7 @@ class RoscompressResult:
 
 
 class RoscompressError(RuntimeError):
-    """A reported compression failure, with the original exception as its cause."""
+    """A reported compression or output-validation failure."""
 
 
 class _KeptTopicObserver(InputProcessor):
@@ -567,22 +567,9 @@ def _run_roscompress(
     delete_source: bool,
 ) -> int:
     try:
-        result = compress(file, output, options, force=force)
+        compress(file, output, options, force=force, delete_source=delete_source)
     except RoscompressError:
         return 1
-
-    if delete_source:
-        if processing_had_errors(result.stats):
-            logger.error("Processing reported errors — source file preserved.")
-            return 1
-        return finalize_delete_source(
-            sources=[file],
-            outputs=[output],
-            preserved_topic_patterns=[] if options.start or options.end else list(options.topics),
-            lossy_topic_patterns=[".*"]
-            if options.start or options.end
-            else list(options.excluded_topics),
-        )
 
     return 0
 
@@ -593,12 +580,13 @@ def compress(
     options: RoscompressOptions | None = None,
     *,
     force: bool = False,
+    delete_source: bool = False,
 ) -> RoscompressResult:
     """Compress one MCAP through the CLI's pipeline and return statistics and drops.
 
-    Reported failures raise RoscompressError with their original exception as the cause.
-    A failed processing run removes its partial output.
-    The source is never deleted. Batch processing and source deletion remain CLI policies.
+    Reported failures raise RoscompressError, preserving underlying exceptions as causes.
+    A failed processing run removes its partial output. With delete_source=True,
+    validate the completed output before deleting the eligible local source.
     """
     if output_overwrites_input(file, output):
         raise ValueError(
@@ -840,6 +828,19 @@ def compress(
     input_size = _local_size(file)
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
+
+    if delete_source:
+        if processing_had_errors(result.stats):
+            message = "Processing reported errors — source file preserved."
+            logger.error(message)
+            raise RoscompressError(message)
+        if finalize_delete_source(
+            sources=[file],
+            outputs=[output],
+            preserved_topic_patterns=[] if start or end else topic or [],
+            lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
+        ):
+            raise RoscompressError("Output validation failed; source file preserved.")
 
     return RoscompressResult(
         stats=result.stats,

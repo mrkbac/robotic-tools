@@ -31,6 +31,91 @@ def test_compress_returns_stats_and_empty_drops(simple_mcap: Path, tmp_path: Pat
     assert result.stats.writer_statistics.message_count == 100
     assert result.stats.errors_encountered == 0
     assert result.dropped_frames == ()
+    assert simple_mcap.exists()
+    with output.open("rb") as stream:
+        assert sum(1 for _ in read_message(stream)) == 100
+
+
+def test_compress_deletes_source_after_validating_output(simple_mcap: Path, tmp_path: Path) -> None:
+    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
+    source.write_bytes(simple_mcap.read_bytes())
+
+    result = compress(
+        str(source),
+        output,
+        RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+        delete_source=True,
+    )
+
+    assert not source.exists()
+    assert result.stats.writer_statistics.message_count == 100
+    assert result.dropped_frames == ()
+    with output.open("rb") as stream:
+        assert sum(1 for _ in read_message(stream)) == 100
+
+
+def test_compress_preserves_source_and_output_when_deletion_validation_fails(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
+    original = simple_mcap.read_bytes()
+    source.write_bytes(original)
+    run_processor = roscompress_cmd.run_processor
+
+    def lose_output_messages(**kwargs):
+        result = run_processor(**kwargs)
+        with output.open("wb") as stream:
+            writer = McapWriter(stream)
+            writer.start(profile="ros2")
+            writer.finish()
+        return result
+
+    monkeypatch.setattr(roscompress_cmd, "run_processor", lose_output_messages)
+
+    with pytest.raises(roscompress_cmd.RoscompressError):
+        compress(
+            str(source),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+            delete_source=True,
+        )
+
+    assert source.read_bytes() == original
+    with output.open("rb") as stream:
+        assert list(read_message(stream)) == []
+
+
+@pytest.mark.parametrize("error_field", ["errors_encountered", "validation_errors"])
+def test_compress_preserves_source_when_processing_reports_errors(
+    simple_mcap: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_field: str,
+) -> None:
+    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
+    original = simple_mcap.read_bytes()
+    source.write_bytes(original)
+    run_processor = roscompress_cmd.run_processor
+
+    def report_processing_error(**kwargs):
+        result = run_processor(**kwargs)
+        if error_field == "errors_encountered":
+            result.stats.errors_encountered = 1
+        else:
+            result.stats.validation_errors = 1
+        return result
+
+    monkeypatch.setattr(roscompress_cmd, "run_processor", report_processing_error)
+
+    with pytest.raises(roscompress_cmd.RoscompressError, match="Processing reported errors"):
+        compress(
+            str(source),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+            delete_source=True,
+        )
+
+    assert source.read_bytes() == original
     with output.open("rb") as stream:
         assert sum(1 for _ in read_message(stream)) == 100
 
@@ -106,11 +191,13 @@ def test_compress_collects_dropped_frames_across_video_profiles(tmp_path: Path) 
         ) == sorted((topic, timestamp) for topic in topics for timestamp in [1_000_000, 1_000_200])
 
 
+@pytest.mark.parametrize("delete_source", [False, True])
 def test_compress_propagates_failure_and_removes_partial_output(
-    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delete_source: bool
 ) -> None:
-    output = tmp_path / "output.mcap"
+    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
     original = simple_mcap.read_bytes()
+    source.write_bytes(original)
 
     def fail_processing(**_kwargs) -> None:
         output.write_bytes(b"partial output")
@@ -122,13 +209,14 @@ def test_compress_propagates_failure_and_removes_partial_output(
         roscompress_cmd.RoscompressError, match="injected processing failure"
     ) as failure:
         compress(
-            str(simple_mcap),
+            str(source),
             output,
             RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+            delete_source=delete_source,
         )
 
     assert isinstance(failure.value.__cause__, RuntimeError)
-    assert simple_mcap.read_bytes() == original
+    assert source.read_bytes() == original
     assert not output.exists()
 
 
