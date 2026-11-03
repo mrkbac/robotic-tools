@@ -566,6 +566,7 @@ def _run_roscompress(
     force: bool,
     delete_source: bool,
 ) -> int:
+    """Apply CLI overwrite confirmation and map reported failures to an exit status."""
     try:
         confirm_output_overwrite(output, force=force)
     except EOFError as exc:

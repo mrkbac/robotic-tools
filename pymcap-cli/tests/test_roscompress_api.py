@@ -18,11 +18,15 @@ from tests.fixtures.image_mcap_generator import (
 )
 
 
-def test_compress_returns_stats_and_empty_drops(simple_mcap: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("file_url", [False, True])
+def test_compress_returns_stats_and_empty_drops(
+    simple_mcap: Path, tmp_path: Path, file_url: bool
+) -> None:
+    """Local paths and file URLs expose the same statistics without changing the source."""
     output = tmp_path / "output.mcap"
 
     result = compress(
-        str(simple_mcap),
+        f"file://{simple_mcap}" if file_url else str(simple_mcap),
         output,
         RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
     )
@@ -36,6 +40,7 @@ def test_compress_returns_stats_and_empty_drops(simple_mcap: Path, tmp_path: Pat
 
 
 def test_compress_deletes_source_after_validating_output(simple_mcap: Path, tmp_path: Path) -> None:
+    """Opting into deletion removes the source only after validating the written messages."""
     source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
     source.write_bytes(simple_mcap.read_bytes())
 
@@ -93,12 +98,14 @@ def test_compress_preserves_source_when_processing_reports_errors(
     error_field: str,
     delete_source: bool,
 ) -> None:
+    """Reported read or validation errors fail API and CLI calls without deleting source."""
     source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
     original = simple_mcap.read_bytes()
     source.write_bytes(original)
     run_processor = roscompress_cmd.run_processor
 
     def report_processing_error(**kwargs):
+        """Return a real completed run with an injected error counter."""
         result = run_processor(**kwargs)
         if error_field == "errors_encountered":
             result.stats.errors_encountered = 1
@@ -135,6 +142,7 @@ def test_compress_preserves_source_when_processing_reports_errors(
 
 
 def test_compress_collects_dropped_frames_across_video_profiles(tmp_path: Path) -> None:
+    """Drops from separate profiles retain source identities and surviving timestamps."""
     pytest.importorskip("av")
     pytest.importorskip("PIL.Image")
     source, output = tmp_path / "input.mcap", tmp_path / "output.mcap"
@@ -247,6 +255,7 @@ def test_compress_preserves_processing_exception_when_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """An unlink failure is logged while the API preserves the processing cause."""
     output = tmp_path / "output.mcap"
     error = RuntimeError("injected processing failure")
     original_unlink = Path.unlink
@@ -256,6 +265,7 @@ def test_compress_preserves_processing_exception_when_cleanup_fails(
         raise error
 
     def fail_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        """Deny cleanup only for this output, leaving unrelated paths usable."""
         if path == output:
             raise PermissionError("cleanup denied")
         original_unlink(path, missing_ok=missing_ok)
@@ -337,6 +347,7 @@ def test_compress_preserves_existing_output_when_input_cannot_open(tmp_path: Pat
 def test_compress_overwrites_existing_output_when_authorized(
     simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_cli: bool
 ) -> None:
+    """Explicit API force and an affirmative CLI prompt both authorize overwriting."""
     output = tmp_path / "output.mcap"
     output.write_bytes(b"existing output")
     monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
@@ -361,9 +372,11 @@ def test_compress_overwrites_existing_output_when_authorized(
 
 
 @pytest.mark.parametrize("symlink", [False, True])
+@pytest.mark.parametrize("file_url", [False, True])
 def test_compress_rejects_output_aliasing_source(
-    simple_mcap: Path, tmp_path: Path, symlink: bool
+    simple_mcap: Path, tmp_path: Path, symlink: bool, file_url: bool
 ) -> None:
+    """Same-path and symlink outputs must be rejected even with forced overwriting."""
     source = tmp_path / "source.mcap"
     original = simple_mcap.read_bytes()
     source.write_bytes(original)
@@ -373,21 +386,26 @@ def test_compress_rejects_output_aliasing_source(
         output.symlink_to(source)
 
     with pytest.raises(ValueError, match="same file as the input"):
-        compress(str(source), output, force=True)
+        compress(f"file://{source}" if file_url else str(source), output, force=True)
 
     assert source.read_bytes() == original
 
 
-def test_compress_rejects_output_hard_linked_to_source(simple_mcap: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("file_url", [False, True])
+def test_compress_rejects_output_hard_linked_to_source(
+    simple_mcap: Path, tmp_path: Path, file_url: bool
+) -> None:
+    """API and CLI calls reject hard links before either name can truncate the source."""
     source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
     original = simple_mcap.read_bytes()
     source.write_bytes(original)
     output.hardlink_to(source)
+    file = f"file://{source}" if file_url else str(source)
 
     with pytest.raises(ValueError, match="same file as the input"):
-        compress(str(source), output, force=True)
+        compress(file, output, force=True)
 
-    assert roscompress_cmd.roscompress(str(source), output, force=True) == 1
+    assert roscompress_cmd.roscompress(file, output, force=True) == 1
     assert source.read_bytes() == original
     assert output.read_bytes() == original
 
@@ -431,6 +449,7 @@ def test_compress_reports_processor_setup_errors(
     error_type: type[Exception],
     diagnostic: str,
 ) -> None:
+    """Expected setup failures preserve their cause and the concise CLI diagnostic."""
     error = error_type("injected setup failure")
 
     def fail_setup(*_args, **_kwargs) -> None:
@@ -457,6 +476,7 @@ def test_compress_reports_processor_setup_errors(
 def test_compress_reports_invalid_message_filter(
     simple_mcap: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Invalid time bounds raise a chained API error and a traceback-free CLI failure."""
     output = tmp_path / "output.mcap"
     options = RoscompressOptions(
         defaults=RoscompressConfig(image_format="none", pointcloud=False), start="10", end="10"
@@ -486,6 +506,8 @@ def test_cli_processing_errors_keep_processing_diagnostic(
     caplog: pytest.LogCaptureFixture,
     error_type: type[Exception],
 ) -> None:
+    """Processing exceptions keep the processing diagnostic regardless of their type."""
+
     def fail_processing(**_kwargs) -> None:
         raise error_type("injected processing failure")
 

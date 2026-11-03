@@ -38,6 +38,7 @@ def test_roscompress_defaults_to_auto_backend() -> None:
 def test_roscompress_cli_pyav_flush_error_preserves_source_and_removes_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A delayed encoder flush failure fails the CLI and preserves the original source."""
     av = pytest.importorskip("av")
     from mcap_codec_support.video.pyav import VideoEncoder  # noqa: PLC0415 - optional video extra
 
@@ -49,9 +50,11 @@ def test_roscompress_cli_pyav_flush_error_preserves_source_and_removes_output(
     flush_attempted = False
 
     def context_with_failed_flush(encoder: VideoEncoder) -> SimpleNamespace:
+        """Keep normal frame encoding while injecting a failure at final flush."""
         context = require_context(encoder)
 
         def encode(frame: VideoFrame | None) -> list[Packet]:
+            """Encode input frames normally and fail when asked to flush delayed packets."""
             nonlocal packets_emitted, flush_attempted
             if frame is None:
                 flush_attempted = True

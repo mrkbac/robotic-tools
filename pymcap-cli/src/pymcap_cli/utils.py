@@ -557,9 +557,10 @@ def output_overwrites_input(input_path: str, output: Path) -> bool:
     Opening such an output with ``"wb"`` truncates the source before it is read,
     destroying the data. URL inputs never collide with a local output.
     """
-    if urlparse(input_path).scheme in ("http", "https"):
+    parsed = urlparse(input_path)
+    if parsed.scheme in ("http", "https"):
         return False
-    input_file = Path(input_path)
+    input_file = Path(parsed.path if parsed.scheme == "file" else input_path)
     if input_file.resolve() == output.resolve():
         return True
     try:

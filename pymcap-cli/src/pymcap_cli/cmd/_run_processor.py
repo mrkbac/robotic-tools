@@ -254,6 +254,7 @@ def _run_processor(
     input_buffer_bytes: int,
     cleanup_on_error: bool = False,
 ) -> ProcessorResult:
+    """Close all streams before attempting cleanup of an output opened by this run."""
     files = expand_bag_paths(files)
     if output is None:
         output_options.input_paths = tuple(files)
