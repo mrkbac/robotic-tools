@@ -9,6 +9,7 @@ from mcap_codec_support.video import VideoEncoderError
 from mcap_ros2_support_fast.writer import ROS2EncoderFactory
 from pymcap_cli.cmd import roscompress_cmd
 from pymcap_cli.cmd.roscompress_cmd import RoscompressConfig, RoscompressOptions, compress
+from pymcap_cli.core.mcap_processor import McapProcessor
 from small_mcap import McapWriter, read_message
 
 from tests.fixtures.image_mcap_generator import (
@@ -87,11 +88,13 @@ def test_compress_preserves_source_and_output_when_deletion_validation_fails(
 
 
 @pytest.mark.parametrize("error_field", ["errors_encountered", "validation_errors"])
+@pytest.mark.parametrize("delete_source", [False, True])
 def test_compress_preserves_source_when_processing_reports_errors(
     simple_mcap: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     error_field: str,
+    delete_source: bool,
 ) -> None:
     source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
     original = simple_mcap.read_bytes()
@@ -113,12 +116,25 @@ def test_compress_preserves_source_when_processing_reports_errors(
             str(source),
             output,
             RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
-            delete_source=True,
+            delete_source=delete_source,
         )
 
     assert source.read_bytes() == original
     with output.open("rb") as stream:
         assert sum(1 for _ in read_message(stream)) == 100
+
+    assert (
+        roscompress_cmd.roscompress(
+            str(source),
+            output,
+            image_format="none",
+            pointcloud=False,
+            force=True,
+            delete_source=delete_source,
+        )
+        == 1
+    )
+    assert source.read_bytes() == original
 
 
 def test_compress_collects_dropped_frames_across_video_profiles(tmp_path: Path) -> None:
@@ -193,18 +209,24 @@ def test_compress_collects_dropped_frames_across_video_profiles(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("delete_source", [False, True])
+@pytest.mark.parametrize("error_type", [RuntimeError, EOFError, FileExistsError])
 def test_compress_propagates_failure_and_removes_partial_output(
-    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delete_source: bool
+    simple_mcap: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delete_source: bool,
+    error_type: type[Exception],
 ) -> None:
     source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
     original = simple_mcap.read_bytes()
     source.write_bytes(original)
+    output.write_bytes(b"existing output")
 
-    def fail_processing(**_kwargs) -> None:
-        output.write_bytes(b"partial output")
-        raise RuntimeError("injected processing failure")
+    def fail_processing(_self, output_stream) -> None:
+        output_stream.write(b"partial output")
+        raise error_type("injected processing failure")
 
-    monkeypatch.setattr(roscompress_cmd, "run_processor", fail_processing)
+    monkeypatch.setattr(McapProcessor, "process", fail_processing)
 
     with pytest.raises(
         roscompress_cmd.RoscompressError, match="injected processing failure"
@@ -214,11 +236,95 @@ def test_compress_propagates_failure_and_removes_partial_output(
             output,
             RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
             delete_source=delete_source,
+            force=True,
         )
 
-    assert isinstance(failure.value.__cause__, RuntimeError)
+    assert isinstance(failure.value.__cause__, error_type)
     assert source.read_bytes() == original
     assert not output.exists()
+
+
+def test_compress_rejects_existing_output_without_prompting(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output.mcap"
+    output.write_bytes(b"existing output")
+
+    def unexpected_prompt(_prompt: str) -> str:
+        pytest.fail("the Python API must not prompt")
+
+    monkeypatch.setattr("builtins.input", unexpected_prompt)
+
+    with pytest.raises(roscompress_cmd.RoscompressError) as failure:
+        compress(
+            str(simple_mcap),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+        )
+
+    assert isinstance(failure.value.__cause__, FileExistsError)
+    assert output.read_bytes() == b"existing output"
+
+
+def test_cli_preserves_existing_output_when_overwrite_prompt_has_eof(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output.mcap"
+    output.write_bytes(b"existing output")
+
+    def fail_prompt(_prompt: str) -> str:
+        raise EOFError("no input available")
+
+    monkeypatch.setattr("builtins.input", fail_prompt)
+
+    assert (
+        roscompress_cmd.roscompress(str(simple_mcap), output, image_format="none", pointcloud=False)
+        == 1
+    )
+    assert output.read_bytes() == b"existing output"
+
+
+def test_compress_preserves_existing_output_when_input_cannot_open(tmp_path: Path) -> None:
+    output = tmp_path / "output.mcap"
+    output.write_bytes(b"existing output")
+
+    with pytest.raises(roscompress_cmd.RoscompressError) as failure:
+        compress(
+            str(tmp_path / "missing.mcap"),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+            force=True,
+        )
+
+    assert isinstance(failure.value.__cause__, FileNotFoundError)
+    assert output.read_bytes() == b"existing output"
+
+
+@pytest.mark.parametrize("use_cli", [False, True])
+def test_compress_overwrites_existing_output_when_authorized(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_cli: bool
+) -> None:
+    output = tmp_path / "output.mcap"
+    output.write_bytes(b"existing output")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+
+    if use_cli:
+        assert (
+            roscompress_cmd.roscompress(
+                str(simple_mcap), output, image_format="none", pointcloud=False
+            )
+            == 0
+        )
+    else:
+        compress(
+            str(simple_mcap),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+            force=True,
+        )
+
+    with output.open("rb") as stream:
+        assert sum(1 for _ in read_message(stream)) == 100
 
 
 @pytest.mark.parametrize("symlink", [False, True])

@@ -966,7 +966,8 @@ print(result.dropped_frames)
 
 `RoscompressOptions` also accepts per-topic settings, topic/time filters and worker
 budgets. Reported failures raise `RoscompressError`, preserving underlying exceptions
-as causes; failed processing removes the partial output. The source is retained by
+as causes; failed processing removes the partial output. Existing output is rejected
+unless `force=True`; Python calls never prompt. The source is retained by
 default. Pass `delete_source=True` to apply the CLI's existing output validation and
 source-deletion policy; failed validation preserves both source and output. Batch
 processing remains a CLI policy.

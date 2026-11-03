@@ -96,7 +96,7 @@ from pymcap_cli.core.processors.base import (
     TopicMatchingProcessor,
 )
 from pymcap_cli.core.processors.chunk_groupers import SchemaCompressionGrouper
-from pymcap_cli.utils import output_overwrites_input
+from pymcap_cli.utils import confirm_output_overwrite, output_overwrites_input
 
 if TYPE_CHECKING:
     from small_mcap import Channel, Schema
@@ -567,7 +567,12 @@ def _run_roscompress(
     delete_source: bool,
 ) -> int:
     try:
-        compress(file, output, options, force=force, delete_source=delete_source)
+        confirm_output_overwrite(output, force=force)
+    except EOFError as exc:
+        logger.error(str(exc))  # noqa: TRY400
+        return 1
+    try:
+        compress(file, output, options, force=True, delete_source=delete_source)
     except RoscompressError:
         return 1
 
@@ -585,6 +590,7 @@ def compress(
     """Compress one MCAP through the CLI's pipeline and return statistics and drops.
 
     Reported failures raise RoscompressError, preserving underlying exceptions as causes.
+    Existing output is rejected unless force=True; this function never prompts.
     A failed processing run removes its partial output. With delete_source=True,
     validate the completed output before deleting the eligible local source.
     """
@@ -604,8 +610,7 @@ def compress(
     end = options.end
     cleanup = resolve_cleanup(defaults)
 
-    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=False)
-    assert overwrite_policy is not None  # no_clobber is fixed False here
+    overwrite_policy = resolve_overwrite_policy(force=force, no_clobber=not force)
 
     # Build the transcode processor chain. Constructors do the real work
     # (encoder probing, codec dependency import), so a missing optional
@@ -791,14 +796,16 @@ def compress(
             input_options=input_options,
             output_options=output_options,
             input_buffer_bytes=_INPUT_BUFFER_BYTES,
+            cleanup_on_error=True,
         )
     except Exception as exc:
         logger.exception("Error during compression")
-        # A failed run may have truncated/partially written the output; don't
-        # leave a corrupt file behind (the output was opened with an
-        # overwrite/truncate policy, so it is ours to remove).
-        output.unlink(missing_ok=True)
         raise RoscompressError(str(exc)) from exc
+
+    if processing_had_errors(result.stats):
+        message = "Processing reported errors — source file preserved."
+        logger.error(message)
+        raise RoscompressError(message)
 
     topics_by_kind: dict[str, set[str]] = {}
     for profile in profiled:
@@ -829,18 +836,13 @@ def compress(
     if input_size and output.exists():
         print_size_comparison(input_size, output.stat().st_size)
 
-    if delete_source:
-        if processing_had_errors(result.stats):
-            message = "Processing reported errors — source file preserved."
-            logger.error(message)
-            raise RoscompressError(message)
-        if finalize_delete_source(
-            sources=[file],
-            outputs=[output],
-            preserved_topic_patterns=[] if start or end else topic or [],
-            lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
-        ):
-            raise RoscompressError("Output validation failed; source file preserved.")
+    if delete_source and finalize_delete_source(
+        sources=[file],
+        outputs=[output],
+        preserved_topic_patterns=[] if start or end else topic or [],
+        lossy_topic_patterns=[".*"] if start or end else exclude_topic or [],
+    ):
+        raise RoscompressError("Output validation failed; source file preserved.")
 
     return RoscompressResult(
         stats=result.stats,
