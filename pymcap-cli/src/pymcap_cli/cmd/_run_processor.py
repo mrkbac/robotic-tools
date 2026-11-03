@@ -217,7 +217,7 @@ def run_processor(
     """Open files, build ProcessingOptions, run McapProcessor, return results.
 
     Raises any exception from McapProcessor.process() to the caller. With
-    cleanup_on_error=True, remove output only after this run has opened it.
+    cleanup_on_error=True, attempt removal only after this run has opened output.
     """
     return _run_processor(
         files=files,
@@ -288,7 +288,10 @@ def _run_processor(
             stats = processor.process(output_stream)
     except Exception:
         if cleanup_on_error and output is not None and output_stream is not None:
-            output.unlink(missing_ok=True)
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove failed output %s", output, exc_info=True)
         raise
 
     return ProcessorResult(stats=stats, processor=processor)

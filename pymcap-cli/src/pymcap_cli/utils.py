@@ -552,14 +552,17 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
 
 
 def output_overwrites_input(input_path: str, output: Path) -> bool:
-    """Return True if a local ``input_path`` resolves to the same file as ``output``.
+    """Return True if local input and output refer to the same file, including hard links.
 
     Opening such an output with ``"wb"`` truncates the source before it is read,
     destroying the data. URL inputs never collide with a local output.
     """
     if urlparse(input_path).scheme in ("http", "https"):
         return False
+    input_file = Path(input_path)
+    if input_file.resolve() == output.resolve():
+        return True
     try:
-        return Path(input_path).resolve() == output.resolve()
-    except OSError:
+        return input_file.samefile(output)
+    except FileNotFoundError:
         return False

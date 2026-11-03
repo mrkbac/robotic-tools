@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from mcap_codec_support.video import VideoEncoderError
@@ -16,9 +16,6 @@ from tests.fixtures.image_mcap_generator import (
     SENSOR_MSGS_COMPRESSED_IMAGE_SCHEMA,
     create_jpeg_frame,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_compress_returns_stats_and_empty_drops(simple_mcap: Path, tmp_path: Path) -> None:
@@ -244,6 +241,42 @@ def test_compress_propagates_failure_and_removes_partial_output(
     assert not output.exists()
 
 
+def test_compress_preserves_processing_exception_when_cleanup_fails(
+    simple_mcap: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    output = tmp_path / "output.mcap"
+    error = RuntimeError("injected processing failure")
+    original_unlink = Path.unlink
+
+    def fail_processing(_self, output_stream) -> None:
+        output_stream.write(b"partial output")
+        raise error
+
+    def fail_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        if path == output:
+            raise PermissionError("cleanup denied")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(McapProcessor, "process", fail_processing)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+
+    with pytest.raises(roscompress_cmd.RoscompressError, match=str(error)) as failure:
+        compress(
+            str(simple_mcap),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+        )
+
+    assert failure.value.__cause__ is error
+    assert output.read_bytes() == b"partial output"
+    assert "Could not remove failed output" in caplog.text
+    assert "cleanup denied" in caplog.text
+    assert simple_mcap.exists()
+
+
 def test_compress_rejects_existing_output_without_prompting(
     simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -343,6 +376,44 @@ def test_compress_rejects_output_aliasing_source(
         compress(str(source), output, force=True)
 
     assert source.read_bytes() == original
+
+
+def test_compress_rejects_output_hard_linked_to_source(simple_mcap: Path, tmp_path: Path) -> None:
+    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
+    original = simple_mcap.read_bytes()
+    source.write_bytes(original)
+    output.hardlink_to(source)
+
+    with pytest.raises(ValueError, match="same file as the input"):
+        compress(str(source), output, force=True)
+
+    assert roscompress_cmd.roscompress(str(source), output, force=True) == 1
+    assert source.read_bytes() == original
+    assert output.read_bytes() == original
+
+
+def test_compress_preserves_files_when_identity_check_fails(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output.mcap"
+    output.write_bytes(b"existing output")
+    original = simple_mcap.read_bytes()
+
+    def fail_identity_check(_self: Path, _other: Path) -> bool:
+        raise PermissionError("identity check denied")
+
+    monkeypatch.setattr(Path, "samefile", fail_identity_check)
+
+    with pytest.raises(PermissionError, match="identity check denied"):
+        compress(
+            str(simple_mcap),
+            output,
+            RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
+            force=True,
+        )
+
+    assert simple_mcap.read_bytes() == original
+    assert output.read_bytes() == b"existing output"
 
 
 @pytest.mark.parametrize(

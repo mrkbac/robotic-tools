@@ -591,8 +591,10 @@ def compress(
 
     Reported failures raise RoscompressError, preserving underlying exceptions as causes.
     Existing output is rejected unless force=True; this function never prompts.
-    A failed processing run removes its partial output. With delete_source=True,
-    validate the completed output before deleting the eligible local source.
+    Processing exceptions after opening output trigger partial-output cleanup;
+    cleanup failures are logged. Processing-reported errors retain the output.
+    With delete_source=True, validate the completed output before deleting the
+    eligible local source.
     """
     if output_overwrites_input(file, output):
         raise ValueError(
