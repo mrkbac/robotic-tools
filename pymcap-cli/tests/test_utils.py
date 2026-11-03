@@ -5,6 +5,7 @@ from __future__ import annotations
 import nturl2path
 import os
 from pathlib import Path, PureWindowsPath
+from socket import gethostname
 from urllib.parse import urlparse
 
 import pytest
@@ -27,6 +28,43 @@ def test_file_url_to_path_windows(path: str, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(utils, "os_name", "nt")
     monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
     assert file_url_to_path(urlparse(PureWindowsPath(path).as_uri())) == path
+
+
+def test_file_url_to_path_preserves_this_host_unc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A decoder that removes local authorities must still preserve UNC server names."""
+    host = gethostname()
+
+    def decode_url_path(path: str) -> str:
+        """Model Python 3.14's local-authority removal on every test platform."""
+        parsed = urlparse(f"file:{path}")
+        return nturl2path.url2pathname(parsed.path if parsed.netloc == host else path)
+
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", decode_url_path)
+    assert file_url_to_path(urlparse(f"file://{host}/share/a%20%23%25.mcap")) == (
+        f"\\\\{host}\\share\\a #%.mcap"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows URI conversion")
+def test_file_url_to_path_preserves_this_host_unc_native() -> None:
+    """The real Windows decoder preserves the server, including on Python 3.14."""
+    host = gethostname()
+    assert file_url_to_path(urlparse(f"file://{host}/share/a%20%23%25.mcap")) == (
+        f"\\\\{host}\\share\\a #%.mcap"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file URI semantics")
+@pytest.mark.parametrize("uppercase", [False, True])
+def test_file_url_to_path_accepts_this_host_on_posix(uppercase: bool) -> None:
+    """The machine's own hostname identifies a local file without DNS resolution."""
+    host = gethostname()
+    if uppercase:
+        host = host.upper()
+    assert file_url_to_path(urlparse(f"file://{host}/recordings/recording%20a.mcap")) == (
+        "/recordings/recording a.mcap"
+    )
 
 
 def test_file_url_to_path_rejects_remote_authorities_on_posix() -> None:
