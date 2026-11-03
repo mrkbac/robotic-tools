@@ -965,8 +965,9 @@ print(result.dropped_frames)
 ```
 
 `RoscompressOptions` also accepts per-topic settings, topic/time filters and worker
-budgets. Processing errors raise exceptions and remove the partial output; the
-source is retained. Batch processing and source deletion remain CLI policies.
+budgets. Reported failures raise `RoscompressError` with the original exception as
+their cause; failed processing removes the partial output. The source is retained.
+Batch processing and source deletion remain CLI policies.
 
 The FFmpeg backend sends validated JPEG pixels as raw video instead of joining
 JPEG byte streams. This requires the `video` extra's PyAV decoder and increases

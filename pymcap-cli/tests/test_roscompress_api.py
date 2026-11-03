@@ -118,13 +118,16 @@ def test_compress_propagates_failure_and_removes_partial_output(
 
     monkeypatch.setattr(roscompress_cmd, "run_processor", fail_processing)
 
-    with pytest.raises(RuntimeError, match="injected processing failure"):
+    with pytest.raises(
+        roscompress_cmd.RoscompressError, match="injected processing failure"
+    ) as failure:
         compress(
             str(simple_mcap),
             output,
             RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
         )
 
+    assert isinstance(failure.value.__cause__, RuntimeError)
     assert simple_mcap.read_bytes() == original
     assert not output.exists()
 
@@ -145,3 +148,41 @@ def test_compress_rejects_output_aliasing_source(
         compress(str(source), output, force=True)
 
     assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("error_type", [ImportError, ValueError])
+def test_cli_processing_errors_keep_processing_diagnostic(
+    simple_mcap: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_type: type[Exception],
+) -> None:
+    def fail_processing(**_kwargs) -> None:
+        raise error_type("injected processing failure")
+
+    monkeypatch.setattr(roscompress_cmd, "run_processor", fail_processing)
+
+    assert (
+        roscompress_cmd.roscompress(
+            str(simple_mcap), tmp_path / "output.mcap", image_format="none", pointcloud=False
+        )
+        == 1
+    )
+    assert any(
+        record.getMessage() == "Error during compression" and record.exc_info
+        for record in caplog.records
+    )
+    assert "Optional dependencies" not in caplog.text
+
+
+def test_cli_unexpected_processor_setup_error_propagates(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_setup(*_args, **_kwargs) -> None:
+        raise RuntimeError("injected setup failure")
+
+    monkeypatch.setattr(roscompress_cmd, "create_video_compress_processor", fail_setup)
+
+    with pytest.raises(RuntimeError, match="injected setup failure"):
+        roscompress_cmd.roscompress(str(simple_mcap), tmp_path / "output.mcap", pointcloud=False)
