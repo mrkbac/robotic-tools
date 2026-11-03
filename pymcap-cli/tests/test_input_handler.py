@@ -57,6 +57,17 @@ def test_resolve_mcap_path_nonexistent_unchanged(tmp_path: Path) -> None:
     assert resolve_mcap_path(str(missing)) == str(missing)
 
 
+@pytest.mark.parametrize("filename", ["recording.mcap", "camera recording #%é.mcap"])
+def test_open_input_file_url_decodes_path(tmp_path: Path, filename: str) -> None:
+    """Native file URIs decode drive paths and escaped filename characters before opening."""
+    source = tmp_path / filename
+    source.write_bytes(b"recording bytes")
+
+    with open_input(source.as_uri()) as (stream, size):
+        assert stream.read() == b"recording bytes"
+        assert size == 15
+
+
 def test_open_input_no_debug_by_default(
     simple_mcap: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

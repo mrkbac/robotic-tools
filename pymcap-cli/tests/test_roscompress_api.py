@@ -23,10 +23,12 @@ def test_compress_returns_stats_and_empty_drops(
     simple_mcap: Path, tmp_path: Path, file_url: bool
 ) -> None:
     """Local paths and file URLs expose the same statistics without changing the source."""
+    source = tmp_path / "source recording #%.mcap"
+    source.write_bytes(simple_mcap.read_bytes())
     output = tmp_path / "output.mcap"
 
     result = compress(
-        f"file://{simple_mcap}" if file_url else str(simple_mcap),
+        source.as_uri() if file_url else str(source),
         output,
         RoscompressOptions(defaults=RoscompressConfig(image_format="none", pointcloud=False)),
     )
@@ -34,7 +36,7 @@ def test_compress_returns_stats_and_empty_drops(
     assert result.stats.writer_statistics.message_count == 100
     assert result.stats.errors_encountered == 0
     assert result.dropped_frames == ()
-    assert simple_mcap.exists()
+    assert source.exists()
     with output.open("rb") as stream:
         assert sum(1 for _ in read_message(stream)) == 100
 
@@ -377,7 +379,7 @@ def test_compress_rejects_output_aliasing_source(
     simple_mcap: Path, tmp_path: Path, symlink: bool, file_url: bool
 ) -> None:
     """Same-path and symlink outputs must be rejected even with forced overwriting."""
-    source = tmp_path / "source.mcap"
+    source = tmp_path / "source recording #%.mcap"
     original = simple_mcap.read_bytes()
     source.write_bytes(original)
     output = source
@@ -386,7 +388,7 @@ def test_compress_rejects_output_aliasing_source(
         output.symlink_to(source)
 
     with pytest.raises(ValueError, match="same file as the input"):
-        compress(f"file://{source}" if file_url else str(source), output, force=True)
+        compress(source.as_uri() if file_url else str(source), output, force=True)
 
     assert source.read_bytes() == original
 
@@ -396,11 +398,11 @@ def test_compress_rejects_output_hard_linked_to_source(
     simple_mcap: Path, tmp_path: Path, file_url: bool
 ) -> None:
     """API and CLI calls reject hard links before either name can truncate the source."""
-    source, output = tmp_path / "source.mcap", tmp_path / "output.mcap"
+    source, output = tmp_path / "source recording #%.mcap", tmp_path / "output.mcap"
     original = simple_mcap.read_bytes()
     source.write_bytes(original)
     output.hardlink_to(source)
-    file = f"file://{source}" if file_url else str(source)
+    file = source.as_uri() if file_url else str(source)
 
     with pytest.raises(ValueError, match="same file as the input"):
         compress(file, output, force=True)

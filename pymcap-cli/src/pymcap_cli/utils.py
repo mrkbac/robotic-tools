@@ -7,6 +7,7 @@ from pathlib import Path
 from re import Pattern
 from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, cast, overload
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 if TYPE_CHECKING:
     from _typeshed import WriteableBuffer
@@ -560,7 +561,7 @@ def output_overwrites_input(input_path: str, output: Path) -> bool:
     parsed = urlparse(input_path)
     if parsed.scheme in ("http", "https"):
         return False
-    input_file = Path(parsed.path if parsed.scheme == "file" else input_path)
+    input_file = Path(url2pathname(parsed.path) if parsed.scheme == "file" else input_path)
     if input_file.resolve() == output.resolve():
         return True
     try:
