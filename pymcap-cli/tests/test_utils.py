@@ -30,6 +30,16 @@ def test_file_url_to_path_windows(path: str, monkeypatch: pytest.MonkeyPatch) ->
     assert file_url_to_path(urlparse(PureWindowsPath(path).as_uri())) == path
 
 
+@pytest.mark.parametrize("uri", ["file://C:/recording.mcap", "file://C|/recording.mcap"])
+def test_file_url_to_path_windows_drive_authority(
+    uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive authorities decode as drive paths rather than UNC server names."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+    assert file_url_to_path(urlparse(uri)) == r"C:\recording.mcap"
+
+
 def test_file_url_to_path_preserves_this_host_unc(monkeypatch: pytest.MonkeyPatch) -> None:
     """A decoder that removes local authorities must still preserve UNC server names."""
     host = gethostname()

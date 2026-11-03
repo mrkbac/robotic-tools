@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from os import fsdecode
 from os import name as os_name
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from re import Pattern
 from socket import gethostname
 from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, cast, overload
@@ -563,7 +563,8 @@ def file_url_to_path(parsed: "ParseResult") -> str:
     if parsed.netloc and parsed.netloc.lower() != "localhost":
         if os_name == "nt":
             # Python 3.14 discards local authorities; decode the server as path data instead.
-            return "\\" + url2pathname(f"/{parsed.netloc}{path}")
+            decoded = url2pathname(f"/{parsed.netloc}{path}")
+            return decoded if PureWindowsPath(decoded).drive else "\\" + decoded
         if parsed.netloc.lower() != gethostname().lower():
             raise ValueError("Non-local file URI authorities are only supported on Windows")
     if os_name == "nt":
