@@ -2,15 +2,40 @@
 
 from __future__ import annotations
 
+import nturl2path
+from pathlib import Path, PureWindowsPath
+from urllib.parse import urlparse
+
 import pytest
+from pymcap_cli import utils
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.utils import (
     RelativeTime,
     bytes_to_human,
     compile_topic_patterns,
+    file_url_to_path,
+    output_overwrites_input,
     parse_time_arg,
     parse_timestamp_args,
 )
+
+
+@pytest.mark.parametrize("path", [r"C:\recording #%.mcap", r"\\server\share\recording #%.mcap"])
+def test_file_url_to_path_windows(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows drive and UNC URIs use the native decoder on every test platform."""
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+    assert file_url_to_path(urlparse(PureWindowsPath(path).as_uri())) == path
+
+
+def test_output_overwrites_input_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity checks retain the same network authority as the input reader."""
+    monkeypatch.setattr(Path, "resolve", lambda path: path)
+    monkeypatch.setattr(Path, "samefile", lambda _path, _other: False)
+    assert output_overwrites_input(
+        "file://server/share/recording%20%23%25.mcap",
+        Path("//server/share/recording #%.mcap"),
+    )
+
 
 # ---------------------------------------------------------------------------
 # bytes_to_human

@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 if TYPE_CHECKING:
+    from urllib.parse import ParseResult
+
     from _typeshed import WriteableBuffer
 
 from rich import filesize
@@ -552,6 +554,14 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
             raise SystemExit(1)
 
 
+def file_url_to_path(parsed: "ParseResult") -> str:
+    """Decode a file URI, preserving UNC servers and local-host paths."""
+    path = parsed.path
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        path = f"//{parsed.netloc}{path}"
+    return url2pathname(path)
+
+
 def output_overwrites_input(input_path: str, output: Path) -> bool:
     """Return True if local input and output refer to the same file, including hard links.
 
@@ -561,7 +571,7 @@ def output_overwrites_input(input_path: str, output: Path) -> bool:
     parsed = urlparse(input_path)
     if parsed.scheme in ("http", "https"):
         return False
-    input_file = Path(url2pathname(parsed.path) if parsed.scheme == "file" else input_path)
+    input_file = Path(file_url_to_path(parsed) if parsed.scheme == "file" else input_path)
     if input_file.resolve() == output.resolve():
         return True
     try:

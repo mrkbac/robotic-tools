@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from pymcap_cli.cmd import info_cmd, merge_cmd
@@ -15,9 +15,6 @@ from pymcap_cli.core.rosbag2_layout import (
 from pymcap_cli.types.info_data import info_to_dict
 
 from tests.fixtures.mcap_generator import create_multi_topic_mcap
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NS_TO_MS = 1_000_000
 
@@ -135,6 +132,13 @@ def test_expand_bag_paths_decodes_file_url_before_expanding(tmp_path: Path) -> N
         str(bag / f"{bag.name}_0.mcap"),
         str(bag / f"{bag.name}_1.mcap"),
     ]
+
+
+def test_expand_bag_paths_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A network authority survives decoding without performing network discovery."""
+    monkeypatch.setattr(Path, "is_dir", lambda _path: False)
+    expected = str(Path("//server/share/bag recording"))
+    assert expand_bag_paths(["file://server/share/bag%20recording"]) == [expected]
 
 
 def test_expand_bag_paths_empty_dir_raises(tmp_path: Path) -> None:

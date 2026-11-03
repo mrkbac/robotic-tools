@@ -13,12 +13,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 from small_mcap import RebuildInfo, Statistics, Summary
 
 from pymcap_cli.core.input_handler import open_input
-from pymcap_cli.utils import read_or_rebuild_info
+from pymcap_cli.utils import file_url_to_path, read_or_rebuild_info
 
 if TYPE_CHECKING:
     from small_mcap import (
@@ -85,7 +84,7 @@ def expand_bag_paths(paths: list[str]) -> list[str]:
             expanded.append(path)
             continue
         parsed = urlparse(path)
-        local_path = url2pathname(parsed.path) if parsed.scheme == "file" else path
+        local_path = file_url_to_path(parsed) if parsed.scheme == "file" else path
         candidate = Path(local_path)
         if not candidate.is_dir():
             expanded.append(local_path)

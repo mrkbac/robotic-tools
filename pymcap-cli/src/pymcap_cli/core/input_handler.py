@@ -6,10 +6,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, cast
 from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 from pymcap_cli.debug_wrapper import DebugStreamWrapper
 from pymcap_cli.http_utils import open_http_stream
+from pymcap_cli.utils import file_url_to_path
 
 _is_debug_io_enabled = False
 
@@ -66,7 +66,7 @@ def open_input(
     if result.scheme in ("http", "https"):
         original_stream, size = open_http_stream(result)
     elif result.scheme == "file":
-        original_stream, size = _open_path_file(url2pathname(result.path))
+        original_stream, size = _open_path_file(file_url_to_path(result))
     elif not result.scheme or (len(result.scheme) == 1 and not result.netloc and path[1:2] == ":"):
         original_stream, size = _open_path_file(path)
     else:
