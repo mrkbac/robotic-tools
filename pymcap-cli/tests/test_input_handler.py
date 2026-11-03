@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
+import nturl2path
+from pathlib import PureWindowsPath
+from typing import TYPE_CHECKING
 
 import pytest
+from pymcap_cli import utils
 from pymcap_cli.core import input_handler
 from pymcap_cli.core.input_handler import open_input, resolve_mcap_path
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_resolve_mcap_path_single_split_directory(tmp_path: Path) -> None:
@@ -69,9 +75,11 @@ def test_open_input_file_url_decodes_path(tmp_path: Path, filename: str, authori
 
 def test_open_input_file_url_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opening a UNC URI forwards its server along with the decoded path."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
 
     def open_unc_path(path: str):
-        assert Path(path) == Path("//server/share/recording #%.mcap")
+        assert path == str(PureWindowsPath("//server/share/recording #%.mcap"))
         return io.BytesIO(b"data"), 4
 
     monkeypatch.setattr(input_handler, "_open_path_file", open_unc_path)

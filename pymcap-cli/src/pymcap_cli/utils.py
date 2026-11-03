@@ -3,10 +3,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from os import fsdecode
+from os import name as os_name
 from pathlib import Path
 from re import Pattern
 from typing import IO, TYPE_CHECKING, BinaryIO, Literal, Protocol, cast, overload
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 from urllib.request import url2pathname
 
 if TYPE_CHECKING:
@@ -555,11 +557,15 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
 
 
 def file_url_to_path(parsed: "ParseResult") -> str:
-    """Decode a file URI, preserving UNC servers and local-host paths."""
+    """Decode a file URI, preserving native paths and filename bytes."""
     path = parsed.path
     if parsed.netloc and parsed.netloc.lower() != "localhost":
+        if os_name != "nt":
+            raise ValueError("Non-local file URI authorities are only supported on Windows")
         path = f"//{parsed.netloc}{path}"
-    return url2pathname(path)
+    if os_name == "nt":
+        return url2pathname(path)
+    return fsdecode(unquote_to_bytes(path))
 
 
 def output_overwrites_input(input_path: str, output: Path) -> bool:

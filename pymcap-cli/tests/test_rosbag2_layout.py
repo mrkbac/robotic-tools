@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import nturl2path
+from pathlib import Path, PureWindowsPath
 
 import pytest
+from pymcap_cli import utils
 from pymcap_cli.cmd import info_cmd, merge_cmd
 from pymcap_cli.core.input_handler import resolve_mcap_path
 from pymcap_cli.core.rosbag2_layout import (
@@ -136,8 +138,10 @@ def test_expand_bag_paths_decodes_file_url_before_expanding(tmp_path: Path) -> N
 
 def test_expand_bag_paths_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """A network authority survives decoding without performing network discovery."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
     monkeypatch.setattr(Path, "is_dir", lambda _path: False)
-    expected = str(Path("//server/share/bag recording"))
+    expected = str(PureWindowsPath("//server/share/bag recording"))
     assert expand_bag_paths(["file://server/share/bag%20recording"]) == [expected]
 
 

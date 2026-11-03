@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import nturl2path
+import os
 from pathlib import Path, PureWindowsPath
 from urllib.parse import urlparse
 
@@ -23,17 +24,36 @@ from pymcap_cli.utils import (
 @pytest.mark.parametrize("path", [r"C:\recording #%.mcap", r"\\server\share\recording #%.mcap"])
 def test_file_url_to_path_windows(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows drive and UNC URIs use the native decoder on every test platform."""
+    monkeypatch.setattr(utils, "os_name", "nt")
     monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
     assert file_url_to_path(urlparse(PureWindowsPath(path).as_uri())) == path
 
 
+def test_file_url_to_path_rejects_remote_authorities_on_posix() -> None:
+    """Remote hosts cannot silently select an unrelated local file on POSIX."""
+    if os.name != "posix":
+        pytest.skip("POSIX file URI semantics")
+    with pytest.raises(ValueError, match="Non-local file URI"):
+        file_url_to_path(urlparse("file://server/share/recording.mcap"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX filename bytes")
+def test_file_url_to_path_preserves_filename_bytes() -> None:
+    """Percent escapes round-trip filename bytes without replacement characters."""
+    assert file_url_to_path(urlparse("file:///tmp/recording%FF.mcap")) == os.fsdecode(
+        b"/tmp/recording\xff.mcap"
+    )
+
+
 def test_output_overwrites_input_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Identity checks retain the same network authority as the input reader."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
     monkeypatch.setattr(Path, "resolve", lambda path: path)
     monkeypatch.setattr(Path, "samefile", lambda _path, _other: False)
     assert output_overwrites_input(
         "file://server/share/recording%20%23%25.mcap",
-        Path("//server/share/recording #%.mcap"),
+        Path(str(PureWindowsPath("//server/share/recording #%.mcap"))),
     )
 
 
