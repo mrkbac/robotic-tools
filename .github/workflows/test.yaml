@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -85,7 +85,7 @@ jobs:
       - name: Cache submodules
         if: matrix.package.submodules
         id: submodule-cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             data/data
@@ -99,7 +99,7 @@ jobs:
           git submodule foreach --recursive 'git lfs pull'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python-version }}
           activate-environment: true
@@ -112,7 +112,7 @@ jobs:
 
       - name: Install PureINI minimum Rust toolchain
         if: matrix.package.dir == 'pureini' && matrix.python-version == '3.13'
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@1.120
 
       - name: Run PureINI Rust unit tests at MSRV
         if: matrix.package.dir == 'pureini' && matrix.python-version == '3.13'
@@ -164,7 +164,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.13"
           activate-environment: true
@@ -173,7 +173,7 @@ jobs:
           cache-suffix: pureini-rust-coverage
 
       - name: Install PureINI minimum Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@1.120
         with:
           components: llvm-tools-preview
 
@@ -236,7 +236,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.14"
           enable-cache: true
@@ -301,7 +301,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.14"
           enable-cache: true
