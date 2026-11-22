@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import io
+import nturl2path
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
+from pymcap_cli import utils
 from pymcap_cli.core import input_handler
 from pymcap_cli.core.input_handler import open_input, resolve_mcap_path
 
@@ -55,6 +58,34 @@ def test_resolve_mcap_path_url_unchanged() -> None:
 def test_resolve_mcap_path_nonexistent_unchanged(tmp_path: Path) -> None:
     missing = tmp_path / "nope.mcap"
     assert resolve_mcap_path(str(missing)) == str(missing)
+
+
+@pytest.mark.parametrize("filename", ["recording.mcap", "camera recording #%é.mcap"])
+@pytest.mark.parametrize("authority", ["", "localhost", "LOCALHOST"])
+def test_open_input_file_url_decodes_path(tmp_path: Path, filename: str, authority: str) -> None:
+    """Native file URIs decode drive paths and escaped filename characters before opening."""
+    source = tmp_path / filename
+    source.write_bytes(b"recording bytes")
+
+    uri = source.as_uri().replace("file://", f"file://{authority}", 1)
+    with open_input(uri) as (stream, size):
+        assert stream.read() == b"recording bytes"
+        assert size == 15
+
+
+def test_open_input_file_url_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening a UNC URI forwards its server along with the decoded path."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+
+    def open_unc_path(path: str):
+        assert path == str(PureWindowsPath("//server/share/recording #%.mcap"))
+        return io.BytesIO(b"data"), 4
+
+    monkeypatch.setattr(input_handler, "_open_path_file", open_unc_path)
+    with open_input("file://server/share/recording%20%23%25.mcap") as (stream, size):
+        assert stream.read() == b"data"
+        assert size == 4
 
 
 def test_open_input_no_debug_by_default(

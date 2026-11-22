@@ -194,12 +194,12 @@ def _open_output_stream(
     """Open a single-output destination with the configured overwrite policy."""
     if not output.parent.is_dir():
         raise FileNotFoundError(f"Output directory '{output.parent}' does not exist.")
+    allow_overwrite = overwrite_policy == OverwriteCollisionPolicy.OVERWRITE
     if overwrite_policy == OverwriteCollisionPolicy.ASK:
-        confirm_output_overwrite(output, force=False)
-    elif overwrite_policy == OverwriteCollisionPolicy.ERROR and output.exists():
-        raise FileExistsError(f"Output file '{output}' already exists.")
+        allow_overwrite = confirm_output_overwrite(output, force=False)
 
-    stream = output.open("wb", buffering=0 if async_buffer_bytes else -1)
+    mode = "wb" if allow_overwrite else "xb"
+    stream = output.open(mode, buffering=0 if async_buffer_bytes else -1)
     if async_buffer_bytes:
         return cast("BinaryIO", _AsyncOutputStream(stream, async_buffer_bytes))
     return stream
@@ -212,10 +212,12 @@ def run_processor(
     input_options: InputOptions,
     output_options: OutputOptions,
     input_buffer_bytes: int = 8192,
+    cleanup_on_error: bool = False,
 ) -> ProcessorResult:
     """Open files, build ProcessingOptions, run McapProcessor, return results.
 
-    Raises any exception from McapProcessor.process() to the caller.
+    Raises any exception from McapProcessor.process() to the caller. With
+    cleanup_on_error=True, attempt removal only after this run has opened output.
     """
     return _run_processor(
         files=files,
@@ -223,6 +225,7 @@ def run_processor(
         input_options=input_options,
         output_options=output_options,
         input_buffer_bytes=input_buffer_bytes,
+        cleanup_on_error=cleanup_on_error,
     )
 
 
@@ -249,38 +252,48 @@ def _run_processor(
     input_options: InputOptions,
     output_options: OutputOptions,
     input_buffer_bytes: int,
+    cleanup_on_error: bool = False,
 ) -> ProcessorResult:
+    """Close all streams before attempting cleanup of an output opened by this run."""
     files = expand_bag_paths(files)
     if output is None:
         output_options.input_paths = tuple(files)
 
-    with contextlib.ExitStack() as stack:
-        input_files: list[InputFile] = []
+    output_stream: BinaryIO | None = None
+    try:
+        with contextlib.ExitStack() as stack:
+            input_files: list[InputFile] = []
 
-        for f in files:
-            stream, size = stack.enter_context(open_input(f, buffering=input_buffer_bytes))
-            input_files.append(
-                InputFile(stream=stream, size=size, options=InputOptions.from_args())
-            )
-
-        output_stream: BinaryIO | None = None
-        if output is not None:
-            output_stream = stack.enter_context(
-                _open_output_stream(
-                    output,
-                    output_options.overwrite_policy,
-                    async_buffer_bytes=output_options.async_output_buffer_bytes,
+            for f in files:
+                stream, size = stack.enter_context(open_input(f, buffering=input_buffer_bytes))
+                input_files.append(
+                    InputFile(stream=stream, size=size, options=InputOptions.from_args())
                 )
+
+            if output is not None:
+                output_stream = stack.enter_context(
+                    _open_output_stream(
+                        output,
+                        output_options.overwrite_policy,
+                        async_buffer_bytes=output_options.async_output_buffer_bytes,
+                    )
+                )
+
+            processing_options = ProcessingOptions(
+                inputs=input_files,
+                input_options=input_options,
+                output_options=output_options,
             )
 
-        processing_options = ProcessingOptions(
-            inputs=input_files,
-            input_options=input_options,
-            output_options=output_options,
-        )
-
-        processor = McapProcessor(processing_options)
-        stats = processor.process(output_stream)
+            processor = McapProcessor(processing_options)
+            stats = processor.process(output_stream)
+    except Exception:
+        if cleanup_on_error and output is not None and output_stream is not None:
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove failed output %s", output, exc_info=True)
+        raise
 
     return ProcessorResult(stats=stats, processor=processor)
 

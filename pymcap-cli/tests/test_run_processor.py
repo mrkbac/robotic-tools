@@ -38,9 +38,10 @@ def test_open_output_stream_prompts_in_ask_mode(tmp_path: Path, monkeypatch):
     output.write_bytes(b"existing")
     seen: list[Path] = []
 
-    def fake_confirm(path: Path, force: bool) -> None:
+    def fake_confirm(path: Path, force: bool) -> bool:
         seen.append(path)
         assert force is False
+        return True
 
     monkeypatch.setattr("pymcap_cli.cmd._run_processor.confirm_output_overwrite", fake_confirm)
 

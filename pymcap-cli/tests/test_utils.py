@@ -2,15 +2,117 @@
 
 from __future__ import annotations
 
+import nturl2path
+import os
+from pathlib import Path, PureWindowsPath
+from socket import gethostname
+from urllib.parse import urlparse
+
 import pytest
+from pymcap_cli import utils
 from pymcap_cli.constants import NS_TO_MS, NS_TO_SEC
 from pymcap_cli.utils import (
     RelativeTime,
     bytes_to_human,
     compile_topic_patterns,
+    file_url_to_path,
+    output_overwrites_input,
     parse_time_arg,
     parse_timestamp_args,
 )
+
+
+@pytest.mark.parametrize("path", [r"C:\recording #%.mcap", r"\\server\share\recording #%.mcap"])
+def test_file_url_to_path_windows(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows drive and UNC URIs use the native decoder on every test platform."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+    assert file_url_to_path(urlparse(PureWindowsPath(path).as_uri())) == path
+
+
+@pytest.mark.parametrize("uri", ["file://C:/recording.mcap", "file://C|/recording.mcap"])
+def test_file_url_to_path_windows_drive_authority(
+    uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive authorities decode as drive paths rather than UNC server names."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+    assert file_url_to_path(urlparse(uri)) == r"C:\recording.mcap"
+
+
+@pytest.mark.parametrize("colon", [":", "%3A"])
+def test_file_url_to_path_preserves_unc_stream(colon: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy URL decoders must not turn UNC streams into unrelated drive-relative files."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", lambda _path: r"P:other.mcap")
+    uri = f"file://server/share/recording.mcap{colon}other.mcap"
+    assert file_url_to_path(urlparse(uri)) == r"\\server\share\recording.mcap:other.mcap"
+
+
+def test_file_url_to_path_preserves_this_host_unc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A decoder that removes local authorities must still preserve UNC server names."""
+    host = gethostname()
+
+    def decode_url_path(path: str) -> str:
+        """Model Python 3.14's local-authority removal on every test platform."""
+        parsed = urlparse(f"file:{path}")
+        return nturl2path.url2pathname(parsed.path if parsed.netloc == host else path)
+
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", decode_url_path)
+    assert file_url_to_path(urlparse(f"file://{host}/share/a%20%23%25.mcap")) == (
+        f"\\\\{host}\\share\\a #%.mcap"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows URI conversion")
+def test_file_url_to_path_preserves_this_host_unc_native() -> None:
+    """The real Windows decoder preserves the server, including on Python 3.14."""
+    host = gethostname()
+    assert file_url_to_path(urlparse(f"file://{host}/share/a%20%23%25.mcap")) == (
+        f"\\\\{host}\\share\\a #%.mcap"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file URI semantics")
+@pytest.mark.parametrize("uppercase", [False, True])
+def test_file_url_to_path_accepts_this_host_on_posix(uppercase: bool) -> None:
+    """The machine's own hostname identifies a local file without DNS resolution."""
+    host = gethostname()
+    if uppercase:
+        host = host.upper()
+    assert file_url_to_path(urlparse(f"file://{host}/recordings/recording%20a.mcap")) == (
+        "/recordings/recording a.mcap"
+    )
+
+
+def test_file_url_to_path_rejects_remote_authorities_on_posix() -> None:
+    """Remote hosts cannot silently select an unrelated local file on POSIX."""
+    if os.name != "posix":
+        pytest.skip("POSIX file URI semantics")
+    with pytest.raises(ValueError, match="Non-local file URI"):
+        file_url_to_path(urlparse("file://server/share/recording.mcap"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX filename bytes")
+def test_file_url_to_path_preserves_filename_bytes() -> None:
+    """Percent escapes round-trip filename bytes without replacement characters."""
+    assert file_url_to_path(urlparse("file:///tmp/recording%FF.mcap")) == os.fsdecode(
+        b"/tmp/recording\xff.mcap"
+    )
+
+
+def test_output_overwrites_input_preserves_unc_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity checks retain the same network authority as the input reader."""
+    monkeypatch.setattr(utils, "os_name", "nt")
+    monkeypatch.setattr(utils, "url2pathname", nturl2path.url2pathname)
+    monkeypatch.setattr(Path, "resolve", lambda path: path)
+    monkeypatch.setattr(Path, "samefile", lambda _path, _other: False)
+    assert output_overwrites_input(
+        "file://server/share/recording%20%23%25.mcap",
+        Path(str(PureWindowsPath("//server/share/recording #%.mcap"))),
+    )
+
 
 # ---------------------------------------------------------------------------
 # bytes_to_human
