@@ -588,3 +588,21 @@ def test_cli_unexpected_processor_setup_error_propagates(
 
     with pytest.raises(RuntimeError, match="injected setup failure"):
         roscompress_cmd.roscompress(str(simple_mcap), tmp_path / "output.mcap", pointcloud=False)
+
+
+def test_cli_preserves_output_created_during_setup(
+    simple_mcap: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "out.mcap"
+    run_processor = roscompress_cmd.run_processor
+
+    def concurrent_writer(**kwargs):
+        output.write_bytes(b"another writer")
+        return run_processor(**kwargs)
+
+    monkeypatch.setattr(roscompress_cmd, "run_processor", concurrent_writer)
+    assert (
+        roscompress_cmd.roscompress(str(simple_mcap), output, image_format="none", pointcloud=False)
+        == 1
+    )
+    assert output.read_bytes() == b"another writer"

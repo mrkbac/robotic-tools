@@ -540,8 +540,8 @@ def parse_timestamp_args(
     return None
 
 
-def confirm_output_overwrite(output: Path, force: bool) -> None:
-    """Confirm overwrite if output exists and force=False.
+def confirm_output_overwrite(output: Path, force: bool) -> bool:
+    """Return whether overwriting was forced or explicitly confirmed.
 
     Args:
         output: Output file path
@@ -555,6 +555,8 @@ def confirm_output_overwrite(output: Path, force: bool) -> None:
         if response.lower() not in ("y", "yes"):
             ERR.print("Aborted.")
             raise SystemExit(1)
+        return True
+    return force
 
 
 def file_url_to_path(parsed: "ParseResult") -> str:

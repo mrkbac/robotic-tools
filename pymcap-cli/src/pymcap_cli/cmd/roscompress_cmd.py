@@ -579,12 +579,12 @@ def _run_roscompress(
 ) -> int:
     """Apply CLI overwrite confirmation and map reported failures to an exit status."""
     try:
-        confirm_output_overwrite(output, force=force)
+        overwrite = confirm_output_overwrite(output, force=force)
     except EOFError as exc:
         logger.error(str(exc))  # noqa: TRY400
         return 1
     try:
-        compress(file, output, options, force=True, delete_source=delete_source)
+        compress(file, output, options, force=overwrite, delete_source=delete_source)
     except RoscompressError:
         return 1
 

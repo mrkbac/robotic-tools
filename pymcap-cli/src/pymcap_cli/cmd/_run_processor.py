@@ -194,12 +194,12 @@ def _open_output_stream(
     """Open a single-output destination with the configured overwrite policy."""
     if not output.parent.is_dir():
         raise FileNotFoundError(f"Output directory '{output.parent}' does not exist.")
+    allow_overwrite = overwrite_policy == OverwriteCollisionPolicy.OVERWRITE
     if overwrite_policy == OverwriteCollisionPolicy.ASK:
-        confirm_output_overwrite(output, force=False)
-    elif overwrite_policy == OverwriteCollisionPolicy.ERROR and output.exists():
-        raise FileExistsError(f"Output file '{output}' already exists.")
+        allow_overwrite = confirm_output_overwrite(output, force=False)
 
-    stream = output.open("wb", buffering=0 if async_buffer_bytes else -1)
+    mode = "wb" if allow_overwrite else "xb"
+    stream = output.open(mode, buffering=0 if async_buffer_bytes else -1)
     if async_buffer_bytes:
         return cast("BinaryIO", _AsyncOutputStream(stream, async_buffer_bytes))
     return stream
