@@ -63,7 +63,7 @@ class StaleStatusWrapper:
 
 def _build_status(label: str, wrap: StaleStatusWrapper) -> Text:
     level = wrap.status.level
-    if level in DiagnosticLevel:
+    if level in _COLOR_MAP:
         lvl = DiagnosticLevel(level)
         color = _COLOR_MAP[DiagnosticLevel.STALE] if wrap.is_stale else _COLOR_MAP[lvl]
         name = lvl.name

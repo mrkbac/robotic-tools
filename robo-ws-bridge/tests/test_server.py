@@ -463,7 +463,7 @@ def test_invalid_handshake_log_filter_preserves_unrelated_records(caplog) -> Non
     exception = ValueError("unrelated")
 
     with caplog.at_level(logging.WARNING, logger=logger.name):
-        logger.warning("ordinary warning")
+        logger.warning("ordinary warning", exc_info=False)
         logger.error(
             "unrelated failure",
             exc_info=(ValueError, exception, None),
@@ -471,7 +471,7 @@ def test_invalid_handshake_log_filter_preserves_unrelated_records(caplog) -> Non
 
     warning, error = caplog.records
     assert warning.getMessage() == "ordinary warning"
-    assert warning.exc_info is None
+    assert warning.exc_info is False
     assert error.levelno == logging.ERROR
     assert error.exc_info == (ValueError, exception, None)
 

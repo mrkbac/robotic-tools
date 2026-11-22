@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 # the ffmpeg-CLI backend on raw ``bytes``. Parameterizing keeps decode→encode
 # paired per backend instead of pretending they share one frame type.
 FrameT = TypeVar("FrameT")
+_FrameT_contra = TypeVar("_FrameT_contra", contravariant=True)
 
 
 class RawImageMessage(Protocol):
@@ -53,12 +54,12 @@ class DecodableImageMessage(Protocol):
     def channel(self) -> _ChannelTopic: ...
 
 
-class VideoEncoderProtocol(Protocol[FrameT]):
+class VideoEncoderProtocol(Protocol[_FrameT_contra]):
     """Encoder interface; ``FrameT`` is the per-backend frame type."""
 
     config: EncoderConfig
 
-    def encode(self, frame: FrameT) -> bytes | None: ...
+    def encode(self, frame: _FrameT_contra) -> bytes | None: ...
 
     def flush_packets(self) -> list[bytes]: ...
 

@@ -217,7 +217,7 @@ def _node_result(rule: LiveNodeRule, node_ids: set[str]) -> CheckResult:
         summary = "expected live node is present" if exists else "expected live node is missing"
     else:
         summary = "forbidden live node is present" if exists else "forbidden live node is absent"
-    values = {"nodes": ", ".join(matches)} if matches else {}
+    values: dict[str, ObservationValue] = {"nodes": ", ".join(matches)} if matches else {}
     return CheckResult(
         OK if is_valid else rule.violation_level, f"{rule.name}/node", summary, values
     )

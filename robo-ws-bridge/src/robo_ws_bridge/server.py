@@ -50,7 +50,7 @@ class _InvalidHandshakeLogFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.exc_info is None:
+        if not record.exc_info:
             return True
         exception = record.exc_info[1]
         if not isinstance(exception, InvalidHandshake):

@@ -31,7 +31,7 @@ from pymcap_cli.rihs01 import compute_rihs01
 from pymcap_cli.utils import bytes_to_human
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterator
 
     from pymcap_cli.core.message_filter import (
         MessageFilterOptions,
@@ -519,7 +519,7 @@ def open_playback_messages(
     reverse: bool = False,
     should_include: Callable[[Channel, Schema | None], bool] | None = None,
     recordings: tuple[McapFile, ...] | None = None,
-) -> Iterator[Iterator[tuple[Schema | None, Channel, Message]]]:
+) -> Generator[Iterator[tuple[Schema | None, Channel, Message]], None, None]:
     if recordings is not None and len(recordings) != len(prepared.files):
         raise PlaybackError("Opened recording count does not match prepared inputs")
     with ExitStack() as stack:

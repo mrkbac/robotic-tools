@@ -32,7 +32,6 @@ def _summaries_equal(a: Summary, b: Summary) -> bool:
     )
 
 
-_K = TypeVar("_K")
 _V = TypeVar("_V")
 _T = TypeVar("_T")
 
@@ -41,7 +40,7 @@ def _describe_summary_diff(existing: Summary, rebuilt: Summary) -> list[str]:
     """Generate human-readable differences between two summaries."""
     diffs: list[str] = []
 
-    def compare_dict(name: str, before: dict[_K, _V], after: dict[_K, _V]) -> None:
+    def compare_dict(name: str, before: dict[int, _V], after: dict[int, _V]) -> None:
         if before == after:
             return
         missing = sorted(set(before) - set(after))

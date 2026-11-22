@@ -6,7 +6,7 @@ import hashlib
 import operator
 import struct
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -846,7 +846,9 @@ def _compare_payload_groups(
 
 
 @contextmanager
-def open_payload_reader(path: str, chunk_indexes: dict[int, ChunkIndex]) -> Iterator[PayloadReader]:
+def open_payload_reader(
+    path: str, chunk_indexes: dict[int, ChunkIndex]
+) -> Generator[PayloadReader, None, None]:
     """Open a long-lived ``PayloadReader`` for a file.
 
     Callers that compare a file against multiple peers should enter this

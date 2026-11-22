@@ -18,7 +18,7 @@ from platformdirs import user_cache_dir
 from pymcap_cli.index.migrations import _discover, apply_pending
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 CURRENT_SCHEMA_VERSION = max((v for v, _, _ in _discover()), default=0)
 
@@ -94,7 +94,7 @@ def _schema_version(db_path: Path) -> int:
 
 
 @contextmanager
-def open_db(db_path: Path, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
+def open_db(db_path: Path, *, read_only: bool = False) -> Generator[sqlite3.Connection, None, None]:
     """Context manager wrapping :func:`connect`."""
     conn = connect(db_path, read_only=read_only)
     try:
