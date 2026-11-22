@@ -55,7 +55,7 @@ jobs:
         working-directory: mcap-web-inspector
 
       - name: Install PureINI minimum Rust toolchain
-        uses: dtolnay/rust-toolchain@1.120
+        uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy, rustfmt
 

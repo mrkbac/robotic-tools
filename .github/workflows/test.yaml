@@ -112,7 +112,7 @@ jobs:
 
       - name: Install PureINI minimum Rust toolchain
         if: matrix.package.dir == 'pureini' && matrix.python-version == '3.13'
-        uses: dtolnay/rust-toolchain@1.120
+        uses: dtolnay/rust-toolchain@1.88
 
       - name: Run PureINI Rust unit tests at MSRV
         if: matrix.package.dir == 'pureini' && matrix.python-version == '3.13'
@@ -173,7 +173,7 @@ jobs:
           cache-suffix: pureini-rust-coverage
 
       - name: Install PureINI minimum Rust toolchain
-        uses: dtolnay/rust-toolchain@1.120
+        uses: dtolnay/rust-toolchain@1.88
         with:
           components: llvm-tools-preview
 
