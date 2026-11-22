@@ -194,7 +194,8 @@ def _packed_color_attributes(
 
     arr = np.asarray(values)
     if arr.dtype.kind == "f":
-        packed = np.ascontiguousarray(arr.astype(np.float32, copy=False)).view(np.uint32)
+        pixels = np.ascontiguousarray(arr.astype(np.float32, copy=False))
+        packed = np.frombuffer(pixels, dtype=np.uint32)
     else:
         packed = arr.astype(np.uint32, copy=False)
 

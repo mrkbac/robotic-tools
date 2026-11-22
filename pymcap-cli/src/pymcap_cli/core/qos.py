@@ -138,7 +138,7 @@ def qos_profiles_to_numeric(raw: str) -> str:
         if not isinstance(entry, dict):
             msg = f"offered_qos_profiles profile {index} must be a mapping"
             raise TypeError(msg)
-        profile = cast("dict[str, YamlValue]", entry)
+        profile = entry
         for field, name_to_code in _HUMBLE_POLICY_CODES.items():
             if field not in profile:
                 msg = f"offered_qos_profiles profile {index} is missing {field!r}"
@@ -252,7 +252,7 @@ def qos_profiles_with_overrides(raw: str, overrides: Mapping[str, YamlValue]) ->
         if not isinstance(entry, dict):
             msg = f"offered_qos_profiles profile {index} must be a mapping"
             raise TypeError(msg)
-        profile = cast("dict[str, YamlValue]", entry)
+        profile = entry
         for field, value in overrides.items():
             if profile.get(field) != value:
                 profile[field] = copy.deepcopy(value)
@@ -298,7 +298,7 @@ def _validate_qos_override_value(field: str, value: YamlValue) -> None:
     if not isinstance(value, dict):
         msg = f"QoS duration policy {field!r} must be a mapping"
         raise TypeError(msg)
-    duration = cast("dict[str, YamlValue]", value)
+    duration = value
     nsec_field = "nsec" if "nsec" in duration else "nanosec"
     if set(duration) != {"sec", nsec_field}:
         msg = f"QoS duration policy {field!r} requires sec and nsec"

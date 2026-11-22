@@ -3,7 +3,7 @@ import struct
 import threading
 import zlib
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, Flag, auto
@@ -175,7 +175,7 @@ def _write_summary_section(
     buffer: io.BytesIO,
     offsets: list[SummaryOffset],
     opcode: Opcode,
-    items: Iterable[McapRecord],
+    items: Collection[McapRecord],
     summary_start: int,
 ) -> None:
     """Write a group of records to summary and add corresponding offset."""
@@ -639,7 +639,7 @@ class McapWriterRaw:
         self.statistics.channel_count = len(self.channels)
 
         # Define sections to write (opcode, items, should_write)
-        sections: list[tuple[Opcode, Iterable[McapRecord], bool]] = [
+        sections: list[tuple[Opcode, Collection[McapRecord], bool]] = [
             (Opcode.SCHEMA, list(self.schemas.values()), self.repeat_schemas),
             (Opcode.CHANNEL, list(self.channels.values()), self.repeat_channels),
             (Opcode.STATISTICS, [self.statistics], self.use_statistics),

@@ -271,7 +271,7 @@ def parse_check_spec(text: str, *, source: str = "<spec>") -> CheckSpec:
     topics_value = root.get("topics")
     if not isinstance(topics_value, dict):
         raise CheckSpecError(f"{source}: topics must be a mapping")
-    topics = cast("dict[str, YamlValue]", topics_value)
+    topics = topics_value
     rules = tuple(
         _parse_topic_rule(name, value, f"{source}.topics.{name}", version=version)
         for name, value in topics.items()
@@ -302,7 +302,7 @@ def load_check_spec(path: Path) -> CheckSpec:
 def _mapping(value: YamlValue, path: str, allowed: set[str]) -> dict[str, YamlValue]:
     if not isinstance(value, dict):
         raise CheckSpecError(f"{path} must be a mapping")
-    mapping = cast("dict[str, YamlValue]", value)
+    mapping = value
     non_string_keys = [key for key in mapping if not isinstance(key, str)]
     if non_string_keys:
         raise CheckSpecError(f"{path} keys must be strings")
@@ -466,7 +466,7 @@ def _parse_pipelines(
 ) -> tuple[PipelineRule, ...]:
     if not isinstance(value, dict):
         raise CheckSpecError(f"{path} must be a mapping")
-    mapping = cast("dict[str, YamlValue]", value)
+    mapping = value
     topic_indexes = {rule.name: index for index, rule in enumerate(topics)}
     return tuple(
         _parse_pipeline_rule(name, item, topic_indexes, topics, f"{path}.{name}")

@@ -1,7 +1,7 @@
 """Unified input handler for local files and HTTP URLs."""
 
 import io
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, cast
@@ -60,7 +60,7 @@ def _open_path_file(path: str) -> tuple[io.RawIOBase, int]:
 @contextmanager
 def open_input(
     path: str, buffering: int = 8192, *, debug: bool = False
-) -> Iterator[tuple[IO[bytes], int]]:
+) -> Generator[tuple[IO[bytes], int], None, None]:
     result = urlparse(path)
     if result.scheme in ("http", "https"):
         original_stream, size = open_http_stream(result)

@@ -321,8 +321,7 @@ def read_points(
     # Select points indexed by the uvs field
     if uvs is not None:
         indices = uvs if isinstance(uvs, np.ndarray) else np.fromiter(uvs, int)
-        # NumPy's stubs don't preserve the integer dtype after the isinstance branch.
-        points = points[indices]  # ty: ignore[invalid-argument-type]
+        points = points[indices]
 
     # Cast into 2d array if cloud is 'organized'
     if reshape_organized_cloud and cloud.height > 1:
