@@ -9,6 +9,7 @@ import logging
 
 from cyclopts import App
 
+from pymcap_cli.cmd.index.catalog_cmd import catalog_cmd
 from pymcap_cli.cmd.index.duplicates_cmd import duplicates_cmd
 from pymcap_cli.cmd.index.errors_cmd import errors_cmd
 from pymcap_cli.cmd.index.info_cmd import info_cmd
@@ -31,6 +32,7 @@ index_app = App(
 )
 
 index_app.command(scan_cmd, name="scan")
+index_app.command(catalog_cmd, name="catalog")
 index_app.command(status_cmd, name="status")
 index_app.command(tree_cmd, name="tree")
 index_app.command(query_cmd, name="query")
