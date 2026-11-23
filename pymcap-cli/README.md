@@ -831,6 +831,20 @@ pymcap-cli index stats /data/recordings \
 pymcap-cli index migrate
 ```
 
+To share a recording index with Lichtblick, export the catalog into the directory served by
+your HTTP server, then paste its URL into Lichtblick's search bar.
+
+```bash
+pymcap-cli index scan /data/recordings
+pymcap-cli index catalog /data/recordings --name "Recordings" > /data/recordings/catalog.json
+```
+
+The export uses the current SQLite index and publishes recording paths relative to the supplied
+root, with dataset names, time bounds, and topic counts. Run a scan before re-exporting to pick up
+changes. If the recordings use a separate URL prefix, pass `--base-url https://example.com/archive/`.
+The recording host needs to support HTTP byte-range requests. For cross-origin access, configure
+CORS on both the catalog and recording hosts for the Lichtblick origin.
+
 ### `records` — Raw Record Dump
 
 Print every MCAP record in file order using its `repr`. Useful for inspecting
