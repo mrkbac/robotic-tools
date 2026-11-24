@@ -11,7 +11,9 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
+from urllib.parse import quote
 
+import platformdirs
 from cyclopts import Parameter
 from robo_ws_bridge import (
     ConnectionState,
@@ -416,7 +418,8 @@ def serve(
 
     Every input opens through the same recording browser. Each Foxglove connection
     gets an independent playback timeline and accepts repeated ``file=`` query
-    parameters at ``/ws``.
+    parameters at ``/ws``. A Lichtblick/Digitalis ``catalog.json`` with ranged MCAP
+    downloads is served on the next port (``--port`` + 1).
 
     Examples
     --------
@@ -474,6 +477,7 @@ def serve(
             end=end,
             early_bail=early_bail,
         )
+        from pymcap_cli.cmd.bridge._catalog import CatalogServer  # noqa: PLC0415
         from pymcap_cli.cmd.bridge._library import (  # noqa: PLC0415
             RecordingLibrary,
             RecordingLibraryServer,
@@ -497,6 +501,13 @@ def serve(
 
         was_stopped = False
 
+        catalog_server = CatalogServer(
+            library,
+            _bind_host(resolved_host),
+            port + 1 if 0 < port < 65535 else 0,
+            platformdirs.user_cache_path("pymcap_cli_catalog", version="v1"),
+        )
+
         async def run_library() -> None:
             nonlocal was_stopped
             await library_server.start()
@@ -505,9 +516,21 @@ def serve(
             console.print("[green]Serving recording library at[/]")
             for url in urls:
                 console.print(f"  [bold]{url}[/]")
+            catalog_url = f"http://{hosts[0]}:{catalog_server.port}/catalog.json"
+            console.print(
+                f"[green]Serving Digitalis catalog at[/] [bold]{catalog_url}[/]", soft_wrap=True
+            )
+            console.print(
+                f"  [bold]https://digitalis.marko.im/?catalog={quote(catalog_url, safe='')}[/]",
+                soft_wrap=True,
+            )
+            console.print(
+                f"  [dim]Index cache: {catalog_server.index.cache_dir}[/]", soft_wrap=True
+            )
             if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
                 console.print(
-                    "[yellow]Warning:[/] Foxglove playback sessions have no authentication; "
+                    "[yellow]Warning:[/] Foxglove playback sessions and the catalog's file "
+                    "downloads have no authentication; "
                     "protect remote access with a trusted network or reverse proxy."
                 )
             if not no_browser:
@@ -550,7 +573,11 @@ def serve(
                             previous_signal_handlers[signal_number],
                         )
 
-        asyncio.run(run_library())
+        try:
+            asyncio.run(run_library())
+        finally:
+            catalog_server.shutdown()
+            catalog_server.server_close()
         if was_stopped:
             console.print("\n[dim]Server stopped.[/]")
     except ImportError as exc:
