@@ -367,4 +367,6 @@ def test_serve_prints_digitalis_catalog_link_on_next_port(
     assert serve_module.serve([str(recording)], port=9090, no_browser=True) == 0
     output = capsys.readouterr().out
     assert "http://127.0.0.1:9091/catalog.json" in output
-    assert "https://licht.marko.im/?catalog=http%3A%2F%2F127.0.0.1%3A9091%2Fcatalog.json" in output
+    assert (
+        "https://digitalis.marko.im/?catalog=http%3A%2F%2F127.0.0.1%3A9091%2Fcatalog.json" in output
+    )

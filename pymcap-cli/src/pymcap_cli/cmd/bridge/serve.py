@@ -519,7 +519,7 @@ def serve(
                 f"[green]Serving Digitalis catalog at[/] [bold]{catalog_url}[/]", soft_wrap=True
             )
             console.print(
-                f"  [bold]https://licht.marko.im/?catalog={quote(catalog_url, safe='')}[/]",
+                f"  [bold]https://digitalis.marko.im/?catalog={quote(catalog_url, safe='')}[/]",
                 soft_wrap=True,
             )
             if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
