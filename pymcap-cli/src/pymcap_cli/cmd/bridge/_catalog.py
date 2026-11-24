@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import threading
@@ -164,7 +165,7 @@ class _CatalogHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         with path.open("rb") as file:
-            size = path.stat().st_size
+            size = os.fstat(file.fileno()).st_size
             try:
                 byte_range = parse_range(self.headers.get("Range", ""), size)
             except ValueError:

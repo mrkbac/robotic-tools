@@ -5,7 +5,8 @@ from __future__ import annotations
 import http.client
 import json
 import threading
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, BinaryIO
 from urllib.parse import urljoin, urlsplit
 
 import pymcap_cli.cmd.bridge._catalog_index as catalog_index_module
@@ -17,7 +18,6 @@ from small_mcap import McapWriter
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 _EXPOSED = "Accept-Ranges, Content-Length, Content-Range"
 
@@ -199,6 +199,30 @@ def test_catalog_server_range_request_returns_partial_content(
     assert response.getheader("Accept-Ranges") == "bytes"
     assert response.getheader("Access-Control-Allow-Origin") == "*"
     assert response.getheader("Access-Control-Expose-Headers") == _EXPOSED
+
+
+def test_catalog_server_sizes_the_file_it_opened_when_replaced_mid_request(
+    server: CatalogServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recording = tmp_path / "recordings" / "example.mcap"
+    original = recording.read_bytes()
+    replacement = tmp_path / "replacement.mcap"
+    replacement.write_bytes(original * 2)
+    open_path = Path.open
+
+    def open_then_replace(path: Path, *args: str) -> BinaryIO:
+        file = open_path(path, *args)
+        if path == recording:
+            replacement.replace(recording)
+        return file
+
+    monkeypatch.setattr(Path, "open", open_then_replace)
+
+    response, data = _request(server, "/files/example.mcap")
+
+    assert response.status == 200
+    assert response.getheader("Content-Length") == str(len(original))
+    assert data == original
 
 
 def test_catalog_server_rejects_unsatisfiable_range(server: CatalogServer, tmp_path: Path) -> None:
