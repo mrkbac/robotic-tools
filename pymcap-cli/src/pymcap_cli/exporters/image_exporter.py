@@ -141,6 +141,15 @@ def _decode_compressed_image(data: bytes) -> PILImage:
     return _pil_image().open(io.BytesIO(data)).convert("RGB")
 
 
+def compressed_image_to_jpeg_thumbnail(data: bytes, width: int) -> bytes:
+    """Decode a compressed image and re-encode it as a JPEG scaled to ``width`` pixels."""
+    image = _decode_compressed_image(data)
+    height = max(1, round(image.height * width / image.width))
+    buf = io.BytesIO()
+    image.resize((width, height)).save(buf, format="JPEG", quality=75)
+    return buf.getvalue()
+
+
 def _raw_image_to_pil(message: _RawImage) -> PILImage:
     """Build a PIL Image from a ROS ``sensor_msgs/Image`` message."""
     width = message.width

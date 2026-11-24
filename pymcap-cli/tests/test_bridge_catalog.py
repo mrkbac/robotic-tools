@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import http.client
 import json
+import threading
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
 
+import pymcap_cli.cmd.bridge._catalog_index as catalog_index_module
 import pytest
-from pymcap_cli.cmd.bridge._catalog import CatalogServer, ns_to_rfc3339, parse_range
+from pymcap_cli.cmd.bridge._catalog import CatalogServer, parse_range
+from pymcap_cli.cmd.bridge._catalog_index import ns_to_rfc3339
 from pymcap_cli.cmd.bridge._library import RecordingLibrary
 from small_mcap import McapWriter
 
@@ -31,15 +34,22 @@ def _write_mcap(path: Path, topic: str, timestamps_ns: list[int]) -> None:
         writer.finish()
 
 
-@pytest.fixture
-def server(tmp_path: Path) -> Iterator[CatalogServer]:
-    _write_mcap(tmp_path / "example.mcap", "/CAM_FRONT/image_rect_compressed", [1_000_000_005])
+def _create_server(tmp_path: Path) -> CatalogServer:
+    root = tmp_path / "recordings"
+    _write_mcap(root / "example.mcap", "/CAM_FRONT/image_rect_compressed", [1_000_000_005])
     _write_mcap(
-        tmp_path / "scene" / "example 2.mcap",
+        root / "scene" / "run 1" / "example 2.mcap",
         "/LIDAR_TOP",
         [1_700_000_000_000_000_000, 1_700_000_001_500_000_000],
     )
-    catalog_server = CatalogServer(RecordingLibrary(tmp_path), "127.0.0.1", 0)
+    return CatalogServer(RecordingLibrary(root), "127.0.0.1", 0, tmp_path / "cache")
+
+
+@pytest.fixture
+def server(tmp_path: Path) -> Iterator[CatalogServer]:
+    catalog_server = _create_server(tmp_path)
+    _request(catalog_server, "/catalog.json")  # schedules indexing like the startup scan
+    catalog_server.index.wait()
     yield catalog_server
     catalog_server.shutdown()
     catalog_server.server_close()
@@ -88,32 +98,76 @@ def test_parse_range_rejects_unsatisfiable(header: str) -> None:
 
 
 def test_catalog_server_serves_v1_catalog(server: CatalogServer, tmp_path: Path) -> None:
+    root = tmp_path / "recordings"
     response, body = _request(server, "/catalog.json")
 
     assert response.status == 200
     assert response.getheader("Access-Control-Allow-Origin") == "*"
     assert json.loads(body) == {
         "version": 1,
-        "name": tmp_path.name,
+        "name": "recordings",
         "recordings": [
             {
                 "id": "example.mcap",
+                "name": "example",
                 "source": {"type": "remote-file", "url": "files/example.mcap"},
-                "size": (tmp_path / "example.mcap").stat().st_size,
+                "size": (root / "example.mcap").stat().st_size,
+                "topics": [
+                    {
+                        "name": "/CAM_FRONT/image_rect_compressed",
+                        "schema": "example/Raw",
+                        "messages": 1,
+                    }
+                ],
                 "messages": 1,
                 "start": "1970-01-01T00:00:01.000000005Z",
                 "end": "1970-01-01T00:00:01.000000005Z",
             },
             {
-                "id": "scene/example 2.mcap",
-                "source": {"type": "remote-file", "url": "files/scene/example%202.mcap"},
-                "size": (tmp_path / "scene" / "example 2.mcap").stat().st_size,
+                "id": "scene/run 1/example 2.mcap",
+                "name": "example 2",
+                "source": {"type": "remote-file", "url": "files/scene/run%201/example%202.mcap"},
+                "size": (root / "scene" / "run 1" / "example 2.mcap").stat().st_size,
+                "dataset": "scene",
+                "session": "run 1",
+                "topics": [{"name": "/LIDAR_TOP", "schema": "example/Raw", "messages": 2}],
                 "messages": 2,
                 "start": "2023-11-14T22:13:20.000000000Z",
                 "end": "2023-11-14T22:13:21.500000000Z",
             },
         ],
     }
+
+
+def test_catalog_server_lists_recordings_while_indexing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+    index_recording = catalog_index_module.index_recording
+
+    def slow_index_recording(*args, **kwargs):
+        release.wait(5)
+        return index_recording(*args, **kwargs)
+
+    monkeypatch.setattr(catalog_index_module, "index_recording", slow_index_recording)
+    catalog_server = _create_server(tmp_path)
+    try:
+        _, body = _request(catalog_server, "/catalog.json")
+        release.set()
+        catalog_server.index.wait()
+        _, indexed_body = _request(catalog_server, "/catalog.json")
+    finally:
+        release.set()
+        catalog_server.shutdown()
+        catalog_server.server_close()
+
+    pending = json.loads(body)["recordings"]
+    assert [recording["id"] for recording in pending] == [
+        "example.mcap",
+        "scene/run 1/example 2.mcap",
+    ]
+    assert all("messages" not in recording for recording in pending)
+    assert all("messages" in recording for recording in json.loads(indexed_body)["recordings"])
 
 
 def test_catalog_server_relative_url_resolves_to_full_file(
@@ -128,13 +182,13 @@ def test_catalog_server_relative_url_resolves_to_full_file(
     assert response.status == 200
     assert response.getheader("Accept-Ranges") == "bytes"
     assert response.getheader("Content-Length") == str(len(data))
-    assert data == (tmp_path / "scene" / "example 2.mcap").read_bytes()
+    assert data == (tmp_path / "recordings" / "scene" / "run 1" / "example 2.mcap").read_bytes()
 
 
 def test_catalog_server_range_request_returns_partial_content(
     server: CatalogServer, tmp_path: Path
 ) -> None:
-    expected = (tmp_path / "example.mcap").read_bytes()
+    expected = (tmp_path / "recordings" / "example.mcap").read_bytes()
 
     response, data = _request(server, "/files/example.mcap", headers={"Range": "bytes=8-23"})
 
@@ -148,7 +202,7 @@ def test_catalog_server_range_request_returns_partial_content(
 
 
 def test_catalog_server_rejects_unsatisfiable_range(server: CatalogServer, tmp_path: Path) -> None:
-    size = (tmp_path / "example.mcap").stat().st_size
+    size = (tmp_path / "recordings" / "example.mcap").stat().st_size
 
     response, _ = _request(server, "/files/example.mcap", headers={"Range": f"bytes={size}-"})
 
@@ -175,12 +229,20 @@ def test_catalog_server_answers_range_preflight(server: CatalogServer) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/files/../outside.mcap", "/files/%2E%2E/outside.mcap", "/files/missing.mcap", "/"]
+    "path",
+    [
+        "/files/../outside.mcap",
+        "/files/%2E%2E/outside.mcap",
+        "/files/missing.mcap",
+        "/",
+        "/previews/../summary.json",
+        "/previews/0123456789abcdef0123456789abcdef/0/000.jpg",
+    ],
 )
 def test_catalog_server_does_not_serve_unknown_paths(
     server: CatalogServer, tmp_path: Path, path: str
 ) -> None:
-    (tmp_path.parent / "outside.mcap").write_bytes(b"secret")
+    (tmp_path / "outside.mcap").write_bytes(b"secret")
 
     response, _ = _request(server, path)
 

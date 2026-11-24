@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Protocol
 from urllib.parse import quote
 
+import platformdirs
 from cyclopts import Parameter
 from robo_ws_bridge import (
     ConnectionState,
@@ -504,6 +505,7 @@ def serve(
             library,
             _bind_host(resolved_host),
             port + 1 if 0 < port < 65535 else 0,
+            platformdirs.user_cache_path("pymcap_cli_catalog", version="v1"),
         )
 
         async def run_library() -> None:
@@ -521,6 +523,9 @@ def serve(
             console.print(
                 f"  [bold]https://digitalis.marko.im/?catalog={quote(catalog_url, safe='')}[/]",
                 soft_wrap=True,
+            )
+            console.print(
+                f"  [dim]Index cache: {catalog_server.index.cache_dir}[/]", soft_wrap=True
             )
             if resolved_host not in {"127.0.0.1", "::1", "localhost"}:
                 console.print(

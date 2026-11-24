@@ -49,11 +49,19 @@ class _LibraryServer:
         pass
 
 
+class _CatalogIndex:
+    def __init__(self, cache_dir: Path) -> None:
+        self.cache_dir = cache_dir
+
+
 class _CatalogServer:
-    def __init__(self, library: library_module.RecordingLibrary, host: str, port: int) -> None:
+    def __init__(
+        self, library: library_module.RecordingLibrary, host: str, port: int, cache_dir: Path
+    ) -> None:
         self.library = library
         self.host = host
         self.port = port
+        self.index = _CatalogIndex(cache_dir)
         self.is_closed = False
 
     def shutdown(self) -> None:
