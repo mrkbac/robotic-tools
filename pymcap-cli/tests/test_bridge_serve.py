@@ -7,6 +7,7 @@ import sys
 from inspect import signature
 from typing import TYPE_CHECKING
 
+import pymcap_cli.cmd.bridge._catalog as catalog_module
 import pymcap_cli.cmd.bridge._library as library_module
 import pymcap_cli.cmd.bridge.serve as serve_module
 
@@ -48,10 +49,25 @@ class _LibraryServer:
         pass
 
 
+class _CatalogServer:
+    def __init__(self, library: library_module.RecordingLibrary, host: str, port: int) -> None:
+        self.library = library
+        self.host = host
+        self.port = port
+        self.is_closed = False
+
+    def shutdown(self) -> None:
+        pass
+
+    def server_close(self) -> None:
+        self.is_closed = True
+
+
 def _patch_library_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[_LibraryServer]:
     servers: list[_LibraryServer] = []
+    monkeypatch.setattr(catalog_module, "CatalogServer", _CatalogServer)
 
     def create_server(
         library: library_module.RecordingLibrary,
@@ -336,3 +352,19 @@ def test_serve_empty_host_binds_all_and_lists_reachable_urls(
     # And advertises a reachable library link for localhost and each LAN IP.
     assert "localhost" in output
     assert "192.168.1.50" in output
+
+
+def test_serve_prints_digitalis_catalog_link_on_next_port(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recording = tmp_path / "input.mcap"
+    recording.write_bytes(b"not opened during startup")
+    monkeypatch.setattr(serve_module, "resolve_playback_transform_config", lambda **_kw: None)
+    _patch_library_server(monkeypatch)
+
+    assert serve_module.serve([str(recording)], port=9090, no_browser=True) == 0
+    output = capsys.readouterr().out
+    assert "http://127.0.0.1:9091/catalog.json" in output
+    assert "https://licht.marko.im/?catalog=http%3A%2F%2F127.0.0.1%3A9091%2Fcatalog.json" in output
